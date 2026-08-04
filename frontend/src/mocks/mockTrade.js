@@ -1,0 +1,30 @@
+/** Mock trade for PositionCard smoke / layout checks */
+export const MOCK_TRADE = {
+  trade_id: 1,
+  underlying: 'BTC',
+  expiry_date: '2026-08-04',
+  expiry_label: '1DTE',
+  hours_to_expiry: 21.25,
+  profit_target_usd: 200,
+  stoploss_usd: 300,
+  delta_mtm_pnl: 10,
+  calculated_pnl: 10,
+  call_leg: {
+    strike: 45000,
+    initial_premium: 152,
+    current_premium: 89,
+    change_pct: -41.4,
+    leg_pnl: 63,
+    status: 'open',
+  },
+  put_leg: {
+    strike: 38000,
+    initial_premium: 148,
+    current_premium: 201,
+    change_pct: 35.8,
+    leg_pnl: -53,
+    status: 'open',
+  },
+  last_adjustment: null,
+  adjustment_count: 0,
+}

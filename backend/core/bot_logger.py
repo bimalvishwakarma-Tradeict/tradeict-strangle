@@ -1,0 +1,150 @@
+# bot_logger.py — Structured bot activity logging (file + in-memory buffer)
+
+from __future__ import annotations
+
+import logging
+import logging.handlers
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from backend.core.time_utils import get_ist_now
+
+bot_log = logging.getLogger("bot_activity")
+
+_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
+_LOG_FILE = _LOG_DIR / "bot_activity.log"
+
+_log_buffer: list[dict[str, Any]] = []
+MAX_BUFFER = 500
+_IMPORTANT_EVENTS = frozenset(
+    {
+        "ADJUSTMENT_START",
+        "ADJUSTMENT_DONE",
+        "ADJUSTMENT_FAIL",
+        "ADJUSTMENT_HOLD",
+        "EXIT_TRIGGERED",
+        "EXIT_DONE",
+        "EXIT_FAIL",
+        "ERROR",
+    }
+)
+
+_setup_done = False
+
+
+def setup_bot_logger() -> None:
+    """Setup rotating file logger for bot activity (daily, keep 7 days)."""
+    global _setup_done
+    if _setup_done:
+        return
+
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        str(_LOG_FILE),
+        when="midnight",
+        interval=1,
+        backupCount=7,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    file_handler.setFormatter(formatter)
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(formatter)
+
+    bot_log.handlers.clear()
+    bot_log.addHandler(file_handler)
+    bot_log.addHandler(console)
+    bot_log.setLevel(logging.DEBUG)
+    bot_log.propagate = False
+    _setup_done = True
+    bot_log.info("Bot activity logger ready → %s", _LOG_FILE)
+
+
+def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
+    """Log a structured bot event to file/console."""
+    now = get_ist_now().strftime("%H:%M:%S IST")
+    detail_str = " | ".join(f"{k}={v}" for k, v in details.items())
+    msg = f"[{event_type}] Trade#{trade_id} @ {now} | {detail_str}"
+
+    if event_type in ("ERROR", "ADJUSTMENT_FAIL", "EXIT_FAIL"):
+        bot_log.error(msg)
+    elif event_type in ("ADJUSTMENT_START", "EXIT_TRIGGERED", "ADJUSTMENT_HOLD"):
+        bot_log.warning(msg)
+    elif event_type in ("ADJUSTMENT_DONE", "EXIT_DONE"):
+        bot_log.info(msg)
+    else:
+        bot_log.debug(msg)
+    return msg
+
+
+def log_and_buffer(
+    event_type: str, trade_id: int, details: dict[str, Any]
+) -> dict[str, Any]:
+    """Log event and append to in-memory ring buffer (newest last)."""
+    msg = log_event(event_type, trade_id, details)
+    entry = {
+        "timestamp": get_ist_now().isoformat(),
+        "event_type": event_type,
+        "trade_id": trade_id,
+        "details": details,
+        "message": msg,
+    }
+    _log_buffer.append(entry)
+    if len(_log_buffer) > MAX_BUFFER:
+        del _log_buffer[0 : len(_log_buffer) - MAX_BUFFER]
+    return entry
+
+
+def get_recent_logs(
+    trade_id: int | None = None,
+    limit: int = 100,
+    level: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return recent buffered logs, newest first."""
+    logs = list(_log_buffer)
+    if trade_id is not None:
+        logs = [row for row in logs if row.get("trade_id") == trade_id]
+    if level and str(level).lower() in {"important", "important_only"}:
+        logs = [row for row in logs if row.get("event_type") in _IMPORTANT_EVENTS]
+    limit = max(1, min(int(limit), MAX_BUFFER))
+    logs = logs[-limit:]
+    return list(reversed(logs))
+
+
+def get_log_file_path(date_str: str | None = None) -> Path | None:
+    """
+    Resolve log file for a date (YYYY-MM-DD).
+
+    Today → bot_activity.log
+    Past → bot_activity.log.YYYY-MM-DD (TimedRotatingFileHandler suffix)
+    """
+    if not date_str:
+        date_str = get_ist_now().strftime("%Y-%m-%d")
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+    today = get_ist_now().strftime("%Y-%m-%d")
+    if date_str == today:
+        path = _LOG_FILE
+    else:
+        path = _LOG_DIR / f"bot_activity.log.{date_str}"
+    return path if path.is_file() else None
+
+
+def read_log_file(date_str: str | None = None) -> str:
+    """Return raw log file text for date, or empty string if missing."""
+    path = get_log_file_path(date_str)
+    if path is None:
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")

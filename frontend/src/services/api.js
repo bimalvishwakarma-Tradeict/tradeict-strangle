@@ -1,0 +1,204 @@
+import axios from 'axios'
+
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+})
+
+function extractError(err, fallback) {
+  const detail = err?.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail.map((item) => item.msg || JSON.stringify(item)).join(', ')
+  }
+  if (detail && typeof detail === 'object') {
+    return JSON.stringify(detail)
+  }
+  return err?.message || fallback
+}
+
+export const connectAccount = async (data) => {
+  try {
+    const res = await api.post('/api/account/connect', data)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Connection failed'))
+  }
+}
+
+export const getAccountStatus = async () => {
+  try {
+    const res = await api.get('/api/account/status')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch account status'))
+  }
+}
+
+export const disconnectAccount = async () => {
+  try {
+    const res = await api.delete('/api/account/disconnect')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Disconnect failed'))
+  }
+}
+
+export const getExpiries = async (underlying) => {
+  try {
+    const res = await api.get(`/api/strategy/expiries?underlying=${underlying}`)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch expiries'))
+  }
+}
+
+export const getOptionChain = async (underlying, expiry) => {
+  try {
+    const res = await api.get(
+      `/api/strategy/option-chain?underlying=${underlying}&expiry=${expiry}`,
+    )
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch option chain'))
+  }
+}
+
+export const getPayoff = async (params) => {
+  try {
+    const res = await api.get('/api/strategy/payoff', { params })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to calculate payoff'))
+  }
+}
+
+export const initiateTrade = async (data) => {
+  try {
+    const res = await api.post('/api/trade/initiate', data)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to place strangle on Delta'))
+  }
+}
+
+export const registerExistingTrade = async (data) => {
+  try {
+    const res = await api.post('/api/trade/register-existing', data)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to register existing trade'))
+  }
+}
+
+export const getActiveTrades = async () => {
+  try {
+    const res = await api.get('/api/trade/active')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch active trades'))
+  }
+}
+
+export const getTrade = async (id) => {
+  try {
+    const res = await api.get(`/api/trade/${id}`)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch trade'))
+  }
+}
+
+export const exitTrade = async (id) => {
+  try {
+    const res = await api.post(`/api/trade/${id}/exit`, {
+      reason: 'MANUAL_EMERGENCY',
+    })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Emergency exit failed'))
+  }
+}
+
+export const closeLeg = async (id, legType) => {
+  try {
+    const res = await api.post(`/api/trade/${id}/leg/${legType}/close`)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, `Failed to close ${legType} leg`))
+  }
+}
+
+export const updateSettings = async (id, data) => {
+  try {
+    const res = await api.patch(`/api/trade/${id}/settings`, data)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to update settings'))
+  }
+}
+
+export const getAdjustments = async (id) => {
+  try {
+    const res = await api.get(`/api/trade/${id}/adjustments`)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch adjustments'))
+  }
+}
+
+export const getTradeHistory = async (limit = 30) => {
+  try {
+    const res = await api.get('/api/trade/history', { params: { limit } })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch trade history'))
+  }
+}
+
+export const getBotLogs = async ({ trade_id, limit = 100, level = 'all' } = {}) => {
+  try {
+    const params = { limit, level }
+    if (trade_id != null) params.trade_id = trade_id
+    const res = await api.get('/api/logs', { params })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch bot logs'))
+  }
+}
+
+export const downloadLogFile = async (date) => {
+  try {
+    const params = date ? { date } : {}
+    const res = await api.get('/api/logs/file', {
+      params,
+      responseType: 'blob',
+    })
+    const blob = new Blob([res.data], { type: 'text/plain;charset=utf-8' })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const stamp =
+      date || new Date().toISOString().slice(0, 10)
+    a.href = url
+    a.download = `bot_activity_${stamp}.log`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    window.URL.revokeObjectURL(url)
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to download log file'))
+  }
+}
+
+export const checkHealth = async () => {
+  try {
+    const res = await api.get('/health', { timeout: 4000 })
+    return res.data?.status === 'ok'
+  } catch {
+    try {
+      const res = await api.get('/', { timeout: 4000 })
+      return res.data?.status === 'ok'
+    } catch {
+      return false
+    }
+  }
+}
