@@ -11,7 +11,8 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend.core.delta_client import DeltaClient
+from backend.config import OPTIONS_CONTRACT_VALUE
+from backend.core.delta_client import DeltaClient, compute_signed_upnl
 from backend.core.encryption import decrypt
 from backend.core.time_utils import get_ist_now
 from backend.database import SessionLocal, get_active_slave_accounts
@@ -626,47 +627,52 @@ class MirrorEngine:
 
                 client = self._get_slave_client(slave)
                 try:
-                    positions = await client._request(
-                        "GET", "/v2/positions/margined"
-                    )
-                    if isinstance(positions, dict):
-                        positions = (
-                            positions.get("result")
-                            or positions.get("positions")
-                            or []
-                        )
-                    if not isinstance(positions, list):
-                        positions = []
-
+                    # Prefer shared helper (entry/mark formula — never API
+                    # unrealized_pnl which is cashflow/notional on Delta India).
+                    upnl_map = await client.get_positions_upnl()
                     total_upnl = 0.0
-                    for pos in positions:
-                        if not isinstance(pos, dict):
-                            continue
-                        try:
-                            size = float(pos.get("size") or 0)
-                        except (TypeError, ValueError):
-                            size = 0.0
-                        if size == 0:
-                            continue
-
-                        upnl: float | None = None
-                        for field in (
-                            "unrealized_pnl",
-                            "unrealized_pnl_usd",
-                            "unrealized_cash_pnl",
-                            "upnl",
-                            "uPnl",
-                        ):
-                            val = pos.get(field)
-                            if val is None or val == "":
+                    if upnl_map:
+                        for row in upnl_map.values():
+                            try:
+                                size = float(row.get("size") or 0)
+                            except (TypeError, ValueError):
+                                size = 0.0
+                            if size == 0:
+                                continue
+                            total_upnl += float(row.get("upnl") or 0.0)
+                    else:
+                        # Fallback: raw positions + same formula
+                        positions = await client._request(
+                            "GET", "/v2/positions/margined"
+                        )
+                        if isinstance(positions, dict):
+                            positions = (
+                                positions.get("result")
+                                or positions.get("positions")
+                                or []
+                            )
+                        if not isinstance(positions, list):
+                            positions = []
+                        for pos in positions:
+                            if not isinstance(pos, dict):
                                 continue
                             try:
-                                upnl = float(val)
-                                break
+                                size = float(pos.get("size") or 0)
                             except (TypeError, ValueError):
+                                size = 0.0
+                            if size == 0:
                                 continue
-                        if upnl is not None:
-                            total_upnl += upnl
+                            entry_price = float(pos.get("entry_price") or 0)
+                            mark_price = float(pos.get("mark_price") or 0)
+                            # Short: (entry - mark) × |size| × 0.001
+                            # Long/short-safe via compute_signed_upnl
+                            if entry_price > 0 and mark_price > 0:
+                                total_upnl += compute_signed_upnl(
+                                    entry_price,
+                                    mark_price,
+                                    size,
+                                    float(OPTIONS_CONTRACT_VALUE),
+                                )
 
                     old_mtm = float(slave_trade.last_mtm or 0.0)
                     slave_trade.last_mtm = round(total_upnl, 4)

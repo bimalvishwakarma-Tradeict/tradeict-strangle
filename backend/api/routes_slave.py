@@ -666,53 +666,25 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             )
             last_mtm = float(active_st.last_mtm or 0.0)
 
-            # Best-effort live MTM from slave positions (same field scan as
-            # MirrorEngine.update_all_slave_mtm). Prefer real Delta UPNL —
-            # never master_net_mtm × multiplier.
+            # Best-effort live MTM from slave positions.
+            # NEVER use API unrealized_pnl — it's entry cashflow on Delta India.
+            # Correct: (entry - mark) × abs(size) × contract_size for shorts.
             try:
                 client = DeltaClient(
                     decrypt(slave.api_key_encrypted),
                     decrypt(slave.api_secret_encrypted),
                 )
                 try:
-                    positions = await client._request(
-                        "GET", "/v2/positions/margined"
-                    )
-                    if isinstance(positions, dict):
-                        positions = (
-                            positions.get("result")
-                            or positions.get("positions")
-                            or []
-                        )
-                    if not isinstance(positions, list):
-                        positions = []
+                    upnl_map = await client.get_positions_upnl()
                     total_mtm = 0.0
-                    for pos in positions:
-                        if not isinstance(pos, dict):
-                            continue
+                    for row in upnl_map.values():
                         try:
-                            if float(pos.get("size") or 0) == 0:
-                                continue
+                            size = float(row.get("size") or 0)
                         except (TypeError, ValueError):
+                            size = 0.0
+                        if size == 0:
                             continue
-                        upnl: float | None = None
-                        for field in (
-                            "unrealized_pnl",
-                            "unrealized_pnl_usd",
-                            "unrealized_cash_pnl",
-                            "upnl",
-                            "uPnl",
-                        ):
-                            val = pos.get(field)
-                            if val is None or val == "":
-                                continue
-                            try:
-                                upnl = float(val)
-                                break
-                            except (TypeError, ValueError):
-                                continue
-                        if upnl is not None:
-                            total_mtm += upnl
+                        total_mtm += float(row.get("upnl") or 0.0)
                     last_mtm = round(total_mtm, 4)
                     active_st.last_mtm = last_mtm
                     active_st.last_updated = get_ist_now()

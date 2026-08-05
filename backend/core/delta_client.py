@@ -52,11 +52,14 @@ def compute_signed_upnl(
     contract_value: float | None = None,
 ) -> float:
     """
-    Signed PnL in USD: (exit_ref - entry) * size * contract_value
-    where size is signed (negative = short).
+    Correct signed UPNL in USD for Delta India options.
 
-    For short options matching Delta UI "UPL @offer", pass best_ask as mark_price
-    (closing a short = buy at offer). Mid/mark alone will diverge from Delta portfolio.
+    NEVER use API field `unrealized_pnl` — it returns entry cashflow/notional,
+    not actual unrealized P&L.
+
+    Formula: (mark_price - entry_price) × size × contract_value
+    For shorts (size < 0) this equals:
+        (entry_price - mark_price) × abs(size) × contract_value
     """
     from backend.config import OPTIONS_CONTRACT_VALUE
 
@@ -431,7 +434,17 @@ class DeltaClient:
 
     @staticmethod
     def _extract_unrealized_pnl(pos: dict[str, Any]) -> float:
-        """Compute signed UPNL — never trust API unrealized_pnl for short options."""
+        """
+        Correct signed UPNL for Delta India options.
+
+        NEVER use API field `unrealized_pnl` — on Delta India it returns
+        entry premium cashflow / notional, NOT actual unrealized P&L.
+
+        Formula (works for long and short):
+            (mark_price - entry_price) × size × contract_size
+        Equiv. for shorts (size < 0):
+            (entry_price - mark_price) × abs(size) × contract_size
+        """
         return compute_signed_upnl(
             entry_price=_safe_float(pos.get("entry_price")),
             mark_price=_safe_float(pos.get("mark_price")),
@@ -440,23 +453,21 @@ class DeltaClient:
         )
 
     async def get_positions_upnl(
-        self, product_ids: list[int]
+        self, product_ids: list[int] | None = None
     ) -> dict[int, dict[str, Any]]:
         """
-        Per-leg UPNL matching Delta UI "UPL @offer".
+        Get correct UPNL for positions using entry/mark price formula.
 
-        IMPORTANT: Do NOT use API field `unrealized_pnl` for short options —
-        on Delta India it returns mark * |size| * contract_value (premium
-        notional), NOT signed UPL. Example: mark 460, size -10, cv 0.001 →
-        api shows ~4.6 while real UPL@offer is (entry-offer)*|size|*cv.
-
-        Correct formula (shorts): (best_offer - entry) * size * cv
-        with size < 0, identical to (entry - best_offer) * |size| * cv.
-        Best offer = L2 top ask (same book Delta UI uses).
+        Delta India `unrealized_pnl` field is entry cashflow, not actual P&L.
+        Correct short-option UPNL:
+            (entry_price - mark_price) × abs(size) × contract_size
+        (contract_size defaults to OPTIONS_CONTRACT_VALUE = 0.001 for BTC).
         """
-        wanted = {int(pid) for pid in product_ids}
-        if not wanted:
-            return {}
+        wanted: set[int] | None = None
+        if product_ids:
+            wanted = {int(pid) for pid in product_ids}
+            if not wanted:
+                return {}
 
         try:
             result = await self._request("GET", "/v2/positions/margined")
@@ -485,27 +496,40 @@ class DeltaClient:
             if product_id is None:
                 continue
             pid = int(product_id)
-            if pid not in wanted:
+            if wanted is not None and pid not in wanted:
                 continue
 
             entry = _safe_float(pos.get("entry_price"))
             mark = _safe_float(pos.get("mark_price"))
             size = _safe_float(pos.get("size"))
             cv = _contract_value_from_position(pos)
-            symbol = str(pos.get("symbol") or product.get("symbol") or "")
+            symbol = str(
+                pos.get("product_symbol")
+                or pos.get("symbol")
+                or product.get("symbol")
+                or ""
+            )
             api_raw = _safe_float(pos.get("unrealized_pnl"))
 
-            logger.info(
-                "Position %s fields_pnl=%s api_unrealized_pnl=%s "
-                "(IGNORED — not UPL; ~mark*|size|*cv) entry=%s mark=%s size=%s",
-                pid,
-                [k for k in pos.keys() if "pnl" in k.lower() or "upl" in k.lower()],
-                api_raw,
+            # CORRECT formula — never trust API unrealized_pnl on Delta India
+            if entry > 0 and mark > 0 and size != 0 and cv > 0:
+                upnl = compute_signed_upnl(entry, mark, size, cv)
+            else:
+                upnl = 0.0
+
+            logger.debug(
+                "UPNL calc: %s entry=%s mark=%s size=%s cv=%s upnl=%.4f "
+                "(api_unrealized_pnl=%.4f IGNORED)",
+                symbol or pid,
                 entry,
                 mark,
                 size,
+                cv,
+                upnl,
+                api_raw,
             )
 
+            # Best offer still useful for short-exit display / trigger watches
             best_offer = 0.0
             if symbol and size < 0:
                 try:
@@ -528,46 +552,36 @@ class DeltaClient:
                         exc,
                     )
 
-            exit_ref = best_offer if best_offer > 0 else mark
-            upnl = compute_signed_upnl(entry, exit_ref, size, cv)
-
-            logger.info(
-                "Position %s UPL@offer=%.6f entry=%.4f offer=%.4f size=%s cv=%s "
-                "symbol=%s (api_raw=%.6f ignored)",
-                pid,
-                upnl,
-                entry,
-                exit_ref,
-                size,
-                cv,
-                symbol,
-                api_raw,
-            )
-
             out[pid] = {
-                "upnl": float(upnl),
+                "upnl": round(float(upnl), 4),
                 "entry_price": entry,
                 "mark_price": mark,
-                "best_offer": float(best_offer) if best_offer > 0 else float(exit_ref),
+                "best_offer": float(best_offer) if best_offer > 0 else mark,
                 "size": size,
                 "symbol": symbol,
                 "contract_value": cv,
                 "api_unrealized_pnl_raw": api_raw,
             }
 
-        missing = wanted - set(out.keys())
-        if missing:
-            logger.warning(
-                "get_positions_upnl missing product_ids=%s found=%s",
-                sorted(missing),
-                sorted(out.keys()),
-            )
+        if wanted is not None:
+            missing = wanted - set(out.keys())
+            if missing:
+                logger.warning(
+                    "get_positions_upnl missing product_ids=%s found=%s",
+                    sorted(missing),
+                    sorted(out.keys()),
+                )
         return out
 
     async def get_mtm_by_product_ids(
         self, product_ids: list[int]
     ) -> dict[int, float]:
-        """Convenience: product_id → UPL@offer USD (matches Delta UI)."""
+        """
+        product_id → correct UPNL USD using entry/mark formula.
+
+        Delta India unrealized_pnl field is WRONG (entry cashflow).
+        Short options: (entry - mark) × abs(size) × contract_size.
+        """
         detailed = await self.get_positions_upnl(product_ids)
         return {pid: float(row["upnl"]) for pid, row in detailed.items()}
 
