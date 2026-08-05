@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -134,6 +135,50 @@ class MirrorEngine:
 
         client = self._get_slave_client(slave)
         try:
+            # Guard: skip if slave already holds these products
+            try:
+                slave_positions = await client.get_option_positions()
+                wanted = {int(call_product_id), int(put_product_id)}
+                conflicting = []
+                for pos in slave_positions:
+                    try:
+                        pid = int(pos.get("product_id") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if pid in wanted:
+                        conflicting.append(pos)
+                if conflicting:
+                    symbols = [
+                        p.get("product_symbol") or p.get("symbol")
+                        for p in conflicting
+                    ]
+                    logger.warning(
+                        "Slave '%s' already has conflicting positions: %s. "
+                        "Skipping mirror entry.",
+                        slave.name,
+                        symbols,
+                    )
+                    slave_trade = SlaveTrade(
+                        slave_account_id=int(slave.id),
+                        master_trade_id=int(master_trade_id),
+                        actual_quantity=slave_qty,
+                        status="error",
+                        last_error="Conflicting positions already exist on slave",
+                        error_count=1,
+                    )
+                    db.add(slave_trade)
+                    slave.connection_status = "error"
+                    slave.last_error = "Conflicting positions already exist on slave"
+                    slave.updated_at = get_ist_now()
+                    db.commit()
+                    return
+            except Exception as exc:
+                logger.warning(
+                    "Slave '%s' position check failed: %s — continuing",
+                    slave.name,
+                    exc,
+                )
+
             # Bracket SL confirmed working on Delta Exchange India
             # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
             # Default 200% of master fill (slave fill unknown until after place)
@@ -200,6 +245,52 @@ class MirrorEngine:
                 put_sl,
             )
 
+            # Verify positions landed on slave Delta
+            await asyncio.sleep(2)
+            call_verified = False
+            put_verified = False
+            try:
+                call_verified = await client.verify_position_exists(
+                    int(call_product_id)
+                )
+                put_verified = await client.verify_position_exists(
+                    int(put_product_id)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Slave '%s' post-entry verify failed: %s",
+                    slave.name,
+                    exc,
+                )
+
+            if call_verified and put_verified:
+                status = "active"
+                last_error = None
+                err_count = 0
+                logger.info(
+                    "Slave '%s' both positions verified", slave.name
+                )
+            elif call_verified or put_verified:
+                status = "error"
+                last_error = (
+                    f"Partial fill: call={call_verified} put={put_verified}"
+                )[:500]
+                err_count = 1
+                logger.error(
+                    "Slave '%s' PARTIAL position: call=%s put=%s",
+                    slave.name,
+                    call_verified,
+                    put_verified,
+                )
+            else:
+                status = "error"
+                last_error = "No positions found after placement"
+                err_count = 1
+                logger.error(
+                    "Slave '%s' NO positions found after entry!",
+                    slave.name,
+                )
+
             slave_trade = SlaveTrade(
                 slave_account_id=int(slave.id),
                 master_trade_id=int(master_trade_id),
@@ -210,26 +301,33 @@ class MirrorEngine:
                 actual_quantity=slave_qty,
                 call_fill_price=call_fill,
                 put_fill_price=put_fill,
-                status="active",
+                status=status,
+                last_error=last_error,
+                error_count=err_count,
             )
             db.add(slave_trade)
             db.flush()
 
-            slave.connection_status = "connected"
+            if status == "active":
+                slave.connection_status = "connected"
+                slave.last_error = None
+            else:
+                slave.connection_status = "error"
+                slave.last_error = last_error
             slave.last_connected_at = get_ist_now()
-            slave.last_error = None
             slave.updated_at = get_ist_now()
             db.commit()
 
             logger.info(
-                "✅ Slave '%s' trade mirrored successfully (expiry=%s)",
+                "Slave '%s' trade mirrored status=%s (expiry=%s)",
                 slave.name,
+                status,
                 expiry_date,
             )
 
         except Exception as exc:
             logger.error(
-                "❌ Slave '%s' mirror FAILED: %s",
+                "Slave '%s' mirror FAILED: %s",
                 slave.name,
                 exc,
                 exc_info=True,
@@ -502,20 +600,50 @@ class MirrorEngine:
                     except Exception as exc:
                         logger.warning("SL cancel failed: %s", exc)
 
-            # Close call leg
-            await client.place_order(
-                product_id=int(call_product_id),
-                size=qty,
-                side="buy",
-            )
+            # Verify slave positions before close
+            try:
+                call_on_slave = await client.verify_position_exists(
+                    int(call_product_id)
+                )
+                put_on_slave = await client.verify_position_exists(
+                    int(put_product_id)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Slave '%s' position verify failed: %s — assume exists",
+                    slave.name,
+                    exc,
+                )
+                call_on_slave = True
+                put_on_slave = True
 
-            # Close put leg
-            await client.place_order(
-                product_id=int(put_product_id),
-                size=qty,
-                side="buy",
-            )
+            if call_on_slave:
+                await client.place_order(
+                    product_id=int(call_product_id),
+                    size=qty,
+                    side="buy",
+                )
+                logger.info("Slave '%s' call closed", slave.name)
+            else:
+                logger.warning(
+                    "Slave '%s' call not on Delta, skipping close",
+                    slave.name,
+                )
 
+            if put_on_slave:
+                await client.place_order(
+                    product_id=int(put_product_id),
+                    size=qty,
+                    side="buy",
+                )
+                logger.info("Slave '%s' put closed", slave.name)
+            else:
+                logger.warning(
+                    "Slave '%s' put not on Delta, skipping close",
+                    slave.name,
+                )
+
+            # Always mark closed in DB (positions may already be gone)
             slave_trade.status = "closed"
             slave_trade.call_sl_order_id = None
             slave_trade.put_sl_order_id = None
@@ -523,21 +651,33 @@ class MirrorEngine:
             db.commit()
 
             logger.info(
-                "✅ Slave '%s' exited: reason=%s qty=%s",
+                "Slave '%s' exit complete for trade %s: reason=%s qty=%s",
                 slave.name,
+                slave_trade.master_trade_id,
                 reason,
                 qty,
             )
 
         except Exception as exc:
-            logger.error("❌ Slave '%s' exit FAILED: %s", slave.name, exc)
+            logger.error("Slave '%s' exit FAILED: %s", slave.name, exc)
             try:
                 db.rollback()
             except Exception:
                 pass
-            slave_trade.last_error = str(exc)[:500]
-            slave_trade.error_count = int(slave_trade.error_count or 0) + 1
-            db.commit()
+            # Still try to mark closed so we don't leave stuck active slaves
+            try:
+                slave_trade.status = "closed"
+                slave_trade.call_sl_order_id = None
+                slave_trade.put_sl_order_id = None
+                slave_trade.last_error = str(exc)[:500]
+                slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+                slave_trade.last_updated = get_ist_now()
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
         finally:
             await client.close()
 
@@ -613,6 +753,10 @@ class MirrorEngine:
                 .all()
             )
             if not slave_trades:
+                logger.debug(
+                    "No active slave trades for master %s",
+                    master_trade_id,
+                )
                 return
 
             for slave_trade in slave_trades:
@@ -660,6 +804,60 @@ class MirrorEngine:
                         db.rollback()
                     except Exception:
                         pass
+                finally:
+                    await client.close()
+
+    async def check_slave_integrity(self, master_trade_id: int) -> None:
+        """
+        Periodic check: active SlaveTrades should still have open options
+        on the slave account. Mark closed if the slave book is empty.
+        """
+        with self.db_factory() as db:
+            slave_trades = (
+                db.query(SlaveTrade)
+                .filter(
+                    SlaveTrade.master_trade_id == int(master_trade_id),
+                    SlaveTrade.status == "active",
+                )
+                .all()
+            )
+            if not slave_trades:
+                return
+
+            for slave_trade in slave_trades:
+                slave = (
+                    db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == slave_trade.slave_account_id)
+                    .first()
+                )
+                if not slave or not slave.is_active:
+                    continue
+
+                client = self._get_slave_client(slave)
+                try:
+                    slave_positions = await client.get_option_positions()
+                    if not slave_positions:
+                        logger.warning(
+                            "Slave '%s' has NO open positions but "
+                            "SlaveTrade %s is 'active'. Marking as closed.",
+                            slave.name,
+                            slave_trade.id,
+                        )
+                        slave_trade.status = "closed"
+                        slave_trade.last_updated = get_ist_now()
+                        db.commit()
+                    else:
+                        logger.debug(
+                            "Slave '%s' integrity OK: %s option positions",
+                            slave.name,
+                            len(slave_positions),
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Slave '%s' integrity check failed: %s",
+                        slave.name,
+                        exc,
+                    )
                 finally:
                     await client.close()
 

@@ -17,6 +17,7 @@ from backend.config import (
     TradeStatus,
     TriggerMode,
 )
+from backend.core.bot_logger import log_and_buffer
 from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt
 from backend.core.time_utils import (
@@ -391,6 +392,134 @@ async def _ensure_no_active_trade(
     db.commit()
 
 
+async def _manual_entry_triple_guard(
+    db: Session,
+    account: Account,
+    underlying: str,
+    delta_client: DeltaClient,
+) -> None:
+    """
+    Triple guard before manual order placement.
+
+    1) DB active trade  2) position tracker  3) Delta positions (warn only)
+    """
+    # Guard 1: DB
+    existing_db = (
+        db.query(Trade)
+        .filter(
+            Trade.account_id == account.id,
+            Trade.underlying == underlying,
+            Trade.status == TradeStatus.ACTIVE.value,
+        )
+        .first()
+    )
+    if existing_db is not None and count_open_bot_legs(db, existing_db.id) > 0:
+        log_and_buffer(
+            "ENTRY_GUARD_BLOCK",
+            int(existing_db.id),
+            {"source": "manual", "guard": "db", "underlying": underlying},
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Active {underlying} trade already exists in DB "
+                f"(id={existing_db.id})"
+            ),
+        )
+
+    # Guard 2: Position tracker
+    for state in bot_engine.position_tracker.get_all_active():
+        state_underlying = str(
+            getattr(getattr(state, "trade", None), "underlying", "") or ""
+        ).upper()
+        if state_underlying == underlying.upper():
+            log_and_buffer(
+                "ENTRY_GUARD_BLOCK",
+                int(state.trade_id),
+                {"source": "manual", "guard": "tracker", "underlying": underlying},
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Active {underlying} trade in position tracker "
+                    f"(id={state.trade_id})"
+                ),
+            )
+
+    # Guard 3: Delta — warn only for manual (user may know about positions)
+    logger.info("Checking Delta for existing %s positions...", underlying)
+    delta_positions = await delta_client.get_option_positions()
+    und = underlying.upper()
+    matching = [
+        p
+        for p in delta_positions
+        if und in str(p.get("product_symbol") or p.get("symbol") or "").upper()
+    ]
+    if matching:
+        symbols = [p.get("product_symbol") or p.get("symbol") for p in matching]
+        logger.warning(
+            "Delta has %s open %s option positions: %s. "
+            "Proceeding with caution — user confirmed manual entry.",
+            len(matching),
+            underlying,
+            symbols,
+        )
+        log_and_buffer(
+            "POSITION_WARNING",
+            0,
+            {
+                "source": "manual_pre_entry",
+                "underlying": underlying,
+                "symbols": symbols,
+                "action": "warn_continue",
+            },
+        )
+    else:
+        log_and_buffer(
+            "ENTRY_GUARD_PASS",
+            0,
+            {"source": "manual", "underlying": underlying, "delta_open": 0},
+        )
+        logger.info("Step 1: All guards passed, placing CALL order")
+
+
+async def _verify_leg_on_delta(
+    client: DeltaClient,
+    *,
+    product_id: int,
+    leg_label: str,
+    order_id: str | None,
+    trade_id: int = 0,
+) -> None:
+    """Best-effort verify position visible on Delta after fill."""
+    await asyncio.sleep(1)
+    exists = await client.verify_position_exists(int(product_id))
+    if not exists:
+        logger.warning(
+            "%s order placed (id=%s) but position product_id=%s "
+            "not yet visible on Delta. Proceeding anyway.",
+            leg_label,
+            order_id,
+            product_id,
+        )
+        log_and_buffer(
+            "POSITION_WARNING",
+            trade_id,
+            {
+                "leg": leg_label.lower(),
+                "product_id": int(product_id),
+                "order_id": order_id,
+            },
+        )
+    else:
+        logger.info("%s position verified on Delta", leg_label)
+        log_and_buffer(
+            "POSITION_VERIFIED",
+            trade_id,
+            {"leg": leg_label.lower(), "product_id": int(product_id)},
+        )
+
+
 async def _persist_strangle_trade(
     *,
     db: Session,
@@ -567,6 +696,8 @@ async def initiate_trade(
     put_sl_trigger_price: float | None = None
 
     try:
+        await _manual_entry_triple_guard(db, account, underlying, client)
+
         # Bracket SL confirmed working on Delta Exchange India
         # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
         # Bracket auto-cancels when position is closed (any reason)
@@ -618,7 +749,7 @@ async def initiate_trade(
             )
         if call_fill_price <= 0:
             call_fill_price = float(await client.get_mark_price(payload.call_symbol))
-            logger.warning("Using mark price as call fill: %s", call_fill_price)
+            logger.warning("Call fill unavailable, using mark: %s", call_fill_price)
         if call_fill_price <= 0:
             raise HTTPException(
                 status_code=502,
@@ -628,6 +759,12 @@ async def initiate_trade(
                 ),
             )
         logger.info("Step 3: Call fill price: %s", call_fill_price)
+        await _verify_leg_on_delta(
+            client,
+            product_id=int(payload.call_product_id),
+            leg_label="Call",
+            order_id=call_order_id,
+        )
 
         # --- Step 4: Place PUT ---
         logger.info("Step 4: Placing put order %s", payload.put_symbol)
@@ -673,7 +810,7 @@ async def initiate_trade(
             )
         if put_fill_price <= 0:
             put_fill_price = float(await client.get_mark_price(payload.put_symbol))
-            logger.warning("Using mark price as put fill: %s", put_fill_price)
+            logger.warning("Put fill unavailable, using mark: %s", put_fill_price)
         if put_fill_price <= 0:
             raise HTTPException(
                 status_code=502,
@@ -683,6 +820,12 @@ async def initiate_trade(
                 ),
             )
         logger.info("Step 6: Put fill price: %s", put_fill_price)
+        await _verify_leg_on_delta(
+            client,
+            product_id=int(payload.put_product_id),
+            leg_label="Put",
+            order_id=put_order_id,
+        )
 
         # --- Step 7–8: Save to DB ---
         logger.info("Step 7: Saving to DB...")
@@ -771,6 +914,25 @@ async def initiate_trade(
         db.expunge(call_leg)
         db.expunge(put_leg)
         bot_engine.position_tracker.add(trade, call_leg, put_leg)
+        state = bot_engine.position_tracker.get(trade.id)
+        if state is None:
+            logger.critical(
+                "Trade %s NOT in position tracker after add()! "
+                "This is a bug — trade will not be monitored!",
+                trade.id,
+            )
+            log_and_buffer(
+                "ERROR",
+                int(trade.id),
+                {"stage": "tracker_add", "error": "missing_after_add"},
+            )
+        else:
+            logger.info("Trade %s confirmed in position tracker", trade.id)
+            log_and_buffer(
+                "ENTRY_GUARD_PASS",
+                int(trade.id),
+                {"stage": "tracker_confirmed", "source": "manual"},
+            )
         logger.info(
             "Step 9: Added to position tracker trade_id=%s active_count=%s "
             "(P&L checks start at %s IST) delta_sl_ok=%s",
@@ -1617,8 +1779,44 @@ async def exit_trade(
             )
             .first()
         )
-        if call_leg is None or put_leg is None:
-            raise HTTPException(status_code=400, detail="Open bot-managed legs not found")
+        # Allow one-legged emergency exit
+        if call_leg is None and put_leg is None:
+            # Close any orphan open legs + mark trade closed
+            orphans = (
+                db.query(Leg)
+                .filter(Leg.trade_id == trade_id, Leg.status == "open")
+                .all()
+            )
+            for orphan in orphans:
+                orphan.status = "closed"
+                orphan.exit_time = get_ist_now()
+                orphan.exit_premium = float(orphan.exit_premium or 0.0)
+            trade.status = TradeStatus.EMERGENCY_CLOSED.value
+            trade.exit_time = get_ist_now()
+            trade.exit_reason = reason
+            db.commit()
+            bot_engine.position_tracker.mark_closed(trade_id)
+            return {
+                "success": True,
+                "final_pnl": trade.realized_pnl,
+                "call_closed_at": None,
+                "put_closed_at": None,
+                "message": "No open legs — trade marked closed",
+            }
+
+        call_exists = False
+        put_exists = False
+        if call_leg is not None and int(call_leg.product_id or 0) > 0:
+            call_exists = await client.verify_position_exists(int(call_leg.product_id))
+        if put_leg is not None and int(put_leg.product_id or 0) > 0:
+            put_exists = await client.verify_position_exists(int(put_leg.product_id))
+        logger.info(
+            "[EXIT_VERIFY] Emergency fallback pre-check trade=%s "
+            "call_exists=%s put_exists=%s",
+            trade_id,
+            call_exists,
+            put_exists,
+        )
 
         # Mirror exit to slaves before closing master legs (need product_ids)
         try:
@@ -1628,8 +1826,12 @@ async def exit_trade(
                 asyncio.create_task(
                     mirror_module.mirror_engine.mirror_exit(
                         master_trade_id=int(trade_id),
-                        call_product_id=int(call_leg.product_id),
-                        put_product_id=int(put_leg.product_id),
+                        call_product_id=int(
+                            (call_leg.product_id if call_leg else 0) or 0
+                        ),
+                        put_product_id=int(
+                            (put_leg.product_id if put_leg else 0) or 0
+                        ),
                         reason=reason,
                     )
                 )
@@ -1637,37 +1839,83 @@ async def exit_trade(
         except Exception as exc:
             logger.warning("Mirror exit queue failed: %s", exc)
 
-        call_close = await bot_engine.order_executor.close_leg(call_leg, client)
-        put_close = await bot_engine.order_executor.close_leg(put_leg, client)
-        if not call_close.success:
-            logger.critical("Exit call failed trade=%s: %s", trade_id, call_close.error)
-        if not put_close.success:
-            logger.critical("Exit put failed trade=%s: %s", trade_id, put_close.error)
+        call_close = None
+        put_close = None
+        if call_leg is not None and call_exists:
+            call_close = await bot_engine.order_executor.close_leg(call_leg, client)
+            if not call_close.success:
+                logger.critical(
+                    "Exit call failed trade=%s: %s", trade_id, call_close.error
+                )
+        elif call_leg is not None:
+            logger.warning("Emergency exit: call not on Delta, skipping close")
+
+        if put_leg is not None and put_exists:
+            put_close = await bot_engine.order_executor.close_leg(put_leg, client)
+            if not put_close.success:
+                logger.critical(
+                    "Exit put failed trade=%s: %s", trade_id, put_close.error
+                )
+        elif put_leg is not None:
+            logger.warning("Emergency exit: put not on Delta, skipping close")
 
         now_utc = datetime.now(timezone.utc)
-        if call_close.success:
+        if call_leg is not None:
             call_leg.status = "closed"
             call_leg.exit_time = now_utc
-            call_leg.exit_premium = float(call_close.filled_price or 0.0)
-            if call_close.order_id is not None:
-                call_leg.exit_order_id = str(call_close.order_id)
-            if call_close.commission is not None:
-                call_leg.exit_fee_usd = abs(float(call_close.commission))
-        if put_close.success:
+            if call_close is not None and call_close.success:
+                call_leg.exit_premium = float(call_close.filled_price or 0.0)
+                if call_close.order_id is not None:
+                    call_leg.exit_order_id = str(call_close.order_id)
+                if call_close.commission is not None:
+                    call_leg.exit_fee_usd = abs(float(call_close.commission))
+            elif not call_exists:
+                call_leg.exit_premium = float(call_leg.exit_premium or 0.0)
+
+        if put_leg is not None:
             put_leg.status = "closed"
             put_leg.exit_time = now_utc
-            put_leg.exit_premium = float(put_close.filled_price or 0.0)
-            if put_close.order_id is not None:
-                put_leg.exit_order_id = str(put_close.order_id)
-            if put_close.commission is not None:
-                put_leg.exit_fee_usd = abs(float(put_close.commission))
+            if put_close is not None and put_close.success:
+                put_leg.exit_premium = float(put_close.filled_price or 0.0)
+                if put_close.order_id is not None:
+                    put_leg.exit_order_id = str(put_close.order_id)
+                if put_close.commission is not None:
+                    put_leg.exit_fee_usd = abs(float(put_close.commission))
+            elif not put_exists:
+                put_leg.exit_premium = float(put_leg.exit_premium or 0.0)
 
-        success = call_close.success and put_close.success
+        # Close ALL remaining open legs (orphans)
+        remaining = (
+            db.query(Leg)
+            .filter(Leg.trade_id == trade_id, Leg.status == "open")
+            .all()
+        )
+        for orphan in remaining:
+            logger.warning(
+                "[EXIT_CLEANUP] Closing orphan leg %s on emergency exit",
+                orphan.symbol,
+            )
+            orphan.status = "closed"
+            orphan.exit_time = get_ist_now()
+            orphan.exit_premium = float(orphan.exit_premium or 0.0)
+
+        call_ok = (
+            call_leg is None
+            or (call_close is not None and call_close.success)
+            or not call_exists
+        )
+        put_ok = (
+            put_leg is None
+            or (put_close is not None and put_close.success)
+            or not put_exists
+        )
+        success = call_ok and put_ok
         if success:
             trade.status = TradeStatus.EMERGENCY_CLOSED.value
             trade.exit_time = get_ist_now()
             trade.exit_reason = reason
-            trade.realized_pnl = 0.0
+            if trade.realized_pnl is None:
+                trade.realized_pnl = 0.0
             db.commit()
             bot_engine.position_tracker.mark_closed(trade_id)
         else:
@@ -1675,16 +1923,15 @@ async def exit_trade(
             raise HTTPException(
                 status_code=502,
                 detail=(
-                    f"Partial/failed exit: call_ok={call_close.success} "
-                    f"put_ok={put_close.success}"
+                    f"Partial/failed exit: call_ok={call_ok} put_ok={put_ok}"
                 ),
             )
 
         return {
             "success": True,
             "final_pnl": trade.realized_pnl,
-            "call_closed_at": call_leg.exit_premium,
-            "put_closed_at": put_leg.exit_premium,
+            "call_closed_at": call_leg.exit_premium if call_leg else None,
+            "put_closed_at": put_leg.exit_premium if put_leg else None,
         }
     finally:
         await client.close()
@@ -1721,6 +1968,54 @@ async def close_single_leg(
     account = _get_active_account(db)
     client = _build_delta_client(account)
     try:
+        leg_exists = False
+        if int(leg.product_id or 0) > 0:
+            leg_exists = await client.verify_position_exists(int(leg.product_id))
+
+        if not leg_exists:
+            logger.warning(
+                "Leg %s not on Delta. Marking closed in DB only.",
+                leg.symbol,
+            )
+            realized = book_leg_close(
+                leg=leg,
+                trade=trade,
+                exit_premium=0.0,
+            )
+            basket_closed = finalize_trade_if_flat(
+                db=db,
+                trade=trade,
+                exit_reason=ExitReason.MANUAL_LEG_CLOSE.value,
+            )
+            db.commit()
+            db.refresh(trade)
+            db.refresh(leg)
+            open_count = count_open_bot_legs(db, trade_id)
+            if basket_closed or open_count == 0:
+                bot_engine.position_tracker.mark_closed(trade_id)
+                await ws_manager.broadcast(
+                    {
+                        "type": "TRADE_CLOSED",
+                        "trade_id": trade_id,
+                        "reason": ExitReason.MANUAL_LEG_CLOSE.value,
+                        "final_pnl": float(trade.realized_pnl or 0.0),
+                        "message": f"Basket closed after closing {leg_key}",
+                    }
+                )
+            return {
+                "success": True,
+                "message": (
+                    "Leg already gone from Delta, marked closed in DB"
+                ),
+                "closed_at_price": 0.0,
+                "leg_type": leg_key,
+                "leg_realized_pnl": realized,
+                "trade_realized_pnl": float(trade.realized_pnl or 0.0),
+                "open_legs_remaining": open_count,
+                "basket_closed": basket_closed,
+                "basket_number": trade.basket_number,
+            }
+
         result = await bot_engine.order_executor.close_leg(leg, client)
         if not result.success:
             raise HTTPException(

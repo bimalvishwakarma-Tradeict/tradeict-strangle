@@ -16,6 +16,7 @@ if str(_ROOT) not in sys.path:
 from backend.config import OPTIONS_CONTRACT_VALUE, TradeStatus
 from backend.core.time_utils import (
     get_expiry_date_for_dte,
+    get_hours_to_expiry,
     get_ist_now,
     settling_ends_at_after_place,
 )
@@ -105,6 +106,7 @@ class AutoTradeEngine:
             await asyncio.sleep(_AUTO_LOOP_SECONDS)
 
     async def _tick(self) -> None:
+        from backend.core.bot_logger import log_and_buffer
         from backend.database import get_or_create_auto_settings
         from backend.models import Trade
 
@@ -114,18 +116,61 @@ class AutoTradeEngine:
             if not settings.is_enabled:
                 return
 
-            active = (
+            underlying = str(settings.underlying).upper()
+            now = get_ist_now()
+
+            # Guard 5: adjustment in progress (any trade)
+            for state in self.position_tracker.get_all_active():
+                if getattr(state, "is_adjusting", False):
+                    logger.info(
+                        "Auto trade BLOCKED: Trade %s has adjustment in progress",
+                        state.trade_id,
+                    )
+                    log_and_buffer(
+                        "ENTRY_GUARD_BLOCK",
+                        int(state.trade_id),
+                        {
+                            "source": "auto",
+                            "guard": "adjusting",
+                            "underlying": underlying,
+                        },
+                    )
+                    return
+
+            # Guard 4: settling period on active trade for this underlying
+            active_for_underlying = (
                 db.query(Trade)
                 .filter(
-                    Trade.underlying == settings.underlying,
+                    Trade.underlying == underlying,
                     Trade.status == TradeStatus.ACTIVE.value,
                 )
-                .first()
+                .all()
             )
-            if active is not None:
+            for candidate in active_for_underlying:
+                starts = _as_ist(getattr(candidate, "monitoring_starts_at", None))
+                if starts is not None and now < starts:
+                    logger.info(
+                        "Auto trade BLOCKED: Trade %s still in settling period "
+                        "until %s",
+                        candidate.id,
+                        starts,
+                    )
+                    log_and_buffer(
+                        "ENTRY_GUARD_BLOCK",
+                        int(candidate.id),
+                        {
+                            "source": "auto",
+                            "guard": "settling",
+                            "underlying": underlying,
+                            "monitoring_starts_at": starts.isoformat(),
+                        },
+                    )
+                    return
+
+            # Guard 1 (tick-level): any active master trade for underlying
+            if active_for_underlying:
                 return
 
-            now = get_ist_now()
             next_entry = _as_ist(settings.next_entry_time)
             if next_entry is not None and now < next_entry:
                 remaining = int((next_entry - now).total_seconds())
@@ -175,8 +220,172 @@ class AutoTradeEngine:
             await self._record_failure(settings, db, "No active account in DB")
             return
 
+        from backend.core.bot_logger import log_and_buffer
+
+        underlying = str(settings.underlying).upper()
+
+        # --- STRICT triple guard (auto blocks on Delta positions) ---
+        # Guard 1: DB
+        active_db = (
+            db.query(Trade)
+            .filter(
+                Trade.underlying == underlying,
+                Trade.status == TradeStatus.ACTIVE.value,
+            )
+            .count()
+        )
+        if active_db > 0:
+            logger.warning(
+                "Auto trade BLOCKED: %s active trade(s) in DB for %s",
+                active_db,
+                underlying,
+            )
+            log_and_buffer(
+                "ENTRY_GUARD_BLOCK",
+                0,
+                {
+                    "source": "auto",
+                    "guard": "db",
+                    "underlying": underlying,
+                    "count": active_db,
+                },
+            )
+            return
+
+        # Guard 2: Tracker (any active basket)
+        active_tracker = len(self.position_tracker.get_all_active())
+        if active_tracker > 0:
+            logger.warning(
+                "Auto trade BLOCKED: %s active trade(s) in tracker",
+                active_tracker,
+            )
+            log_and_buffer(
+                "ENTRY_GUARD_BLOCK",
+                0,
+                {
+                    "source": "auto",
+                    "guard": "tracker",
+                    "count": active_tracker,
+                },
+            )
+            return
+
+        # Guard 3: Delta positions (STRICT)
+        delta_option_positions = await client.get_option_positions()
+        underlying_positions = [
+            p
+            for p in delta_option_positions
+            if underlying
+            in str(p.get("product_symbol") or p.get("symbol") or "").upper()
+        ]
+        if underlying_positions:
+            symbols = [
+                p.get("product_symbol") or p.get("symbol")
+                for p in underlying_positions
+            ]
+            logger.warning(
+                "Auto trade BLOCKED: Delta has %s open %s option positions: %s. "
+                "Will retry after positions are cleared.",
+                len(underlying_positions),
+                underlying,
+                symbols,
+            )
+            log_and_buffer(
+                "ENTRY_GUARD_BLOCK",
+                0,
+                {
+                    "source": "auto",
+                    "guard": "delta",
+                    "underlying": underlying,
+                    "symbols": symbols,
+                },
+            )
+            settings.next_entry_time = get_ist_now() + timedelta(minutes=2)
+            settings.last_error = f"Delta has open positions: {symbols}"[:500]
+            db.commit()
+            return
+
+        # Guard 4 (place-level): settling active trade
+        now_check = get_ist_now()
+        for candidate in (
+            db.query(Trade)
+            .filter(
+                Trade.underlying == underlying,
+                Trade.status == TradeStatus.ACTIVE.value,
+            )
+            .all()
+        ):
+            starts = _as_ist(getattr(candidate, "monitoring_starts_at", None))
+            if starts is not None and now_check < starts:
+                logger.info(
+                    "Auto trade BLOCKED: Trade %s still in settling until %s",
+                    candidate.id,
+                    starts,
+                )
+                log_and_buffer(
+                    "ENTRY_GUARD_BLOCK",
+                    int(candidate.id),
+                    {"source": "auto", "guard": "settling", "underlying": underlying},
+                )
+                return
+
+        # Guard 5 (place-level): adjustment lock
+        for state in self.position_tracker.get_all_active():
+            if getattr(state, "is_adjusting", False):
+                logger.info(
+                    "Auto trade BLOCKED: Trade %s has adjustment in progress",
+                    state.trade_id,
+                )
+                log_and_buffer(
+                    "ENTRY_GUARD_BLOCK",
+                    int(state.trade_id),
+                    {"source": "auto", "guard": "adjusting"},
+                )
+                return
+
+        # Guard: expiry not too close (before any order)
+        expiry_date = get_expiry_date_for_dte(int(settings.expiry_dte))
+        hours_to_expiry = float(get_hours_to_expiry(expiry_date))
+        if hours_to_expiry < 1.0:
+            logger.warning(
+                "Auto trade BLOCKED: Expiry %s is only %.1fh away. Too close.",
+                expiry_date,
+                hours_to_expiry,
+            )
+            log_and_buffer(
+                "ENTRY_GUARD_BLOCK",
+                0,
+                {
+                    "source": "auto",
+                    "guard": "expiry_too_close",
+                    "expiry": str(expiry_date),
+                    "hours_to_expiry": round(hours_to_expiry, 1),
+                },
+            )
+            settings.next_entry_time = get_ist_now() + timedelta(hours=1)
+            settings.last_error = f"Expiry too close: {hours_to_expiry:.1f}h"[:500]
+            db.commit()
+            return
+
+        logger.info(
+            "Expiry validated: %s (%.1fh to expiry)",
+            expiry_date,
+            hours_to_expiry,
+        )
+        logger.info("All entry guards passed — proceeding with auto trade entry")
+        log_and_buffer(
+            "ENTRY_GUARD_PASS",
+            0,
+            {
+                "underlying": settings.underlying,
+                "expiry": str(expiry_date),
+                "hours_to_expiry": round(hours_to_expiry, 1),
+                "quantity": int(settings.quantity or 0),
+                "trigger_mode": str(settings.trigger_mode or "slab"),
+            },
+        )
+
         try:
-            expiry_date = get_expiry_date_for_dte(int(settings.expiry_dte))
             expiry_str = expiry_date.isoformat()
             logger.info("Auto trade: expiry=%s", expiry_str)
 
@@ -405,14 +614,65 @@ class AutoTradeEngine:
             db.refresh(trade)
             db.refresh(call_leg)
             db.refresh(put_leg)
-            # With bracket SLs attached at entry, there is no separate
-            # stop-loss order to place/refresh for auto-trades.
+
+            # --- Post-placement verification ---
+            saved_trade = (
+                db.query(Trade)
+                .filter(
+                    Trade.id == trade.id,
+                    Trade.status == TradeStatus.ACTIVE.value,
+                )
+                .first()
+            )
+            if saved_trade is None:
+                logger.critical(
+                    "Auto trade %s NOT found in DB after save! Critical bug.",
+                    trade.id,
+                )
+            else:
+                logger.info("Auto trade %s verified in DB", trade.id)
+
+            saved_legs = (
+                db.query(Leg)
+                .filter(Leg.trade_id == trade.id, Leg.status == "open")
+                .all()
+            )
+            if len(saved_legs) != 2:
+                logger.critical(
+                    "Auto trade %s has %s open legs (expected 2)! "
+                    "DB save may be incomplete.",
+                    trade.id,
+                    len(saved_legs),
+                )
+            else:
+                logger.info("Auto trade %s has 2 open legs in DB", trade.id)
 
             # Detach for tracker after session commits
             db.expunge(trade)
             db.expunge(call_leg)
             db.expunge(put_leg)
             self.position_tracker.add(trade, call_leg, put_leg)
+            state = self.position_tracker.get(trade.id)
+            if state is None:
+                logger.critical(
+                    "Auto trade %s NOT in position tracker! "
+                    "Trade will not be monitored!",
+                    trade.id,
+                )
+                self.position_tracker.add(trade, call_leg, put_leg)
+                logger.info("Re-added trade %s to tracker", trade.id)
+                log_and_buffer(
+                    "ERROR",
+                    int(trade.id),
+                    {"stage": "auto_tracker_add", "error": "missing_after_add_retried"},
+                )
+            else:
+                logger.info("Auto trade %s in tracker", trade.id)
+                log_and_buffer(
+                    "ENTRY_GUARD_PASS",
+                    int(trade.id),
+                    {"stage": "tracker_confirmed", "source": "auto"},
+                )
 
             # Mirror to slave accounts (non-fatal)
             try:
@@ -454,6 +714,9 @@ class AutoTradeEngine:
             settings.next_entry_time = None
             settings.updated_at = now_ist
             db.commit()
+            logger.info(
+                "Cleared next_entry_time after successful placement"
+            )
 
             logger.info(
                 "AUTO TRADE PLACED: id=%s call_strike=%s put_strike=%s "
@@ -540,7 +803,7 @@ class AutoTradeEngine:
     def schedule_reentry(self, underlying: str, delay_minutes: int) -> None:
         """
         Called by bot_engine when a trade exits.
-        Schedules next auto re-entry after delay.
+        Schedules next auto re-entry after delay (minimum 1 minute).
         """
         from backend.database import get_or_create_auto_settings
 
@@ -553,21 +816,25 @@ class AutoTradeEngine:
                 return
 
             now = get_ist_now()
-            delay = max(0, int(delay_minutes))
-            if delay <= 0:
-                delay = int(settings.re_entry_delay_minutes or 1)
-            reentry_time = now + timedelta(minutes=delay)
+            user_delay = int(delay_minutes)
+            if user_delay <= 0:
+                user_delay = int(settings.re_entry_delay_minutes or 1)
+            # Minimum delay: max(user_delay, 1) — prevents instant re-entry
+            effective_delay = max(user_delay, 1)
+            reentry_time = now + timedelta(minutes=effective_delay)
 
             settings.last_exit_time = now
             settings.next_entry_time = reentry_time
+            settings.retry_count = 0
+            settings.last_error = None
             settings.updated_at = now
             db.commit()
 
             logger.info(
-                "Auto re-entry scheduled: %s in %smin at %s",
+                "Auto re-entry scheduled: %s in %smin at %s IST",
                 underlying,
-                delay,
-                reentry_time.strftime("%H:%M:%S IST"),
+                effective_delay,
+                reentry_time.strftime("%H:%M:%S"),
             )
 
 

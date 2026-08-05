@@ -436,6 +436,105 @@ class DeltaClient:
             )
         return normalized
 
+    async def get_option_positions(self) -> list[dict[str, Any]]:
+        """
+        Open option positions on Delta (non-zero size).
+
+        Returns raw-ish rows with at least product_id, size, product_symbol.
+        """
+        option_prefixes = (
+            "C-BTC",
+            "P-BTC",
+            "C-ETH",
+            "P-ETH",
+            "C-XAU",
+            "P-XAU",
+            "C-DXBT",
+            "P-DXBT",
+        )
+        try:
+            result = await self._request("GET", "/v2/positions/margined")
+            raw: list[Any]
+            if isinstance(result, list):
+                raw = result
+            elif isinstance(result, dict):
+                raw = list(
+                    result.get("positions")
+                    or result.get("result")
+                    or result.get("data")
+                    or []
+                )
+            else:
+                raw = []
+
+            option_positions: list[dict[str, Any]] = []
+            for pos in raw:
+                if not isinstance(pos, dict):
+                    continue
+                product = pos.get("product") if isinstance(pos.get("product"), dict) else {}
+                symbol = str(
+                    pos.get("product_symbol")
+                    or pos.get("symbol")
+                    or product.get("symbol")
+                    or ""
+                )
+                size = float(pos.get("size") or 0)
+                if size == 0:
+                    continue
+                if not any(prefix in symbol for prefix in option_prefixes):
+                    continue
+                product_id = pos.get("product_id") or product.get("id")
+                row = dict(pos)
+                row["product_symbol"] = symbol
+                row["size"] = size
+                if product_id is not None:
+                    try:
+                        row["product_id"] = int(product_id)
+                    except (TypeError, ValueError):
+                        pass
+                option_positions.append(row)
+            return option_positions
+        except Exception as exc:
+            logger.warning("Could not fetch option positions: %s", exc)
+            return []
+
+    async def verify_position_exists(self, product_id: int) -> bool:
+        """Return True if Delta has a non-zero size position for product_id."""
+        try:
+            wanted = int(product_id)
+            result = await self._request("GET", "/v2/positions/margined")
+            raw: list[Any]
+            if isinstance(result, list):
+                raw = result
+            elif isinstance(result, dict):
+                raw = list(
+                    result.get("positions")
+                    or result.get("result")
+                    or result.get("data")
+                    or []
+                )
+            else:
+                raw = []
+
+            for pos in raw:
+                if not isinstance(pos, dict):
+                    continue
+                product = (
+                    pos.get("product") if isinstance(pos.get("product"), dict) else {}
+                )
+                pid = pos.get("product_id") or product.get("id")
+                try:
+                    if int(pid) != wanted:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                size = float(pos.get("size") or 0)
+                return size != 0
+            return False
+        except Exception as exc:
+            logger.warning("verify_position_exists failed: %s", exc)
+            return False
+
     @staticmethod
     def _extract_unrealized_pnl(pos: dict[str, Any]) -> float:
         """

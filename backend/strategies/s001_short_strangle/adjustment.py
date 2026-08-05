@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from backend.core.bot_logger import log_and_buffer
 from backend.core.time_utils import get_hours_to_expiry
 from backend.core.delta_client import short_leg_realized_pnl
 from backend.models import Adjustment, Leg, Trade
@@ -23,6 +25,70 @@ logger = logging.getLogger(__name__)
 
 class AdjustmentError(Exception):
     """Raised for adjustment precondition failures (missing legs, etc.)."""
+
+
+async def _resolve_offer_price(
+    delta_client: Any,
+    symbol: str,
+    *,
+    keep_if_missing: float | None = None,
+) -> float:
+    """
+    Best offer (ask) for baseline / strike-match. Never uses mark_price.
+
+    Order: L2/ticker ask via get_short_exit_price → ticker best_ask → mid → keep.
+    """
+    try:
+        offer = float(await delta_client.get_short_exit_price(symbol))
+        if offer > 0:
+            return offer
+    except Exception as exc:
+        logger.debug("get_short_exit_price failed for %s: %s", symbol, exc)
+
+    try:
+        ticker = await delta_client.get_ticker(symbol)
+        quotes = ticker.get("quotes") if isinstance(ticker.get("quotes"), dict) else {}
+        ask = float(
+            quotes.get("best_ask")
+            or ticker.get("best_ask")
+            or ticker.get("ask")
+            or 0
+        )
+        bid = float(
+            quotes.get("best_bid")
+            or ticker.get("best_bid")
+            or ticker.get("bid")
+            or 0
+        )
+        if ask > 0:
+            return ask
+        if bid > 0 and ask > 0:
+            mid = (bid + ask) / 2.0
+            logger.warning(
+                "Using mid price for %s baseline: %.4f (bid=%.4f ask=%.4f)",
+                symbol,
+                mid,
+                bid,
+                ask,
+            )
+            return mid
+        # If ask missing but both legs of book exist under alternate keys
+        if bid > 0:
+            ask2 = float(quotes.get("ask") or ticker.get("ask") or 0)
+            if ask2 > 0:
+                mid = (bid + ask2) / 2.0
+                logger.warning(
+                    "Using mid price for %s baseline: %.4f",
+                    symbol,
+                    mid,
+                )
+                return mid
+    except Exception as exc:
+        logger.error("Cannot get offer price for %s: %s", symbol, exc)
+
+    if keep_if_missing is not None and float(keep_if_missing) > 0:
+        return float(keep_if_missing)
+    return 0.0
 
 
 class AdjustmentExecutor:
@@ -68,22 +134,17 @@ class AdjustmentExecutor:
                 logger.error(msg)
                 return AdjustmentResult(success=False, error_message=msg)
 
-            # Untouched leg's Best Offer (ask) at adjust time — strike match
-            # target AND new trigger baseline after success.
-            # NEVER use mark/bid — a depressed mark resets baseline too low
-            # and the next tick fires "150%" while exit/entry looks ~96%.
-            try:
-                other_premium = float(
-                    await delta_client.get_short_exit_price(other_leg.symbol)
-                )
-            except Exception as exc:
-                raise AdjustmentError(
-                    f"Could not fetch Best Offer for untouched "
-                    f"{other_leg.symbol}: {exc}"
-                ) from exc
+            # Untouched leg's Best Offer at adjust time — strike match target.
+            # NEVER use mark — depressed mark resets baseline too low.
+            other_premium = await _resolve_offer_price(
+                delta_client,
+                str(other_leg.symbol),
+                keep_if_missing=None,
+            )
             if other_premium <= 0:
                 raise AdjustmentError(
-                    f"Invalid other-leg offer for {other_leg.symbol}: {other_premium}"
+                    f"Could not fetch Best Offer for untouched "
+                    f"{other_leg.symbol} (no mark fallback)"
                 )
 
             triggered_baseline = float(
@@ -157,6 +218,45 @@ class AdjustmentExecutor:
                     error_message=msg,
                 )
 
+            # --- AUDIT: verify triggered leg still on Delta before close ---
+            logger.info(
+                "[AUDIT] Verifying triggered leg on Delta before close..."
+            )
+            try:
+                leg_exists = await delta_client.verify_position_exists(
+                    int(triggered_leg.product_id)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[AUDIT] verify_position_exists failed before close: %s",
+                    exc,
+                )
+                leg_exists = True  # proceed cautiously if check unavailable
+            log_and_buffer(
+                "ADJUSTMENT_DELTA_VERIFY",
+                int(trade.id),
+                {
+                    "stage": "pre_close",
+                    "leg": triggered_leg_type,
+                    "product_id": int(triggered_leg.product_id),
+                    "exists": bool(leg_exists),
+                },
+            )
+            if not leg_exists:
+                logger.warning(
+                    "[AUDIT] Triggered leg %s NOT found on Delta. "
+                    "May have been closed already. Skipping adjustment.",
+                    triggered_leg.symbol,
+                )
+                return AdjustmentResult(
+                    success=False,
+                    is_partial=False,
+                    error_message=(
+                        "Triggered leg not found on Delta — already closed?"
+                    ),
+                )
+            logger.info("[AUDIT] Triggered leg confirmed on Delta")
+
             # Step 3→4: Close triggered leg
             # If this leg was protected by a legacy *separate* SL order
             # (delta_sl_order_id exists), cancel it before/around the close so
@@ -187,6 +287,36 @@ class AdjustmentExecutor:
                 logger.error("Adjustment abort trade=%s — %s", trade.id, msg)
                 return AdjustmentResult(success=False, error_message=msg)
 
+            # AUDIT: verify close registered on Delta
+            await asyncio.sleep(2)
+            try:
+                still_exists = await delta_client.verify_position_exists(
+                    int(triggered_leg.product_id)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[AUDIT] post-close verify failed: %s", exc
+                )
+                still_exists = False
+            log_and_buffer(
+                "ADJUSTMENT_DELTA_VERIFY",
+                int(trade.id),
+                {
+                    "stage": "post_close",
+                    "leg": triggered_leg_type,
+                    "product_id": int(triggered_leg.product_id),
+                    "still_exists": bool(still_exists),
+                },
+            )
+            if still_exists:
+                logger.warning(
+                    "[AUDIT] Triggered leg %s still visible on Delta after "
+                    "close order. Order may be pending. Proceeding anyway.",
+                    triggered_leg.symbol,
+                )
+            else:
+                logger.info("[AUDIT] Triggered leg closed on Delta")
+
             # Step 5: Enter new leg with bracket SL attached at placement time.
             # Bracket SL confirmed working on Delta Exchange India
             # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
@@ -194,10 +324,11 @@ class AdjustmentExecutor:
             uni_sl = float(getattr(trade, "universal_sl_pct", None) or 200.0)
             try:
                 expected_new_entry = float(
-                    await delta_client.get_mark_price(plan.new_symbol)
+                    await delta_client.get_short_exit_price(plan.new_symbol)
                 )
             except Exception:
-                # Fallback: strategy target (other_leg_current_premium)
+                expected_new_entry = float(other_premium)
+            if expected_new_entry <= 0:
                 expected_new_entry = float(other_premium)
             bracket_sl_price = round(expected_new_entry * (uni_sl / 100.0), 2)
             bracket_sl_limit = (
@@ -212,24 +343,65 @@ class AdjustmentExecutor:
                 bracket_sl_limit=bracket_sl_limit,
             )
             if not entry_result.success:
+                other_leg_type = (
+                    "put" if triggered_leg_type.lower() == "call" else "call"
+                )
                 self._log_partial_error(trade, triggered_leg_type, exit_result)
                 self._mark_leg_closed_partial(
                     triggered_leg, exit_result, db_session
+                )
+                logger.critical(
+                    "PARTIAL ADJUSTMENT: %s closed at %s but new entry FAILED. "
+                    "Trade %s now ONE-LEGGED. Other leg (%s) still open. "
+                    "Manual intervention required!",
+                    triggered_leg_type,
+                    exit_result.filled_price,
+                    trade.id,
+                    other_leg_type,
                 )
                 return AdjustmentResult(
                     success=False,
                     is_partial=True,
                     old_strike=float(triggered_leg.strike),
                     error_message=(
-                        "PARTIAL: Old leg closed but new entry failed. "
-                        f"{entry_result.error or ''}"
-                    ).strip(),
+                        f"PARTIAL: {triggered_leg_type} closed at "
+                        f"{exit_result.filled_price}, new entry failed. "
+                        "One-legged position remains."
+                    ),
                 )
+
+            # AUDIT: verify new leg on Delta
+            await asyncio.sleep(1)
+            try:
+                new_exists = await delta_client.verify_position_exists(
+                    int(plan.new_product_id)
+                )
+            except Exception as exc:
+                logger.warning("[AUDIT] new-leg verify failed: %s", exc)
+                new_exists = False
+            log_and_buffer(
+                "ADJUSTMENT_DELTA_VERIFY",
+                int(trade.id),
+                {
+                    "stage": "post_entry",
+                    "symbol": str(plan.new_symbol),
+                    "product_id": int(plan.new_product_id),
+                    "exists": bool(new_exists),
+                },
+            )
+            if not new_exists:
+                logger.warning(
+                    "[AUDIT] New leg %s not yet visible on Delta. "
+                    "Order may be settling.",
+                    plan.new_symbol,
+                )
+            else:
+                logger.info("[AUDIT] New leg confirmed on Delta")
 
             # Steps 6–8: Update DB on full success
             # BOTH legs reset trigger baseline after a successful adjustment:
             #   triggered → new fill price
-            #   untouched → its Best Offer at adjustment time (other_premium)
+            #   untouched → Best Offer at adjustment time (re-fetched, no mark)
             now_utc = datetime.now(timezone.utc)
             old_strike = float(triggered_leg.strike)
             # Accounting entry for closed leg (true fill) — before any baseline reset
@@ -283,18 +455,40 @@ class AdjustmentExecutor:
             db_session.add(new_leg)
 
             # Untouched leg: KEEP original entry; ONLY reset trigger baseline
-            # to its Best Offer at adjustment time (never mark/bid).
-            other_leg.trigger_baseline_premium = float(other_premium)
-            other_leg.trigger_premium = float(other_premium)
-            # Do NOT modify other_leg.initial_premium
-            logger.info(
-                "[BASELINE_RESET] Trade %s "
-                "untouched_%s.trigger_baseline: %s → %s (best_offer)",
-                trade.id,
-                other_leg.leg_type,
-                other_old_baseline,
-                other_premium,
+            # to Best Offer (ask). Soft fallback: mid, then keep existing.
+            refreshed_offer = await _resolve_offer_price(
+                delta_client,
+                str(other_leg.symbol),
+                keep_if_missing=other_old_baseline,
             )
+            if refreshed_offer > 0:
+                other_leg.trigger_baseline_premium = float(refreshed_offer)
+                other_leg.trigger_premium = float(refreshed_offer)
+                other_premium = float(refreshed_offer)
+                logger.info(
+                    "[BASELINE_RESET] %s baseline: %.2f → %.2f "
+                    "(using offer price at adjustment time)",
+                    other_leg.leg_type,
+                    other_old_baseline,
+                    refreshed_offer,
+                )
+                log_and_buffer(
+                    "BASELINE_RESET",
+                    int(trade.id),
+                    {
+                        "leg": str(other_leg.leg_type),
+                        "old": round(other_old_baseline, 4),
+                        "new": round(float(refreshed_offer), 4),
+                        "source": "offer",
+                    },
+                )
+            else:
+                logger.warning(
+                    "[BASELINE_RESET] Could not get offer for %s. "
+                    "Keeping existing baseline: %s",
+                    other_leg.symbol,
+                    other_leg.trigger_baseline_premium,
+                )
 
             # Realized from TRUE fill premium of closed leg (not trigger baseline)
             # USD = (entry - exit) * qty * contract_value  (matches Delta scale)
@@ -313,7 +507,7 @@ class AdjustmentExecutor:
             trade_row.realized_pnl = prior_realized + leg_realized
 
             hours_left = get_hours_to_expiry(trade.expiry_date)
-            # Ratio of exit vs trigger baseline (NOT exit/entry — that misreads as ~96%)
+            # CORRECT: exit_fill / trigger_baseline (NOT exit / initial_premium)
             trigger_pct = (
                 (old_exit_premium / triggered_baseline) * 100.0
                 if triggered_baseline > 0
@@ -380,8 +574,6 @@ class AdjustmentExecutor:
 
             # Mirror adjustment to slave accounts (non-fatal)
             try:
-                import asyncio
-
                 import backend.engine.mirror_engine as mirror_module
 
                 if mirror_module.mirror_engine is not None:

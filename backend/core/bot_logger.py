@@ -23,8 +23,16 @@ _IMPORTANT_EVENTS = frozenset(
         "ADJUSTMENT_DONE",
         "ADJUSTMENT_FAIL",
         "ADJUSTMENT_HOLD",
+        "ADJUSTMENT_DELTA_VERIFY",
+        "BASELINE_RESET",
+        "PARTIAL_ADJUSTMENT",
         "DECISION_TRIGGER",
         "EXIT_TRIGGERED",
+        "EXIT_START",
+        "EXIT_VERIFY",
+        "EXIT_CLOSE",
+        "EXIT_CLEANUP",
+        "EXIT_COMPLETE",
         "EXIT_DONE",
         "EXIT_FAIL",
         "ERROR",
@@ -32,7 +40,13 @@ _IMPORTANT_EVENTS = frozenset(
         "EMERGENCY_CLOSE",
         "MANUAL_EXCHANGE_CLOSE",
         "POSITION_CHECK",
+        "INTEGRITY_MANUAL_CLOSE",
+        "INTEGRITY_NAKED",
         "TP_SL_LOCKED",
+        "ENTRY_GUARD_PASS",
+        "ENTRY_GUARD_BLOCK",
+        "POSITION_VERIFIED",
+        "POSITION_WARNING",
     }
 )
 
@@ -140,19 +154,39 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "EXIT_FAIL",
         "NAKED_POSITION",
         "EMERGENCY_CLOSE",
+        "ENTRY_GUARD_BLOCK",
+        "PARTIAL_ADJUSTMENT",
+        "INTEGRITY_NAKED",
     ):
         bot_log.error(msg)
     elif event_type in (
         "ADJUSTMENT_START",
         "EXIT_TRIGGERED",
+        "EXIT_START",
         "ADJUSTMENT_HOLD",
         "DECISION_TRIGGER",
         "MANUAL_EXCHANGE_CLOSE",
+        "POSITION_WARNING",
+        "BASELINE_RESET",
+        "EXIT_CLEANUP",
+        "INTEGRITY_MANUAL_CLOSE",
     ):
         bot_log.warning(msg)
-    elif event_type in ("ADJUSTMENT_DONE", "EXIT_DONE", "POSITION_CHECK", "TP_SL_LOCKED"):
+    elif event_type in (
+        "ADJUSTMENT_DONE",
+        "EXIT_DONE",
+        "EXIT_COMPLETE",
+        "EXIT_VERIFY",
+        "EXIT_CLOSE",
+        "POSITION_CHECK",
+        "TP_SL_LOCKED",
+        "ENTRY_GUARD_PASS",
+        "POSITION_VERIFIED",
+        "ADJUSTMENT_DELTA_VERIFY",
+    ):
         bot_log.info(msg)
     else:
+        # INTEGRITY_OK and other high-frequency events stay at debug
         bot_log.debug(msg)
     return msg
 

@@ -18,8 +18,12 @@ from backend.api.routes_strategy import router as strategy_router
 from backend.api.routes_trade import router as trade_router
 from backend.api.routes_ws import router as ws_router
 from backend.core.bot_logger import setup_bot_logger
+from backend.core.db_audit import verify_db_consistency
 from backend.database import init_db
 from backend.engine.bot_engine import bot_engine
+
+# Re-export for `from backend.main import verify_db_consistency` tests
+__all__ = ["app", "verify_db_consistency"]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +44,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db()
     setup_bot_logger()
     logger.info("Database initialized / tables ready")
+
+    # DB consistency audit FIRST — before engines load positions / place trades
+    try:
+        fixes, warnings = await verify_db_consistency(SessionLocal)
+        if warnings > 0:
+            logger.warning(
+                "DB audit found %s issue(s) needing manual review", warnings
+            )
+        if fixes > 0:
+            logger.info("DB audit applied %s automatic fix(es)", fixes)
+    except Exception as exc:
+        logger.critical(
+            "DB consistency audit failed — continuing startup carefully: %s",
+            exc,
+            exc_info=True,
+        )
 
     # One-time orphan stop-loss cleanup (runs on startup).
     # This targets legacy `stop_loss_order` orders that may remain open

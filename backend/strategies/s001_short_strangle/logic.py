@@ -390,8 +390,47 @@ class ShortStrangleStrategy(BaseStrategy):
         call_open = str(getattr(call_leg, "status", "open")).lower() == "open"
         put_open = str(getattr(put_leg, "status", "open")).lower() == "open"
 
-        call_baseline = _trigger_baseline(call_leg) if call_open else 0.0
-        put_baseline = _trigger_baseline(put_leg) if put_open else 0.0
+        # Validate baselines before trigger calc (hot path — no DB commit)
+        if call_open:
+            call_baseline = float(
+                getattr(call_leg, "trigger_baseline_premium", None) or 0
+            )
+            if call_baseline <= 0:
+                call_baseline = float(getattr(call_leg, "initial_premium", 0) or 0)
+                logger.warning(
+                    "Trade %s CALL has invalid baseline. Resetting to initial: %s",
+                    getattr(trade, "id", "?"),
+                    call_baseline,
+                )
+                call_leg.trigger_baseline_premium = call_baseline
+                if hasattr(call_leg, "trigger_premium"):
+                    call_leg.trigger_premium = call_baseline
+        else:
+            call_baseline = 0.0
+
+        if put_open:
+            put_baseline = float(
+                getattr(put_leg, "trigger_baseline_premium", None) or 0
+            )
+            if put_baseline <= 0:
+                put_baseline = float(getattr(put_leg, "initial_premium", 0) or 0)
+                logger.warning(
+                    "Trade %s PUT has invalid baseline. Resetting to initial: %s",
+                    getattr(trade, "id", "?"),
+                    put_baseline,
+                )
+                put_leg.trigger_baseline_premium = put_baseline
+                if hasattr(put_leg, "trigger_premium"):
+                    put_leg.trigger_premium = put_baseline
+        else:
+            put_baseline = 0.0
+
+        # Prefer validated baselines; fall back through _trigger_baseline
+        if call_baseline <= 0 and call_open:
+            call_baseline = _trigger_baseline(call_leg)
+        if put_baseline <= 0 and put_open:
+            put_baseline = _trigger_baseline(put_leg)
+
         call_trigger_price = (
             call_baseline * (call_trigger_pct / 100.0) if call_baseline > 0 else 0.0
         )
@@ -404,24 +443,39 @@ class ShortStrangleStrategy(BaseStrategy):
         put_ratio = (
             (put_premium / put_baseline * 100.0) if put_baseline > 0 else 0.0
         )
-        logger.info(
-            "[TRIGGER_CHECK] Trade %s "
-            "call: current=%.2f baseline=%.2f trigger_at=%.2f "
-            "trigger_pct=%.1f ratio=%.1f%% "
-            "| put: current=%.2f baseline=%.2f trigger_at=%.2f "
-            "trigger_pct=%.1f ratio=%.1f%%",
+        logger.debug(
+            "[TRIGGER_CHECK] Trade %s | "
+            "CALL: offer=%.2f baseline=%.2f trigger_at=%.2f (%.1f%%) | "
+            "PUT: offer=%.2f baseline=%.2f trigger_at=%.2f (%.1f%%)",
             getattr(trade, "id", "?"),
             call_premium,
             call_baseline,
             call_trigger_price,
-            call_trigger_pct,
             call_ratio,
             put_premium,
             put_baseline,
             put_trigger_price,
-            put_trigger_pct,
             put_ratio,
         )
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "TRIGGER_CALC",
+                int(getattr(trade, "id", 0) or 0),
+                {
+                    "call_offer": round(float(call_premium), 2),
+                    "call_baseline": round(float(call_baseline), 2),
+                    "call_trigger_at": round(float(call_trigger_price), 2),
+                    "call_ratio_pct": round(float(call_ratio), 1),
+                    "put_offer": round(float(put_premium), 2),
+                    "put_baseline": round(float(put_baseline), 2),
+                    "put_trigger_at": round(float(put_trigger_price), 2),
+                    "put_ratio_pct": round(float(put_ratio), 1),
+                },
+            )
+        except Exception:
+            pass
 
         if call_open:
             if call_premium >= call_trigger_price:
