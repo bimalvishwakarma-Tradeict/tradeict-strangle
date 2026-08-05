@@ -102,8 +102,7 @@ def upload_to_drive(zip_path: Path) -> str:
         .create(
             body=metadata,
             media_body=media,
-            fields="id,name,createdTime,size",
-            supportsAllDrives=True,
+            fields="id, name, size",
         )
         .execute()
     )
@@ -129,12 +128,9 @@ def delete_old_backups() -> int:
             service.files()
             .list(
                 q=query,
-                spaces="drive",
                 fields="nextPageToken, files(id, name, createdTime)",
                 pageToken=page_token,
                 pageSize=100,
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
             )
             .execute()
         )
@@ -147,7 +143,7 @@ def delete_old_backups() -> int:
                 continue
             file_id = item["id"]
             name = item.get("name", file_id)
-            service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+            service.files().delete(fileId=file_id).execute()
             deleted += 1
             _log(f"Deleted old backup: {name} (created {created_raw})")
         page_token = response.get("nextPageToken")
