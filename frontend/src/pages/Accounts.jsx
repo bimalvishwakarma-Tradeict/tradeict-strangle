@@ -5,8 +5,10 @@ import LoadingSpinner from '../components/ui/LoadingSpinner'
 import Toast from '../components/ui/Toast'
 import {
   addSlaveAccount,
+  copyMasterTradeToSlave,
   deleteSlaveAccount,
   getAccountStatus,
+  getActiveTrades,
   getSlaveAccounts,
   testSlaveConnection,
   toggleSlaveAccount,
@@ -38,6 +40,10 @@ function statusBadge(status) {
     return { label: '🔴 Error', className: 'text-red-400' }
   }
   return { label: '⚪ Unknown', className: 'text-gray-400' }
+}
+
+function calcSlaveQty(masterQty, multiplier) {
+  return Math.max(1, Math.round(Number(masterQty || 1) * Number(multiplier || 1)))
 }
 
 function SlaveModal({
@@ -250,17 +256,28 @@ function SlaveModal({
 
 function SlaveCard({
   slave,
+  masterTrade,
   onTest,
   onToggle,
   onEdit,
   onDelete,
+  onCopyTrade,
   testingId,
   togglingId,
+  copyingId,
 }) {
   const badge = statusBadge(slave.connection_status)
   const paused = !slave.is_active
   const testing = testingId === slave.id
   const toggling = togglingId === slave.id
+  const copying = copyingId === slave.id
+  const hasActiveTrade = Boolean(slave.has_active_trade || slave.active_trade_count > 0)
+  const showCopy =
+    Boolean(masterTrade) && !paused && !hasActiveTrade
+
+  const slaveQty = masterTrade
+    ? calcSlaveQty(masterTrade.quantity, slave.qty_multiplier)
+    : null
 
   return (
     <div
@@ -271,7 +288,7 @@ function SlaveCard({
       }`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-semibold text-white">📋 {slave.name}</span>
             <span className={`text-sm ${badge.className}`}>{badge.label}</span>
@@ -291,7 +308,9 @@ function SlaveCard({
             {Number(slave.qty_multiplier || 1)}×
           </div>
           <div className="mt-0.5 text-xs text-gray-500">
-            Active trades: {slave.active_trade_count ?? 0}
+            {hasActiveTrade
+              ? `Active trade: ${slave.active_trade_count ?? 1}`
+              : 'No active trade'}
           </div>
           {slave.connection_status === 'error' && slave.last_error ? (
             <div className="mt-1 text-xs text-red-400">❌ {slave.last_error}</div>
@@ -303,6 +322,30 @@ function SlaveCard({
               }`}
             >
               {slave._testMessage}
+            </div>
+          ) : null}
+
+          {showCopy ? (
+            <div className="mt-3 rounded-lg border border-blue-700/40 bg-blue-950/30 px-3 py-2">
+              <div className="text-xs text-blue-200">
+                ⚡ Master has active {masterTrade.underlying || ''} trade
+                {slaveQty != null ? ` · Slave qty: ${slaveQty} lots` : ''}
+              </div>
+              <button
+                type="button"
+                disabled={copying}
+                onClick={() => onCopyTrade(slave)}
+                className="mt-2 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                {copying ? (
+                  <>
+                    <LoadingSpinner size="sm" color="white" />
+                    Copying trade…
+                  </>
+                ) : (
+                  '📋 Copy Trade to This Account'
+                )}
+              </button>
             </div>
           ) : null}
         </div>
@@ -352,6 +395,7 @@ export default function Accounts() {
   const [loading, setLoading] = useState(true)
   const [master, setMaster] = useState(null)
   const [slaves, setSlaves] = useState([])
+  const [masterTrade, setMasterTrade] = useState(null)
   const [toast, setToast] = useState(null)
 
   const [modalOpen, setModalOpen] = useState(false)
@@ -362,8 +406,11 @@ export default function Accounts() {
 
   const [testingId, setTestingId] = useState(null)
   const [togglingId, setTogglingId] = useState(null)
+  const [copyingId, setCopyingId] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [deleting, setDeleting] = useState(false)
+  const [copyTarget, setCopyTarget] = useState(null)
+  const [postAddPrompt, setPostAddPrompt] = useState(null)
 
   useEffect(() => {
     document.title = 'Delta Bot — Accounts'
@@ -372,12 +419,30 @@ export default function Accounts() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const [status, list] = await Promise.all([
+      const [status, list, active] = await Promise.all([
         getAccountStatus(),
         getSlaveAccounts(),
+        getActiveTrades().catch(() => ({ trades: [] })),
       ])
       setMaster(status)
       setSlaves(Array.isArray(list) ? list : [])
+
+      const trades = Array.isArray(active?.trades) ? active.trades : []
+      const first = trades[0] || null
+      if (first) {
+        const qty =
+          Number(first.call_leg?.quantity) ||
+          Number(first.put_leg?.quantity) ||
+          Number(first.quantity) ||
+          1
+        setMasterTrade({
+          trade_id: first.trade_id || first.id,
+          underlying: first.underlying || 'BTC',
+          quantity: qty,
+        })
+      } else {
+        setMasterTrade(null)
+      }
     } catch (err) {
       setToast({
         type: 'error',
@@ -411,6 +476,34 @@ export default function Accounts() {
     setModalOpen(true)
   }
 
+  const runCopyTrade = async (slave) => {
+    setCopyingId(slave.id)
+    try {
+      const res = await copyMasterTradeToSlave(slave.id)
+      if (!res?.success) {
+        setToast({
+          type: 'error',
+          message: `❌ ${res?.message || 'Copy failed'}`,
+        })
+        return
+      }
+      setToast({
+        type: 'success',
+        message: `✅ Trade copied to ${slave.name}! Call + Put sold`,
+      })
+      await refresh()
+    } catch (err) {
+      setToast({
+        type: 'error',
+        message: `❌ Failed: ${err.message || 'Copy failed'}`,
+      })
+    } finally {
+      setCopyingId(null)
+      setCopyTarget(null)
+      setPostAddPrompt(null)
+    }
+  }
+
   const handleSave = async (form) => {
     if (!form.name) {
       setFormError('Account name is required.')
@@ -420,7 +513,10 @@ export default function Accounts() {
       setFormError('API key and secret are required.')
       return
     }
-    if (modalMode === 'edit' && ((form.api_key && !form.api_secret) || (!form.api_key && form.api_secret))) {
+    if (
+      modalMode === 'edit' &&
+      ((form.api_key && !form.api_secret) || (!form.api_key && form.api_secret))
+    ) {
       setFormError('Provide both API key and secret to rotate credentials.')
       return
     }
@@ -429,8 +525,16 @@ export default function Accounts() {
     setFormError('')
     try {
       if (modalMode === 'add') {
-        await addSlaveAccount(form)
+        const created = await addSlaveAccount(form)
         setToast({ type: 'success', message: '✅ Slave added!' })
+        setModalOpen(false)
+        await refresh()
+        if (masterTrade && created?.is_active !== false) {
+          setPostAddPrompt({
+            slave: created,
+            masterTrade,
+          })
+        }
       } else {
         const payload = {
           name: form.name,
@@ -441,9 +545,9 @@ export default function Accounts() {
         if (form.api_secret) payload.api_secret = form.api_secret
         await updateSlaveAccount(editingSlave.id, payload)
         setToast({ type: 'success', message: '✅ Slave updated!' })
+        setModalOpen(false)
+        await refresh()
       }
-      setModalOpen(false)
-      await refresh()
     } catch (err) {
       setFormError(err.message || 'Save failed')
     } finally {
@@ -528,6 +632,16 @@ export default function Accounts() {
     }
   }
 
+  const copyConfirmMessage = useMemo(() => {
+    if (!copyTarget || !masterTrade) return ''
+    const qty = calcSlaveQty(masterTrade.quantity, copyTarget.qty_multiplier)
+    return (
+      `Copy master ${masterTrade.underlying || ''} trade to ${copyTarget.name}?\n` +
+      `Slave qty: ${qty} lots (${Number(copyTarget.qty_multiplier || 1)}× master)\n` +
+      `This will place SELL orders on ${copyTarget.name} immediately.`
+    )
+  }, [copyTarget, masterTrade])
+
   if (loading) {
     return (
       <main className="mx-auto flex max-w-3xl items-center justify-center px-4 py-20">
@@ -558,6 +672,14 @@ export default function Accounts() {
               Balance: ${formatUsd(master.balance_usdt)} · ₹
               {formatInr(master.balance_inr)} · Role: Master
             </div>
+            {masterTrade ? (
+              <div className="mt-1 text-xs text-green-300">
+                Active trade: {masterTrade.underlying} #{masterTrade.trade_id} ·{' '}
+                {masterTrade.quantity} lot(s)
+              </div>
+            ) : (
+              <div className="mt-1 text-xs text-gray-500">No active master trade</div>
+            )}
             <Link
               to="/settings"
               className="mt-3 inline-block text-sm text-blue-400 underline hover:text-blue-300"
@@ -604,12 +726,15 @@ export default function Accounts() {
               <SlaveCard
                 key={slave.id}
                 slave={slave}
+                masterTrade={masterTrade}
                 onTest={handleTest}
                 onToggle={handleToggle}
                 onEdit={openEdit}
                 onDelete={setDeleteTarget}
+                onCopyTrade={setCopyTarget}
                 testingId={testingId}
                 togglingId={togglingId}
+                copyingId={copyingId}
               />
             ))}
           </div>
@@ -639,6 +764,69 @@ export default function Accounts() {
         onCancel={() => setDeleteTarget(null)}
         onConfirm={handleDeleteConfirm}
       />
+
+      <ConfirmDialog
+        isOpen={Boolean(copyTarget)}
+        title="Copy master trade?"
+        message={copyConfirmMessage}
+        confirmLabel={copyingId ? 'Copying trade…' : 'Yes, Copy Trade'}
+        cancelLabel="Cancel"
+        confirmDisabled={Boolean(copyingId)}
+        onCancel={() => !copyingId && setCopyTarget(null)}
+        onConfirm={() => copyTarget && runCopyTrade(copyTarget)}
+      />
+
+      {postAddPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-md rounded-xl border border-gray-700 bg-gray-800 p-5 shadow-xl">
+            <h3 className="text-lg font-semibold text-white">Slave added!</h3>
+            <p className="mt-2 text-sm text-gray-300">
+              Master has an active {postAddPrompt.masterTrade?.underlying || ''}{' '}
+              trade. Copy it to{' '}
+              <span className="font-medium text-white">
+                {postAddPrompt.slave?.name}
+              </span>{' '}
+              now?
+            </p>
+            <p className="mt-2 text-xs text-gray-500">
+              Slave qty:{' '}
+              {calcSlaveQty(
+                postAddPrompt.masterTrade?.quantity,
+                postAddPrompt.slave?.qty_multiplier,
+              )}{' '}
+              lots ({Number(postAddPrompt.slave?.qty_multiplier || 1)}× master).
+              This places SELL orders immediately.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={Boolean(copyingId)}
+                onClick={() => setPostAddPrompt(null)}
+                className="rounded-md border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:opacity-50"
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                disabled={Boolean(copyingId)}
+                onClick={() =>
+                  postAddPrompt.slave && runCopyTrade(postAddPrompt.slave)
+                }
+                className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                {copyingId ? (
+                  <>
+                    <LoadingSpinner size="sm" color="white" />
+                    Copying…
+                  </>
+                ) : (
+                  'Copy Trade'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && (
         <Toast

@@ -49,6 +49,7 @@ def _to_response(slave: SlaveAccount, db: Session, rate: float) -> dict[str, Any
     bal_inr = float(slave.balance_inr or 0.0)
     if bal_inr <= 0 and bal_usd > 0:
         bal_inr = round(bal_usd * rate, 2)
+    active_count = _active_trade_count(db, int(slave.id))
     return {
         "id": int(slave.id),
         "name": slave.name,
@@ -59,7 +60,8 @@ def _to_response(slave: SlaveAccount, db: Session, rate: float) -> dict[str, Any
         "balance_inr": bal_inr,
         "last_connected_at": _iso(slave.last_connected_at),
         "last_error": slave.last_error,
-        "active_trade_count": _active_trade_count(db, int(slave.id)),
+        "active_trade_count": active_count,
+        "has_active_trade": active_count > 0,
     }
 
 
@@ -289,6 +291,192 @@ async def toggle_slave_account(
         "is_active": slave.is_active,
         "message": f"Slave '{slave.name}' {msg}",
     }
+
+
+@router.post("/accounts/{slave_id}/copy-master-trade")
+async def copy_master_trade_to_slave(
+    slave_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    One-click: place the master's current open strangle on this slave.
+
+    Uses bracket SL attached to entry orders (auto-cancels on close).
+    """
+    from backend.engine.bot_engine import bot_engine
+
+    slave = db.query(SlaveAccount).filter(SlaveAccount.id == slave_id).first()
+    if slave is None:
+        raise HTTPException(status_code=404, detail="Slave account not found")
+
+    if not slave.is_active:
+        raise HTTPException(status_code=400, detail="Slave account is paused")
+
+    active_states = bot_engine.position_tracker.get_all_active()
+    if not active_states:
+        return {"success": False, "message": "No active master trade to copy"}
+
+    state = active_states[0]
+    master_trade_id = int(state.trade_id)
+
+    existing = (
+        db.query(SlaveTrade)
+        .filter(
+            SlaveTrade.slave_account_id == slave_id,
+            SlaveTrade.master_trade_id == master_trade_id,
+            SlaveTrade.status == "active",
+        )
+        .first()
+    )
+    if existing is not None:
+        return {
+            "success": False,
+            "message": f"Slave already has trade #{master_trade_id}",
+        }
+
+    call_leg = state.call_leg
+    put_leg = state.put_leg
+    if call_leg is None or put_leg is None:
+        return {"success": False, "message": "Master trade missing open call/put legs"}
+
+    master_qty = max(1, int(getattr(call_leg, "quantity", 1) or 1))
+    mult = float(slave.qty_multiplier or 1.0)
+    slave_qty = max(1, int(round(master_qty * mult)))
+
+    uni_sl = float(getattr(state.trade, "universal_sl_pct", None) or 200.0)
+    call_base = float(
+        getattr(call_leg, "trigger_baseline_premium", None)
+        or getattr(call_leg, "initial_premium", 0)
+        or 0
+    )
+    put_base = float(
+        getattr(put_leg, "trigger_baseline_premium", None)
+        or getattr(put_leg, "initial_premium", 0)
+        or 0
+    )
+    call_sl = round(call_base * (uni_sl / 100.0), 2) if call_base > 0 else None
+    put_sl = round(put_base * (uni_sl / 100.0), 2) if put_base > 0 else None
+
+    underlying = str(getattr(state.trade, "underlying", "") or "")
+    call_symbol = str(getattr(call_leg, "symbol", "") or "")
+    put_symbol = str(getattr(put_leg, "symbol", "") or "")
+
+    client = DeltaClient(
+        decrypt(slave.api_key_encrypted),
+        decrypt(slave.api_secret_encrypted),
+    )
+    call_order_id: str | None = None
+    try:
+        # Bracket SL confirmed working on Delta Exchange India
+        # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
+        call_order = await client.place_order(
+            product_id=int(call_leg.product_id),
+            size=slave_qty,
+            side="sell",
+            bracket_stop_loss_price=call_sl,
+            bracket_stop_loss_limit_price=(
+                round(call_sl * 1.05, 2) if call_sl else None
+            ),
+        )
+        call_fill = float(
+            await client.resolve_fill_price(
+                call_order, symbol_for_fallback=call_symbol or None
+            )
+            or 0.0
+        )
+        if call_fill <= 0:
+            call_fill = call_base
+        call_order_id = str(
+            call_order.get("order_id") or call_order.get("id") or ""
+        ) or None
+
+        put_order = await client.place_order(
+            product_id=int(put_leg.product_id),
+            size=slave_qty,
+            side="sell",
+            bracket_stop_loss_price=put_sl,
+            bracket_stop_loss_limit_price=(
+                round(put_sl * 1.05, 2) if put_sl else None
+            ),
+        )
+        put_fill = float(
+            await client.resolve_fill_price(
+                put_order, symbol_for_fallback=put_symbol or None
+            )
+            or 0.0
+        )
+        if put_fill <= 0:
+            put_fill = put_base
+        put_order_id = str(
+            put_order.get("order_id") or put_order.get("id") or ""
+        ) or None
+
+        slave_trade = SlaveTrade(
+            slave_account_id=int(slave.id),
+            master_trade_id=master_trade_id,
+            call_order_id=call_order_id,
+            put_order_id=put_order_id,
+            call_sl_order_id=None,
+            put_sl_order_id=None,
+            actual_quantity=slave_qty,
+            call_fill_price=call_fill,
+            put_fill_price=put_fill,
+            status="active",
+        )
+        db.add(slave_trade)
+
+        slave.connection_status = "connected"
+        slave.last_connected_at = get_ist_now()
+        slave.last_error = None
+        slave.updated_at = get_ist_now()
+        db.commit()
+
+        logger.info(
+            "✅ Master trade #%s copied to slave '%s': qty=%s "
+            "call_fill=%s put_fill=%s",
+            master_trade_id,
+            slave.name,
+            slave_qty,
+            call_fill,
+            put_fill,
+        )
+
+        return {
+            "success": True,
+            "message": f"Trade #{master_trade_id} copied to {slave.name}",
+            "slave_qty": slave_qty,
+            "call_fill": call_fill,
+            "put_fill": put_fill,
+            "call_order_id": call_order_id,
+            "put_order_id": put_order_id,
+            "master_trade_id": master_trade_id,
+            "underlying": underlying,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Copy trade to slave failed slave=%s master=%s call_order=%s: %s",
+            slave.name,
+            master_trade_id,
+            call_order_id,
+            exc,
+            exc_info=True,
+        )
+        slave.last_error = str(exc)[:500]
+        slave.connection_status = "error"
+        slave.updated_at = get_ist_now()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to copy trade: {exc}",
+        ) from exc
+    finally:
+        await client.close()
 
 
 @router.get("/accounts/{slave_id}/trades")

@@ -311,6 +311,15 @@ export const toggleSlaveAccount = async (id) => {
   }
 }
 
+export const copyMasterTradeToSlave = async (slaveId) => {
+  try {
+    const res = await api.post(`/api/slave/accounts/${slaveId}/copy-master-trade`)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to copy master trade to slave'))
+  }
+}
+
 export const getSlaveOverview = async () => {
   try {
     const res = await api.get('/api/slave/overview')
