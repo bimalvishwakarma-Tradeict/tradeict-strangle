@@ -170,27 +170,30 @@ def get_dte_label(expiry_date: date) -> str:
 
 def get_expiry_date_for_dte(dte: int) -> date:
     """
-    Next available expiry calendar date for a given DTE on Delta India.
+    Calendar expiry date for a requested DTE on Delta India (daily 5:30 PM IST).
 
-    Daily expiry is 5:30 PM IST. After 5:15 PM IST the current day is treated
-    as expired for auto-entry, so DTE counting shifts forward one day.
+    After 5:15 PM IST today's expiry is gone, so the soonest date is tomorrow.
+    1DTE means ~1 calendar day to expiry — which is still tomorrow after cutoff
+    (not day-after-tomorrow).
 
-    Before 5:15 PM IST: 0DTE=today, 1DTE=tomorrow, …
-    At/after 5:15 PM IST: 0DTE=tomorrow, 1DTE=day after, …
+    Before 5:15 PM IST: 0DTE=today, 1DTE=tomorrow, 2DTE=day+2
+    At/after 5:15 PM IST: 0DTE=tomorrow, 1DTE=tomorrow, 2DTE=day+2
     """
     now = get_ist_now()
     cutoff = now.replace(hour=17, minute=15, second=0, microsecond=0)
+    dte_n = max(0, int(dte))
 
     if now >= cutoff:
-        base_date = (now + timedelta(days=1)).date()
-    else:
-        base_date = now.date()
+        # Today's expiry is gone — minimum expiry is tomorrow.
+        # dte=0 and dte=1 both map to tomorrow; dte=2 → day after, etc.
+        return now.date() + timedelta(days=max(dte_n, 1))
 
-    return base_date + timedelta(days=max(0, int(dte)))
+    # Today's expiry still available
+    return now.date() + timedelta(days=dte_n)
 
 
 if __name__ == "__main__":
-    from datetime import timedelta
+    from unittest.mock import patch
 
     now = get_ist_now()
     print(f"IST Now: {now}")
@@ -223,5 +226,29 @@ if __name__ == "__main__":
 
     assert get_dte_label(tomorrow) == "1DTE"
     assert get_dte_label(date.today() + timedelta(days=2)) == "2DTE"
+
+    # After-cutoff: 0DTE and 1DTE both = tomorrow; 2DTE = day after
+    fake_after = IST.localize(datetime(2026, 8, 5, 18, 0, 0))
+    with patch(f"{__name__}.get_ist_now", return_value=fake_after):
+        assert get_expiry_date_for_dte(0) == date(2026, 8, 6)
+        assert get_expiry_date_for_dte(1) == date(2026, 8, 6)
+        assert get_expiry_date_for_dte(2) == date(2026, 8, 7)
+        print("After cutoff (6 PM Aug 5):")
+        for dte in [0, 1, 2, 7]:
+            print(f"  dte={dte} → {get_expiry_date_for_dte(dte)}")
+
+    # Before-cutoff: 0DTE=today, 1DTE=tomorrow, 2DTE=day+2
+    fake_before = IST.localize(datetime(2026, 8, 5, 10, 0, 0))
+    with patch(f"{__name__}.get_ist_now", return_value=fake_before):
+        assert get_expiry_date_for_dte(0) == date(2026, 8, 5)
+        assert get_expiry_date_for_dte(1) == date(2026, 8, 6)
+        assert get_expiry_date_for_dte(2) == date(2026, 8, 7)
+        print("Before cutoff (10 AM Aug 5):")
+        for dte in [0, 1, 2, 7]:
+            print(f"  dte={dte} → {get_expiry_date_for_dte(dte)}")
+
+    print("Live get_expiry_date_for_dte:")
+    for dte in [0, 1, 2, 7]:
+        print(f"  dte={dte} → {get_expiry_date_for_dte(dte)}")
 
     print("✅ TIME UTILS TEST PASSED")
