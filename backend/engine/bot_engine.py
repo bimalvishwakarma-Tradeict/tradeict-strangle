@@ -84,10 +84,12 @@ class BotEngine:
         # Debounce emergency / manual-close integrity handlers
         self._integrity_in_progress: set[int] = set()
         self._premium_collapse_pending: set[int] = set()
+        # Set from main.py lifespan after AutoTradeEngine is created
+        self.auto_trade_engine: Any | None = None
 
     async def start(self) -> None:
         self.is_running = True
-        logger.info("Bot engine starting...")
+        logger.info("🤖 Bot engine started")
         self._refresh_delta_client()
         with self.db_factory() as db:
             count = self.position_tracker.load_from_db(db)
@@ -622,6 +624,9 @@ class BotEngine:
                 ),
             }
         )
+        self._maybe_schedule_auto_reentry(
+            str(getattr(trade_state.trade, "underlying", "") or "")
+        )
 
     async def _emergency_close_remaining_leg(
         self, trade_state: TradeState, leg_to_close: str
@@ -784,6 +789,34 @@ class BotEngine:
                 ),
             }
         )
+        self._maybe_schedule_auto_reentry(
+            str(getattr(trade_state.trade, "underlying", "") or "")
+        )
+
+    def _maybe_schedule_auto_reentry(self, underlying: str) -> None:
+        """Schedule auto re-entry if AutoTradeEngine is enabled for this underlying."""
+        if not getattr(self, "auto_trade_engine", None):
+            return
+        if not underlying:
+            return
+        try:
+            from backend.database import get_or_create_auto_settings
+
+            with self.db_factory() as db:
+                settings = get_or_create_auto_settings(db)
+                if not settings.is_enabled:
+                    return
+                if str(settings.underlying).upper() != str(underlying).upper():
+                    return
+                delay = int(settings.re_entry_delay_minutes or 1)
+                self.auto_trade_engine.schedule_reentry(underlying, delay)
+                logger.info(
+                    "Auto re-entry scheduled for %s in %s min",
+                    underlying,
+                    delay,
+                )
+        except Exception as exc:
+            logger.warning("Could not schedule auto re-entry: %s", exc)
 
     async def _process_trade(self, trade_state: TradeState) -> None:
         assert self.delta_client is not None
@@ -1343,6 +1376,9 @@ class BotEngine:
                 "final_pnl": final_pnl,
                 "timestamp": get_ist_now().isoformat(),
             }
+        )
+        self._maybe_schedule_auto_reentry(
+            str(getattr(trade, "underlying", "") or "")
         )
 
     async def _adjust_trade(

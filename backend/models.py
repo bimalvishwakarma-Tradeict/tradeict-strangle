@@ -151,3 +151,66 @@ class Setting(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
 
     trade: Mapped[Trade] = relationship("Trade", back_populates="settings")
+
+
+class AutoTradeSettings(Base):
+    """
+    Singleton (id=1) config for automatic strangle re-entry after exits.
+
+    Created on first access via get_or_create_auto_settings().
+    """
+
+    __tablename__ = "auto_trade_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    underlying: Mapped[str] = mapped_column(String(20), nullable=False, default="BTC")
+    expiry_dte: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    re_entry_delay_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+
+    # Risk settings
+    tp_pct: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
+    sl_pct: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
+    universal_sl_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, default=200.0
+    )
+    slippage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=2.0)
+
+    # Trigger settings
+    trigger_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="slab")
+    flat_trigger_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, default=150.0
+    )
+    slab_24h: Mapped[float] = mapped_column(Float, nullable=False, default=200.0)
+    slab_12h: Mapped[float] = mapped_column(Float, nullable=False, default=175.0)
+    slab_6h: Mapped[float] = mapped_column(Float, nullable=False, default=150.0)
+    slab_lt6h: Mapped[float] = mapped_column(Float, nullable=False, default=150.0)
+    premium_slab_300: Mapped[float] = mapped_column(
+        Float, nullable=False, default=150.0
+    )
+    premium_slab_200: Mapped[float] = mapped_column(
+        Float, nullable=False, default=160.0
+    )
+    premium_slab_100: Mapped[float] = mapped_column(
+        Float, nullable=False, default=180.0
+    )
+    premium_slab_lt100: Mapped[float] = mapped_column(
+        Float, nullable=False, default=200.0
+    )
+
+    # Status tracking
+    last_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_exit_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_entry_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now
+    )

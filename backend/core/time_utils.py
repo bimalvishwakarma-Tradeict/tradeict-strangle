@@ -168,6 +168,27 @@ def get_dte_label(expiry_date: date) -> str:
     return f"{days}DTE"
 
 
+def get_expiry_date_for_dte(dte: int) -> date:
+    """
+    Next available expiry calendar date for a given DTE on Delta India.
+
+    Daily expiry is 5:30 PM IST. After 5:15 PM IST the current day is treated
+    as expired for auto-entry, so DTE counting shifts forward one day.
+
+    Before 5:15 PM IST: 0DTE=today, 1DTE=tomorrow, …
+    At/after 5:15 PM IST: 0DTE=tomorrow, 1DTE=day after, …
+    """
+    now = get_ist_now()
+    cutoff = now.replace(hour=17, minute=15, second=0, microsecond=0)
+
+    if now >= cutoff:
+        base_date = (now + timedelta(days=1)).date()
+    else:
+        base_date = now.date()
+
+    return base_date + timedelta(days=max(0, int(dte)))
+
+
 if __name__ == "__main__":
     from datetime import timedelta
 

@@ -25,6 +25,8 @@ export function useTrades() {
   const [errors, setErrors] = useState({})
   const [adjustments, setAdjustments] = useState([])
   const [loading, setLoading] = useState(true)
+  /** Latest AUTO_TRADE_* snapshot from WS (Dashboard banner can sync). */
+  const [autoTradeStatus, setAutoTradeStatus] = useState(null)
 
   const applyTradesList = useCallback((list) => {
     const next = new Map()
@@ -504,6 +506,42 @@ export function useTrades() {
       return
     }
 
+    if (msg.type === 'AUTO_TRADE_PLACED') {
+      setAutoTradeStatus({
+        type: 'AUTO_TRADE_PLACED',
+        trade_id: msg.trade_id,
+        underlying: msg.underlying,
+        strike: msg.strike,
+        at: Date.now(),
+      })
+      refetch()
+      return
+    }
+
+    if (msg.type === 'AUTO_TRADE_WAITING') {
+      const secs = Number(msg.seconds_remaining)
+      setAutoTradeStatus({
+        type: 'AUTO_TRADE_WAITING',
+        underlying: msg.underlying,
+        seconds_remaining: Number.isFinite(secs) ? Math.max(0, secs) : null,
+        next_entry_time: msg.next_entry_time || null,
+        at: Date.now(),
+      })
+      return
+    }
+
+    if (msg.type === 'AUTO_TRADE_FAILED') {
+      setAutoTradeStatus({
+        type: 'AUTO_TRADE_FAILED',
+        underlying: msg.underlying,
+        error: msg.error,
+        retry_in_seconds: msg.retry_in_seconds,
+        message: msg.message,
+        at: Date.now(),
+      })
+      return
+    }
+
     if (msg.type === 'ERROR') {
       setErrors((prev) => ({
         ...prev,
@@ -537,5 +575,6 @@ export function useTrades() {
     adjustments,
     loading,
     refetch,
+    autoTradeStatus,
   }
 }

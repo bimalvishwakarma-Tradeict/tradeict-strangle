@@ -1296,6 +1296,121 @@ class DeltaClient:
         )
         return best
 
+    async def find_atm_straddle(
+        self,
+        underlying: str,
+        expiry_date: str,
+    ) -> dict[str, Any]:
+        """
+        Find best ATM strike for a short straddle on the given expiry.
+
+        1. Spot price for underlying
+        2. Option chain for underlying + expiry
+        3. ATM = strike nearest to spot
+        4–5. If call/put premium mismatch is large, try ±1 adjacent strikes
+        6. Return best premium-matched row with placement fields
+        """
+        # Map UI underlying → perpetual ticker for spot (avoid strategy import)
+        price_map = {"BTC": "BTCUSD", "ETH": "ETHUSD", "XAU": "XAUUSD"}
+        key = underlying.upper().strip()
+        price_symbol = price_map.get(
+            key, key if key.endswith("USD") else f"{key}USD"
+        )
+
+        spot_price = await self.get_underlying_price(price_symbol)
+        if not spot_price or spot_price <= 0:
+            raise DeltaAPIError(
+                502, f"Could not get spot price for {underlying} ({price_symbol})"
+            )
+
+        chain = await self.get_option_chain(underlying, expiry_date)
+        if not chain:
+            raise DeltaAPIError(
+                404,
+                f"No option chain available for {underlying} {expiry_date}. "
+                "Market may be closed or expiry unavailable.",
+            )
+
+        logger.info(
+            "Finding ATM straddle: %s spot=%.2f expiry=%s chain_rows=%s",
+            underlying,
+            spot_price,
+            expiry_date,
+            len(chain),
+        )
+
+        def premium_diff_pct(row: dict[str, Any]) -> float:
+            call_p = _safe_float(row.get("call_mark_price"))
+            put_p = _safe_float(row.get("put_mark_price"))
+            if call_p <= 0 or put_p <= 0:
+                return 999.0
+            return abs(call_p - put_p) / max(call_p, put_p) * 100.0
+
+        def distance_from_spot(row: dict[str, Any]) -> float:
+            return abs(_safe_float(row.get("strike")) - float(spot_price))
+
+        # Chain is sorted by strike from get_option_chain
+        atm_row = min(chain, key=distance_from_spot)
+        atm_idx = chain.index(atm_row)
+
+        candidates: list[dict[str, Any]] = [atm_row]
+        if atm_idx > 0:
+            candidates.append(chain[atm_idx - 1])
+        if atm_idx < len(chain) - 1:
+            candidates.append(chain[atm_idx + 1])
+
+        valid_candidates = [
+            c
+            for c in candidates
+            if _safe_float(c.get("call_mark_price")) > 0
+            and _safe_float(c.get("put_mark_price")) > 0
+        ]
+        if not valid_candidates:
+            raise DeltaAPIError(
+                404,
+                f"No valid ATM strikes with positive premiums found "
+                f"for {underlying} {expiry_date}",
+            )
+
+        # Prefer closest-to-spot among candidates with diff <= 15%;
+        # otherwise pick lowest premium mismatch among ATM ±1.
+        tight = [c for c in valid_candidates if premium_diff_pct(c) <= 15.0]
+        if tight:
+            best_row = min(tight, key=lambda r: (distance_from_spot(r), premium_diff_pct(r)))
+        else:
+            best_row = min(valid_candidates, key=premium_diff_pct)
+        diff = premium_diff_pct(best_row)
+
+        logger.info(
+            "ATM straddle selected: strike=%s call=%.2f put=%.2f "
+            "diff=%.1f%% spot=%.2f",
+            best_row.get("strike"),
+            _safe_float(best_row.get("call_mark_price")),
+            _safe_float(best_row.get("put_mark_price")),
+            diff,
+            spot_price,
+        )
+
+        return {
+            "strike": _safe_float(best_row.get("strike")),
+            "call_symbol": str(best_row.get("call_symbol") or ""),
+            "call_product_id": int(best_row.get("call_product_id") or 0),
+            "call_premium": _safe_float(best_row.get("call_mark_price")),
+            "call_bid": _safe_float(best_row.get("call_bid")),
+            "call_ask": _safe_float(best_row.get("call_ask")),
+            "call_delta": _safe_float(best_row.get("call_delta")),
+            "put_symbol": str(best_row.get("put_symbol") or ""),
+            "put_product_id": int(best_row.get("put_product_id") or 0),
+            "put_premium": _safe_float(best_row.get("put_mark_price")),
+            "put_bid": _safe_float(best_row.get("put_bid")),
+            "put_ask": _safe_float(best_row.get("put_ask")),
+            "put_delta": _safe_float(best_row.get("put_delta")),
+            "spot_price": float(spot_price),
+            "premium_diff_pct": float(diff),
+            "expiry_date": expiry_date,
+            "underlying": underlying.upper().strip(),
+        }
+
     async def close(self) -> None:
         """Close the underlying httpx client."""
         await self.client.aclose()

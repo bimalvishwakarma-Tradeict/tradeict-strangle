@@ -1,12 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useTrades } from '../hooks/useTrades'
 import PositionCard from '../components/PositionCard'
 import {
   checkHealth,
+  enableAutoTrade,
   getAccountStatus,
+  getAutoTradeStatus,
   getTradeHistory,
 } from '../services/api'
+
+const AUTO_STATUS_POLL_MS = 5000
 
 function formatIstTime(date = new Date()) {
   return (
@@ -71,6 +75,134 @@ function formatBalance(value) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })
+}
+
+function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
+  const [secondsLeft, setSecondsLeft] = useState(null)
+  const [entering, setEntering] = useState(false)
+
+  useEffect(() => {
+    if (!status?.is_enabled) {
+      setSecondsLeft(null)
+      return
+    }
+    const secs = status.seconds_until_entry
+    if (secs != null && Number.isFinite(Number(secs))) {
+      setSecondsLeft(Math.max(0, Number(secs)))
+    } else {
+      setSecondsLeft(null)
+    }
+  }, [status?.is_enabled, status?.seconds_until_entry, status?.next_entry_time])
+
+  const countdownActive = secondsLeft != null && secondsLeft > 0
+  useEffect(() => {
+    if (!countdownActive) return undefined
+    const id = setInterval(() => {
+      setSecondsLeft((prev) => {
+        if (prev == null || prev <= 0) return prev
+        return prev - 1
+      })
+    }, 1000)
+    return () => clearInterval(id)
+  }, [countdownActive])
+
+  if (!status?.is_enabled) return null
+
+  const tradeLabel =
+    activeTrade?.basket_number ??
+    activeTrade?.trade_id ??
+    status.last_trade_id
+  const delayMin = Number(status.re_entry_delay_minutes ?? 1)
+  const hasActive = Boolean(activeTrade)
+  const hasError = Boolean(status.last_error)
+
+  const handleEnterNow = async () => {
+    setEntering(true)
+    try {
+      await onEnterNow?.()
+    } finally {
+      setEntering(false)
+    }
+  }
+
+  if (hasActive) {
+    return (
+      <div className="mb-4 rounded-xl border border-green-700/60 bg-green-950/40 px-4 py-3 text-sm text-green-100">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="font-medium">
+            🔄 Auto Trade ON · Monitoring trade #
+            {tradeLabel != null ? tradeLabel : '—'}
+          </div>
+          <Link
+            to="/auto-trade"
+            className="text-xs font-medium text-green-300 underline hover:text-green-200"
+          >
+            Settings →
+          </Link>
+        </div>
+        <div className="mt-1 text-green-200/80">
+          Will re-enter in {delayMin} min after exit
+        </div>
+      </div>
+    )
+  }
+
+  if (hasError) {
+    return (
+      <div className="mb-4 rounded-xl border border-red-700/60 bg-red-950/40 px-4 py-3 text-sm text-red-100">
+        <div className="font-medium">
+          ⚠️ Auto Trade ON ·{' '}
+          {secondsLeft != null && secondsLeft > 0
+            ? `Retry in ${secondsLeft}s`
+            : 'Retrying…'}
+        </div>
+        <div className="mt-1 text-red-200/90">
+          Last error: &quot;{status.last_error}&quot;
+        </div>
+        <div className="mt-2">
+          <Link
+            to="/auto-trade"
+            className="text-xs font-medium text-red-300 underline hover:text-red-200"
+          >
+            Settings →
+          </Link>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mb-4 rounded-xl border border-amber-600/60 bg-amber-950/40 px-4 py-3 text-sm text-amber-100">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="font-medium">
+          🔄 Auto Trade ON ·{' '}
+          {secondsLeft != null && secondsLeft > 0
+            ? `Next entry in ${secondsLeft}s ⏱`
+            : 'Ready to enter…'}
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <Link
+            to="/auto-trade"
+            className="text-xs font-medium text-amber-300 underline hover:text-amber-200"
+          >
+            Settings →
+          </Link>
+          <button
+            type="button"
+            disabled={entering}
+            onClick={handleEnterNow}
+            className="rounded-md bg-amber-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-amber-500 disabled:opacity-50"
+          >
+            {entering ? 'Entering…' : 'Enter Now →'}
+          </button>
+        </div>
+      </div>
+      <div className="mt-1 text-amber-200/80">
+        {status.underlying || 'BTC'} {Number(status.expiry_dte ?? 1)}DTE · Qty{' '}
+        {status.quantity ?? 1}
+      </div>
+    </div>
+  )
 }
 
 function BasketHistoryCard({ basket }) {
@@ -213,17 +345,80 @@ function BasketHistoryCard({ basket }) {
 }
 
 export default function Dashboard() {
-  const { trades, wsStatus, loading, errors, adjustments } = useTrades()
+  const { trades, wsStatus, loading, errors, adjustments, autoTradeStatus } =
+    useTrades()
   const [updatedAt, setUpdatedAt] = useState(() => formatIstTime())
   const [backendOnline, setBackendOnline] = useState(true)
   const [accountName, setAccountName] = useState('')
   const [balance, setBalance] = useState(0)
   const [accountConnected, setAccountConnected] = useState(false)
   const [baskets, setBaskets] = useState([])
+  const [autoStatus, setAutoStatus] = useState(null)
 
   useEffect(() => {
     document.title = 'Delta Bot — Dashboard'
   }, [])
+
+  const refreshAutoStatus = useCallback(async () => {
+    try {
+      const data = await getAutoTradeStatus()
+      setAutoStatus(data)
+    } catch {
+      // keep last known
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshAutoStatus()
+    const id = setInterval(refreshAutoStatus, AUTO_STATUS_POLL_MS)
+    return () => clearInterval(id)
+  }, [refreshAutoStatus])
+
+  // Sync countdown from WS AUTO_TRADE_WAITING without waiting for poll
+  useEffect(() => {
+    if (!autoTradeStatus) return
+    if (autoTradeStatus.type === 'AUTO_TRADE_WAITING') {
+      setAutoStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              is_enabled: true,
+              seconds_until_entry: autoTradeStatus.seconds_remaining,
+              next_entry_time: autoTradeStatus.next_entry_time,
+              last_error: null,
+            }
+          : prev,
+      )
+    } else if (autoTradeStatus.type === 'AUTO_TRADE_PLACED') {
+      refreshAutoStatus()
+    } else if (autoTradeStatus.type === 'AUTO_TRADE_FAILED') {
+      setAutoStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              is_enabled: true,
+              last_error: autoTradeStatus.error || prev.last_error,
+              seconds_until_entry: autoTradeStatus.retry_in_seconds ?? 60,
+            }
+          : prev,
+      )
+    }
+  }, [autoTradeStatus, refreshAutoStatus])
+
+  const handleEnterNow = useCallback(async () => {
+    await enableAutoTrade()
+    await refreshAutoStatus()
+  }, [refreshAutoStatus])
+
+  const bannerActiveTrade = useMemo(() => {
+    if (!autoStatus?.is_enabled || !trades?.length) return null
+    const und = String(autoStatus.underlying || '').toUpperCase()
+    return (
+      trades.find((t) => String(t.underlying || '').toUpperCase() === und) ||
+      trades[0] ||
+      null
+    )
+  }, [autoStatus, trades])
 
   useEffect(() => {
     const id = setInterval(() => setUpdatedAt(formatIstTime()), 1000)
@@ -327,6 +522,12 @@ export default function Dashboard() {
           {errors.global}
         </div>
       )}
+
+      <AutoTradeBanner
+        status={autoStatus}
+        activeTrade={bannerActiveTrade}
+        onEnterNow={handleEnterNow}
+      />
 
       {loading ? (
         <div className="space-y-4">

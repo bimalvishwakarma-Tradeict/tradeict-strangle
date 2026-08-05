@@ -202,3 +202,48 @@ export const checkHealth = async () => {
     }
   }
 }
+
+export const getAutoTradeSettings = async () => {
+  try {
+    const res = await api.get('/api/auto-trade/settings')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch auto trade settings'))
+  }
+}
+
+export const saveAutoTradeSettings = async (data) => {
+  try {
+    const res = await api.post('/api/auto-trade/settings', data)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to save auto trade settings'))
+  }
+}
+
+export const enableAutoTrade = async () => {
+  try {
+    const res = await api.post('/api/auto-trade/enable')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to enable auto trade'))
+  }
+}
+
+export const disableAutoTrade = async () => {
+  try {
+    const res = await api.post('/api/auto-trade/disable')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to disable auto trade'))
+  }
+}
+
+export const getAutoTradeStatus = async () => {
+  try {
+    const res = await api.get('/api/auto-trade/status')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch auto trade status'))
+  }
+}

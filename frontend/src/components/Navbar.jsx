@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { getAccountStatus } from '../services/api'
+import {
+  getAccountStatus,
+  getActiveTrades,
+  getAutoTradeStatus,
+} from '../services/api'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 const WS_URL = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/trades`
 const BALANCE_POLL_MS = 60000
+const AUTO_TRADE_POLL_MS = 5000
 
 const linkClass = ({ isActive }) =>
   `block border-b-2 px-3 py-2 text-sm font-medium ${
@@ -26,6 +31,8 @@ export default function Navbar() {
   const [balance, setBalance] = useState(0)
   const [accountName, setAccountName] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
+  /** null | 'active' | 'waiting' */
+  const [autoTradeDot, setAutoTradeDot] = useState(null)
 
   const refreshAccount = useCallback(async () => {
     try {
@@ -41,6 +48,31 @@ export default function Navbar() {
     }
   }, [])
 
+  const refreshAutoTradeDot = useCallback(async () => {
+    try {
+      const [status, activeRes] = await Promise.all([
+        getAutoTradeStatus(),
+        getActiveTrades().catch(() => ({ trades: [] })),
+      ])
+      if (!status?.is_enabled) {
+        setAutoTradeDot(null)
+        return
+      }
+      const und = String(status.underlying || '').toUpperCase()
+      const trades = activeRes?.trades || []
+      const hasActive = trades.some(
+        (t) => String(t.underlying || '').toUpperCase() === und,
+      )
+      if (hasActive) {
+        setAutoTradeDot('active')
+        return
+      }
+      setAutoTradeDot('waiting')
+    } catch {
+      // Keep last indicator on failure
+    }
+  }, [])
+
   useEffect(() => {
     refreshAccount()
     const interval = setInterval(refreshAccount, BALANCE_POLL_MS)
@@ -51,6 +83,12 @@ export default function Navbar() {
       window.removeEventListener('tradeict-account-updated', onUpdate)
     }
   }, [refreshAccount])
+
+  useEffect(() => {
+    refreshAutoTradeDot()
+    const interval = setInterval(refreshAutoTradeDot, AUTO_TRADE_POLL_MS)
+    return () => clearInterval(interval)
+  }, [refreshAutoTradeDot])
 
   const wsDot =
     wsStatus === 'connected'
@@ -66,6 +104,13 @@ export default function Navbar() {
         ? 'Connecting...'
         : 'Disconnected'
 
+  const autoDotClass =
+    autoTradeDot === 'active'
+      ? 'bg-green-500'
+      : autoTradeDot === 'waiting'
+        ? 'bg-yellow-400'
+        : null
+
   const navLinks = (
     <>
       <NavLink to="/" className={linkClass} end onClick={() => setMenuOpen(false)}>
@@ -77,6 +122,21 @@ export default function Navbar() {
         onClick={() => setMenuOpen(false)}
       >
         New Trade
+      </NavLink>
+      <NavLink
+        to="/auto-trade"
+        className={linkClass}
+        onClick={() => setMenuOpen(false)}
+      >
+        <span className="inline-flex items-center gap-1.5">
+          Auto Trade
+          {autoDotClass ? (
+            <span
+              className={`inline-block h-2 w-2 rounded-full ${autoDotClass}`}
+              aria-hidden
+            />
+          ) : null}
+        </span>
       </NavLink>
       <NavLink to="/logs" className={linkClass} onClick={() => setMenuOpen(false)}>
         Logs

@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes_account import router as account_router
+from backend.api.routes_auto_trade import router as auto_trade_router
 from backend.api.routes_logs import router as logs_router
 from backend.api.routes_strategy import router as strategy_router
 from backend.api.routes_trade import router as trade_router
@@ -28,20 +29,40 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup: init DB + start bot engine background task. Shutdown: stop bot."""
+    """Startup: init DB + start bot + auto-trade engines. Shutdown: stop both."""
+    from backend.database import SessionLocal
+    from backend.engine import auto_trade_engine as ate_module
+    from backend.engine.auto_trade_engine import AutoTradeEngine
+
     init_db()
     setup_bot_logger()
     logger.info("Database initialized / tables ready")
-    bot_task = asyncio.create_task(bot_engine.start())
+
+    auto_trade_engine = AutoTradeEngine(
+        db_factory=SessionLocal,
+        delta_client=bot_engine.delta_client,
+        position_tracker=bot_engine.position_tracker,
+        order_executor=bot_engine.order_executor,
+    )
+    auto_trade_engine.set_bot_engine(bot_engine)
+    bot_engine.auto_trade_engine = auto_trade_engine
+    ate_module.auto_trade_engine = auto_trade_engine
+
+    bot_task = asyncio.create_task(bot_engine.start(), name="bot-engine")
+    auto_task = asyncio.create_task(
+        auto_trade_engine.start(), name="auto-trade-engine"
+    )
     try:
         yield
     finally:
         await bot_engine.stop()
-        bot_task.cancel()
-        try:
-            await bot_task
-        except asyncio.CancelledError:
-            pass
+        await auto_trade_engine.stop()
+        for task in (bot_task, auto_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(
@@ -65,6 +86,7 @@ app.add_middleware(
 app.include_router(account_router)
 app.include_router(strategy_router)
 app.include_router(trade_router)
+app.include_router(auto_trade_router)
 app.include_router(logs_router)
 app.include_router(ws_router)
 

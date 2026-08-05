@@ -4,16 +4,18 @@ const TYPE_STYLES = {
   success: 'border-green-600 bg-green-900/90 text-green-100',
   error: 'border-red-600 bg-red-900/90 text-red-100',
   info: 'border-blue-600 bg-blue-900/90 text-blue-100',
+  warning: 'border-amber-600 bg-amber-900/90 text-amber-100',
 }
 
-export default function Toast({ message, type = 'info', onClose }) {
+export default function Toast({ message, type = 'info', durationMs = 4000, onClose }) {
   useEffect(() => {
     if (!message) return undefined
+    const ms = Number(durationMs) > 0 ? Number(durationMs) : 4000
     const timer = setTimeout(() => {
       onClose?.()
-    }, 4000)
+    }, ms)
     return () => clearTimeout(timer)
-  }, [message, onClose])
+  }, [message, durationMs, onClose])
 
   if (!message) return null
 

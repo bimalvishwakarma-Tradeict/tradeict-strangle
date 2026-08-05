@@ -233,6 +233,21 @@ def init_db() -> None:
     _migrate_schema()
 
 
+def get_or_create_auto_settings(db: Session):
+    """Return singleton AutoTradeSettings row (id=1), creating defaults if missing."""
+    from backend.models import AutoTradeSettings
+
+    settings = (
+        db.query(AutoTradeSettings).filter(AutoTradeSettings.id == 1).first()
+    )
+    if settings is None:
+        settings = AutoTradeSettings(id=1)
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
 if __name__ == "__main__":
     # Re-import via package so models bind to the same Base (not __main__.Base)
     import backend.database as db
@@ -246,4 +261,5 @@ if __name__ == "__main__":
     assert "legs" in tables
     assert "adjustments" in tables
     assert "settings" in tables
+    assert "auto_trade_settings" in tables
     print("✅ DATABASE TEST PASSED")
