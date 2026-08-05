@@ -18,17 +18,24 @@ const linkClass = ({ isActive }) =>
       : 'border-transparent text-gray-400 hover:text-gray-200'
   }`
 
-function formatBalance(value) {
+function formatBalanceUsd(value) {
   return Number(value || 0).toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })
 }
 
+function formatBalanceInr(value) {
+  return Number(value || 0).toLocaleString('en-IN', {
+    maximumFractionDigits: 0,
+  })
+}
+
 export default function Navbar() {
   const { status: wsStatus } = useWebSocket(WS_URL)
   const [connected, setConnected] = useState(false)
-  const [balance, setBalance] = useState(0)
+  const [balanceUsd, setBalanceUsd] = useState(0)
+  const [balanceInr, setBalanceInr] = useState(0)
   const [accountName, setAccountName] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   /** null | 'active' | 'waiting' */
@@ -39,7 +46,8 @@ export default function Navbar() {
       const status = await getAccountStatus()
       setConnected(Boolean(status?.connected))
       if (status?.connected) {
-        setBalance(Number(status?.balance_usdt || 0))
+        setBalanceUsd(Number(status?.balance_usdt || 0))
+        setBalanceInr(Number(status?.balance_inr || 0))
         setAccountName(status?.account_name || '')
       }
       // On failure path below: keep last known balance (no crash)
@@ -163,8 +171,9 @@ export default function Navbar() {
           <div className="hidden items-center gap-2 text-sm text-gray-300 sm:flex">
             <span className={`inline-block h-2.5 w-2.5 rounded-full ${wsDot}`} />
             {connected ? (
-              <span title={accountName || undefined}>
-                {wsLabel} • ${formatBalance(balance)}
+              <span title={accountName || undefined} className="text-green-400">
+                {wsLabel} • ${formatBalanceUsd(balanceUsd)} · ₹
+                {formatBalanceInr(balanceInr)}
               </span>
             ) : (
               <span>{wsLabel}</span>
@@ -191,8 +200,9 @@ export default function Navbar() {
           <div className="mt-3 flex items-center gap-2 border-t border-gray-800 pt-3 text-sm text-gray-300">
             <span className={`inline-block h-2.5 w-2.5 rounded-full ${wsDot}`} />
             {connected ? (
-              <span>
-                {wsLabel} • ${formatBalance(balance)}
+              <span className="text-green-400">
+                {wsLabel} • ${formatBalanceUsd(balanceUsd)} · ₹
+                {formatBalanceInr(balanceInr)}
               </span>
             ) : (
               <span>{wsLabel}</span>

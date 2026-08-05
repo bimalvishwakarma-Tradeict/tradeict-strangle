@@ -223,6 +223,30 @@ def _migrate_schema() -> None:
                         "ALTER TABLE adjustments ADD COLUMN decision_type VARCHAR(40)"
                     )
                 )
+    if "auto_trade_settings" in tables:
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "usd_inr_rate" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN usd_inr_rate FLOAT DEFAULT 85.0"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE auto_trade_settings SET usd_inr_rate = 85.0 "
+                        "WHERE usd_inr_rate IS NULL"
+                    )
+                )
+
+
+def get_usd_inr_rate(db: Session) -> float:
+    """Return configured USD→INR rate from global auto_trade_settings row."""
+    settings = get_or_create_auto_settings(db)
+    return float(settings.usd_inr_rate or 85.0)
 
 
 def init_db() -> None:

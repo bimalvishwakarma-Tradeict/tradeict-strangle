@@ -11,12 +11,13 @@ from sqlalchemy.orm import Session
 from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt, encrypt
 from backend.core.time_utils import get_ist_now
-from backend.database import get_db
+from backend.database import get_db, get_or_create_auto_settings
 from backend.models import Account
 from backend.schemas import (
     AccountConnectRequest,
     AccountConnectResponse,
     AccountDisconnectResponse,
+    AccountSettingsUpdate,
     AccountStatusResponse,
 )
 
@@ -104,13 +105,18 @@ async def account_status(db: Session = Depends(get_db)) -> AccountStatusResponse
         .first()
     )
     if account is None:
+        app_settings = get_or_create_auto_settings(db)
         return AccountStatusResponse(
             connected=False,
             account_name="",
             balance_usdt=0.0,
+            balance_inr=0.0,
+            usd_inr_rate=float(app_settings.usd_inr_rate or 85.0),
             last_checked="",
         )
 
+    app_settings = get_or_create_auto_settings(db)
+    rate = float(app_settings.usd_inr_rate or 85.0)
     api_key = decrypt(account.api_key_encrypted)
     api_secret = decrypt(account.api_secret_encrypted)
     client = DeltaClient(api_key, api_secret)
@@ -125,14 +131,32 @@ async def account_status(db: Session = Depends(get_db)) -> AccountStatusResponse
         account.last_connected_at = datetime.now(timezone.utc)
         db.commit()
 
+        balance_usd = float(wallet.get("balance_usdt", 0.0))
         return AccountStatusResponse(
             connected=True,
             account_name=profile.get("account_name") or account.name,
-            balance_usdt=float(wallet.get("balance_usdt", 0.0)),
+            balance_usdt=balance_usd,
+            balance_inr=round(balance_usd * rate, 2),
+            usd_inr_rate=rate,
             last_checked=get_ist_now().isoformat(),
         )
     finally:
         await client.close()
+
+
+@router.patch("/settings")
+async def update_account_settings(
+    payload: AccountSettingsUpdate,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Update global account display settings (USD→INR rate)."""
+    settings = get_or_create_auto_settings(db)
+    if payload.usd_inr_rate is not None:
+        settings.usd_inr_rate = float(payload.usd_inr_rate)
+        db.commit()
+        db.refresh(settings)
+        logger.info("USD/INR rate updated to %s", settings.usd_inr_rate)
+    return {"success": True, "usd_inr_rate": float(settings.usd_inr_rate or 85.0)}
 
 
 @router.delete("/disconnect", response_model=AccountDisconnectResponse)

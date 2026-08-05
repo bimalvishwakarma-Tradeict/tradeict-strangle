@@ -4,6 +4,7 @@ import {
   connectAccount,
   disconnectAccount,
   getAccountStatus,
+  updateAccountSettings,
 } from '../services/api'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
 import Toast from '../components/ui/Toast'
@@ -34,6 +35,11 @@ function formatLastChecked(iso) {
   }
 }
 
+function formatBalanceInr(value) {
+  const n = Number(value || 0)
+  return n.toLocaleString('en-IN', { maximumFractionDigits: 0 })
+}
+
 function notifyAccountUpdated() {
   window.dispatchEvent(new Event('tradeict-account-updated'))
 }
@@ -43,6 +49,10 @@ export default function Settings() {
   const [connected, setConnected] = useState(false)
   const [accountName, setAccountName] = useState('')
   const [balance, setBalance] = useState(0)
+  const [balanceInr, setBalanceInr] = useState(0)
+  const [usdInrRate, setUsdInrRate] = useState('85')
+  const [rateInput, setRateInput] = useState('85')
+  const [updatingRate, setUpdatingRate] = useState(false)
   const [lastChecked, setLastChecked] = useState('')
 
   useEffect(() => {
@@ -69,13 +79,18 @@ export default function Settings() {
         setConnected(true)
         setAccountName(status.account_name || '')
         setBalance(status.balance_usdt || 0)
+        setBalanceInr(status.balance_inr || 0)
         setLastChecked(status.last_checked || '')
       } else {
         setConnected(false)
         setAccountName('')
         setBalance(0)
+        setBalanceInr(0)
         setLastChecked('')
       }
+      const rate = status?.usd_inr_rate ?? 85
+      setUsdInrRate(String(rate))
+      setRateInput(String(rate))
     } catch (err) {
       setConnected(false)
       setToast({ type: 'error', message: err.message || 'Failed to load status' })
@@ -128,6 +143,7 @@ export default function Settings() {
       setConnected(false)
       setAccountName('')
       setBalance(0)
+      setBalanceInr(0)
       setLastChecked('')
       setDisconnectOpen(false)
       setToast({ type: 'info', message: 'Disconnected' })
@@ -136,6 +152,31 @@ export default function Settings() {
       setToast({ type: 'error', message: err.message || 'Disconnect failed' })
     } finally {
       setDisconnecting(false)
+    }
+  }
+
+  const handleUpdateRate = async () => {
+    const newRate = Number(rateInput)
+    if (!Number.isFinite(newRate) || newRate <= 0 || newRate > 500) {
+      setToast({ type: 'error', message: 'Rate must be between 0 and 500' })
+      return
+    }
+    setUpdatingRate(true)
+    try {
+      const result = await updateAccountSettings({ usd_inr_rate: newRate })
+      const saved = result?.usd_inr_rate ?? newRate
+      setUsdInrRate(String(saved))
+      setRateInput(String(saved))
+      setToast({ type: 'success', message: `✅ Rate updated to ₹${saved}` })
+      notifyAccountUpdated()
+      await loadStatus()
+    } catch (err) {
+      setToast({
+        type: 'error',
+        message: err.message || 'Failed to update rate',
+      })
+    } finally {
+      setUpdatingRate(false)
     }
   }
 
@@ -158,7 +199,9 @@ export default function Settings() {
             </div>
             <div className="flex justify-between gap-4">
               <dt className="text-gray-400">Balance</dt>
-              <dd className="font-medium">${formatBalance(balance)} USDT</dd>
+              <dd className="font-medium text-right">
+                ${formatBalance(balance)} · ₹{formatBalanceInr(balanceInr)}
+              </dd>
             </div>
             <div className="flex justify-between gap-4">
               <dt className="text-gray-400">Last checked</dt>
@@ -255,6 +298,40 @@ export default function Settings() {
           </button>
         </form>
       )}
+
+      <section className="mt-10 rounded-xl border border-gray-700 bg-gray-800/60 p-5">
+        <h2 className="text-sm font-semibold text-white">💱 Currency Settings</h2>
+        <p className="mt-1 text-xs text-gray-500">
+          Used for balance display in Navbar (USD × rate → INR).
+        </p>
+        <label className="mt-4 block text-sm text-gray-300">
+          USD to INR Rate
+          <div className="mt-1 flex max-w-xs items-center gap-2">
+            <input
+              type="number"
+              min={1}
+              max={500}
+              step={0.01}
+              value={rateInput}
+              onChange={(e) => setRateInput(e.target.value)}
+              className="w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+            />
+            <span className="shrink-0 text-gray-400">₹</span>
+          </div>
+          <span className="mt-1 block text-xs text-gray-500">
+            Current: ₹{usdInrRate} per $1
+          </span>
+        </label>
+        <button
+          type="button"
+          disabled={updatingRate}
+          onClick={handleUpdateRate}
+          className="mt-4 inline-flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+        >
+          {updatingRate ? <LoadingSpinner size="sm" color="white" /> : null}
+          Update Rate
+        </button>
+      </section>
 
       {/* Emergency recovery */}
       <section className="mt-10 rounded-xl border border-dashed border-gray-700 bg-gray-800/40 p-4">

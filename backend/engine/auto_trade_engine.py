@@ -185,8 +185,9 @@ class AutoTradeEngine:
                 str(settings.underlying), expiry_str
             )
             logger.info(
-                "Straddle: strike=%s call=%.2f put=%.2f diff=%.1f%%",
-                straddle["strike"],
+                "Straddle: call_strike=%s put_strike=%s call=%.2f put=%.2f diff=%.1f%%",
+                straddle.get("call_strike", straddle.get("strike")),
+                straddle.get("put_strike", straddle.get("strike")),
                 straddle["call_premium"],
                 straddle["put_premium"],
                 straddle.get("premium_diff_pct") or 0,
@@ -316,7 +317,7 @@ class AutoTradeEngine:
             call_leg = Leg(
                 trade_id=trade.id,
                 leg_type="call",
-                strike=float(straddle["strike"]),
+                strike=float(straddle.get("call_strike", straddle["strike"])),
                 symbol=str(straddle["call_symbol"]),
                 product_id=int(straddle["call_product_id"]),
                 initial_premium=call_fill,
@@ -333,7 +334,7 @@ class AutoTradeEngine:
             put_leg = Leg(
                 trade_id=trade.id,
                 leg_type="put",
-                strike=float(straddle["strike"]),
+                strike=float(straddle.get("put_strike", straddle["strike"])),
                 symbol=str(straddle["put_symbol"]),
                 product_id=int(straddle["put_product_id"]),
                 initial_premium=put_fill,
@@ -423,10 +424,11 @@ class AutoTradeEngine:
             db.commit()
 
             logger.info(
-                "AUTO TRADE PLACED: id=%s strike=%s call_fill=%s put_fill=%s "
-                "target=%s sl=%s",
+                "AUTO TRADE PLACED: id=%s call_strike=%s put_strike=%s "
+                "call_fill=%s put_fill=%s target=%s sl=%s",
                 trade.id,
-                straddle["strike"],
+                straddle.get("call_strike", straddle["strike"]),
+                straddle.get("put_strike", straddle["strike"]),
                 call_fill,
                 put_fill,
                 profit_target_usd,
@@ -438,13 +440,17 @@ class AutoTradeEngine:
                     "type": "AUTO_TRADE_PLACED",
                     "trade_id": trade.id,
                     "underlying": settings.underlying,
-                    "strike": straddle["strike"],
+                    "strike": straddle.get("call_strike", straddle["strike"]),
+                    "call_strike": straddle.get("call_strike", straddle["strike"]),
+                    "put_strike": straddle.get("put_strike", straddle["strike"]),
                     "call_premium": call_fill,
                     "put_premium": put_fill,
                     "expiry_date": expiry_str,
                     "message": (
-                        f"Auto trade placed: {settings.underlying} straddle "
-                        f"@ {straddle['strike']} ({settings.expiry_dte}DTE)"
+                        f"Auto trade placed: {settings.underlying} "
+                        f"call {straddle.get('call_strike', straddle['strike'])} / "
+                        f"put {straddle.get('put_strike', straddle['strike'])} "
+                        f"({settings.expiry_dte}DTE)"
                     ),
                 }
             )

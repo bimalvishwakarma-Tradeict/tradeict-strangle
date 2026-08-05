@@ -24,7 +24,13 @@ class AccountStatusResponse(BaseModel):
     connected: bool
     account_name: str = ""
     balance_usdt: float = 0.0
+    balance_inr: float = 0.0
+    usd_inr_rate: float = 85.0
     last_checked: str = ""
+
+
+class AccountSettingsUpdate(BaseModel):
+    usd_inr_rate: float | None = Field(default=None, gt=0, le=500)
 
 
 class AccountDisconnectResponse(BaseModel):

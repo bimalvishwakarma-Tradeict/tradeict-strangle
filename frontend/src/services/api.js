@@ -34,6 +34,15 @@ export const getAccountStatus = async () => {
   }
 }
 
+export const updateAccountSettings = async (data) => {
+  try {
+    const res = await api.patch('/api/account/settings', data)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to update account settings'))
+  }
+}
+
 export const disconnectAccount = async () => {
   try {
     const res = await api.delete('/api/account/disconnect')

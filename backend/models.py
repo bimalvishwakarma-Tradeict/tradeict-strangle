@@ -211,6 +211,8 @@ class AutoTradeSettings(Base):
     )
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Global app config — USD→INR for balance display in Navbar
+    usd_inr_rate: Mapped[float] = mapped_column(Float, nullable=False, default=85.0)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utc_now
     )

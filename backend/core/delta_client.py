@@ -1302,15 +1302,11 @@ class DeltaClient:
         expiry_date: str,
     ) -> dict[str, Any]:
         """
-        Find best ATM strike for a short straddle on the given expiry.
+        Find best premium-matched short straddle/strangle near ATM.
 
-        1. Spot price for underlying
-        2. Option chain for underlying + expiry
-        3. ATM = strike nearest to spot
-        4–5. If call/put premium mismatch is large, try ±1 adjacent strikes
-        6. Return best premium-matched row with placement fields
+        Considers call × put combinations from ATM and ±1 adjacent strikes
+        (same-strike straddle plus cross-strike pairs). Picks lowest premium diff %.
         """
-        # Map UI underlying → perpetual ticker for spot (avoid strategy import)
         price_map = {"BTC": "BTCUSD", "ETH": "ETHUSD", "XAU": "XAUUSD"}
         key = underlying.upper().strip()
         price_symbol = price_map.get(
@@ -1339,76 +1335,105 @@ class DeltaClient:
             len(chain),
         )
 
-        def premium_diff_pct(row: dict[str, Any]) -> float:
-            call_p = _safe_float(row.get("call_mark_price"))
-            put_p = _safe_float(row.get("put_mark_price"))
+        def premium_diff_pct(call_p: float, put_p: float) -> float:
             if call_p <= 0 or put_p <= 0:
                 return 999.0
             return abs(call_p - put_p) / max(call_p, put_p) * 100.0
 
+        def row_valid(row: dict[str, Any]) -> bool:
+            return (
+                _safe_float(row.get("call_mark_price")) > 0
+                and _safe_float(row.get("put_mark_price")) > 0
+            )
+
         def distance_from_spot(row: dict[str, Any]) -> float:
             return abs(_safe_float(row.get("strike")) - float(spot_price))
 
-        # Chain is sorted by strike from get_option_chain
         atm_row = min(chain, key=distance_from_spot)
-        atm_idx = chain.index(atm_row)
+        atm_idx = next(
+            i for i, row in enumerate(chain) if row.get("strike") == atm_row.get("strike")
+        )
 
-        candidates: list[dict[str, Any]] = [atm_row]
+        candidate_rows: dict[str, dict[str, Any]] = {"atm": atm_row}
         if atm_idx > 0:
-            candidates.append(chain[atm_idx - 1])
+            candidate_rows["atm_minus1"] = chain[atm_idx - 1]
         if atm_idx < len(chain) - 1:
-            candidates.append(chain[atm_idx + 1])
+            candidate_rows["atm_plus1"] = chain[atm_idx + 1]
 
-        valid_candidates = [
-            c
-            for c in candidates
-            if _safe_float(c.get("call_mark_price")) > 0
-            and _safe_float(c.get("put_mark_price")) > 0
-        ]
-        if not valid_candidates:
+        valid_rows = {k: v for k, v in candidate_rows.items() if row_valid(v)}
+        if not valid_rows:
             raise DeltaAPIError(
                 404,
                 f"No valid ATM strikes with positive premiums found "
                 f"for {underlying} {expiry_date}",
             )
 
-        # Prefer closest-to-spot among candidates with diff <= 15%;
-        # otherwise pick lowest premium mismatch among ATM ±1.
-        tight = [c for c in valid_candidates if premium_diff_pct(c) <= 15.0]
-        if tight:
-            best_row = min(tight, key=lambda r: (distance_from_spot(r), premium_diff_pct(r)))
-        else:
-            best_row = min(valid_candidates, key=premium_diff_pct)
-        diff = premium_diff_pct(best_row)
+        best: dict[str, Any] | None = None
+        best_diff = 999.0
+
+        for call_row in valid_rows.values():
+            for put_row in valid_rows.values():
+                call_p = _safe_float(call_row.get("call_mark_price"))
+                put_p = _safe_float(put_row.get("put_mark_price"))
+                diff = premium_diff_pct(call_p, put_p)
+                logger.debug(
+                    "Combination: call %s@%.0f + put %s@%.0f → diff=%.1f%%",
+                    call_row.get("strike"),
+                    call_p,
+                    put_row.get("strike"),
+                    put_p,
+                    diff,
+                )
+                if diff < best_diff:
+                    best_diff = diff
+                    best = {
+                        "call_row": call_row,
+                        "put_row": put_row,
+                        "diff_pct": diff,
+                    }
+
+        if best is None:
+            raise DeltaAPIError(
+                404,
+                f"No valid strike combination found for {underlying} {expiry_date}",
+            )
+
+        call_row = best["call_row"]
+        put_row = best["put_row"]
+        call_strike = _safe_float(call_row.get("strike"))
+        put_strike = _safe_float(put_row.get("strike"))
 
         logger.info(
-            "ATM straddle selected: strike=%s call=%.2f put=%.2f "
-            "diff=%.1f%% spot=%.2f",
-            best_row.get("strike"),
-            _safe_float(best_row.get("call_mark_price")),
-            _safe_float(best_row.get("put_mark_price")),
-            diff,
+            "Best straddle: CALL %s@%.2f + PUT %s@%.2f diff=%.1f%% spot=%.2f",
+            call_strike,
+            _safe_float(call_row.get("call_mark_price")),
+            put_strike,
+            _safe_float(put_row.get("put_mark_price")),
+            best_diff,
             spot_price,
         )
 
         return {
-            "strike": _safe_float(best_row.get("strike")),
-            "call_symbol": str(best_row.get("call_symbol") or ""),
-            "call_product_id": int(best_row.get("call_product_id") or 0),
-            "call_premium": _safe_float(best_row.get("call_mark_price")),
-            "call_bid": _safe_float(best_row.get("call_bid")),
-            "call_ask": _safe_float(best_row.get("call_ask")),
-            "call_delta": _safe_float(best_row.get("call_delta")),
-            "put_symbol": str(best_row.get("put_symbol") or ""),
-            "put_product_id": int(best_row.get("put_product_id") or 0),
-            "put_premium": _safe_float(best_row.get("put_mark_price")),
-            "put_bid": _safe_float(best_row.get("put_bid")),
-            "put_ask": _safe_float(best_row.get("put_ask")),
-            "put_delta": _safe_float(best_row.get("put_delta")),
+            "call_strike": call_strike,
+            "call_symbol": str(call_row.get("call_symbol") or ""),
+            "call_product_id": int(call_row.get("call_product_id") or 0),
+            "call_premium": _safe_float(call_row.get("call_mark_price")),
+            "call_bid": _safe_float(call_row.get("call_bid")),
+            "call_ask": _safe_float(call_row.get("call_ask")),
+            "call_delta": _safe_float(call_row.get("call_delta")),
+            "put_strike": put_strike,
+            "put_symbol": str(put_row.get("put_symbol") or ""),
+            "put_product_id": int(put_row.get("put_product_id") or 0),
+            "put_premium": _safe_float(put_row.get("put_mark_price")),
+            "put_bid": _safe_float(put_row.get("put_bid")),
+            "put_ask": _safe_float(put_row.get("put_ask")),
+            "put_delta": _safe_float(put_row.get("put_delta")),
             "spot_price": float(spot_price),
-            "premium_diff_pct": float(diff),
+            "premium_diff_pct": float(best_diff),
             "expiry_date": expiry_date,
             "underlying": underlying.upper().strip(),
+            # Backward compatibility — primary display strike
+            "strike": call_strike,
         }
 
     async def close(self) -> None:
