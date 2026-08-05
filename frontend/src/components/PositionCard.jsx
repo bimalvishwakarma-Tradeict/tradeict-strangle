@@ -352,15 +352,26 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const feesPaid = n(trade.fees_paid)
   const estExitFees = n(trade.est_exit_fees)
   const slippagePct = n(trade.slippage_pct ?? 2)
-  const slippageAmount = n(
-    trade.slippage_amount ?? Math.abs(n(trade.gross_mtm)) * (slippagePct / 100),
-  )
-  const totalFees = n(trade.total_expected_fees ?? feesPaid + estExitFees)
-  const totalDeductions = n(
-    trade.total_deductions ?? totalFees + slippageAmount,
-  )
   const grossMtm = n(trade.gross_mtm)
-  const netMtm = n(trade.net_mtm)
+  // Prefer server amount; fallback = |gross| × pct / 100
+  const slippageAmount = n(
+    trade.slippage_amount != null && trade.slippage_amount !== ''
+      ? trade.slippage_amount
+      : Math.abs(grossMtm) * (slippagePct / 100),
+  )
+  // Always fees + exit + slippage (never fees-only "Total Fees")
+  const totalDeductions = n(
+    trade.total_deductions != null && trade.total_deductions !== ''
+      ? trade.total_deductions
+      : feesPaid + estExitFees + slippageAmount,
+  )
+  const computedNet =
+    grossMtm - feesPaid - estExitFees - slippageAmount
+  const netMtm = n(
+    trade.net_mtm != null && trade.net_mtm !== ''
+      ? trade.net_mtm
+      : computedNet,
+  )
   const totalMtm = grossMtm
   const lastMtmUpdate = trade.last_mtm_update || null
   const target = n(trade.profit_target_usd)
@@ -738,7 +749,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             <span>PUT UPL</span>
             <span className={pnlColor(putUpnl)}>{fmtSignedMoney(putUpnl)}</span>
           </div>
-          <div className="flex justify-between border-t border-gray-700 pt-1">
+          <div className="flex justify-between">
             <span>Combined UPNL</span>
             <span className={pnlColor(unrealized)}>
               {fmtSignedMoney(unrealized)}
@@ -748,7 +759,8 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             <span>Realized P&L</span>
             <span className={pnlColor(realized)}>{fmtSignedMoney(realized)}</span>
           </div>
-          <div className="flex justify-between border-t border-gray-700 pt-1 font-medium text-white">
+          <div className="my-1 border-t border-gray-600" />
+          <div className="flex justify-between font-medium text-white">
             <span>Gross MTM</span>
             <span className={pnlColor(grossMtm)}>{fmtSignedMoney(grossMtm)}</span>
           </div>
@@ -760,15 +772,16 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             <span>Est. Exit Fees</span>
             <span>-${fmtMoney(estExitFees)}</span>
           </div>
-          <div className="flex justify-between text-amber-200/90">
+          <div className="flex justify-between text-yellow-400">
             <span>Slippage ({fmtMoney(slippagePct)}%)</span>
             <span>-${fmtMoney(slippageAmount)}</span>
           </div>
+          <div className="my-1 border-t border-gray-600" />
           <div className="flex justify-between text-amber-100">
             <span>Total Deductions</span>
             <span>-${fmtMoney(totalDeductions)}</span>
           </div>
-          <div className="flex justify-between border-t border-gray-600 pt-1 text-base font-semibold text-white">
+          <div className="flex justify-between pt-0.5 text-base font-semibold text-white">
             <span>NET MTM</span>
             <span className={pnlColor(netMtm)}>{fmtSignedMoney(netMtm)}</span>
           </div>
