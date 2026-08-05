@@ -81,6 +81,9 @@ class BotEngine:
         self._last_price_tick_at: dict[int, float] = {}
         self._btc_spot: float = 0.0
         self._btc_spot_at: float = 0.0
+        # Debounce emergency / manual-close integrity handlers
+        self._integrity_in_progress: set[int] = set()
+        self._premium_collapse_pending: set[int] = set()
 
     async def start(self) -> None:
         self.is_running = True
@@ -150,12 +153,18 @@ class BotEngine:
                 async def on_ticker(symbol: str, data: dict[str, Any]) -> None:
                     # ONLY best ask for shorts — never mark (mark poisons UI vs Delta UPL @offer)
                     ask = float(data.get("ask") or 0)
-                    if ask <= 0:
+                    if ask < 0:
+                        return
+                    # Zero/near-zero ask can mean position closed by Delta SL
+                    if ask == 0:
+                        await self._maybe_flag_premium_collapse(symbol, ask)
                         return
                     prev = self._live_prices.get(symbol)
                     self._live_prices[symbol] = ask
                     if prev is not None and abs(prev - ask) < 1e-9:
                         return
+                    # Premium collapse → likely Delta SL / external close
+                    await self._maybe_flag_premium_collapse(symbol, ask)
                     # Refresh BTC spot opportunistically for payoff graph
                     try:
                         await self._refresh_btc_spot()
@@ -197,6 +206,65 @@ class BotEngine:
             except Exception as exc:
                 logger.warning("WS price feed error: %s, restarting in 5s", exc)
                 await asyncio.sleep(5)
+
+    async def _maybe_flag_premium_collapse(
+        self, symbol: str, ask: float
+    ) -> None:
+        """
+        If ask < 5% of entry for an open leg, run immediate position integrity
+        (Delta SL / external close likely).
+        """
+        for state in self.position_tracker.get_all_active():
+            call_sym = str(state.call_leg.symbol)
+            put_sym = str(state.put_leg.symbol)
+            if symbol not in {call_sym, put_sym}:
+                continue
+            is_call = symbol == call_sym
+            leg = state.call_leg if is_call else state.put_leg
+            if str(getattr(leg, "status", "open")).lower() != "open":
+                continue
+            entry = float(getattr(leg, "initial_premium", 0) or 0)
+            if entry <= 0:
+                continue
+            if ask >= entry * 0.05:
+                continue
+            tid = state.trade_id
+            if tid in self._integrity_in_progress:
+                continue
+            if tid in self._premium_collapse_pending:
+                continue
+            logger.warning(
+                "Premium collapse trade=%s %s ask=%.4f entry=%.4f "
+                "— immediate position check",
+                tid,
+                "call" if is_call else "put",
+                ask,
+                entry,
+            )
+            self._premium_collapse_pending.add(tid)
+            asyncio.create_task(
+                self._run_immediate_integrity(tid),
+                name=f"integrity-{tid}",
+            )
+
+    async def _run_immediate_integrity(self, trade_id: int) -> None:
+        """WS-triggered position integrity (debounced via _integrity_in_progress)."""
+        await asyncio.sleep(0.2)
+        self._premium_collapse_pending.discard(trade_id)
+        state = self.position_tracker.get(trade_id)
+        if state is None or state.is_adjusting:
+            return
+        try:
+            await self._enforce_position_integrity(
+                state, source="premium_collapse_ws"
+            )
+        except Exception as exc:
+            logger.error(
+                "Immediate integrity check failed trade=%s: %s",
+                trade_id,
+                exc,
+                exc_info=True,
+            )
 
     async def _broadcast_price_tick(self, symbol: str, price: float) -> None:
         """Push lightweight PRICE_TICK to frontend (throttled per trade)."""
@@ -287,20 +355,37 @@ class BotEngine:
                 from backend.engine.trade_reconcile import reconcile_open_legs_with_delta
 
                 with SessionLocal() as db:
-                    closed_ids = await reconcile_open_legs_with_delta(
+                    recon = await reconcile_open_legs_with_delta(
                         db=db,
                         client=self.delta_client,
                         position_tracker=self.position_tracker,
                     )
+                closed_ids = list(recon.get("fully_closed") or [])
                 for tid in closed_ids:
                     await ws_manager.broadcast(
                         {
                             "type": "TRADE_CLOSED",
                             "trade_id": tid,
-                            "reason": ExitReason.MANUAL_LEG_CLOSE.value,
+                            "reason": ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value,
                             "message": "Basket closed — Delta size flat",
                         }
                     )
+                for alert in recon.get("naked_risk") or []:
+                    tid = int(alert["trade_id"])
+                    remaining = str(alert["remaining"])
+                    state = self.position_tracker.get(tid)
+                    if state is None:
+                        continue
+                    log_and_buffer(
+                        "NAKED_POSITION",
+                        tid,
+                        {
+                            "missing": alert.get("missing"),
+                            "remaining": remaining,
+                            "source": "reconcile",
+                        },
+                    )
+                    await self._emergency_close_remaining_leg(state, remaining)
             except Exception as exc:
                 logger.warning("Monitor reconcile failed: %s", exc)
 
@@ -323,9 +408,17 @@ class BotEngine:
         except Exception:
             pass
 
-        for trade_state in self.position_tracker.get_all_active():
+        for trade_state in list(self.position_tracker.get_all_active()):
             if trade_state.is_adjusting:
                 continue
+            # Fast path from WS premium-collapse flag
+            if trade_state.trade_id in self._premium_collapse_pending:
+                self._premium_collapse_pending.discard(trade_state.trade_id)
+                ok = await self._enforce_position_integrity(
+                    trade_state, source="premium_collapse"
+                )
+                if not ok:
+                    continue
             try:
                 await self._process_trade(trade_state)
             except Exception as exc:
@@ -335,6 +428,362 @@ class BotEngine:
                     exc,
                     exc_info=True,
                 )
+
+    def _active_product_ids_from_positions(
+        self, positions: list[dict[str, Any]]
+    ) -> set[int]:
+        active: set[int] = set()
+        for pos in positions or []:
+            try:
+                pid = int(pos.get("product_id"))
+            except (TypeError, ValueError):
+                continue
+            try:
+                size = float(pos.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0.0
+            if pid > 0 and size != 0:
+                active.add(pid)
+        return active
+
+    def _check_partial_position(
+        self, trade_state: TradeState, positions: list[dict[str, Any]]
+    ) -> str:
+        """Return 'both_open' | 'call_only' | 'put_only' | 'none'."""
+        active_pids = self._active_product_ids_from_positions(positions)
+        call_pid = int(getattr(trade_state.call_leg, "product_id", 0) or 0)
+        put_pid = int(getattr(trade_state.put_leg, "product_id", 0) or 0)
+        call_open_delta = call_pid in active_pids
+        put_open_delta = put_pid in active_pids
+        if call_open_delta and put_open_delta:
+            return "both_open"
+        if call_open_delta and not put_open_delta:
+            return "call_only"
+        if put_open_delta and not call_open_delta:
+            return "put_only"
+        return "none"
+
+    async def _fetch_positions_safe(self) -> list[dict[str, Any]] | None:
+        assert self.delta_client is not None
+        try:
+            return await self.delta_client.get_positions()
+        except Exception as exc:
+            logger.error("Could not verify positions: %s", exc)
+            return None
+
+    async def _enforce_position_integrity(
+        self,
+        trade_state: TradeState,
+        *,
+        source: str = "monitor",
+    ) -> bool:
+        """
+        Verify both open legs still exist on Delta.
+
+        Returns False if trade was closed / emergency-handled (caller must stop).
+        Only runs when bot still thinks BOTH legs are open.
+        """
+        call_open = (
+            str(getattr(trade_state.call_leg, "status", "open")).lower() == "open"
+        )
+        put_open = (
+            str(getattr(trade_state.put_leg, "status", "open")).lower() == "open"
+        )
+        if not (call_open and put_open):
+            return True
+
+        if trade_state.trade_id in self._integrity_in_progress:
+            return True
+        if self.delta_client is None:
+            return True
+
+        positions = await self._fetch_positions_safe()
+        if positions is None:
+            return True
+
+        status = self._check_partial_position(trade_state, positions)
+        log_and_buffer(
+            "POSITION_CHECK",
+            trade_state.trade_id,
+            {"status": status, "source": source},
+        )
+        if status == "both_open":
+            return True
+
+        self._integrity_in_progress.add(trade_state.trade_id)
+        try:
+            if status == "none":
+                await self._handle_manual_close(trade_state)
+                return False
+            if status == "call_only":
+                log_and_buffer(
+                    "NAKED_POSITION",
+                    trade_state.trade_id,
+                    {"missing": "put", "remaining": "call", "source": source},
+                )
+                logger.critical(
+                    "Trade %s: PUT position MISSING! Closing CALL.",
+                    trade_state.trade_id,
+                )
+                await self._emergency_close_remaining_leg(trade_state, "call")
+                return False
+            if status == "put_only":
+                log_and_buffer(
+                    "NAKED_POSITION",
+                    trade_state.trade_id,
+                    {"missing": "call", "remaining": "put", "source": source},
+                )
+                logger.critical(
+                    "Trade %s: CALL position MISSING! Closing PUT.",
+                    trade_state.trade_id,
+                )
+                await self._emergency_close_remaining_leg(trade_state, "put")
+                return False
+            return True
+        finally:
+            self._integrity_in_progress.discard(trade_state.trade_id)
+
+    async def _handle_manual_close(self, trade_state: TradeState) -> None:
+        """Both legs gone on Delta — cancel orphan SLs and mark trade closed."""
+        trade_id = trade_state.trade_id
+        logger.warning(
+            "Trade %s manually closed on Delta — cancelling SL orders "
+            "and marking trade closed",
+            trade_id,
+        )
+        log_and_buffer(
+            "MANUAL_EXCHANGE_CLOSE",
+            trade_id,
+            {"action": "cancel_sl_and_close"},
+        )
+
+        from backend.core.delta_sl import cancel_leg_sl_order
+        from backend.engine.trade_reconcile import book_leg_close
+
+        assert self.delta_client is not None
+        now_utc = datetime.now(timezone.utc)
+
+        with self.db_factory() as db:
+            call_leg = (
+                db.query(Leg).filter(Leg.id == trade_state.call_leg.id).first()
+            ) or trade_state.call_leg
+            put_leg = (
+                db.query(Leg).filter(Leg.id == trade_state.put_leg.id).first()
+            ) or trade_state.put_leg
+            trade = db.query(Trade).filter(Trade.id == trade_id).first()
+
+            for leg in (call_leg, put_leg):
+                await cancel_leg_sl_order(
+                    self.delta_client, leg, clear_fields=True
+                )
+                if (
+                    trade is not None
+                    and str(getattr(leg, "status", "")).lower() == "open"
+                ):
+                    exit_px = float(
+                        getattr(leg, "exit_premium", None)
+                        or getattr(leg, "initial_premium", 0)
+                        or 0
+                    )
+                    book_leg_close(
+                        leg=leg,
+                        trade=trade,
+                        exit_premium=exit_px,
+                        exit_time=now_utc,
+                    )
+
+            if trade is not None:
+                trade.status = TradeStatus.CLOSED.value
+                trade.exit_reason = ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value
+                trade.exit_time = get_ist_now()
+                if trade.realized_pnl is None:
+                    trade.realized_pnl = float(
+                        getattr(trade_state, "last_delta_mtm", 0) or 0
+                    )
+            try:
+                db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "Could not persist manual exchange close trade=%s: %s",
+                    trade_id,
+                    exc,
+                )
+                db.rollback()
+
+        self.position_tracker.mark_closed(trade_id)
+        await ws_manager.broadcast(
+            {
+                "type": "TRADE_CLOSED",
+                "trade_id": trade_id,
+                "reason": ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value,
+                "message": (
+                    "Trade was manually closed on Delta Exchange. "
+                    "SL orders cancelled."
+                ),
+            }
+        )
+
+    async def _emergency_close_remaining_leg(
+        self, trade_state: TradeState, leg_to_close: str
+    ) -> None:
+        """Close remaining open leg after the other vanished on Delta."""
+        trade_id = trade_state.trade_id
+        remaining = str(leg_to_close).lower().strip()
+        missing = "put" if remaining == "call" else "call"
+        logger.critical(
+            "EMERGENCY: Closing %s leg due to naked position risk (trade %s)",
+            remaining,
+            trade_id,
+        )
+        log_and_buffer(
+            "EMERGENCY_CLOSE",
+            trade_id,
+            {"closing": remaining, "missing": missing},
+        )
+
+        if self.delta_client is None:
+            self._refresh_delta_client()
+        assert self.delta_client is not None
+
+        from backend.core.delta_sl import cancel_leg_sl_order
+        from backend.engine.trade_reconcile import book_leg_close
+
+        now_utc = datetime.now(timezone.utc)
+        close_ok = False
+        filled = 0.0
+
+        with self.db_factory() as db:
+            legs = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_id,
+                    Leg.is_bot_managed.is_(True),
+                )
+                .all()
+            )
+            remaining_leg = next(
+                (
+                    leg
+                    for leg in legs
+                    if str(leg.leg_type).lower() == remaining
+                    and str(leg.status).lower() == "open"
+                ),
+                None,
+            )
+            missing_leg = next(
+                (
+                    leg
+                    for leg in legs
+                    if str(leg.leg_type).lower() == missing
+                    and str(leg.status).lower() == "open"
+                ),
+                None,
+            )
+            trade = db.query(Trade).filter(Trade.id == trade_id).first()
+
+            if missing_leg is not None and trade is not None:
+                await cancel_leg_sl_order(
+                    self.delta_client, missing_leg, clear_fields=True
+                )
+                exit_px = float(missing_leg.initial_premium or 0)
+                try:
+                    mark = float(
+                        await self.delta_client.get_mark_price(
+                            str(missing_leg.symbol)
+                        )
+                    )
+                    if mark > 0:
+                        exit_px = mark
+                except Exception:
+                    pass
+                book_leg_close(
+                    leg=missing_leg,
+                    trade=trade,
+                    exit_premium=exit_px,
+                    exit_time=now_utc,
+                )
+
+            if remaining_leg is not None:
+                await cancel_leg_sl_order(
+                    self.delta_client, remaining_leg, clear_fields=True
+                )
+                result = await self.order_executor.close_leg(
+                    remaining_leg, self.delta_client
+                )
+                if result.success:
+                    close_ok = True
+                    filled = float(result.filled_price or 0)
+                    logger.info(
+                        "Emergency close SUCCESS: %s @ %s", remaining, filled
+                    )
+                    if trade is not None:
+                        book_leg_close(
+                            leg=remaining_leg,
+                            trade=trade,
+                            exit_premium=filled,
+                            exit_time=now_utc,
+                            exit_fee_usd=(
+                                float(result.commission)
+                                if result.commission is not None
+                                else None
+                            ),
+                            exit_order_id=(
+                                str(result.order_id)
+                                if result.order_id is not None
+                                else None
+                            ),
+                        )
+                else:
+                    logger.critical("Emergency close FAILED: %s", result.error)
+                    log_and_buffer(
+                        "EXIT_FAIL",
+                        trade_id,
+                        {
+                            "reason": "EMERGENCY_CLOSE",
+                            "error": result.error,
+                        },
+                    )
+
+            if trade is not None:
+                trade.status = TradeStatus.CLOSED.value
+                trade.exit_reason = (
+                    ExitReason.SL_TRIGGERED_EMERGENCY_CLOSE.value
+                )
+                trade.exit_time = get_ist_now()
+            try:
+                db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "Could not persist emergency close trade=%s: %s",
+                    trade_id,
+                    exc,
+                )
+                db.rollback()
+
+        self.position_tracker.mark_closed(trade_id)
+        await ws_manager.broadcast(
+            {
+                "type": "ERROR",
+                "trade_id": trade_id,
+                "message": (
+                    f"⚠️ Delta SL triggered on one leg! "
+                    f"Emergency closed {remaining} to prevent naked position. "
+                    f"Trade is now fully closed."
+                    + ("" if close_ok else " (close may need manual check)")
+                ),
+                "requires_manual_action": not close_ok,
+            }
+        )
+        await ws_manager.broadcast(
+            {
+                "type": "TRADE_CLOSED",
+                "trade_id": trade_id,
+                "reason": ExitReason.SL_TRIGGERED_EMERGENCY_CLOSE.value,
+                "final_pnl": float(
+                    getattr(trade_state, "last_delta_mtm", 0) or 0
+                ),
+            }
+        )
 
     async def _process_trade(self, trade_state: TradeState) -> None:
         assert self.delta_client is not None
@@ -361,6 +810,12 @@ class BotEngine:
                 or put_leg.initial_premium
                 or 0.0
             )
+
+        # Position integrity: cancel orphan SLs / prevent naked after Delta SL
+        if not await self._enforce_position_integrity(
+            trade_state, source="monitor_tick"
+        ):
+            return
 
         settling = get_settling_info(getattr(trade, "monitoring_starts_at", None))
         is_settling = bool(settling.get("is_settling"))

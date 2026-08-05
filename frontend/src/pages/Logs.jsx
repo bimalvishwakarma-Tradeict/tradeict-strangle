@@ -11,6 +11,7 @@ const EVENT_STYLE = {
   TRIGGER_CHECK: 'text-blue-400',
   PRICE_UPDATE: 'text-gray-400',
   SETTLING: 'text-gray-500 italic',
+  POSITION_CHECK: 'text-cyan-400',
   DECISION_TRIGGER: 'text-violet-400',
   ADJUSTMENT_START: 'text-amber-400',
   ADJUSTMENT_DONE: 'text-green-400',
@@ -19,6 +20,9 @@ const EVENT_STYLE = {
   EXIT_TRIGGERED: 'text-orange-400',
   EXIT_DONE: 'text-green-400',
   EXIT_FAIL: 'text-red-400',
+  MANUAL_EXCHANGE_CLOSE: 'text-orange-300',
+  NAKED_POSITION: 'text-red-500 font-semibold',
+  EMERGENCY_CLOSE: 'text-red-500 font-semibold',
   ERROR: 'text-red-500',
 }
 
@@ -31,6 +35,10 @@ const EVENT_ICON = {
   EXIT_TRIGGERED: '🚨',
   EXIT_DONE: '✅',
   EXIT_FAIL: '❌',
+  NAKED_POSITION: '🚨',
+  EMERGENCY_CLOSE: '🚨',
+  MANUAL_EXCHANGE_CLOSE: '⚠️',
+  POSITION_CHECK: '🔍',
   ERROR: '❌',
 }
 
@@ -82,6 +90,19 @@ function detailPreview(details, eventType) {
     return (
       `call ${callPct}% (${callBand}) · put ${putPct}% (${putBand}) · ` +
       `action=${details.action || '—'}`
+    )
+  }
+  if (eventType === 'NAKED_POSITION') {
+    return (
+      `MISSING ${String(details.missing || '?').toUpperCase()} — ` +
+      `closing ${String(details.remaining || '?').toUpperCase()} ` +
+      `(${details.source || 'detect'})`
+    )
+  }
+  if (eventType === 'EMERGENCY_CLOSE') {
+    return (
+      `Closing ${String(details.closing || '?').toUpperCase()} ` +
+      `after ${String(details.missing || '?').toUpperCase()} vanished`
     )
   }
   const keys = Object.keys(details).slice(0, 4)

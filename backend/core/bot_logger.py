@@ -28,6 +28,10 @@ _IMPORTANT_EVENTS = frozenset(
         "EXIT_DONE",
         "EXIT_FAIL",
         "ERROR",
+        "NAKED_POSITION",
+        "EMERGENCY_CLOSE",
+        "MANUAL_EXCHANGE_CLOSE",
+        "POSITION_CHECK",
     }
 )
 
@@ -76,16 +80,23 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
     detail_str = " | ".join(f"{k}={v}" for k, v in details.items())
     msg = f"[{event_type}] Trade#{trade_id} @ {now} | {detail_str}"
 
-    if event_type in ("ERROR", "ADJUSTMENT_FAIL", "EXIT_FAIL"):
+    if event_type in (
+        "ERROR",
+        "ADJUSTMENT_FAIL",
+        "EXIT_FAIL",
+        "NAKED_POSITION",
+        "EMERGENCY_CLOSE",
+    ):
         bot_log.error(msg)
     elif event_type in (
         "ADJUSTMENT_START",
         "EXIT_TRIGGERED",
         "ADJUSTMENT_HOLD",
         "DECISION_TRIGGER",
+        "MANUAL_EXCHANGE_CLOSE",
     ):
         bot_log.warning(msg)
-    elif event_type in ("ADJUSTMENT_DONE", "EXIT_DONE"):
+    elif event_type in ("ADJUSTMENT_DONE", "EXIT_DONE", "POSITION_CHECK"):
         bot_log.info(msg)
     else:
         bot_log.debug(msg)

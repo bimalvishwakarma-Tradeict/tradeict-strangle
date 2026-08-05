@@ -133,14 +133,25 @@ async def reconcile_open_legs_with_delta(
     db: Any,
     client: Any,
     position_tracker: Any | None = None,
-) -> list[int]:
+) -> dict[str, Any]:
     """
-    For each ACTIVE trade: if an 'open' leg has size≈0 on Delta, mark it closed
-    (external/manual close). Then finalize flat baskets.
+    Align DB open legs with Delta sizes.
 
-    Returns trade ids that were fully closed.
+    Returns:
+      {
+        "fully_closed": [trade_id, ...],
+        "naked_risk": [
+          {"trade_id": int, "remaining": "call"|"put", "missing": "call"|"put"},
+          ...
+        ],
+      }
+
+    IMPORTANT: If a 2-leg basket has exactly one leg flat on Delta, we do NOT
+    mark it closed here and leave a naked remaining leg. Instead we return
+    naked_risk so the bot can emergency-close the remaining leg + cancel SLs.
     """
     fully_closed = heal_zombie_active_trades(db, position_tracker)
+    naked_risk: list[dict[str, Any]] = []
 
     # Drop tracker entries already CLOSED in DB (stale after external close)
     if position_tracker is not None:
@@ -170,13 +181,13 @@ async def reconcile_open_legs_with_delta(
                 )
 
     if client is None:
-        return fully_closed
+        return {"fully_closed": fully_closed, "naked_risk": naked_risk}
 
     try:
         positions = await client.get_positions()
     except Exception as exc:
         logger.warning("Delta positions fetch failed during reconcile: %s", exc)
-        return fully_closed
+        return {"fully_closed": fully_closed, "naked_risk": naked_risk}
 
     size_by_pid: dict[int, int] = {}
     mark_by_pid: dict[int, float] = {}
@@ -203,21 +214,69 @@ async def reconcile_open_legs_with_delta(
             )
             .all()
         )
-        changed = False
+        if not open_legs:
+            continue
+
+        flat_legs: list[Any] = []
+        live_legs: list[Any] = []
         for leg in open_legs:
             pid = int(leg.product_id or 0)
             if pid <= 0:
+                live_legs.append(leg)
                 continue
-            size = size_by_pid.get(pid, 0)
-            if size > 0:
-                continue
-            # Not on Delta → treat as externally closed
+            if size_by_pid.get(pid, 0) > 0:
+                live_legs.append(leg)
+            else:
+                flat_legs.append(leg)
+
+        if not flat_legs:
+            continue
+
+        # Two open in DB, exactly one flat on Delta → naked risk (do not leave half-open)
+        if len(open_legs) >= 2 and len(flat_legs) == 1 and len(live_legs) == 1:
+            missing = flat_legs[0]
+            remaining = live_legs[0]
+            naked_risk.append(
+                {
+                    "trade_id": int(trade.id),
+                    "remaining": str(remaining.leg_type).lower(),
+                    "missing": str(missing.leg_type).lower(),
+                }
+            )
+            logger.critical(
+                "Reconcile NAKED RISK trade=%s: %s flat on Delta, %s still open",
+                trade.id,
+                missing.leg_type,
+                remaining.leg_type,
+            )
+            continue
+
+        # All open legs flat (or single remaining open leg flat) → book closes + cancel SLs
+        changed = False
+        for leg in flat_legs:
+            pid = int(leg.product_id or 0)
             exit_px = mark_by_pid.get(pid, 0.0)
             if exit_px <= 0:
                 try:
                     exit_px = float(await client.get_mark_price(str(leg.symbol)))
                 except Exception:
                     exit_px = float(leg.initial_premium or 0.0)
+            # Cancel orphan SL for this externally closed leg
+            oid = getattr(leg, "delta_sl_order_id", None)
+            if oid:
+                try:
+                    await client.cancel_order(int(oid))
+                    logger.info(
+                        "Reconcile cancelled orphan SL %s for trade=%s %s",
+                        oid,
+                        trade.id,
+                        leg.leg_type,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Reconcile could not cancel SL %s: %s", oid, exc
+                    )
+                leg.delta_sl_order_id = None
             realized = book_leg_close(
                 leg=leg, trade=trade, exit_premium=exit_px, exit_time=now
             )
@@ -233,17 +292,17 @@ async def reconcile_open_legs_with_delta(
             )
 
         if changed:
-            if finalize_trade_if_flat(
-                db=db,
-                trade=trade,
-                exit_reason=ExitReason.MANUAL_LEG_CLOSE.value,
-            ):
+            reason = (
+                ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value
+                if len(flat_legs) == len(open_legs)
+                else ExitReason.MANUAL_LEG_CLOSE.value
+            )
+            if finalize_trade_if_flat(db=db, trade=trade, exit_reason=reason):
                 if int(trade.id) not in fully_closed:
                     fully_closed.append(int(trade.id))
                 if position_tracker is not None:
                     position_tracker.mark_closed(int(trade.id))
             elif position_tracker is not None:
-                # Refresh tracker legs for half-open basket
                 all_legs = (
                     db.query(Leg)
                     .filter(
@@ -258,11 +317,9 @@ async def reconcile_open_legs_with_delta(
                     state.call_leg = call_leg
                     state.put_leg = put_leg
                     state.trade = trade
-
-        if changed:
             db.commit()
 
-    return fully_closed
+    return {"fully_closed": fully_closed, "naked_risk": naked_risk}
 
 
 def next_basket_number(db: Any, account_id: int) -> int:

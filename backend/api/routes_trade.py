@@ -332,21 +332,28 @@ async def _ensure_no_active_trade(
     """
     client = _build_delta_client(account)
     try:
-        closed_ids = await reconcile_open_legs_with_delta(
+        recon = await reconcile_open_legs_with_delta(
             db=db,
             client=client,
             position_tracker=bot_engine.position_tracker,
         )
-        for tid in closed_ids:
+        for tid in recon.get("fully_closed") or []:
             bot_engine.position_tracker.mark_closed(tid)
             await ws_manager.broadcast(
                 {
                     "type": "TRADE_CLOSED",
                     "trade_id": tid,
-                    "reason": ExitReason.MANUAL_LEG_CLOSE.value,
+                    "reason": ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value,
                     "message": "Basket closed after Delta reconcile (no open size)",
                 }
             )
+        for alert in recon.get("naked_risk") or []:
+            tid = int(alert["trade_id"])
+            state = bot_engine.position_tracker.get(tid)
+            if state is not None:
+                await bot_engine._emergency_close_remaining_leg(
+                    state, str(alert["remaining"])
+                )
     except Exception as exc:
         logger.warning("Pre-initiate reconcile failed: %s", exc)
         heal_zombie_active_trades(db)
@@ -1012,20 +1019,27 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
     client = bot_engine.delta_client
     if client is not None:
         try:
-            closed_ids = await reconcile_open_legs_with_delta(
+            recon = await reconcile_open_legs_with_delta(
                 db=db,
                 client=client,
                 position_tracker=bot_engine.position_tracker,
             )
-            for tid in closed_ids:
+            for tid in recon.get("fully_closed") or []:
                 await ws_manager.broadcast(
                     {
                         "type": "TRADE_CLOSED",
                         "trade_id": tid,
-                        "reason": ExitReason.MANUAL_LEG_CLOSE.value,
+                        "reason": ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value,
                         "message": "Basket closed — no open size on Delta",
                     }
                 )
+            for alert in recon.get("naked_risk") or []:
+                tid = int(alert["trade_id"])
+                state = bot_engine.position_tracker.get(tid)
+                if state is not None:
+                    await bot_engine._emergency_close_remaining_leg(
+                        state, str(alert["remaining"])
+                    )
         except Exception as exc:
             logger.warning("Active-trades reconcile failed: %s", exc)
 
@@ -1635,6 +1649,26 @@ async def close_single_leg(
     account = _get_active_account(db)
     client = _build_delta_client(account)
     try:
+        # Cancel Delta SL for this leg before closing (avoid orphan stop)
+        if getattr(leg, "delta_sl_order_id", None):
+            try:
+                await client.cancel_order(int(leg.delta_sl_order_id))
+                logger.info(
+                    "Cancelled SL order %s for manually closed %s leg trade=%s",
+                    leg.delta_sl_order_id,
+                    leg_key,
+                    trade_id,
+                )
+                leg.delta_sl_order_id = None
+                db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "Could not cancel SL on manual close trade=%s %s: %s",
+                    trade_id,
+                    leg_key,
+                    exc,
+                )
+
         result = await bot_engine.order_executor.close_leg(leg, client)
         if not result.success:
             raise HTTPException(
