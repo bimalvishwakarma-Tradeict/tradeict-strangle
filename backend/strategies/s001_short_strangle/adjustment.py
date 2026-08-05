@@ -48,6 +48,11 @@ class AdjustmentExecutor:
 
         NEVER raises to caller — always returns AdjustmentResult.
         BOT ISOLATION: only operates on is_bot_managed legs in our DB.
+
+        TP/SL locked to initial deployment premium.
+        initial_max_profit never changes after trade entry.
+        adjustments do NOT affect TP/SL
+        (only leg baselines + trade.realized_pnl change).
         """
         try:
             call_leg, put_leg = self._get_legs(trade, db_session)

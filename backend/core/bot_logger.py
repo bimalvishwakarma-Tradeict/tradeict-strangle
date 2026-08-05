@@ -32,6 +32,7 @@ _IMPORTANT_EVENTS = frozenset(
         "EMERGENCY_CLOSE",
         "MANUAL_EXCHANGE_CLOSE",
         "POSITION_CHECK",
+        "TP_SL_LOCKED",
     }
 )
 
@@ -74,6 +75,59 @@ def setup_bot_logger() -> None:
     bot_log.info("Bot activity logger ready → %s", _LOG_FILE)
 
 
+def log_tp_sl_locked(
+    trade_id: int,
+    initial_max_profit: float,
+    profit_target_usd: float,
+    stoploss_usd: float,
+    tp_pct: float,
+    sl_pct: float,
+) -> None:
+    """
+    Log locked TP/SL at trade entry.
+
+    TP/SL locked to initial deployment premium.
+    initial_max_profit never changes after trade entry.
+    adjustments do NOT affect TP/SL.
+    """
+    bot_log.info(
+        "Trade %s locked: "
+        "initial_max_profit=%s "
+        "TP=%s (%s%%) "
+        "SL=%s (%s%%) "
+        "— will NOT change on adjustments",
+        trade_id,
+        initial_max_profit,
+        profit_target_usd,
+        tp_pct,
+        stoploss_usd,
+        sl_pct,
+    )
+    # Buffer only (message already logged above — avoid duplicate file lines)
+    entry = {
+        "timestamp": get_ist_now().isoformat(),
+        "event_type": "TP_SL_LOCKED",
+        "trade_id": trade_id,
+        "details": {
+            "initial_max_profit": initial_max_profit,
+            "profit_target_usd": profit_target_usd,
+            "stoploss_usd": stoploss_usd,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+        },
+        "message": (
+            f"Trade {trade_id} locked: "
+            f"initial_max_profit={initial_max_profit} "
+            f"TP={profit_target_usd} ({tp_pct}%) "
+            f"SL={stoploss_usd} ({sl_pct}%) "
+            f"— will NOT change on adjustments"
+        ),
+    }
+    _log_buffer.append(entry)
+    if len(_log_buffer) > MAX_BUFFER:
+        del _log_buffer[0 : len(_log_buffer) - MAX_BUFFER]
+
+
 def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
     """Log a structured bot event to file/console."""
     now = get_ist_now().strftime("%H:%M:%S IST")
@@ -96,7 +150,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MANUAL_EXCHANGE_CLOSE",
     ):
         bot_log.warning(msg)
-    elif event_type in ("ADJUSTMENT_DONE", "EXIT_DONE", "POSITION_CHECK"):
+    elif event_type in ("ADJUSTMENT_DONE", "EXIT_DONE", "POSITION_CHECK", "TP_SL_LOCKED"):
         bot_log.info(msg)
     else:
         bot_log.debug(msg)

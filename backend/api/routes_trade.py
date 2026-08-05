@@ -409,7 +409,10 @@ async def _persist_strangle_trade(
     qty = int(payload.quantity)
     # Premium points collected (display / accounting)
     total_premium = (call_fill_price + put_fill_price) * qty
-    # Locked USD max profit — same scale as Delta MTM (× contract value)
+    # Locked USD max profit from INITIAL fills only
+    # TP/SL locked to initial deployment premium
+    # initial_max_profit never changes after trade entry
+    # adjustments do NOT affect TP/SL
     initial_max_profit = round(
         (float(call_fill_price) + float(put_fill_price))
         * qty
@@ -444,6 +447,17 @@ async def _persist_strangle_trade(
     )
     db.add(trade)
     db.flush()
+
+    from backend.core.bot_logger import log_tp_sl_locked
+
+    log_tp_sl_locked(
+        trade_id=int(trade.id),
+        initial_max_profit=initial_max_profit,
+        profit_target_usd=profit_target_usd,
+        stoploss_usd=stoploss_usd,
+        tp_pct=tp_pct,
+        sl_pct=sl_pct,
+    )
 
     call_leg = Leg(
         trade_id=trade.id,
@@ -1814,6 +1828,9 @@ async def update_trade_settings(
             state.trade.slippage_pct = trade.slippage_pct
 
     if "tp_pct" in updates and updates["tp_pct"] is not None:
+        # TP/SL locked to initial deployment premium
+        # initial_max_profit never changes after trade entry
+        # adjustments do NOT affect TP/SL — mid-trade % edits still use locked base
         tp = float(updates["tp_pct"])
         if tp <= 0:
             raise HTTPException(status_code=400, detail="tp_pct must be > 0")
@@ -1830,6 +1847,7 @@ async def update_trade_settings(
         _sync_tracker_money()
 
     if "sl_pct" in updates and updates["sl_pct"] is not None:
+        # Derive SL $ from locked initial_max_profit — never from live premiums
         sl = float(updates["sl_pct"])
         if sl <= 0:
             raise HTTPException(status_code=400, detail="sl_pct must be > 0")

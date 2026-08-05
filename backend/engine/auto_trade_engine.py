@@ -195,14 +195,8 @@ class AutoTradeEngine:
             qty = max(1, int(settings.quantity))
             call_mark = float(straddle["call_premium"])
             put_mark = float(straddle["put_premium"])
-            initial_max_profit = round(
-                (call_mark + put_mark) * qty * float(OPTIONS_CONTRACT_VALUE),
-                6,
-            )
             tp_pct = float(settings.tp_pct or 50.0)
             sl_pct = float(settings.sl_pct or 100.0)
-            profit_target_usd = round(initial_max_profit * tp_pct / 100.0, 2)
-            stoploss_usd = round(initial_max_profit * sl_pct / 100.0, 2)
 
             # --- Place CALL ---
             logger.info(
@@ -270,6 +264,16 @@ class AutoTradeEngine:
             )
             logger.info("Put filled @ %s order_id=%s", put_fill, put_order_id)
 
+            # TP/SL locked to initial deployment premium (actual fills)
+            # initial_max_profit never changes after trade entry
+            # adjustments do NOT affect TP/SL
+            initial_max_profit = round(
+                (call_fill + put_fill) * qty * float(OPTIONS_CONTRACT_VALUE),
+                6,
+            )
+            profit_target_usd = round(initial_max_profit * tp_pct / 100.0, 2)
+            stoploss_usd = round(initial_max_profit * sl_pct / 100.0, 2)
+
             now_utc = datetime.now(timezone.utc)
             now_ist = get_ist_now()
             monitoring_starts = settling_ends_at_after_place(now_ist)
@@ -297,6 +301,17 @@ class AutoTradeEngine:
             )
             db.add(trade)
             db.flush()
+
+            from backend.core.bot_logger import log_tp_sl_locked
+
+            log_tp_sl_locked(
+                trade_id=int(trade.id),
+                initial_max_profit=initial_max_profit,
+                profit_target_usd=profit_target_usd,
+                stoploss_usd=stoploss_usd,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+            )
 
             call_leg = Leg(
                 trade_id=trade.id,
