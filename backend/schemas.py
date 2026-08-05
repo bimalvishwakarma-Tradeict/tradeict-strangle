@@ -124,3 +124,36 @@ class TradeSettingsUpdate(BaseModel):
 
 class TradeExitRequest(BaseModel):
     reason: str = "MANUAL_EMERGENCY"
+
+
+# --- Slave account schemas ---
+
+
+class SlaveAccountCreate(BaseModel):
+    name: str = Field(..., min_length=1)
+    api_key: str = Field(..., min_length=1)
+    api_secret: str = Field(..., min_length=1)
+    qty_multiplier: float = Field(default=1.0, gt=0, le=100)
+    is_active: bool = True
+
+
+class SlaveAccountUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1)
+    api_key: str | None = None
+    api_secret: str | None = None
+    qty_multiplier: float | None = Field(default=None, gt=0, le=100)
+    is_active: bool | None = None
+
+
+class SlaveAccountResponse(BaseModel):
+    id: int
+    name: str
+    qty_multiplier: float
+    is_active: bool
+    connection_status: str
+    balance_usd: float
+    balance_inr: float
+    last_connected_at: str | None = None
+    last_error: str | None = None
+    active_trade_count: int = 0
+

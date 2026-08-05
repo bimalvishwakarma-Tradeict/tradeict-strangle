@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timezone
 from typing import Any
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -760,6 +761,32 @@ async def initiate_trade(
             monitoring_starts.isoformat(),
             delta_sl_ok,
         )
+
+        # Mirror to slave accounts (non-fatal)
+        try:
+            import backend.engine.mirror_engine as mirror_module
+
+            if mirror_module.mirror_engine is not None:
+                asyncio.create_task(
+                    mirror_module.mirror_engine.mirror_trade_entry(
+                        master_trade_id=int(trade.id),
+                        call_product_id=int(payload.call_product_id),
+                        put_product_id=int(payload.put_product_id),
+                        master_call_qty=int(payload.quantity),
+                        master_put_qty=int(payload.quantity),
+                        master_call_strike=float(payload.call_strike),
+                        master_put_strike=float(payload.put_strike),
+                        master_call_symbol=str(payload.call_symbol),
+                        master_put_symbol=str(payload.put_symbol),
+                        master_call_fill=float(call_fill_price),
+                        master_put_fill=float(put_fill_price),
+                        expiry_date=trade.expiry_date,
+                        underlying=str(underlying),
+                    )
+                )
+                logger.info("Mirror task queued for trade %s", trade.id)
+        except Exception as exc:
+            logger.warning("Mirror queue failed (non-fatal): %s", exc)
 
         await ws_manager.broadcast(
             {
@@ -1585,6 +1612,23 @@ async def exit_trade(
         )
         if call_leg is None or put_leg is None:
             raise HTTPException(status_code=400, detail="Open bot-managed legs not found")
+
+        # Mirror exit to slaves before closing master legs (need product_ids)
+        try:
+            import backend.engine.mirror_engine as mirror_module
+
+            if mirror_module.mirror_engine is not None:
+                asyncio.create_task(
+                    mirror_module.mirror_engine.mirror_exit(
+                        master_trade_id=int(trade_id),
+                        call_product_id=int(call_leg.product_id),
+                        put_product_id=int(put_leg.product_id),
+                        reason=reason,
+                    )
+                )
+                logger.info("Mirror exit queued for trade %s (fallback path)", trade_id)
+        except Exception as exc:
+            logger.warning("Mirror exit queue failed: %s", exc)
 
         call_close = await bot_engine.order_executor.close_leg(call_leg, client)
         put_close = await bot_engine.order_executor.close_leg(put_leg, client)

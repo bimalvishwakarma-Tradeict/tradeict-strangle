@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.api.routes_account import router as account_router
 from backend.api.routes_auto_trade import router as auto_trade_router
 from backend.api.routes_logs import router as logs_router
+from backend.api.routes_slave import router as slave_router
 from backend.api.routes_strategy import router as strategy_router
 from backend.api.routes_trade import router as trade_router
 from backend.api.routes_ws import router as ws_router
@@ -29,10 +30,12 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup: init DB + start bot + auto-trade engines. Shutdown: stop both."""
+    """Startup: init DB + start bot + auto-trade + mirror engines. Shutdown: stop both."""
     from backend.database import SessionLocal
     from backend.engine import auto_trade_engine as ate_module
+    from backend.engine import mirror_engine as mirror_module
     from backend.engine.auto_trade_engine import AutoTradeEngine
+    from backend.engine.mirror_engine import MirrorEngine
 
     init_db()
     setup_bot_logger()
@@ -47,6 +50,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     auto_trade_engine.set_bot_engine(bot_engine)
     bot_engine.auto_trade_engine = auto_trade_engine
     ate_module.auto_trade_engine = auto_trade_engine
+
+    mirror_engine = MirrorEngine(db_factory=SessionLocal)
+    mirror_module.mirror_engine = mirror_engine
+    bot_engine.mirror_engine = mirror_engine
+    logger.info("🪞 Mirror engine ready")
 
     bot_task = asyncio.create_task(bot_engine.start(), name="bot-engine")
     auto_task = asyncio.create_task(
@@ -87,6 +95,7 @@ app.include_router(account_router)
 app.include_router(strategy_router)
 app.include_router(trade_router)
 app.include_router(auto_trade_router)
+app.include_router(slave_router)
 app.include_router(logs_router)
 app.include_router(ws_router)
 

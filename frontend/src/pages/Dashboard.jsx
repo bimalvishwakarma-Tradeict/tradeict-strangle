@@ -7,10 +7,12 @@ import {
   enableAutoTrade,
   getAccountStatus,
   getAutoTradeStatus,
+  getSlaveOverview,
   getTradeHistory,
 } from '../services/api'
 
 const AUTO_STATUS_POLL_MS = 5000
+const SLAVE_OVERVIEW_POLL_MS = 30000
 
 function formatIstTime(date = new Date()) {
   return (
@@ -75,6 +77,337 @@ function formatBalance(value) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })
+}
+
+function formatInr(value) {
+  return Number(value || 0).toLocaleString('en-IN', {
+    maximumFractionDigits: 0,
+  })
+}
+
+function truncateName(name, max = 18) {
+  const s = String(name || '')
+  if (s.length <= max) return s
+  return `${s.slice(0, max - 1)}…`
+}
+
+function mtmClass(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n === 0) return 'text-gray-500'
+  return n > 0 ? 'text-green-400' : 'text-red-400'
+}
+
+function formatSignedMoney(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  const sign = n > 0 ? '+' : ''
+  return `${sign}$${fmtMoney(n)}`
+}
+
+function AccountOverviewRow({
+  rowKey,
+  role,
+  name,
+  multiplier,
+  statusKind,
+  statusText,
+  balanceUsd,
+  balanceInr,
+  availableUsd,
+  availableInr,
+  netMtm,
+  targetUsd,
+  isExpanded,
+  onToggle,
+  borderClass,
+  dimmed,
+  expandContent,
+}) {
+  return (
+    <>
+      <tr
+        onClick={onToggle}
+        className={`cursor-pointer border-b border-gray-800 hover:bg-gray-800/80 ${
+          dimmed ? 'opacity-50 italic' : ''
+        } ${isExpanded ? 'bg-gray-800/50' : ''}`}
+      >
+        <td className={`px-3 py-3 text-sm ${borderClass}`}>
+          {role === 'master' ? (
+            <span className="font-medium text-amber-200">⭐ Master</span>
+          ) : (
+            <span className="font-medium text-blue-300">
+              📋 Slave
+              {multiplier != null ? (
+                <span className="ml-1 text-xs text-gray-400">
+                  ({Number(multiplier)}×)
+                </span>
+              ) : null}
+            </span>
+          )}
+        </td>
+        <td className="px-3 py-3 text-sm text-white" title={name}>
+          {truncateName(name)}
+        </td>
+        <td className="px-3 py-3 text-sm">
+          {statusKind === 'live' && (
+            <span className="text-green-400">🟢 Live</span>
+          )}
+          {statusKind === 'ready' && (
+            <span className="text-yellow-300">🟡 Ready</span>
+          )}
+          {statusKind === 'error' && (
+            <span className="text-red-400" title={statusText}>
+              🔴 {truncateName(statusText || 'Error', 16)}
+            </span>
+          )}
+          {statusKind === 'paused' && (
+            <span className="text-gray-400">⚪ Paused</span>
+          )}
+          {statusKind === 'offline' && (
+            <span className="text-gray-500">⚪ Offline</span>
+          )}
+        </td>
+        <td className="px-3 py-3 text-sm text-gray-200">
+          {balanceUsd != null ? (
+            <>
+              <div>${formatBalance(balanceUsd)}</div>
+              <div className="text-xs text-gray-500">₹{formatInr(balanceInr)}</div>
+            </>
+          ) : (
+            <span className="text-gray-500">—</span>
+          )}
+        </td>
+        <td className="px-3 py-3 text-sm text-gray-200">
+          {availableUsd != null ? (
+            <>
+              <div>${formatBalance(availableUsd)}</div>
+              <div className="text-xs text-gray-500">
+                ₹{formatInr(availableInr)}
+              </div>
+            </>
+          ) : (
+            <span className="text-gray-500">—</span>
+          )}
+        </td>
+        <td className={`px-3 py-3 text-sm font-medium ${mtmClass(netMtm)}`}>
+          {netMtm == null || !Number.isFinite(Number(netMtm))
+            ? '—'
+            : formatSignedMoney(netMtm)}
+        </td>
+        <td className="px-3 py-3 text-sm text-gray-300">
+          {targetUsd != null && Number.isFinite(Number(targetUsd))
+            ? `$${fmtMoney(targetUsd)}`
+            : '—'}
+        </td>
+      </tr>
+      {isExpanded && (
+        <tr className="border-b border-gray-800 bg-gray-800/40">
+          <td colSpan={7} className="px-4 py-3 text-xs text-gray-300">
+            {expandContent}
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+function MultiAccountOverview({ overview }) {
+  const [expanded, setExpanded] = useState({})
+
+  if (!overview?.has_slaves) return null
+
+  const master = overview.master || {}
+  const slaves = overview.slaves || []
+  const combined = Number(overview.combined_mtm || 0)
+
+  const toggle = (key) => {
+    setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
+
+  const masterTrade = master.active_trade
+  let masterStatus = 'offline'
+  let masterStatusText = ''
+  if (!master.connected) {
+    masterStatus = 'offline'
+  } else if (masterTrade) {
+    masterStatus = 'live'
+  } else {
+    masterStatus = 'ready'
+  }
+
+  // Prefer live net_mtm from dashboard trades when available via expand only —
+  // overview already carries tracker MTM.
+  const masterExpand = masterTrade ? (
+    <div className="space-y-1 font-mono">
+      <div>
+        CALL ${fmtStrike(masterTrade.call_strike)} @ $
+        {fmtMoney(masterTrade.call_entry)} | Current $
+        {fmtMoney(masterTrade.call_premium)}
+      </div>
+      <div>
+        PUT ${fmtStrike(masterTrade.put_strike)} @ $
+        {fmtMoney(masterTrade.put_entry)} | Current $
+        {fmtMoney(masterTrade.put_premium)}
+      </div>
+      <div className="pt-1 text-gray-400">
+        Net MTM:{' '}
+        <span className={mtmClass(masterTrade.net_mtm)}>
+          {formatSignedMoney(masterTrade.net_mtm)}
+        </span>
+        {' · '}
+        Target: ${fmtMoney(masterTrade.profit_target_usd)} · SL: $
+        {fmtMoney(masterTrade.stoploss_usd)}
+      </div>
+    </div>
+  ) : (
+    <span className="text-gray-500">No active master trade</span>
+  )
+
+  return (
+    <section className="mb-8 overflow-hidden rounded-xl border border-gray-700 bg-gray-900">
+      <div className="border-b border-gray-700 px-4 py-3">
+        <h2 className="text-sm font-semibold text-white">
+          📊 Multi-Account Overview
+        </h2>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-left">
+          <thead className="bg-gray-800 text-[10px] uppercase tracking-wide text-gray-400">
+            <tr>
+              <th className="px-3 py-2">Role</th>
+              <th className="px-3 py-2">Account</th>
+              <th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2">Capital</th>
+              <th className="px-3 py-2">Avail.</th>
+              <th className="px-3 py-2">Net MTM</th>
+              <th className="px-3 py-2">Target</th>
+            </tr>
+          </thead>
+          <tbody>
+            <AccountOverviewRow
+              rowKey="master"
+              role="master"
+              name={master.name || 'Master'}
+              statusKind={masterStatus}
+              statusText={masterStatusText}
+              balanceUsd={master.connected ? master.balance_usd : null}
+              balanceInr={master.balance_inr}
+              availableUsd={
+                master.connected ? master.available_usd ?? null : null
+              }
+              availableInr={master.available_inr}
+              netMtm={masterTrade?.net_mtm ?? null}
+              targetUsd={masterTrade?.profit_target_usd ?? null}
+              isExpanded={Boolean(expanded.master)}
+              onToggle={() => toggle('master')}
+              borderClass="border-l-2 border-l-amber-500"
+              dimmed={false}
+              expandContent={masterExpand}
+            />
+
+            {slaves.map((slave) => {
+              const st = slave.active_slave_trade
+              let statusKind = 'ready'
+              let statusText = ''
+              if (!slave.is_active) {
+                statusKind = 'paused'
+              } else if (slave.connection_status === 'error') {
+                statusKind = 'error'
+                statusText = slave.last_error || 'Error'
+              } else if (st) {
+                statusKind = 'live'
+              }
+
+              const key = `slave-${slave.id}`
+              const expand = st ? (
+                <div className="space-y-1 font-mono">
+                  <div>
+                    CALL ${fmtStrike(st.call_strike)} qty={st.actual_quantity}{' '}
+                    | Fill ${fmtMoney(st.call_fill_price)}
+                  </div>
+                  <div>
+                    PUT ${fmtStrike(st.put_strike)} qty={st.actual_quantity}{' '}
+                    | Fill ${fmtMoney(st.put_fill_price)}
+                  </div>
+                  <div className="pt-1 text-gray-400">
+                    Est. MTM:{' '}
+                    <span className={mtmClass(st.last_mtm)}>
+                      {formatSignedMoney(st.last_mtm)}
+                    </span>
+                    {' · '}
+                    Status: {st.status}
+                    {st.last_updated
+                      ? ` · Last sync: ${formatAdjTime(st.last_updated)}`
+                      : ''}
+                  </div>
+                </div>
+              ) : (
+                <span className="text-gray-500">
+                  {slave.is_active
+                    ? 'No active mirrored trade'
+                    : 'Account paused — not mirroring'}
+                </span>
+              )
+
+              return (
+                <AccountOverviewRow
+                  key={key}
+                  rowKey={key}
+                  role="slave"
+                  name={slave.name}
+                  multiplier={slave.qty_multiplier}
+                  statusKind={statusKind}
+                  statusText={statusText}
+                  balanceUsd={
+                    statusKind === 'error' ? null : slave.balance_usd
+                  }
+                  balanceInr={slave.balance_inr}
+                  availableUsd={
+                    statusKind === 'error'
+                      ? null
+                      : slave.available_usd ?? null
+                  }
+                  availableInr={slave.available_inr}
+                  netMtm={st?.last_mtm ?? null}
+                  targetUsd={st?.profit_target_usd ?? null}
+                  isExpanded={Boolean(expanded[key])}
+                  onToggle={() => toggle(key)}
+                  borderClass={
+                    statusKind === 'error'
+                      ? 'border-l-2 border-l-red-500'
+                      : 'border-l-2 border-l-blue-500'
+                  }
+                  dimmed={!slave.is_active}
+                  expandContent={expand}
+                />
+              )
+            })}
+          </tbody>
+          <tfoot>
+            <tr className="border-t border-gray-600 bg-gray-800/60">
+              <td
+                colSpan={5}
+                className="px-3 py-3 text-right text-sm font-semibold text-gray-300"
+              >
+                Combined MTM:
+              </td>
+              <td
+                colSpan={2}
+                className={`px-3 py-3 text-base font-bold ${mtmClass(combined)}`}
+              >
+                {formatSignedMoney(combined)}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div className="border-t border-gray-800 px-4 py-2 text-right text-[11px] text-gray-500">
+        <Link to="/accounts" className="text-blue-400 hover:underline">
+          Manage accounts →
+        </Link>
+      </div>
+    </section>
+  )
 }
 
 function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
@@ -354,10 +687,33 @@ export default function Dashboard() {
   const [accountConnected, setAccountConnected] = useState(false)
   const [baskets, setBaskets] = useState([])
   const [autoStatus, setAutoStatus] = useState(null)
+  const [slaveOverview, setSlaveOverview] = useState(null)
 
   useEffect(() => {
     document.title = 'Delta Bot — Dashboard'
   }, [])
+
+  const refreshSlaveOverview = useCallback(async () => {
+    try {
+      const data = await getSlaveOverview()
+      setSlaveOverview(data)
+    } catch {
+      // keep last known — section hidden if never loaded / no slaves
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshSlaveOverview()
+    const id = setInterval(refreshSlaveOverview, SLAVE_OVERVIEW_POLL_MS)
+    return () => clearInterval(id)
+  }, [refreshSlaveOverview])
+
+  // Refresh overview when live trades change (new entry / exit)
+  useEffect(() => {
+    if (trades?.length != null) {
+      refreshSlaveOverview()
+    }
+  }, [trades?.length, refreshSlaveOverview])
 
   const refreshAutoStatus = useCallback(async () => {
     try {
@@ -528,6 +884,8 @@ export default function Dashboard() {
         activeTrade={bannerActiveTrade}
         onEnterNow={handleEnterNow}
       />
+
+      <MultiAccountOverview overview={slaveOverview} />
 
       {loading ? (
         <div className="space-y-4">

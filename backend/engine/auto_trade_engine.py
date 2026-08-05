@@ -412,6 +412,36 @@ class AutoTradeEngine:
             db.expunge(put_leg)
             self.position_tracker.add(trade, call_leg, put_leg)
 
+            # Mirror to slave accounts (non-fatal)
+            try:
+                import backend.engine.mirror_engine as mirror_module
+
+                if mirror_module.mirror_engine is not None:
+                    asyncio.create_task(
+                        mirror_module.mirror_engine.mirror_trade_entry(
+                            master_trade_id=int(trade.id),
+                            call_product_id=int(straddle["call_product_id"]),
+                            put_product_id=int(straddle["put_product_id"]),
+                            master_call_qty=qty,
+                            master_put_qty=qty,
+                            master_call_strike=float(
+                                straddle.get("call_strike", straddle["strike"])
+                            ),
+                            master_put_strike=float(
+                                straddle.get("put_strike", straddle["strike"])
+                            ),
+                            master_call_symbol=str(straddle["call_symbol"]),
+                            master_put_symbol=str(straddle["put_symbol"]),
+                            master_call_fill=float(call_fill),
+                            master_put_fill=float(put_fill),
+                            expiry_date=expiry_date,
+                            underlying=str(settings.underlying),
+                        )
+                    )
+                    logger.info("Mirror task queued for auto trade %s", trade.id)
+            except Exception as exc:
+                logger.warning("Mirror queue failed (non-fatal): %s", exc)
+
             # Refresh settings row after possible rollback
             from backend.database import get_or_create_auto_settings
 

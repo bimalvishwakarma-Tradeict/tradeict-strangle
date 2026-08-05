@@ -216,3 +216,98 @@ class AutoTradeSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utc_now
     )
+
+
+class SlaveAccount(Base):
+    """
+    Secondary Delta account that mirrors master trades (master-slave copy trading).
+
+    qty_multiplier scales master lot size (1.0 = same, 2.0 = double, 0.5 = half).
+    is_active=False pauses new mirrored entries without deleting the account.
+    """
+
+    __tablename__ = "slave_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    api_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Trading settings — 1.0 = same qty as master
+    qty_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+
+    # True = mirror all trades; False = paused
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # Connection status (updated on each API call)
+    last_connected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # "connected" | "error" | "unknown"
+    connection_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="unknown"
+    )
+
+    # Balance cached from last check
+    balance_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    balance_inr: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now
+    )
+
+    trades: Mapped[list[SlaveTrade]] = relationship(
+        "SlaveTrade", back_populates="slave_account"
+    )
+
+
+class SlaveTrade(Base):
+    """Links a master Trade to the mirrored position on a SlaveAccount."""
+
+    __tablename__ = "slave_trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    slave_account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("slave_accounts.id"), nullable=False
+    )
+    master_trade_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("trades.id"), nullable=False
+    )
+
+    # Slave-specific order details
+    call_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    put_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    call_sl_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    put_sl_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # Actual qty placed on this slave
+    actual_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    # Fill prices on slave (may differ from master)
+    call_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # "active" | "closed" | "error" | "partial"
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+
+    # MTM for this slave (from slave's Delta account)
+    last_mtm: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    last_updated: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now
+    )
+
+    slave_account: Mapped[SlaveAccount] = relationship(
+        "SlaveAccount", back_populates="trades"
+    )
+    master_trade: Mapped[Trade] = relationship("Trade")

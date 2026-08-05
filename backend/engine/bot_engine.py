@@ -86,6 +86,8 @@ class BotEngine:
         self._premium_collapse_pending: set[int] = set()
         # Set from main.py lifespan after AutoTradeEngine is created
         self.auto_trade_engine: Any | None = None
+        # Set from main.py lifespan after MirrorEngine is created
+        self.mirror_engine: Any | None = None
 
     async def start(self) -> None:
         self.is_running = True
@@ -1257,6 +1259,23 @@ class BotEngine:
                 trade_id,
             )
         assert self.delta_client is not None
+
+        # Mirror exit to slave accounts (before master legs close — need product_ids)
+        try:
+            import backend.engine.mirror_engine as mirror_module
+
+            if mirror_module.mirror_engine is not None:
+                asyncio.create_task(
+                    mirror_module.mirror_engine.mirror_exit(
+                        master_trade_id=trade_id,
+                        call_product_id=int(trade_state.call_leg.product_id),
+                        put_product_id=int(trade_state.put_leg.product_id),
+                        reason=reason,
+                    )
+                )
+                logger.info("Mirror exit queued for trade %s", trade_id)
+        except Exception as exc:
+            logger.warning("Mirror exit queue failed: %s", exc)
 
         # Cancel Delta SL safety orders before closing legs
         from backend.core.delta_sl import cancel_leg_sl_order

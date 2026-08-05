@@ -256,3 +256,66 @@ export const getAutoTradeStatus = async () => {
     throw new Error(extractError(err, 'Failed to fetch auto trade status'))
   }
 }
+
+export const getSlaveAccounts = async () => {
+  try {
+    const res = await api.get('/api/slave/accounts')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch slave accounts'))
+  }
+}
+
+export const addSlaveAccount = async (data) => {
+  try {
+    const res = await api.post('/api/slave/accounts', data)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to add slave account'))
+  }
+}
+
+export const updateSlaveAccount = async (id, data) => {
+  try {
+    const res = await api.patch(`/api/slave/accounts/${id}`, data)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to update slave account'))
+  }
+}
+
+export const deleteSlaveAccount = async (id) => {
+  try {
+    const res = await api.delete(`/api/slave/accounts/${id}`)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to delete slave account'))
+  }
+}
+
+export const testSlaveConnection = async (id) => {
+  try {
+    const res = await api.post(`/api/slave/accounts/${id}/test`)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Slave connection test failed'))
+  }
+}
+
+export const toggleSlaveAccount = async (id) => {
+  try {
+    const res = await api.post(`/api/slave/accounts/${id}/toggle`)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to toggle slave account'))
+  }
+}
+
+export const getSlaveOverview = async () => {
+  try {
+    const res = await api.get('/api/slave/overview')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch slave overview'))
+  }
+}

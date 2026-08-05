@@ -272,6 +272,18 @@ def get_or_create_auto_settings(db: Session):
     return settings
 
 
+def get_active_slave_accounts(db: Session) -> list:
+    """Return all slave accounts currently set to mirror trades."""
+    from backend.models import SlaveAccount
+
+    return (
+        db.query(SlaveAccount)
+        .filter(SlaveAccount.is_active.is_(True))
+        .order_by(SlaveAccount.id.asc())
+        .all()
+    )
+
+
 if __name__ == "__main__":
     # Re-import via package so models bind to the same Base (not __main__.Base)
     import backend.database as db
@@ -286,4 +298,6 @@ if __name__ == "__main__":
     assert "adjustments" in tables
     assert "settings" in tables
     assert "auto_trade_settings" in tables
+    assert "slave_accounts" in tables
+    assert "slave_trades" in tables
     print("✅ DATABASE TEST PASSED")
