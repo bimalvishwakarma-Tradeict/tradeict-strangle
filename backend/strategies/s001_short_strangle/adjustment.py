@@ -183,7 +183,7 @@ class AdjustmentExecutor:
             if exit_result.commission is not None:
                 triggered_leg.exit_fee_usd = abs(float(exit_result.commission))
 
-            # New leg: fill = accounting entry AND fresh trigger baseline
+            # New leg: entry fill stays forever; baseline starts at fill
             new_leg = Leg(
                 trade_id=trade.id,
                 leg_type=triggered_leg.leg_type,
@@ -191,6 +191,7 @@ class AdjustmentExecutor:
                 symbol=plan.new_symbol,
                 product_id=int(plan.new_product_id),
                 initial_premium=new_entry_premium,
+                trigger_baseline_premium=new_entry_premium,
                 trigger_premium=new_entry_premium,
                 quantity=int(triggered_leg.quantity),
                 entry_time=now_utc,
@@ -210,11 +211,12 @@ class AdjustmentExecutor:
             )
             db_session.add(new_leg)
 
-            # Step 6b — Reset untouched leg baseline to offer used for strike match
-            other_leg.initial_premium = float(other_premium)
+            # Untouched leg: KEEP original entry; ONLY reset trigger baseline
+            other_leg.trigger_baseline_premium = float(other_premium)
             other_leg.trigger_premium = float(other_premium)
+            # Do NOT modify other_leg.initial_premium
 
-            # Realized from TRUE fill premium of closed leg (not post-reset baseline)
+            # Realized from TRUE fill premium of closed leg (not trigger baseline)
             # USD = (entry - exit) * qty * contract_value  (matches Delta scale)
             leg_realized = short_leg_realized_pnl(
                 entry_fill=old_entry_fill,
@@ -253,8 +255,11 @@ class AdjustmentExecutor:
 
             logger.info(
                 "Adjustment baseline reset: "
-                "triggered_leg new_premium=%s other_leg new_baseline=%s",
+                "triggered_leg entry=%s baseline=%s "
+                "other_leg entry(kept)=%s baseline=%s",
                 new_entry_premium,
+                new_entry_premium,
+                float(other_leg.initial_premium),
                 other_premium,
             )
             logger.info(

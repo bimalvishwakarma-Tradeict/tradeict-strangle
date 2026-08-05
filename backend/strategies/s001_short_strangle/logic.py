@@ -46,9 +46,13 @@ def _trigger_baseline(leg: Any) -> float:
     """
     Premium used for adjustment trigger %.
 
-    Always use current leg.initial_premium (reset after every adjustment:
-    triggered → new fill; untouched → offer at adjust time).
+    Prefer trigger_baseline_premium (resets each adjustment).
+    Fall back to legacy trigger_premium, then initial_premium (entry).
     """
+    for attr in ("trigger_baseline_premium", "trigger_premium"):
+        val = getattr(leg, attr, None)
+        if val is not None and float(val) > 0:
+            return float(val)
     return float(getattr(leg, "initial_premium", 0) or 0)
 
 

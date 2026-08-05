@@ -76,11 +76,31 @@ def _migrate_schema() -> None:
                 conn.execute(
                     text("ALTER TABLE legs ADD COLUMN trigger_premium FLOAT")
                 )
-                # Backfill: trigger baseline = fill premium for existing rows
                 conn.execute(
                     text(
                         "UPDATE legs SET trigger_premium = initial_premium "
                         "WHERE trigger_premium IS NULL"
+                    )
+                )
+        # Refresh columns after possible alter
+        leg_cols = {col["name"] for col in inspector.get_columns("legs")}
+        if "trigger_baseline_premium" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE legs ADD COLUMN trigger_baseline_premium FLOAT"
+                    )
+                )
+                # Prefer existing trigger_premium; else initial_premium
+                conn.execute(
+                    text(
+                        """
+                        UPDATE legs
+                        SET trigger_baseline_premium = COALESCE(
+                            trigger_premium, initial_premium
+                        )
+                        WHERE trigger_baseline_premium IS NULL
+                        """
                     )
                 )
         if "realized_pnl" not in leg_cols:

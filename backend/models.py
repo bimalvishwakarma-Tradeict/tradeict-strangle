@@ -79,7 +79,10 @@ class Leg(Base):
     symbol: Mapped[str] = mapped_column(String(100), nullable=False)
     product_id: Mapped[int] = mapped_column(Integer, nullable=False)
     initial_premium: Mapped[float] = mapped_column(Float, nullable=False)
-    # Trigger baseline (may reset after opposite-leg adjustment). Accounting uses initial_premium.
+    # Trigger % baseline — resets after each adjustment (untouched = offer at adj time).
+    # initial_premium is the accounting entry price and never changes for that leg row.
+    trigger_baseline_premium: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Legacy alias kept in sync with trigger_baseline_premium for older rows/code.
     trigger_premium: Mapped[float | None] = mapped_column(Float, nullable=True)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

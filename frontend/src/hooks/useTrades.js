@@ -200,6 +200,14 @@ export function useTrades() {
             callEntry != null ? callEntry : existing.call_entry_premium,
           put_entry_premium:
             putEntry != null ? putEntry : existing.put_entry_premium,
+          call_trigger_baseline:
+            msg.call_trigger_baseline != null
+              ? Number(msg.call_trigger_baseline)
+              : existing.call_trigger_baseline,
+          put_trigger_baseline:
+            msg.put_trigger_baseline != null
+              ? Number(msg.put_trigger_baseline)
+              : existing.put_trigger_baseline,
           call_trigger_price:
             msg.call_trigger_price != null
               ? Number(msg.call_trigger_price)
@@ -354,6 +362,14 @@ export function useTrades() {
               msg.put_entry_premium != null
                 ? Number(msg.put_entry_premium)
                 : putLeg?.initial_premium ?? existing.put_entry_premium,
+            call_trigger_baseline:
+              msg.call_trigger_baseline != null
+                ? Number(msg.call_trigger_baseline)
+                : existing.call_trigger_baseline,
+            put_trigger_baseline:
+              msg.put_trigger_baseline != null
+                ? Number(msg.put_trigger_baseline)
+                : existing.put_trigger_baseline,
             call_trigger_price:
               msg.call_trigger_price != null
                 ? Number(msg.call_trigger_price)

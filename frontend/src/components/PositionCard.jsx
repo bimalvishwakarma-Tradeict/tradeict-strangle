@@ -160,6 +160,12 @@ function normalizeLeg(trade, side) {
       trade.quantity ??
       null,
     initial_premium: initial,
+    trigger_baseline_premium:
+      nested?.trigger_baseline_premium ??
+      (side === 'call'
+        ? trade.call_trigger_baseline
+        : trade.put_trigger_baseline) ??
+      initial,
     current_premium: current,
     change_pct: change,
     leg_pnl: legPnl,
@@ -215,6 +221,7 @@ function LegRow({ label, leg }) {
 function TriggerWatch({
   title,
   entry,
+  baseline,
   trigger,
   current,
   distance,
@@ -224,6 +231,10 @@ function TriggerWatch({
   const pct = Math.max(0, Math.min(120, Number(progressPct) || 0))
   const warn = pct > 70
   const danger = pct > 90
+  const entryN = Number(entry) || 0
+  const baselineN = Number(baseline) || 0
+  const showAdjBaseline =
+    baselineN > 0 && Math.abs(baselineN - entryN) > 0.005
   return (
     <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
@@ -231,9 +242,15 @@ function TriggerWatch({
       </div>
       <div className="space-y-1 text-xs text-gray-300">
         <div className="flex justify-between">
-          <span>Entry</span>
-          <span>${fmtMoney(entry)}</span>
+          <span>Entry (original)</span>
+          <span>${fmtMoney(entryN)}</span>
         </div>
+        {showAdjBaseline && (
+          <div className="flex justify-between text-orange-200/90">
+            <span>Price at Last Adj</span>
+            <span>${fmtMoney(baselineN)}</span>
+          </div>
+        )}
         <div className="flex justify-between">
           <span>Trigger ({fmtMoney(triggerPct)}%)</span>
           <span className="text-amber-300">${fmtMoney(trigger)}</span>
@@ -309,10 +326,20 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const progressPositive = totalMtm >= 0
   const displayPct = target > 0 ? Math.round(Math.abs((totalMtm / target) * 100)) : 0
 
-  // Bot Monitoring Plan — baselines/triggers from server; live offer from PRICE_TICK leg
+  // Bot Monitoring Plan — entry vs trigger baseline are separate
   const triggerPct = Number(trade.current_trigger_pct || 0)
   const callEntry = Number(trade.call_entry_premium ?? call.initial_premium ?? 0)
   const putEntry = Number(trade.put_entry_premium ?? put.initial_premium ?? 0)
+  const callBaseline = Number(
+    trade.call_trigger_baseline ??
+      call.trigger_baseline_premium ??
+      callEntry,
+  )
+  const putBaseline = Number(
+    trade.put_trigger_baseline ??
+      put.trigger_baseline_premium ??
+      putEntry,
+  )
   const callTrigger = Number(trade.call_trigger_price ?? 0)
   const putTrigger = Number(trade.put_trigger_price ?? 0)
   const callOfferLive = Number(call.current_premium ?? 0)
@@ -688,6 +715,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
           <TriggerWatch
             title="Call Leg Watch"
             entry={callEntry}
+            baseline={callBaseline}
             trigger={callTrigger}
             current={call.current_premium}
             distance={callDistance}
@@ -697,6 +725,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
           <TriggerWatch
             title="Put Leg Watch"
             entry={putEntry}
+            baseline={putBaseline}
             trigger={putTrigger}
             current={put.current_premium}
             distance={putDistance}

@@ -113,6 +113,11 @@ def _leg_snapshot(leg: Any, current_premium: float) -> dict[str, Any]:
         "symbol": leg.symbol,
         "quantity": int(leg.quantity),
         "initial_premium": initial,
+        "trigger_baseline_premium": float(
+            getattr(leg, "trigger_baseline_premium", None)
+            or getattr(leg, "trigger_premium", None)
+            or initial
+        ),
         "current_premium": display_prem,
         "exit_premium": float(leg.exit_premium) if leg.exit_premium is not None else None,
         "entry_time": _to_ist_iso(getattr(leg, "entry_time", None)),
@@ -411,6 +416,7 @@ async def _persist_strangle_trade(
         symbol=payload.call_symbol,
         product_id=int(payload.call_product_id),
         initial_premium=float(call_fill_price),
+        trigger_baseline_premium=float(call_fill_price),
         trigger_premium=float(call_fill_price),
         quantity=qty,
         entry_time=now_utc,
@@ -429,6 +435,7 @@ async def _persist_strangle_trade(
         symbol=payload.put_symbol,
         product_id=int(payload.put_product_id),
         initial_premium=float(put_fill_price),
+        trigger_baseline_premium=float(put_fill_price),
         trigger_premium=float(put_fill_price),
         quantity=qty,
         entry_time=now_utc,

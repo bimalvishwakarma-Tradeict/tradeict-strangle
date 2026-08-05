@@ -523,7 +523,10 @@ class BotEngine:
                 trigger_for_plan = trigger_pct
 
         def _trig_base(leg: Any) -> float:
-            # Always current initial_premium (reset on every adjustment)
+            for attr in ("trigger_baseline_premium", "trigger_premium"):
+                val = getattr(leg, attr, None)
+                if val is not None and float(val) > 0:
+                    return float(val)
             return float(getattr(leg, "initial_premium", 0) or 0)
 
         call_trigger = _trig_base(call_leg) * (trigger_for_plan / 100.0)
@@ -899,9 +902,14 @@ class BotEngine:
                 trade_state.trade.realized_pnl = float(trade_row.realized_pnl or 0.0)
             logger.info(
                 "Legs reloaded after adjustment: "
-                "call baseline=%s put baseline=%s trade=%s realized_pnl=%s",
+                "call entry=%s baseline=%s put entry=%s baseline=%s "
+                "trade=%s realized_pnl=%s",
                 call_leg.initial_premium,
+                getattr(call_leg, "trigger_baseline_premium", None)
+                or getattr(call_leg, "trigger_premium", None),
                 put_leg.initial_premium,
+                getattr(put_leg, "trigger_baseline_premium", None)
+                or getattr(put_leg, "trigger_premium", None),
                 trade_state.trade_id,
                 getattr(trade_state.trade, "realized_pnl", 0.0),
             )
@@ -1019,14 +1027,24 @@ class BotEngine:
     ) -> dict[str, Any]:
         """Shared monitoring-plan fields for WS and /api/trade/active.
 
-        Trigger prices ALWAYS use current leg.initial_premium (post-adjustment
-        baseline). Do not use stale trigger_premium — it can lag the DB reset.
+        Entry display = initial_premium (never changes for a leg row).
+        Trigger calc = trigger_baseline_premium (resets each adjustment).
         """
+
+        def _baseline(leg: Any) -> float:
+            for attr in ("trigger_baseline_premium", "trigger_premium"):
+                val = getattr(leg, attr, None)
+                if val is not None and float(val) > 0:
+                    return float(val)
+            return float(getattr(leg, "initial_premium", 0) or 0)
+
         call_entry = float(trade_state.call_leg.initial_premium or 0)
         put_entry = float(trade_state.put_leg.initial_premium or 0)
+        call_base = _baseline(trade_state.call_leg)
+        put_base = _baseline(trade_state.put_leg)
         pct = float(trigger_pct) if trigger_pct > 0 else 150.0
-        call_trigger = call_entry * (pct / 100.0)
-        put_trigger = put_entry * (pct / 100.0)
+        call_trigger = call_base * (pct / 100.0)
+        put_trigger = put_base * (pct / 100.0)
         call_pct_to = (call_prem / call_trigger * 100.0) if call_trigger > 0 else 0.0
         put_pct_to = (put_prem / put_trigger * 100.0) if put_trigger > 0 else 0.0
 
@@ -1039,8 +1057,8 @@ class BotEngine:
         return {
             "call_entry_premium": call_entry,
             "put_entry_premium": put_entry,
-            "call_trigger_baseline": call_entry,
-            "put_trigger_baseline": put_entry,
+            "call_trigger_baseline": call_base,
+            "put_trigger_baseline": put_base,
             "call_strike": float(trade_state.call_leg.strike),
             "put_strike": float(trade_state.put_leg.strike),
             "call_symbol": str(trade_state.call_leg.symbol),
