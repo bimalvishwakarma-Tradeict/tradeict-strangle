@@ -63,6 +63,42 @@ def basket_fees_paid_from_legs(legs: list[Any]) -> float:
     return float(sum(leg_fees_paid(leg) for leg in legs))
 
 
+def compute_slippage_amount(gross_mtm: float, slippage_pct: float | None) -> float:
+    """slippage_amount = abs(gross_mtm) × slippage_pct / 100."""
+    pct = float(slippage_pct if slippage_pct is not None else 2.0)
+    if pct < 0:
+        pct = 0.0
+    return abs(float(gross_mtm or 0.0)) * pct / 100.0
+
+
+def compute_net_mtm(
+    *,
+    gross_mtm: float,
+    fees_paid: float = 0.0,
+    est_exit_fees: float = 0.0,
+    slippage_pct: float | None = 2.0,
+) -> dict[str, float]:
+    """
+    Net MTM = Gross − Fees Paid − Est Exit Fees − Slippage.
+
+    Returns slippage_pct, slippage_amount, net_mtm, total_deductions.
+    """
+    slip_pct = float(slippage_pct if slippage_pct is not None else 2.0)
+    if slip_pct < 0:
+        slip_pct = 0.0
+    fees = max(0.0, float(fees_paid or 0.0))
+    est_exit = max(0.0, float(est_exit_fees or 0.0))
+    slip = compute_slippage_amount(gross_mtm, slip_pct)
+    deductions = fees + est_exit + slip
+    net = float(gross_mtm or 0.0) - deductions
+    return {
+        "slippage_pct": slip_pct,
+        "slippage_amount": round(slip, 4),
+        "total_deductions": round(deductions, 4),
+        "net_mtm": round(net, 4),
+    }
+
+
 def build_fee_summary(
     *,
     legs: list[Any],

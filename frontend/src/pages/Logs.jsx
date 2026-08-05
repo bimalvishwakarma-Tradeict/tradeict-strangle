@@ -11,6 +11,7 @@ const EVENT_STYLE = {
   TRIGGER_CHECK: 'text-blue-400',
   PRICE_UPDATE: 'text-gray-400',
   SETTLING: 'text-gray-500 italic',
+  DECISION_TRIGGER: 'text-violet-400',
   ADJUSTMENT_START: 'text-amber-400',
   ADJUSTMENT_DONE: 'text-green-400',
   ADJUSTMENT_FAIL: 'text-red-400',
@@ -22,6 +23,7 @@ const EVENT_STYLE = {
 }
 
 const EVENT_ICON = {
+  DECISION_TRIGGER: '⚖️',
   ADJUSTMENT_START: '⚠️',
   ADJUSTMENT_DONE: '✅',
   ADJUSTMENT_FAIL: '❌',
@@ -47,8 +49,41 @@ function formatTime(iso) {
   }
 }
 
-function detailPreview(details) {
+function formatMoneySigned(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  const abs = Math.abs(n).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+  return `${n >= 0 ? '+' : '-'}$${abs}`
+}
+
+function detailPreview(details, eventType) {
   if (!details || typeof details !== 'object') return '—'
+  if (eventType === 'DECISION_TRIGGER') {
+    const leg = String(details.leg || '?').toUpperCase()
+    const pct = Number(details.trigger_pct)
+    const net = Number(details.net_mtm)
+    const closing = details.decision === 'CLOSE_PROFITABLE'
+    return (
+      `DECISION: ${leg} hit ${Number.isFinite(pct) ? pct : '—'}% — ` +
+      `Net MTM ${formatMoneySigned(net)} → ` +
+      (closing ? 'CLOSING BASKET (profitable)' : 'ADJUSTING (loss)')
+    )
+  }
+  if (eventType === 'TRIGGER_CHECK' && details.trigger_mode === 'premium') {
+    const note = details.trigger_pct_note
+    if (note) return String(note)
+    const callPct = details.call_trigger_pct
+    const putPct = details.put_trigger_pct
+    const callBand = details.call_premium_band || ''
+    const putBand = details.put_premium_band || ''
+    return (
+      `call ${callPct}% (${callBand}) · put ${putPct}% (${putBand}) · ` +
+      `action=${details.action || '—'}`
+    )
+  }
   const keys = Object.keys(details).slice(0, 4)
   return keys.map((k) => `${k}=${details[k]}`).join(' · ')
 }
@@ -258,7 +293,7 @@ export default function Logs() {
                         {JSON.stringify(row.details, null, 2)}
                       </pre>
                     ) : (
-                      detailPreview(row.details)
+                      detailPreview(row.details, row.event_type)
                     )}
                   </td>
                 </tr>

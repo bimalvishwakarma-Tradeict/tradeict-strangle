@@ -4,6 +4,7 @@ import Toast from './ui/Toast'
 import LoadingSpinner from './ui/LoadingSpinner'
 import EmergencyExit from './EmergencyExit'
 import PayoffGraph from './PayoffGraph'
+import AdjustmentSlabs from './AdjustmentSlabs'
 import { closeLeg, getAdjustments, updateSettings } from '../services/api'
 
 function fmtMoney(v) {
@@ -218,6 +219,14 @@ function LegRow({ label, leg }) {
   )
 }
 
+function premiumBandHint(premium) {
+  const px = Number(premium) || 0
+  if (px >= 300) return '≥ $300'
+  if (px >= 200) return '$200–$300'
+  if (px >= 100) return '$100–$200'
+  return '< $100'
+}
+
 function TriggerWatch({
   title,
   entry,
@@ -227,14 +236,17 @@ function TriggerWatch({
   distance,
   progressPct,
   triggerPct,
+  triggerMode,
 }) {
   const pct = Math.max(0, Math.min(120, Number(progressPct) || 0))
   const warn = pct > 70
   const danger = pct > 90
   const entryN = Number(entry) || 0
   const baselineN = Number(baseline) || 0
+  const currentN = Number(current) || 0
   const showAdjBaseline =
     baselineN > 0 && Math.abs(baselineN - entryN) > 0.005
+  const isPremium = triggerMode === 'premium'
   return (
     <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
@@ -251,13 +263,24 @@ function TriggerWatch({
             <span>${fmtMoney(baselineN)}</span>
           </div>
         )}
+        {isPremium && (
+          <div className="flex justify-between">
+            <span>Current Premium</span>
+            <span>
+              ${fmtMoney(currentN)}{' '}
+              <span className="text-gray-500">
+                ({premiumBandHint(currentN)} → {fmtMoney(triggerPct)}%)
+              </span>
+            </span>
+          </div>
+        )}
         <div className="flex justify-between">
           <span>Trigger ({fmtMoney(triggerPct)}%)</span>
           <span className="text-amber-300">${fmtMoney(trigger)}</span>
         </div>
         <div className="flex justify-between">
           <span>Offer</span>
-          <span>${fmtMoney(current)}</span>
+          <span>${fmtMoney(currentN)}</span>
         </div>
         <div className="flex justify-between">
           <span>To trigger</span>
@@ -314,20 +337,37 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   )
   const feesPaid = n(trade.fees_paid)
   const estExitFees = n(trade.est_exit_fees)
+  const slippagePct = n(trade.slippage_pct ?? 2)
+  const slippageAmount = n(
+    trade.slippage_amount ?? Math.abs(n(trade.gross_mtm)) * (slippagePct / 100),
+  )
   const totalFees = n(trade.total_expected_fees ?? feesPaid + estExitFees)
+  const totalDeductions = n(
+    trade.total_deductions ?? totalFees + slippageAmount,
+  )
   const grossMtm = n(trade.gross_mtm)
   const netMtm = n(trade.net_mtm)
   const totalMtm = grossMtm
   const lastMtmUpdate = trade.last_mtm_update || null
   const target = n(trade.profit_target_usd)
   const stoploss = n(trade.stoploss_usd)
+  const initialMax = n(trade.initial_max_profit)
+  const tpPctLocked = n(trade.tp_pct || 50)
+  const slPctLocked = n(trade.sl_pct || 100)
   const progressPct =
     target > 0 ? Math.min(100, Math.abs((totalMtm / target) * 100)) : 0
   const progressPositive = totalMtm >= 0
   const displayPct = target > 0 ? Math.round(Math.abs((totalMtm / target) * 100)) : 0
 
   // Bot Monitoring Plan — entry vs trigger baseline are separate
+  const triggerMode = String(trade.trigger_mode || 'slab').toLowerCase()
   const triggerPct = Number(trade.current_trigger_pct || 0)
+  const callTriggerPct = Number(
+    trade.call_trigger_pct ?? trade.current_trigger_pct ?? 0,
+  )
+  const putTriggerPct = Number(
+    trade.put_trigger_pct ?? trade.current_trigger_pct ?? 0,
+  )
   const callEntry = Number(trade.call_entry_premium ?? call.initial_premium ?? 0)
   const putEntry = Number(trade.put_entry_premium ?? put.initial_premium ?? 0)
   const callBaseline = Number(
@@ -366,6 +406,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const [editField, setEditField] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
+  const [triggerDraft, setTriggerDraft] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -438,31 +479,87 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   }
 
   const openEdit = (field) => {
-    if (field === 'target') setEditValue(String(target || ''))
-    else if (field === 'sl') setEditValue(String(stoploss || ''))
-    else if (field === 'trigger') setEditValue(String(triggerPct || ''))
+    if (field === 'target') setEditValue(String(tpPctLocked || 50))
+    else if (field === 'sl') setEditValue(String(slPctLocked || 100))
+    else if (field === 'slippage') setEditValue(String(slippagePct || 2))
+    else if (field === 'trigger') {
+      setEditValue(String(triggerPct || ''))
+      setTriggerDraft({
+        mode: triggerMode || 'slab',
+        flat_pct: triggerPct || 150,
+        slab_24h: 200,
+        slab_12h: 175,
+        slab_6h: 150,
+        slab_lt6h: 150,
+        premium_slab_300: Number(trade.premium_slab_300 ?? 150),
+        premium_slab_200: Number(trade.premium_slab_200 ?? 160),
+        premium_slab_100: Number(trade.premium_slab_100 ?? 180),
+        premium_slab_lt100: Number(trade.premium_slab_lt100 ?? 200),
+      })
+    }
     setEditField(field)
   }
 
   const saveEdit = async () => {
     if (!editField) return
-    const n = Number(editValue)
-    if (!Number.isFinite(n) || n <= 0) {
-      setToast({ type: 'error', message: 'Enter a positive number' })
-      return
-    }
     setSavingEdit(true)
     try {
       const payload = {}
-      if (editField === 'target') payload.profit_target_usd = n
-      if (editField === 'sl') payload.stoploss_usd = n
-      if (editField === 'trigger') {
-        payload.trigger_mode = 'flat'
-        payload.flat_trigger_pct = n
+      if (editField === 'target') {
+        const val = Number(editValue)
+        if (!Number.isFinite(val) || val <= 0) {
+          setToast({ type: 'error', message: 'Enter a valid number' })
+          setSavingEdit(false)
+          return
+        }
+        payload.tp_pct = val
+      } else if (editField === 'sl') {
+        const val = Number(editValue)
+        if (!Number.isFinite(val) || val <= 0) {
+          setToast({ type: 'error', message: 'Enter a valid number' })
+          setSavingEdit(false)
+          return
+        }
+        payload.sl_pct = val
+      } else if (editField === 'slippage') {
+        const val = Number(editValue)
+        if (!Number.isFinite(val) || val < 0 || val > 10) {
+          setToast({ type: 'error', message: 'Slippage must be 0–10%' })
+          setSavingEdit(false)
+          return
+        }
+        payload.slippage_pct = val
+      } else if (editField === 'trigger') {
+        const d = triggerDraft
+        if (!d) {
+          setToast({ type: 'error', message: 'No trigger settings' })
+          setSavingEdit(false)
+          return
+        }
+        payload.trigger_mode = d.mode
+        if (d.mode === 'flat') {
+          if (!Number.isFinite(d.flat_pct) || d.flat_pct < 1) {
+            setToast({ type: 'error', message: 'Enter a valid flat %' })
+            setSavingEdit(false)
+            return
+          }
+          payload.flat_trigger_pct = d.flat_pct
+        } else if (d.mode === 'premium') {
+          payload.premium_slab_300 = d.premium_slab_300
+          payload.premium_slab_200 = d.premium_slab_200
+          payload.premium_slab_100 = d.premium_slab_100
+          payload.premium_slab_lt100 = d.premium_slab_lt100
+        } else {
+          payload.slab_24h = d.slab_24h
+          payload.slab_12h = d.slab_12h
+          payload.slab_6h = d.slab_6h
+          payload.slab_lt6h = d.slab_lt6h
+        }
       }
       await updateSettings(trade.trade_id, payload)
       setToast({ type: 'success', message: 'Settings updated' })
       setEditField(null)
+      setTriggerDraft(null)
     } catch (err) {
       setToast({ type: 'error', message: err.message || 'Update failed' })
     } finally {
@@ -632,9 +729,13 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             <span>Est. Exit Fees</span>
             <span>-${fmtMoney(estExitFees)}</span>
           </div>
+          <div className="flex justify-between text-amber-200/90">
+            <span>Slippage ({fmtMoney(slippagePct)}%)</span>
+            <span>-${fmtMoney(slippageAmount)}</span>
+          </div>
           <div className="flex justify-between text-amber-100">
-            <span>Total Fees</span>
-            <span>-${fmtMoney(totalFees)}</span>
+            <span>Total Deductions</span>
+            <span>-${fmtMoney(totalDeductions)}</span>
           </div>
           <div className="flex justify-between border-t border-gray-600 pt-1 text-base font-semibold text-white">
             <span>NET MTM</span>
@@ -657,9 +758,17 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
         <div className="flex flex-wrap justify-between gap-2 text-xs text-gray-400">
           <span>
             Target: ${fmtMoney(target)}{' '}
-            <span className="text-gray-300">[{displayPct}%]</span>
+            <span className="text-gray-300">
+              [{fmtMoney(tpPctLocked)}% of ${fmtMoney(initialMax)} max]
+            </span>{' '}
+            <span className="text-gray-500">[{displayPct}% reached]</span>
           </span>
-          <span>Stop Loss: ${fmtMoney(stoploss)}</span>
+          <span>
+            Stop Loss: ${fmtMoney(stoploss)}{' '}
+            <span className="text-gray-300">
+              [{fmtMoney(slPctLocked)}% of ${fmtMoney(initialMax)} max]
+            </span>
+          </span>
         </div>
       </div>
 
@@ -720,7 +829,8 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             current={call.current_premium}
             distance={callDistance}
             progressPct={callProgress}
-            triggerPct={triggerPct}
+            triggerPct={callTriggerPct}
+            triggerMode={triggerMode}
           />
           <TriggerWatch
             title="Put Leg Watch"
@@ -730,7 +840,8 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             current={put.current_premium}
             distance={putDistance}
             progressPct={putProgress}
-            triggerPct={triggerPct}
+            triggerPct={putTriggerPct}
+            triggerMode={triggerMode}
           />
         </div>
 
@@ -854,21 +965,28 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             onClick={() => openEdit('target')}
             className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700"
           >
-            Edit Target
+            Edit Target %
           </button>
           <button
             type="button"
             onClick={() => openEdit('sl')}
             className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700"
           >
-            Edit SL
+            Edit SL %
+          </button>
+          <button
+            type="button"
+            onClick={() => openEdit('slippage')}
+            className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700"
+          >
+            Edit Slippage %
           </button>
           <button
             type="button"
             onClick={() => openEdit('trigger')}
             className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700"
           >
-            Edit Trigger %
+            Edit Trigger
           </button>
         </div>
       </div>
@@ -890,27 +1008,67 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
         isOpen={Boolean(editField)}
         title={
           editField === 'target'
-            ? 'Edit Profit Target'
+            ? 'Edit Profit Target %'
             : editField === 'sl'
-              ? 'Edit Stop Loss'
-              : 'Edit Trigger %'
+              ? 'Edit Stop Loss %'
+              : editField === 'slippage'
+                ? 'Edit Slippage %'
+                : 'Edit Trigger Settings'
         }
         message={
-          <label className="block text-left text-sm text-gray-300">
-            New value
-            <input
-              type="number"
-              min={1}
-              step={editField === 'trigger' ? 1 : 1}
-              value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
-              className="mt-2 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-          </label>
+          editField === 'trigger' ? (
+            <div className="text-left">
+              <AdjustmentSlabs
+                compact
+                defaultMode={triggerMode}
+                initialValues={triggerDraft}
+                onChange={setTriggerDraft}
+              />
+            </div>
+          ) : (
+            <label className="block text-left text-sm text-gray-300">
+              {editField === 'target' || editField === 'sl'
+                ? `${editField === 'target' ? 'Target' : 'Stop Loss'} % of initial max ($${fmtMoney(initialMax)})`
+                : 'Slippage % of |Gross MTM| (0–10)'}
+              <input
+                type="number"
+                min={0}
+                max={editField === 'slippage' ? 10 : undefined}
+                step={editField === 'slippage' ? 0.1 : 1}
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                className="mt-2 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+              />
+              {(editField === 'target' || editField === 'sl') && (
+                <span className="mt-2 block text-xs text-gray-400">
+                  = $
+                  {fmtMoney(
+                    initialMax > 0 && Number(editValue) > 0
+                      ? (initialMax * Number(editValue)) / 100
+                      : 0,
+                  )}{' '}
+                  ({fmtMoney(Number(editValue) || 0)}% of $
+                  {fmtMoney(initialMax)} initial max)
+                </span>
+              )}
+              {editField === 'slippage' && (
+                <span className="mt-2 block text-xs text-gray-400">
+                  = $
+                  {fmtMoney(
+                    (Math.abs(grossMtm) * (Number(editValue) || 0)) / 100,
+                  )}{' '}
+                  on current ${fmtMoney(grossMtm)} gross MTM
+                </span>
+              )}
+            </label>
+          )
         }
         confirmLabel={savingEdit ? 'Saving…' : 'Save'}
         confirmDisabled={savingEdit}
-        onCancel={() => setEditField(null)}
+        onCancel={() => {
+          setEditField(null)
+          setTriggerDraft(null)
+        }}
         onConfirm={saveEdit}
       />
 

@@ -50,6 +50,12 @@ class Trade(Base):
     total_premium_collected: Mapped[float] = mapped_column(Float, nullable=False)
     profit_target_usd: Mapped[float] = mapped_column(Float, nullable=False)
     stoploss_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    # Locked at initiation — TP/SL $ are derived from these; never change on adjust
+    initial_max_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tp_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=50.0)
+    sl_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=100.0)
+    # Est. execution slippage applied to Net MTM (and exit decisions)
+    slippage_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=2.0)
     trigger_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -123,6 +129,8 @@ class Adjustment(Base):
     )
     time_remaining_hours: Mapped[float] = mapped_column(Float, nullable=False)
     slab_used: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Audit: ADJUSTED | CLOSED_PROFITABLE (nullable for legacy rows)
+    decision_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     trade: Mapped[Trade] = relationship("Trade", back_populates="adjustments")
 

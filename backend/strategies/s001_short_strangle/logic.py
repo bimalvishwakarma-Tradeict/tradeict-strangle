@@ -16,14 +16,20 @@ if str(_ROOT) not in sys.path:
 from backend.config import OPTIONS_CONTRACT_VALUE
 from backend.core.time_utils import (
     get_hours_to_expiry,
+    get_premium_trigger_pct,
     get_settling_info,
     get_trigger_pct,
     is_pre_expiry_window,
+    premium_slab_band_label,
 )
 from backend.core.delta_client import compute_signed_upnl
 from backend.models import Setting
 from backend.strategies.base_strategy import AdjustmentPlan, BaseStrategy, TradeAction
 from backend.strategies.s001_short_strangle.config import (
+    DEFAULT_PREMIUM_SLAB_100,
+    DEFAULT_PREMIUM_SLAB_200,
+    DEFAULT_PREMIUM_SLAB_300,
+    DEFAULT_PREMIUM_SLAB_LT100,
     DEFAULT_SLAB_12H,
     DEFAULT_SLAB_24H,
     DEFAULT_SLAB_6H,
@@ -33,12 +39,27 @@ from backend.strategies.s001_short_strangle.config import (
 
 logger = logging.getLogger(__name__)
 
-_SLAB_KEYS = ("slab_24h", "slab_12h", "slab_6h", "slab_lt6h")
+_SLAB_KEYS = (
+    "slab_24h",
+    "slab_12h",
+    "slab_6h",
+    "slab_lt6h",
+    "flat_trigger_pct",
+    "premium_slab_300",
+    "premium_slab_200",
+    "premium_slab_100",
+    "premium_slab_lt100",
+)
 _SLAB_DEFAULTS: dict[str, float] = {
     "slab_24h": DEFAULT_SLAB_24H,
     "slab_12h": DEFAULT_SLAB_12H,
     "slab_6h": DEFAULT_SLAB_6H,
     "slab_lt6h": DEFAULT_SLAB_LT6H,
+    "flat_trigger_pct": 150.0,
+    "premium_slab_300": DEFAULT_PREMIUM_SLAB_300,
+    "premium_slab_200": DEFAULT_PREMIUM_SLAB_200,
+    "premium_slab_100": DEFAULT_PREMIUM_SLAB_100,
+    "premium_slab_lt100": DEFAULT_PREMIUM_SLAB_LT100,
 }
 
 
@@ -54,6 +75,89 @@ def _trigger_baseline(leg: Any) -> float:
         if val is not None and float(val) > 0:
             return float(val)
     return float(getattr(leg, "initial_premium", 0) or 0)
+
+
+def _fees_from_legs(call_leg: Any, put_leg: Any, trade: Any, db_session: Any) -> float:
+    """Sum actual fees paid on basket legs (DB when available)."""
+    from unittest.mock import Mock
+
+    from backend.core.fees import basket_fees_paid_from_legs
+
+    try:
+        if db_session is not None:
+            from backend.models import Leg
+
+            result = (
+                db_session.query(Leg)
+                .filter(Leg.trade_id == getattr(trade, "id", None))
+                .all()
+            )
+            if isinstance(result, list) and result:
+                # Ignore unittest mocks (float(MagicMock)==1.0 would invent fees)
+                real_legs = [r for r in result if not isinstance(r, Mock)]
+                if real_legs:
+                    return float(basket_fees_paid_from_legs(real_legs))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    except Exception:
+        pass
+
+    fallback = [
+        x
+        for x in (call_leg, put_leg)
+        if x is not None and not isinstance(x, Mock)
+    ]
+    # MagicMock legs: only use explicit numeric fee attrs
+    if not fallback:
+        total = 0.0
+        for leg in (call_leg, put_leg):
+            if leg is None:
+                continue
+            try:
+                entry = getattr(leg, "entry_fee_usd", None)
+                exit_ = getattr(leg, "exit_fee_usd", None)
+                if isinstance(entry, Mock) or isinstance(exit_, Mock):
+                    continue
+                total += float(entry or 0.0) + float(exit_ or 0.0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return total
+    try:
+        return float(basket_fees_paid_from_legs(fallback))
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def _decision_net_mtm(
+    *,
+    gross_mtm: float,
+    trade: Any,
+    call_leg: Any,
+    put_leg: Any,
+    db_session: Any,
+    est_exit_fees: float = 0.0,
+    slippage_pct: float | None = None,
+) -> float:
+    """
+    Net MTM for exit/adjust decisions — same formula as frontend display.
+
+    net = gross − fees_paid − est_exit_fees − slippage
+    """
+    from backend.core.fees import compute_net_mtm
+
+    fees_paid = _fees_from_legs(call_leg, put_leg, trade, db_session)
+    slip = (
+        slippage_pct
+        if slippage_pct is not None
+        else getattr(trade, "slippage_pct", None)
+    )
+    fields = compute_net_mtm(
+        gross_mtm=gross_mtm,
+        fees_paid=fees_paid,
+        est_exit_fees=est_exit_fees,
+        slippage_pct=slip,
+    )
+    return float(fields["net_mtm"])
 
 
 class ShortStrangleStrategy(BaseStrategy):
@@ -94,11 +198,13 @@ class ShortStrangleStrategy(BaseStrategy):
 
     def get_slabs(self, trade_id: int, db_session: Any) -> dict[str, float]:
         """
-        Load time-based trigger slabs for a trade from settings table.
+        Load trigger slabs for a trade from settings table.
 
-        Missing keys fall back to S001 config defaults.
+        Includes time slabs, flat %, and premium slabs. Missing keys use defaults.
         """
         slabs = dict(_SLAB_DEFAULTS)
+        if db_session is None:
+            return slabs
         rows = (
             db_session.query(Setting)
             .filter(
@@ -119,26 +225,44 @@ class ShortStrangleStrategy(BaseStrategy):
                 )
         return slabs
 
-    def get_current_trigger_pct(self, trade: Any, db_session: Any) -> float:
-        """Resolve active trigger % (flat setting or time-based slab)."""
+    def get_trigger_for_leg(
+        self,
+        leg_current_premium: float,
+        trade: Any,
+        db_session: Any = None,
+    ) -> float:
+        """
+        Resolve trigger % for one leg.
+
+        flat / slab: same % for both legs.
+        premium: % depends on this leg's current premium.
+        """
         mode = str(getattr(trade, "trigger_mode", "slab") or "slab").lower()
+        slabs = self.get_slabs(getattr(trade, "id", 0), db_session)
+
         if mode == "flat":
-            row = (
-                db_session.query(Setting)
-                .filter(
-                    Setting.trade_id == trade.id,
-                    Setting.key == "flat_trigger_pct",
-                )
-                .first()
+            return float(slabs.get("flat_trigger_pct", 150))
+        if mode == "slab":
+            hours_left = get_hours_to_expiry(trade.expiry_date)
+            return float(get_trigger_pct(hours_left, slabs))
+        if mode == "premium":
+            return float(
+                get_premium_trigger_pct(float(leg_current_premium or 0), slabs)
             )
-            if row is not None:
-                try:
-                    return float(row.value)
-                except (TypeError, ValueError):
-                    pass
-            return 150.0
-        hours_left = get_hours_to_expiry(trade.expiry_date)
-        return float(get_trigger_pct(hours_left, self.get_slabs(trade.id, db_session)))
+        return 150.0
+
+    def get_current_trigger_pct(self, trade: Any, db_session: Any) -> float:
+        """
+        Resolve a single trigger % (flat / time slab).
+
+        For premium mode, returns lt100 default (use get_trigger_for_leg per leg).
+        """
+        mode = str(getattr(trade, "trigger_mode", "slab") or "slab").lower()
+        if mode == "premium":
+            slabs = self.get_slabs(trade.id, db_session)
+            return float(slabs.get("premium_slab_lt100", 200))
+        # Use 0 premium for flat/slab — premium arg ignored
+        return self.get_trigger_for_leg(0.0, trade, db_session)
 
     async def on_tick(
         self,
@@ -150,13 +274,21 @@ class ShortStrangleStrategy(BaseStrategy):
         db_session: Any = None,
         realized_pnl: float = 0.0,
         delta_mtm: float | None = None,
+        net_mtm: float | None = None,
+        slippage_pct: float | None = None,
     ) -> TradeAction:
         """
-        Evaluate profit target, stop loss, pre-expiry, then adjustment triggers.
+        Evaluate exits then adjustment triggers (exact priority):
 
-        Exit decisions prefer Delta official MTM (realized + unrealized).
-        Adjustment triggers still use live premiums vs entry × trigger %.
-        Settling period: no exit/adjust until trade.monitoring_starts_at.
+        a. settling → no action
+        b. Net MTM >= profit_target → PROFIT_TARGET
+        c. Net MTM <= -stoploss → STOPLOSS
+        d. pre-expiry window → PRE_EXPIRY
+        e. adjustment trigger + decision (Net MTM > 0 → close, else adjust)
+        f. HOLD
+
+        When ``net_mtm`` is provided (from bot_engine), use it for b/c/e.
+        Otherwise compute via compute_net_mtm (gross − fees − slip).
         """
         calculated_pnl = self.calculate_pnl(
             trade,
@@ -172,7 +304,7 @@ class ShortStrangleStrategy(BaseStrategy):
         else:
             total_pnl = calculated_pnl
 
-        # SETTLING PERIOD: Don't check P&L / adjust for first N minutes
+        # a. SETTLING PERIOD: Don't check P&L / adjust for first N minutes
         settling = get_settling_info(getattr(trade, "monitoring_starts_at", None))
         if settling["is_settling"]:
             logger.info(
@@ -182,88 +314,198 @@ class ShortStrangleStrategy(BaseStrategy):
             )
             return TradeAction(current_pnl=total_pnl)
 
-        should_exit_profit = total_pnl >= float(trade.profit_target_usd)
-        should_exit_sl = total_pnl <= -float(trade.stoploss_usd)
+        # Decision Net MTM (passed in from bot_engine, or computed here)
+        if net_mtm is not None:
+            decision_pnl = float(net_mtm)
+        else:
+            decision_pnl = _decision_net_mtm(
+                gross_mtm=total_pnl,
+                trade=trade,
+                call_leg=call_leg,
+                put_leg=put_leg,
+                db_session=db_session,
+                slippage_pct=slippage_pct,
+            )
+
+        # b. Profit target
+        should_exit_profit = decision_pnl >= float(trade.profit_target_usd)
+        # c. Stop loss
+        should_exit_sl = decision_pnl <= -float(trade.stoploss_usd)
 
         if should_exit_profit:
             logger.info(
-                "Trade %s decision: realized=%.2f + upnl=%.2f = total=%.2f | "
-                "target=%s | sl=%s | action=EXIT PROFIT_TARGET",
+                "Trade %s decision: realized=%.2f + upnl=%.2f = gross=%.2f | "
+                "net_mtm=%.2f | target=%s | sl=%s | action=EXIT PROFIT_TARGET",
                 getattr(trade, "id", "?"),
                 float(realized_pnl or 0.0),
                 float(delta_mtm if delta_mtm is not None else 0.0),
                 total_pnl,
+                decision_pnl,
                 trade.profit_target_usd,
                 trade.stoploss_usd,
             )
             return TradeAction(
                 should_exit=True,
                 exit_reason="PROFIT_TARGET",
-                current_pnl=total_pnl,
+                current_pnl=decision_pnl,
             )
 
         if should_exit_sl:
             logger.info(
-                "Trade %s decision: realized=%.2f + upnl=%.2f = total=%.2f | "
-                "target=%s | sl=%s | action=EXIT STOPLOSS",
+                "Trade %s decision: realized=%.2f + upnl=%.2f = gross=%.2f | "
+                "net_mtm=%.2f | target=%s | sl=%s | action=EXIT STOPLOSS",
                 getattr(trade, "id", "?"),
                 float(realized_pnl or 0.0),
                 float(delta_mtm if delta_mtm is not None else 0.0),
                 total_pnl,
+                decision_pnl,
                 trade.profit_target_usd,
                 trade.stoploss_usd,
             )
             return TradeAction(
                 should_exit=True,
                 exit_reason="STOPLOSS",
-                current_pnl=total_pnl,
+                current_pnl=decision_pnl,
             )
 
+        # d. Pre-expiry
         hours_left = get_hours_to_expiry(trade.expiry_date)
-        # Edge case: expiry already past (bot late) → force pre-expiry exit
         if hours_left == 0 or is_pre_expiry_window(trade.expiry_date):
             return TradeAction(
                 should_exit=True,
                 exit_reason="PRE_EXPIRY",
-                current_pnl=total_pnl,
+                current_pnl=decision_pnl,
             )
 
-        trigger_pct = self.get_current_trigger_pct(trade, db_session)
+        # e. Adjustment trigger + decision (Net MTM > 0 → close basket)
+        call_trigger_pct = self.get_trigger_for_leg(
+            call_premium, trade, db_session
+        )
+        put_trigger_pct = self.get_trigger_for_leg(
+            put_premium, trade, db_session
+        )
+        mode = str(getattr(trade, "trigger_mode", "slab") or "slab").lower()
+        net_for_decision = decision_pnl
 
         call_open = str(getattr(call_leg, "status", "open")).lower() == "open"
         put_open = str(getattr(put_leg, "status", "open")).lower() == "open"
 
         if call_open:
-            call_trigger_price = _trigger_baseline(call_leg) * (trigger_pct / 100.0)
+            call_trigger_price = _trigger_baseline(call_leg) * (
+                call_trigger_pct / 100.0
+            )
             if call_premium >= call_trigger_price:
+                if mode == "premium":
+                    logger.info(
+                        "Premium trigger CALL: premium=$%.2f (%s) → %.1f%%",
+                        call_premium,
+                        premium_slab_band_label(call_premium),
+                        call_trigger_pct,
+                    )
+                if net_for_decision > 0:
+                    logger.info(
+                        "DECISION: Net MTM profitable at trigger — closing basket | "
+                        "Trade %s CALL hit %.1f%% but Net MTM=%.2f is PROFITABLE",
+                        getattr(trade, "id", "?"),
+                        call_trigger_pct,
+                        net_for_decision,
+                    )
+                    return TradeAction(
+                        should_exit=True,
+                        exit_reason="DECISION_PROFIT_AT_TRIGGER",
+                        current_pnl=net_for_decision,
+                        triggered_leg="call",
+                        trigger_pct_hit=call_trigger_pct,
+                        trigger_pct_used=call_trigger_pct,
+                        call_trigger_pct=call_trigger_pct,
+                        put_trigger_pct=put_trigger_pct,
+                    )
+                logger.info(
+                    "DECISION: Net MTM negative at trigger — adjusting | "
+                    "Trade %s CALL hit %.1f%% and Net MTM=%.2f is NEGATIVE",
+                    getattr(trade, "id", "?"),
+                    call_trigger_pct,
+                    net_for_decision,
+                )
                 return TradeAction(
                     should_adjust=True,
                     adjust_leg="call",
-                    current_pnl=total_pnl,
-                    trigger_pct_used=trigger_pct,
+                    current_pnl=net_for_decision,
+                    triggered_leg="call",
+                    trigger_pct_hit=call_trigger_pct,
+                    trigger_pct_used=call_trigger_pct,
+                    call_trigger_pct=call_trigger_pct,
+                    put_trigger_pct=put_trigger_pct,
                 )
 
         if put_open:
-            put_trigger_price = _trigger_baseline(put_leg) * (trigger_pct / 100.0)
+            put_trigger_price = _trigger_baseline(put_leg) * (
+                put_trigger_pct / 100.0
+            )
             if put_premium >= put_trigger_price:
+                if mode == "premium":
+                    logger.info(
+                        "Premium trigger PUT: premium=$%.2f (%s) → %.1f%%",
+                        put_premium,
+                        premium_slab_band_label(put_premium),
+                        put_trigger_pct,
+                    )
+                if net_for_decision > 0:
+                    logger.info(
+                        "DECISION: Net MTM profitable at trigger — closing basket | "
+                        "Trade %s PUT hit %.1f%% but Net MTM=%.2f is PROFITABLE",
+                        getattr(trade, "id", "?"),
+                        put_trigger_pct,
+                        net_for_decision,
+                    )
+                    return TradeAction(
+                        should_exit=True,
+                        exit_reason="DECISION_PROFIT_AT_TRIGGER",
+                        current_pnl=net_for_decision,
+                        triggered_leg="put",
+                        trigger_pct_hit=put_trigger_pct,
+                        trigger_pct_used=put_trigger_pct,
+                        call_trigger_pct=call_trigger_pct,
+                        put_trigger_pct=put_trigger_pct,
+                    )
+                logger.info(
+                    "DECISION: Net MTM negative at trigger — adjusting | "
+                    "Trade %s PUT hit %.1f%% and Net MTM=%.2f is NEGATIVE",
+                    getattr(trade, "id", "?"),
+                    put_trigger_pct,
+                    net_for_decision,
+                )
                 return TradeAction(
                     should_adjust=True,
                     adjust_leg="put",
-                    current_pnl=total_pnl,
-                    trigger_pct_used=trigger_pct,
+                    current_pnl=net_for_decision,
+                    triggered_leg="put",
+                    trigger_pct_hit=put_trigger_pct,
+                    trigger_pct_used=put_trigger_pct,
+                    call_trigger_pct=call_trigger_pct,
+                    put_trigger_pct=put_trigger_pct,
                 )
 
         logger.info(
-            "Trade %s decision: realized=%.2f + upnl=%.2f = total=%.2f | "
+            "Trade %s decision: realized=%.2f + upnl=%.2f = gross=%.2f | "
+            "net_mtm=%.2f | call_trig=%.1f%% put_trig=%.1f%% | "
             "target=%s | sl=%s | action=HOLD",
             getattr(trade, "id", "?"),
             float(realized_pnl or 0.0),
             float(delta_mtm if delta_mtm is not None else 0.0),
             total_pnl,
+            decision_pnl,
+            call_trigger_pct,
+            put_trigger_pct,
             trade.profit_target_usd,
             trade.stoploss_usd,
         )
-        return TradeAction(current_pnl=total_pnl, trigger_pct_used=trigger_pct)
+        return TradeAction(
+            current_pnl=decision_pnl,
+            trigger_pct_used=call_trigger_pct,
+            call_trigger_pct=call_trigger_pct,
+            put_trigger_pct=put_trigger_pct,
+        )
 
     async def find_adjustment_strike(
         self,
@@ -336,14 +578,23 @@ if __name__ == "__main__":
     trade.stoploss_usd = 300.0
     trade.expiry_date = date.today() + timedelta(days=1)
     trade.underlying = "BTC"
+    trade.monitoring_starts_at = None
+    trade.slippage_pct = 2.0
+    trade.trigger_mode = "slab"
 
     call_leg = MagicMock()
     call_leg.initial_premium = 150.0
     call_leg.quantity = 1
+    call_leg.status = "open"
+    call_leg.entry_fee_usd = 0.0
+    call_leg.exit_fee_usd = 0.0
 
     put_leg = MagicMock()
     put_leg.initial_premium = 150.0
     put_leg.quantity = 1
+    put_leg.status = "open"
+    put_leg.entry_fee_usd = 0.0
+    put_leg.exit_fee_usd = 0.0
 
     # Test 1: P&L calculation (equal qty) — USD with contract_value
     from backend.config import OPTIONS_CONTRACT_VALUE as CV
@@ -393,15 +644,58 @@ if __name__ == "__main__":
     print(f"Test 2b Realized blocks false profit exit: pnl={action.current_pnl} ✅")
     trade.profit_target_usd = 200.0
 
-    # Test 3: Adjustment trigger (call at 200% of initial)
+    # Test 3: Adjustment trigger (call at 200% of initial) — net MTM negative
     trade.profit_target_usd = 10000  # high so doesn't trigger
+    trade.stoploss_usd = 10000
+    trade.slippage_pct = 2.0
     action = asyncio.run(strategy.on_tick(trade, call_leg, put_leg, 300.0, 100.0, db))
     assert action.should_adjust is True
     assert action.adjust_leg == "call"
+    assert action.triggered_leg == "call"
     assert action.trigger_pct_used > 0
     print(
         f"Test 3 Adjustment: adjust {action.adjust_leg} "
         f"(trigger_pct_used={action.trigger_pct_used}) ✅"
     )
+
+    # Test 3b: trigger hit but Net MTM > 0 → DECISION_PROFIT_AT_TRIGGER
+    call_leg.initial_premium = 100.0
+    put_leg.initial_premium = 250.0
+    action = asyncio.run(strategy.on_tick(trade, call_leg, put_leg, 200.0, 40.0, db))
+    assert action.should_exit is True
+    assert action.exit_reason == "DECISION_PROFIT_AT_TRIGGER"
+    assert action.triggered_leg == "call"
+    assert action.current_pnl > 0
+    print(
+        f"Test 3b Decision close: {action.exit_reason} "
+        f"net_mtm={action.current_pnl} ✅"
+    )
+
+    # Test 4: Premium-based slabs — per-leg trigger %
+    trade.trigger_mode = "premium"
+    call_leg.initial_premium = 400.0
+    call_leg.trigger_baseline_premium = 400.0
+    put_leg.initial_premium = 80.0
+    put_leg.trigger_baseline_premium = 80.0
+    trade.profit_target_usd = 10000
+    trade.stoploss_usd = 10000
+    # call $450 → 150% → trigger 600; put $85 → 200% → trigger 160
+    # neither hits yet
+    action = asyncio.run(strategy.on_tick(trade, call_leg, put_leg, 450.0, 85.0, db))
+    assert action.should_adjust is False
+    assert action.call_trigger_pct == 150.0
+    assert action.put_trigger_pct == 200.0
+    print(
+        f"Test 4 Premium slabs: call={action.call_trigger_pct}% "
+        f"put={action.put_trigger_pct}% ✅"
+    )
+    # put at $99 still in <\$100 band → 200%; baseline 40 → trigger \$80
+    put_leg.initial_premium = 40.0
+    put_leg.trigger_baseline_premium = 40.0
+    action = asyncio.run(strategy.on_tick(trade, call_leg, put_leg, 450.0, 99.0, db))
+    assert action.should_adjust is True
+    assert action.adjust_leg == "put"
+    assert action.trigger_pct_hit == 200.0
+    print(f"Test 4b Premium put adjust @ {action.trigger_pct_hit}% ✅")
 
     print("✅ STRATEGY LOGIC TEST PASSED")

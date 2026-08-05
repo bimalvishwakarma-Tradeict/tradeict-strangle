@@ -229,10 +229,11 @@ async def test_5_adjustment_trigger_logic() -> None:
         }
     )
 
-    # A: call at 200% of 150 → adjust call
+    # A: call at 200% of 150 → adjust call (net MTM negative)
     action_a = await strategy.on_tick(trade, call_leg, put_leg, 300.0, 100.0, db)
     assert action_a.should_adjust is True
     assert action_a.adjust_leg == "call"
+    assert action_a.triggered_leg == "call"
     print(f"Scenario A: adjust={action_a.adjust_leg} ✅")
 
     # B: put at 200% → adjust put
@@ -247,12 +248,31 @@ async def test_5_adjustment_trigger_logic() -> None:
     assert action_c.should_exit is False
     print(f"Scenario C: no action (pnl={action_c.current_pnl}) ✅")
 
-    # D: pnl >= profit target → PROFIT_TARGET exit
-    # (150-50)+(150-50)=200 >= 200
+    # D: pnl >= profit target → PROFIT_TARGET exit (USD)
+    # (150-50)+(150-50)=200 pts × 0.001 = $0.20; target $0.15
+    trade.profit_target_usd = 0.15
     action_d = await strategy.on_tick(trade, call_leg, put_leg, 50.0, 50.0, db)
     assert action_d.should_exit is True
     assert action_d.exit_reason == "PROFIT_TARGET"
     print(f"Scenario D: exit={action_d.exit_reason} pnl={action_d.current_pnl} ✅")
+    trade.profit_target_usd = 200.0
+
+    # E: trigger hit but Net MTM > 0 → close basket (decision)
+    # call entry 100 @ 200 (200%), put entry 250 @ 40 → gross positive
+    call_e = SimpleNamespace(initial_premium=100.0, quantity=1, status="open")
+    put_e = SimpleNamespace(initial_premium=250.0, quantity=1, status="open")
+    trade.profit_target_usd = 10000.0
+    trade.stoploss_usd = 10000.0
+    trade.slippage_pct = 2.0
+    action_e = await strategy.on_tick(trade, call_e, put_e, 200.0, 40.0, db)
+    assert action_e.should_exit is True
+    assert action_e.exit_reason == "DECISION_PROFIT_AT_TRIGGER"
+    assert action_e.triggered_leg == "call"
+    assert action_e.current_pnl > 0
+    print(
+        f"Scenario E: decision close leg={action_e.triggered_leg} "
+        f"net_mtm={action_e.current_pnl} ✅"
+    )
 
 
 async def test_6_time_utils() -> None:

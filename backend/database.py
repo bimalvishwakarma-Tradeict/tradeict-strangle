@@ -54,7 +54,6 @@ def _migrate_schema() -> None:
                 conn.execute(
                     text("ALTER TABLE trades ADD COLUMN basket_number INTEGER")
                 )
-                # Backfill sequential basket numbers per account (by id order)
                 conn.execute(
                     text(
                         """
@@ -69,6 +68,69 @@ def _migrate_schema() -> None:
                         """
                     )
                 )
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "initial_max_profit" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE trades ADD COLUMN initial_max_profit FLOAT")
+                )
+        if "tp_pct" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE trades ADD COLUMN tp_pct FLOAT DEFAULT 50.0")
+                )
+                conn.execute(
+                    text("UPDATE trades SET tp_pct = 50.0 WHERE tp_pct IS NULL")
+                )
+        if "sl_pct" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE trades ADD COLUMN sl_pct FLOAT DEFAULT 100.0")
+                )
+                conn.execute(
+                    text("UPDATE trades SET sl_pct = 100.0 WHERE sl_pct IS NULL")
+                )
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "slippage_pct" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN slippage_pct FLOAT DEFAULT 2.0"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE trades SET slippage_pct = 2.0 WHERE slippage_pct IS NULL"
+                    )
+                )
+        # Preserve existing TP/SL $: backfill max from target / (tp_pct/100)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE trades
+                    SET tp_pct = COALESCE(tp_pct, 50.0),
+                        sl_pct = COALESCE(sl_pct, 100.0)
+                    WHERE tp_pct IS NULL OR sl_pct IS NULL
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE trades
+                    SET initial_max_profit = CASE
+                        WHEN profit_target_usd IS NOT NULL
+                             AND COALESCE(tp_pct, 50.0) > 0
+                        THEN profit_target_usd / (COALESCE(tp_pct, 50.0) / 100.0)
+                        ELSE NULL
+                    END
+                    WHERE initial_max_profit IS NULL
+                      AND profit_target_usd IS NOT NULL
+                      AND profit_target_usd > 0
+                    """
+                )
+            )
     if "legs" in tables:
         leg_cols = {col["name"] for col in inspector.get_columns("legs")}
         if "trigger_premium" not in leg_cols:
@@ -122,6 +184,15 @@ def _migrate_schema() -> None:
             with engine.begin() as conn:
                 conn.execute(
                     text("ALTER TABLE legs ADD COLUMN exit_order_id VARCHAR(100)")
+                )
+    if "adjustments" in tables:
+        adj_cols = {col["name"] for col in inspector.get_columns("adjustments")}
+        if "decision_type" not in adj_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE adjustments ADD COLUMN decision_type VARCHAR(40)"
+                    )
                 )
 
 

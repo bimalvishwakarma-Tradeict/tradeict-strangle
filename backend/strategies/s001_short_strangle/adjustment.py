@@ -249,6 +249,7 @@ class AdjustmentExecutor:
                 timestamp=now_utc,
                 time_remaining_hours=hours_left,
                 slab_used=self._slab_label(hours_left),
+                decision_type="ADJUSTED",
             )
             db_session.add(adjustment)
             db_session.commit()

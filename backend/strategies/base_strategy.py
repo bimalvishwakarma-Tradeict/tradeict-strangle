@@ -17,6 +17,10 @@ class TradeAction:
     adjust_leg: str | None = None  # "call" or "put"
     current_pnl: float = 0.0
     trigger_pct_used: float = 0.0  # slab % that applied this tick (for logs)
+    triggered_leg: str | None = None  # which leg hit trigger (decision path)
+    trigger_pct_hit: float = 0.0  # trigger % when decision fired
+    call_trigger_pct: float = 0.0  # per-leg (premium mode may differ)
+    put_trigger_pct: float = 0.0
 
 
 @dataclass
@@ -82,11 +86,14 @@ class BaseStrategy(ABC):
         db_session: Any = None,
         realized_pnl: float = 0.0,
         delta_mtm: float | None = None,
+        net_mtm: float | None = None,
+        slippage_pct: float | None = None,
     ) -> TradeAction:
         """Evaluate exit / adjustment triggers for one monitoring tick.
 
-        When delta_mtm is provided (official Delta UPNL), exits use
-        realized + delta_mtm. Otherwise fall back to calculated short-option PnL.
+        Prefer passed ``net_mtm`` (gross − fees − slip) for TP/SL/decision.
+        When delta_mtm is provided without net_mtm, gross = realized + delta_mtm
+        then net is computed inside the strategy.
         """
 
     @abstractmethod

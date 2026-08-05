@@ -187,9 +187,7 @@ export function useTrades() {
         const net =
           msg.net_mtm != null
             ? Number(msg.net_mtm)
-            : gross != null && feesPaid != null && estExit != null
-              ? Number(gross) - Number(feesPaid || 0) - Number(estExit || 0)
-              : existing.net_mtm
+            : existing.net_mtm
 
         next.set(msg.trade_id, {
           ...existing,
@@ -236,6 +234,20 @@ export function useTrades() {
             msg.current_trigger_pct != null
               ? Number(msg.current_trigger_pct)
               : existing.current_trigger_pct,
+          call_trigger_pct:
+            msg.call_trigger_pct != null
+              ? Number(msg.call_trigger_pct)
+              : existing.call_trigger_pct,
+          put_trigger_pct:
+            msg.put_trigger_pct != null
+              ? Number(msg.put_trigger_pct)
+              : existing.put_trigger_pct,
+          trigger_mode: msg.trigger_mode ?? existing.trigger_mode,
+          premium_slab_300: msg.premium_slab_300 ?? existing.premium_slab_300,
+          premium_slab_200: msg.premium_slab_200 ?? existing.premium_slab_200,
+          premium_slab_100: msg.premium_slab_100 ?? existing.premium_slab_100,
+          premium_slab_lt100:
+            msg.premium_slab_lt100 ?? existing.premium_slab_lt100,
           leg_history: msg.leg_history || existing.leg_history,
           // Server MTM only — never undefined-overwrite
           call_upnl: callUpnl,
@@ -256,6 +268,18 @@ export function useTrades() {
             msg.total_expected_fees != null
               ? Number(msg.total_expected_fees)
               : existing.total_expected_fees,
+          slippage_pct:
+            msg.slippage_pct != null
+              ? Number(msg.slippage_pct)
+              : existing.slippage_pct,
+          slippage_amount:
+            msg.slippage_amount != null
+              ? Number(msg.slippage_amount)
+              : existing.slippage_amount,
+          total_deductions:
+            msg.total_deductions != null
+              ? Number(msg.total_deductions)
+              : existing.total_deductions,
           last_mtm_update: msg.last_mtm_update ?? existing.last_mtm_update,
           underlying_price:
             Number(msg.underlying_price) > 0
@@ -325,6 +349,9 @@ export function useTrades() {
           fees_paid: trade.fees_paid,
           est_exit_fees: trade.est_exit_fees,
           total_expected_fees: trade.total_expected_fees,
+          slippage_pct: trade.slippage_pct,
+          slippage_amount: trade.slippage_amount,
+          total_deductions: trade.total_deductions,
           last_mtm_update: trade.last_mtm_update,
         })
         return next

@@ -56,6 +56,7 @@ class LegType(str, Enum):
 class TriggerMode(str, Enum):
     FLAT = "flat"
     SLAB = "slab"
+    PREMIUM = "premium"
 
 
 class ExitReason(str, Enum):
@@ -64,3 +65,4 @@ class ExitReason(str, Enum):
     PRE_EXPIRY = "PRE_EXPIRY"
     MANUAL_EMERGENCY = "MANUAL_EMERGENCY"
     MANUAL_LEG_CLOSE = "MANUAL_LEG_CLOSE"
+    DECISION_PROFIT_AT_TRIGGER = "DECISION_PROFIT_AT_TRIGGER"

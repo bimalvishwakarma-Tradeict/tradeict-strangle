@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from backend.config import (
     ExitReason,
+    OPTIONS_CONTRACT_VALUE,
     SETTLING_PERIOD_AFTER_PLACE_MINUTES,
     TradeStatus,
     TriggerMode,
@@ -300,10 +301,21 @@ def _validate_initiate_common(payload: TradeInitiateRequest) -> tuple[str, date]
             status_code=400,
             detail=f"Unsupported underlying. Use one of {SUPPORTED_UNDERLYINGS}",
         )
-    if payload.trigger_mode not in {TriggerMode.FLAT.value, TriggerMode.SLAB.value}:
-        raise HTTPException(status_code=400, detail="trigger_mode must be 'flat' or 'slab'")
+    if payload.trigger_mode not in {
+        TriggerMode.FLAT.value,
+        TriggerMode.SLAB.value,
+        TriggerMode.PREMIUM.value,
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="trigger_mode must be 'flat', 'slab', or 'premium'",
+        )
     if payload.quantity <= 0:
         raise HTTPException(status_code=400, detail="quantity must be > 0")
+    if float(getattr(payload, "tp_pct", 0) or 0) <= 0:
+        raise HTTPException(status_code=400, detail="tp_pct must be > 0")
+    if float(getattr(payload, "sl_pct", 0) or 0) <= 0:
+        raise HTTPException(status_code=400, detail="sl_pct must be > 0")
     try:
         expiry = date.fromisoformat(payload.expiry_date)
     except ValueError as exc:
@@ -388,7 +400,19 @@ async def _persist_strangle_trade(
 ) -> tuple[Trade, Leg, Leg]:
     now_utc = datetime.now(timezone.utc)
     qty = int(payload.quantity)
+    # Premium points collected (display / accounting)
     total_premium = (call_fill_price + put_fill_price) * qty
+    # Locked USD max profit — same scale as Delta MTM (× contract value)
+    initial_max_profit = round(
+        (float(call_fill_price) + float(put_fill_price))
+        * qty
+        * float(OPTIONS_CONTRACT_VALUE),
+        6,
+    )
+    tp_pct = float(getattr(payload, "tp_pct", None) or 50.0)
+    sl_pct = float(getattr(payload, "sl_pct", None) or 100.0)
+    profit_target_usd = round(initial_max_profit * tp_pct / 100.0, 2)
+    stoploss_usd = round(initial_max_profit * sl_pct / 100.0, 2)
     basket_no = next_basket_number(db, account.id)
 
     trade = Trade(
@@ -398,8 +422,12 @@ async def _persist_strangle_trade(
         status=TradeStatus.ACTIVE.value,
         entry_time=now_utc,
         total_premium_collected=total_premium,
-        profit_target_usd=float(payload.profit_target_usd),
-        stoploss_usd=float(payload.stoploss_usd),
+        initial_max_profit=initial_max_profit,
+        tp_pct=tp_pct,
+        sl_pct=sl_pct,
+        profit_target_usd=profit_target_usd,
+        stoploss_usd=stoploss_usd,
+        slippage_pct=float(getattr(payload, "slippage_pct", None) or 2.0),
         trigger_mode=payload.trigger_mode,
         notes=None,
         realized_pnl=0.0,
@@ -459,6 +487,15 @@ async def _persist_strangle_trade(
     }
     if payload.flat_trigger_pct is not None:
         settings_map["flat_trigger_pct"] = payload.flat_trigger_pct
+    if payload.trigger_mode == TriggerMode.PREMIUM.value:
+        settings_map.update(
+            {
+                "premium_slab_300": getattr(payload, "premium_slab_300", 150.0),
+                "premium_slab_200": getattr(payload, "premium_slab_200", 160.0),
+                "premium_slab_100": getattr(payload, "premium_slab_100", 180.0),
+                "premium_slab_lt100": getattr(payload, "premium_slab_lt100", 200.0),
+            }
+        )
     for key, value in settings_map.items():
         db.add(Setting(trade_id=trade.id, key=key, value=str(value)))
 
@@ -679,8 +716,11 @@ async def initiate_trade(
                 "put_strike": payload.put_strike,
                 "quantity": payload.quantity,
                 "total_premium_collected": total_prem * int(payload.quantity),
-                "profit_target_usd": payload.profit_target_usd,
-                "stoploss_usd": payload.stoploss_usd,
+                "initial_max_profit": float(getattr(trade, "initial_max_profit", 0) or 0),
+                "tp_pct": float(getattr(trade, "tp_pct", 50) or 50),
+                "sl_pct": float(getattr(trade, "sl_pct", 100) or 100),
+                "profit_target_usd": float(trade.profit_target_usd),
+                "stoploss_usd": float(trade.stoploss_usd),
             },
         }
     except HTTPException:
@@ -966,13 +1006,28 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
         )
 
         trigger_pct = bot_engine.strategy.get_current_trigger_pct(state.trade, db)
+        call_trig_pct = bot_engine.strategy.get_trigger_for_leg(
+            call_prem, state.trade, db
+        )
+        put_trig_pct = bot_engine.strategy.get_trigger_for_leg(
+            put_prem, state.trade, db
+        )
+        premium_slabs = None
+        if str(getattr(state.trade, "trigger_mode", "") or "").lower() == "premium":
+            premium_slabs = bot_engine.strategy.get_slabs(state.trade.id, db)
         if client is not None and call_open and put_open:
             try:
                 await bot_engine._estimate_replacements(state, call_prem, put_prem)
             except Exception:
                 pass
         plan = bot_engine.build_bot_plan_fields(
-            state, call_prem, put_prem, float(trigger_pct)
+            state,
+            call_prem,
+            put_prem,
+            float(trigger_pct),
+            call_trigger_pct=float(call_trig_pct),
+            put_trigger_pct=float(put_trig_pct),
+            premium_slabs=premium_slabs,
         )
 
         adj_count = (
@@ -1039,7 +1094,15 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
         fees_paid = float(fee_fields["fees_paid"])
         est_exit = float(fee_fields["est_exit_fees"])
         total_fees = float(fee_fields["total_expected_fees"])
-        net_mtm = gross_mtm - fees_paid - est_exit
+        from backend.core.fees import compute_net_mtm
+
+        slip_fields = compute_net_mtm(
+            gross_mtm=gross_mtm,
+            fees_paid=fees_paid,
+            est_exit_fees=est_exit,
+            slippage_pct=getattr(state.trade, "slippage_pct", None),
+        )
+        net_mtm = float(slip_fields["net_mtm"])
 
         leg_history = _basket_leg_history(db, state.trade_id)
         open_count = sum(1 for x in (call_open, put_open) if x)
@@ -1077,6 +1140,9 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "fees_paid": fees_paid,
                 "est_exit_fees": est_exit,
                 "total_expected_fees": total_fees,
+                "slippage_pct": float(slip_fields["slippage_pct"]),
+                "slippage_amount": float(slip_fields["slippage_amount"]),
+                "total_deductions": float(slip_fields["total_deductions"]),
                 "net_mtm": net_mtm,
                 "underlying_price": (
                     float(fee_fields.get("btc_index_for_fees") or 0)
@@ -1089,6 +1155,12 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "put_est_exit_fee": fee_fields.get("put_est_exit_fee"),
                 "profit_target_usd": target,
                 "stoploss_usd": float(state.trade.stoploss_usd),
+                "initial_max_profit": float(
+                    getattr(state.trade, "initial_max_profit", None) or 0
+                )
+                or None,
+                "tp_pct": float(getattr(state.trade, "tp_pct", None) or 50.0),
+                "sl_pct": float(getattr(state.trade, "sl_pct", None) or 100.0),
                 "pnl_pct_of_target": round(pnl_pct, 2),
                 "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
                 "adjustment_count": adj_count,
@@ -1563,29 +1635,122 @@ async def update_trade_settings(
         raise HTTPException(status_code=400, detail="No settings provided")
 
     updated: dict[str, Any] = {}
-    if "profit_target_usd" in updates and updates["profit_target_usd"] is not None:
-        trade.profit_target_usd = float(updates["profit_target_usd"])
+    state = bot_engine.position_tracker.get(trade_id)
+
+    def _sync_tracker_money() -> None:
+        if state is None:
+            return
+        state.trade.profit_target_usd = trade.profit_target_usd
+        state.trade.stoploss_usd = trade.stoploss_usd
+        if hasattr(state.trade, "tp_pct"):
+            state.trade.tp_pct = trade.tp_pct
+        if hasattr(state.trade, "sl_pct"):
+            state.trade.sl_pct = trade.sl_pct
+        if hasattr(state.trade, "initial_max_profit"):
+            state.trade.initial_max_profit = trade.initial_max_profit
+        if hasattr(state.trade, "slippage_pct"):
+            state.trade.slippage_pct = trade.slippage_pct
+
+    if "tp_pct" in updates and updates["tp_pct"] is not None:
+        tp = float(updates["tp_pct"])
+        if tp <= 0:
+            raise HTTPException(status_code=400, detail="tp_pct must be > 0")
+        max_p = float(getattr(trade, "initial_max_profit", None) or 0)
+        if max_p <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="initial_max_profit missing — cannot derive target from %",
+            )
+        trade.tp_pct = tp
+        trade.profit_target_usd = round(max_p * tp / 100.0, 2)
+        updated["tp_pct"] = trade.tp_pct
         updated["profit_target_usd"] = trade.profit_target_usd
-        state = bot_engine.position_tracker.get(trade_id)
-        if state is not None:
-            state.trade.profit_target_usd = trade.profit_target_usd
+        _sync_tracker_money()
+
+    if "sl_pct" in updates and updates["sl_pct"] is not None:
+        sl = float(updates["sl_pct"])
+        if sl <= 0:
+            raise HTTPException(status_code=400, detail="sl_pct must be > 0")
+        max_p = float(getattr(trade, "initial_max_profit", None) or 0)
+        if max_p <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="initial_max_profit missing — cannot derive stop from %",
+            )
+        trade.sl_pct = sl
+        trade.stoploss_usd = round(max_p * sl / 100.0, 2)
+        updated["sl_pct"] = trade.sl_pct
+        updated["stoploss_usd"] = trade.stoploss_usd
+        _sync_tracker_money()
+
+    if "profit_target_usd" in updates and updates["profit_target_usd"] is not None:
+        # Legacy path — only if tp_pct not also sent
+        if "tp_pct" not in updates:
+            trade.profit_target_usd = float(updates["profit_target_usd"])
+            updated["profit_target_usd"] = trade.profit_target_usd
+            _sync_tracker_money()
 
     if "stoploss_usd" in updates and updates["stoploss_usd"] is not None:
-        trade.stoploss_usd = float(updates["stoploss_usd"])
-        updated["stoploss_usd"] = trade.stoploss_usd
-        state = bot_engine.position_tracker.get(trade_id)
-        if state is not None:
-            state.trade.stoploss_usd = trade.stoploss_usd
+        if "sl_pct" not in updates:
+            trade.stoploss_usd = float(updates["stoploss_usd"])
+            updated["stoploss_usd"] = trade.stoploss_usd
+            _sync_tracker_money()
 
-    if "trigger_mode" in updates and updates["trigger_mode"] is not None:
-        trade.trigger_mode = str(updates["trigger_mode"])
-        _upsert_setting(db, trade_id, "trigger_mode", trade.trigger_mode)
-        updated["trigger_mode"] = trade.trigger_mode
+    if "slippage_pct" in updates and updates["slippage_pct"] is not None:
+        sp = float(updates["slippage_pct"])
+        if sp < 0 or sp > 10:
+            raise HTTPException(
+                status_code=400, detail="slippage_pct must be between 0 and 10"
+            )
+        trade.slippage_pct = sp
+        updated["slippage_pct"] = trade.slippage_pct
+        _sync_tracker_money()
 
-    for key in ("slab_24h", "slab_12h", "slab_6h", "slab_lt6h", "flat_trigger_pct"):
+    for key in (
+        "slab_24h",
+        "slab_12h",
+        "slab_6h",
+        "slab_lt6h",
+        "flat_trigger_pct",
+        "premium_slab_300",
+        "premium_slab_200",
+        "premium_slab_100",
+        "premium_slab_lt100",
+    ):
         if key in updates and updates[key] is not None:
             _upsert_setting(db, trade_id, key, updates[key])
             updated[key] = updates[key]
 
+    if "trigger_mode" in updates and updates["trigger_mode"] is not None:
+        mode = str(updates["trigger_mode"]).lower()
+        if mode not in {
+            TriggerMode.FLAT.value,
+            TriggerMode.SLAB.value,
+            TriggerMode.PREMIUM.value,
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="trigger_mode must be 'flat', 'slab', or 'premium'",
+            )
+        trade.trigger_mode = mode
+        _upsert_setting(db, trade_id, "trigger_mode", trade.trigger_mode)
+        updated["trigger_mode"] = trade.trigger_mode
+        if state is not None and hasattr(state.trade, "trigger_mode"):
+            state.trade.trigger_mode = trade.trigger_mode
+
     db.commit()
-    return {"success": True, "updated": updated}
+    return {
+        "success": True,
+        "updated": {
+            **updated,
+            "initial_max_profit": float(
+                getattr(trade, "initial_max_profit", None) or 0
+            )
+            or None,
+            "tp_pct": float(getattr(trade, "tp_pct", None) or 50.0),
+            "sl_pct": float(getattr(trade, "sl_pct", None) or 100.0),
+            "slippage_pct": float(getattr(trade, "slippage_pct", None) or 2.0),
+            "profit_target_usd": float(trade.profit_target_usd or 0),
+            "stoploss_usd": float(trade.stoploss_usd or 0),
+        },
+    }

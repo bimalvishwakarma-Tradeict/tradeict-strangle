@@ -131,6 +131,37 @@ def get_trigger_pct(hours_left: float, slabs: dict) -> float:
     return float(slabs.get("slab_lt6h", 150))
 
 
+def get_premium_trigger_pct(current_premium: float, slabs: dict) -> float:
+    """
+    Trigger % from current premium value (premium-based slabs).
+
+    Premium >= $300          → premium_slab_300 (default 150)
+    $200 <= Premium < $300   → premium_slab_200 (default 160)
+    $100 <= Premium < $200   → premium_slab_100 (default 180)
+    Premium < $100           → premium_slab_lt100 (default 200)
+    """
+    px = float(current_premium or 0.0)
+    if px >= 300:
+        return float(slabs.get("premium_slab_300", 150))
+    if px >= 200:
+        return float(slabs.get("premium_slab_200", 160))
+    if px >= 100:
+        return float(slabs.get("premium_slab_100", 180))
+    return float(slabs.get("premium_slab_lt100", 200))
+
+
+def premium_slab_band_label(current_premium: float) -> str:
+    """Human-readable premium band for logs / UI hints."""
+    px = float(current_premium or 0.0)
+    if px >= 300:
+        return f"${px:.0f} >= $300"
+    if px >= 200:
+        return f"$200 <= ${px:.0f} < $300"
+    if px >= 100:
+        return f"$100 <= ${px:.0f} < $200"
+    return f"${px:.0f} < $100"
+
+
 def get_dte_label(expiry_date: date) -> str:
     """Return DTE label based on calendar days to expiry_date (e.g. '1DTE', '2DTE')."""
     days = (expiry_date - date.today()).days
@@ -156,6 +187,18 @@ if __name__ == "__main__":
     assert get_trigger_pct(18, slabs) == 175
     assert get_trigger_pct(8, slabs) == 150
     assert get_trigger_pct(3, slabs) == 125
+
+    prem = {
+        "premium_slab_300": 150,
+        "premium_slab_200": 160,
+        "premium_slab_100": 180,
+        "premium_slab_lt100": 200,
+    }
+    assert get_premium_trigger_pct(350, prem) == 150
+    assert get_premium_trigger_pct(250, prem) == 160
+    assert get_premium_trigger_pct(150, prem) == 180
+    assert get_premium_trigger_pct(50, prem) == 200
+    assert "$50 < $100" in premium_slab_band_label(50)
 
     assert get_dte_label(tomorrow) == "1DTE"
     assert get_dte_label(date.today() + timedelta(days=2)) == "2DTE"

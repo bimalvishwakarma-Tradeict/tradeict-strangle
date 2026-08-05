@@ -486,6 +486,52 @@ class BotEngine:
         target = float(getattr(trade, "profit_target_usd", 0) or 0)
         stoploss = float(getattr(trade, "stoploss_usd", 0) or 0)
         pnl_pct = (total_pnl / target * 100.0) if target else 0.0
+        slip_pct = float(getattr(trade, "slippage_pct", None) or 2.0)
+
+        # Net MTM for exit decisions (same as frontend display)
+        from backend.core.fees import (
+            basket_fees_paid_from_legs,
+            compute_net_mtm,
+            estimate_option_trading_fee,
+        )
+        from backend.models import Leg as LegModel
+
+        fees_paid = 0.0
+        est_exit = 0.0
+        with self.db_factory() as db:
+            legs = (
+                db.query(LegModel)
+                .filter(
+                    LegModel.trade_id == trade_id,
+                    LegModel.is_bot_managed.is_(True),
+                )
+                .all()
+            )
+            fees_paid = basket_fees_paid_from_legs(legs)
+            btc = float(self._btc_spot or 0)
+            for leg in legs:
+                if str(getattr(leg, "status", "") or "").lower() != "open":
+                    continue
+                offer = (
+                    float(call_premium)
+                    if str(leg.leg_type).lower() == "call"
+                    else float(put_premium)
+                )
+                if offer > 0 and btc > 0:
+                    est_exit += estimate_option_trading_fee(
+                        option_price=offer,
+                        quantity_lots=int(leg.quantity or 0),
+                        btc_index_price=btc,
+                    )
+
+        slip_fields = compute_net_mtm(
+            gross_mtm=total_pnl,
+            fees_paid=fees_paid,
+            est_exit_fees=est_exit,
+            slippage_pct=slip_pct,
+        )
+        net_mtm_val = float(slip_fields["net_mtm"])
+        slippage_amount = float(slip_fields["slippage_amount"])
 
         log_and_buffer(
             "PNL_CHECK",
@@ -495,19 +541,36 @@ class BotEngine:
                 "delta_upnl": round(delta_upnl, 4),
                 "call_upnl": round(call_mtm, 4),
                 "put_upnl": round(put_mtm, 4),
+                "gross_mtm": round(total_pnl, 4),
+                "fees_paid": round(fees_paid, 4),
+                "est_exit_fees": round(est_exit, 4),
+                "slippage_pct": slip_pct,
+                "slippage_amount": round(slippage_amount, 4),
+                "net_mtm": round(net_mtm_val, 4),
                 "total_pnl": round(total_pnl, 4),
                 "profit_target": target,
                 "stoploss": stoploss,
                 "pnl_pct": round(pnl_pct, 1),
-                "will_exit_profit": total_pnl >= target if target else False,
-                "will_exit_stoploss": total_pnl <= -stoploss if stoploss else False,
+                "will_exit_profit": net_mtm_val >= target if target else False,
+                "will_exit_stoploss": (
+                    net_mtm_val <= -stoploss if stoploss else False
+                ),
                 "mtm_source": "delta_position" if mtm_available else "computed_fallback",
                 "contract_value": OPTIONS_CONTRACT_VALUE,
             },
         )
 
         with self.db_factory() as db:
-            trigger_pct = float(self.strategy.get_current_trigger_pct(trade, db))
+            call_trig_pct = float(
+                self.strategy.get_trigger_for_leg(call_premium, trade, db)
+            )
+            put_trig_pct = float(
+                self.strategy.get_trigger_for_leg(put_premium, trade, db)
+            )
+            trigger_pct = call_trig_pct
+            premium_slabs = None
+            if str(getattr(trade, "trigger_mode", "") or "").lower() == "premium":
+                premium_slabs = self.strategy.get_slabs(trade.id, db)
             action = await self.strategy.on_tick(
                 trade,
                 call_leg,
@@ -516,8 +579,14 @@ class BotEngine:
                 put_premium,
                 db,
                 realized_pnl=realized,
-                delta_mtm=delta_upnl,  # unrealized only (Delta or calculated)
+                delta_mtm=delta_upnl,
+                net_mtm=net_mtm_val,
+                slippage_pct=slip_pct,
             )
+            if float(getattr(action, "call_trigger_pct", 0) or 0) > 0:
+                call_trig_pct = float(action.call_trigger_pct)
+            if float(getattr(action, "put_trigger_pct", 0) or 0) > 0:
+                put_trig_pct = float(action.put_trigger_pct)
             trigger_for_plan = float(getattr(action, "trigger_pct_used", 0) or 0)
             if trigger_for_plan <= 0:
                 trigger_for_plan = trigger_pct
@@ -529,8 +598,8 @@ class BotEngine:
                     return float(val)
             return float(getattr(leg, "initial_premium", 0) or 0)
 
-        call_trigger = _trig_base(call_leg) * (trigger_for_plan / 100.0)
-        put_trigger = _trig_base(put_leg) * (trigger_for_plan / 100.0)
+        call_trigger = _trig_base(call_leg) * (call_trig_pct / 100.0)
+        put_trigger = _trig_base(put_leg) * (put_trig_pct / 100.0)
         call_pct = (call_premium / call_trigger * 100.0) if call_trigger > 0 else 0.0
         put_pct = (put_premium / put_trigger * 100.0) if put_trigger > 0 else 0.0
         if action.should_exit:
@@ -540,20 +609,64 @@ class BotEngine:
         else:
             action_label = "HOLD"
 
-        log_and_buffer(
-            "TRIGGER_CHECK",
-            trade_id,
-            {
-                "trigger_pct": trigger_for_plan,
-                "call_trigger_at": round(call_trigger, 2),
-                "put_trigger_at": round(put_trigger, 2),
-                "call_current": round(call_premium, 2),
-                "call_pct_to_trigger": round(call_pct, 1),
-                "put_current": round(put_premium, 2),
-                "put_pct_to_trigger": round(put_pct, 1),
-                "action": action_label,
-            },
-        )
+        mode = str(getattr(trade, "trigger_mode", "slab") or "slab").lower()
+        trigger_details: dict[str, Any] = {
+            "trigger_mode": mode,
+            "trigger_pct": trigger_for_plan,
+            "call_trigger_pct": round(call_trig_pct, 1),
+            "put_trigger_pct": round(put_trig_pct, 1),
+            "call_trigger_at": round(call_trigger, 2),
+            "put_trigger_at": round(put_trigger, 2),
+            "call_current": round(call_premium, 2),
+            "call_pct_to_trigger": round(call_pct, 1),
+            "put_current": round(put_premium, 2),
+            "put_pct_to_trigger": round(put_pct, 1),
+            "action": action_label,
+        }
+        if mode == "premium":
+            from backend.core.time_utils import premium_slab_band_label
+
+            trigger_details["call_premium_band"] = premium_slab_band_label(
+                call_premium
+            )
+            trigger_details["put_premium_band"] = premium_slab_band_label(put_premium)
+            trigger_details["trigger_pct_note"] = (
+                f"call {call_trig_pct:.0f}% ({premium_slab_band_label(call_premium)}); "
+                f"put {put_trig_pct:.0f}% ({premium_slab_band_label(put_premium)})"
+            )
+
+        log_and_buffer("TRIGGER_CHECK", trade_id, trigger_details)
+
+        # Decision at trigger: profitable close vs adjust
+        triggered_leg = getattr(action, "triggered_leg", None)
+        if triggered_leg:
+            net_for_decision = float(getattr(action, "current_pnl", 0) or 0)
+            is_close = bool(
+                action.should_exit
+                and action.exit_reason
+                == ExitReason.DECISION_PROFIT_AT_TRIGGER.value
+            )
+            decision = "CLOSE_PROFITABLE" if is_close else "ADJUST"
+            reason_txt = (
+                "Net MTM positive — booking profit"
+                if is_close
+                else "Net MTM negative — adjusting"
+            )
+            log_and_buffer(
+                "DECISION_TRIGGER",
+                trade_id,
+                {
+                    "leg": triggered_leg,
+                    "trigger_pct": float(
+                        getattr(action, "trigger_pct_hit", 0)
+                        or trigger_for_plan
+                        or 0
+                    ),
+                    "net_mtm": round(net_for_decision, 4),
+                    "decision": decision,
+                    "reason": reason_txt,
+                },
+            )
 
         self.position_tracker.update_premiums(
             trade_id,
@@ -568,10 +681,16 @@ class BotEngine:
         )
 
         if action.should_exit:
+            exit_pnl = float(getattr(action, "current_pnl", net_mtm_val) or net_mtm_val)
             await self._exit_trade(
                 trade_state,
                 action.exit_reason or "UNKNOWN",
-                total_pnl=total_pnl,
+                total_pnl=exit_pnl,
+                gross_mtm=total_pnl,
+                fees_paid=fees_paid,
+                est_exit_fees=est_exit,
+                slippage_amount=slippage_amount,
+                net_mtm=net_mtm_val,
             )
         elif action.should_adjust and action.adjust_leg:
             await self._adjust_trade(trade_state, action.adjust_leg)
@@ -587,6 +706,9 @@ class BotEngine:
                 trigger_pct=trigger_for_plan,
                 call_replacement=call_repl,
                 put_replacement=put_repl,
+                call_trigger_pct=call_trig_pct,
+                put_trigger_pct=put_trig_pct,
+                premium_slabs=premium_slabs,
             )
 
     async def _exit_trade(
@@ -594,6 +716,11 @@ class BotEngine:
         trade_state: TradeState,
         reason: str,
         total_pnl: float | None = None,
+        gross_mtm: float | None = None,
+        fees_paid: float | None = None,
+        est_exit_fees: float | None = None,
+        slippage_amount: float | None = None,
+        net_mtm: float | None = None,
     ) -> None:
         trade_id = trade_state.trade_id
         trade = trade_state.trade
@@ -602,17 +729,45 @@ class BotEngine:
             if total_pnl is not None
             else (trade_state.last_delta_mtm or trade_state.last_pnl)
         )
+        gross = float(gross_mtm if gross_mtm is not None else pnl_now)
+        fees = float(fees_paid or 0.0) + float(est_exit_fees or 0.0)
+        slip = float(slippage_amount or 0.0)
+        net = float(net_mtm if net_mtm is not None else pnl_now)
+
         log_and_buffer(
             "EXIT_TRIGGERED",
             trade_id,
             {
                 "reason": reason,
+                "gross_mtm": round(gross, 4),
+                "fees_paid": round(float(fees_paid or 0), 4),
+                "est_exit_fees": round(float(est_exit_fees or 0), 4),
+                "slippage_amount": round(slip, 4),
+                "net_mtm": round(net, 4),
                 "total_pnl": round(pnl_now, 2),
                 "profit_target": float(getattr(trade, "profit_target_usd", 0) or 0),
                 "stoploss": float(getattr(trade, "stoploss_usd", 0) or 0),
             },
         )
-        logger.info("Exiting trade %s, reason: %s", trade_id, reason)
+        logger.info(
+            "EXIT TRADE %s: reason=%s | gross_mtm=%.2f | fees=%.2f | "
+            "slippage=%.2f | net_mtm=%.2f | target=%s | sl=%s",
+            trade_id,
+            reason,
+            gross,
+            fees,
+            slip,
+            net,
+            getattr(trade, "profit_target_usd", 0),
+            getattr(trade, "stoploss_usd", 0),
+        )
+        if reason == ExitReason.DECISION_PROFIT_AT_TRIGGER.value:
+            logger.info(
+                "Closing basket: trigger fired but profitable — "
+                "booking net_mtm=%.2f (trade %s)",
+                net,
+                trade_id,
+            )
         assert self.delta_client is not None
 
         call_close = await self.order_executor.close_leg(
@@ -1024,11 +1179,15 @@ class BotEngine:
         trigger_pct: float,
         call_replacement: dict[str, Any] | None = None,
         put_replacement: dict[str, Any] | None = None,
+        call_trigger_pct: float | None = None,
+        put_trigger_pct: float | None = None,
+        premium_slabs: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         """Shared monitoring-plan fields for WS and /api/trade/active.
 
         Entry display = initial_premium (never changes for a leg row).
         Trigger calc = trigger_baseline_premium (resets each adjustment).
+        Premium mode: call_trigger_pct / put_trigger_pct may differ.
         """
 
         def _baseline(leg: Any) -> float:
@@ -1042,9 +1201,19 @@ class BotEngine:
         put_entry = float(trade_state.put_leg.initial_premium or 0)
         call_base = _baseline(trade_state.call_leg)
         put_base = _baseline(trade_state.put_leg)
-        pct = float(trigger_pct) if trigger_pct > 0 else 150.0
-        call_trigger = call_base * (pct / 100.0)
-        put_trigger = put_base * (pct / 100.0)
+        fallback_pct = float(trigger_pct) if trigger_pct > 0 else 150.0
+        call_pct = (
+            float(call_trigger_pct)
+            if call_trigger_pct is not None and call_trigger_pct > 0
+            else fallback_pct
+        )
+        put_pct = (
+            float(put_trigger_pct)
+            if put_trigger_pct is not None and put_trigger_pct > 0
+            else fallback_pct
+        )
+        call_trigger = call_base * (call_pct / 100.0)
+        put_trigger = put_base * (put_pct / 100.0)
         call_pct_to = (call_prem / call_trigger * 100.0) if call_trigger > 0 else 0.0
         put_pct_to = (put_prem / put_trigger * 100.0) if put_trigger > 0 else 0.0
 
@@ -1054,7 +1223,8 @@ class BotEngine:
         if put_replacement is None:
             put_replacement = cached.get("estimated_put_replacement")
 
-        return {
+        mode = str(getattr(trade_state.trade, "trigger_mode", "slab") or "slab")
+        out: dict[str, Any] = {
             "call_entry_premium": call_entry,
             "put_entry_premium": put_entry,
             "call_trigger_baseline": call_base,
@@ -1065,7 +1235,9 @@ class BotEngine:
             "put_symbol": str(trade_state.put_leg.symbol),
             "call_quantity": int(trade_state.call_leg.quantity),
             "put_quantity": int(trade_state.put_leg.quantity),
-            "current_trigger_pct": pct,
+            "current_trigger_pct": call_pct,  # primary / call (compat)
+            "call_trigger_pct": round(call_pct, 2),
+            "put_trigger_pct": round(put_pct, 2),
             "call_trigger_price": round(call_trigger, 4),
             "put_trigger_price": round(put_trigger, 4),
             "call_pct_to_trigger": round(call_pct_to, 2),
@@ -1074,8 +1246,26 @@ class BotEngine:
             "put_distance_to_trigger": round(put_trigger - put_prem, 4),
             "estimated_call_replacement": call_replacement,
             "estimated_put_replacement": put_replacement,
-            "trigger_mode": str(getattr(trade_state.trade, "trigger_mode", "slab")),
+            "trigger_mode": mode,
         }
+        if premium_slabs:
+            out.update(
+                {
+                    "premium_slab_300": float(
+                        premium_slabs.get("premium_slab_300", 150)
+                    ),
+                    "premium_slab_200": float(
+                        premium_slabs.get("premium_slab_200", 160)
+                    ),
+                    "premium_slab_100": float(
+                        premium_slabs.get("premium_slab_100", 180)
+                    ),
+                    "premium_slab_lt100": float(
+                        premium_slabs.get("premium_slab_lt100", 200)
+                    ),
+                }
+            )
+        return out
 
     async def _push_update(
         self,
@@ -1089,6 +1279,9 @@ class BotEngine:
         trigger_pct: float = 0.0,
         call_replacement: dict[str, Any] | None = None,
         put_replacement: dict[str, Any] | None = None,
+        call_trigger_pct: float | None = None,
+        put_trigger_pct: float | None = None,
+        premium_slabs: dict[str, float] | None = None,
     ) -> None:
         call_change = 0.0
         put_change = 0.0
@@ -1118,6 +1311,52 @@ class BotEngine:
             trigger_pct,
             call_replacement,
             put_replacement,
+            call_trigger_pct=call_trigger_pct,
+            put_trigger_pct=put_trigger_pct,
+            premium_slabs=premium_slabs,
+        )
+
+        # Fees from DB legs + slippage for Net MTM on TRADE_UPDATE
+        from backend.core.fees import (
+            basket_fees_paid_from_legs,
+            compute_net_mtm,
+            estimate_option_trading_fee,
+        )
+        from backend.models import Leg as LegModel
+
+        fees_paid = 0.0
+        est_exit = 0.0
+        with self.db_factory() as db:
+            legs = (
+                db.query(LegModel)
+                .filter(
+                    LegModel.trade_id == trade_state.trade_id,
+                    LegModel.is_bot_managed.is_(True),
+                )
+                .all()
+            )
+            fees_paid = basket_fees_paid_from_legs(legs)
+            btc = float(self._btc_spot or 0)
+            for leg in legs:
+                if str(getattr(leg, "status", "") or "").lower() != "open":
+                    continue
+                offer = (
+                    float(call_prem)
+                    if str(leg.leg_type).lower() == "call"
+                    else float(put_prem)
+                )
+                if offer > 0 and btc > 0:
+                    est_exit += estimate_option_trading_fee(
+                        option_price=offer,
+                        quantity_lots=int(leg.quantity or 0),
+                        btc_index_price=btc,
+                    )
+
+        slip_fields = compute_net_mtm(
+            gross_mtm=display_total,
+            fees_paid=fees_paid,
+            est_exit_fees=est_exit,
+            slippage_pct=getattr(trade_state.trade, "slippage_pct", None),
         )
 
         await ws_manager.broadcast(
@@ -1143,12 +1382,24 @@ class BotEngine:
                 "put_offer": float(put_prem),
                 "pnl": delta_mtm,
                 "gross_mtm": display_total,
-                "net_mtm": display_total,  # fees applied on /active; tick path must not recompute
+                "fees_paid": round(fees_paid, 6),
+                "est_exit_fees": round(est_exit, 6),
+                "total_expected_fees": round(fees_paid + est_exit, 6),
+                "slippage_pct": float(slip_fields["slippage_pct"]),
+                "slippage_amount": float(slip_fields["slippage_amount"]),
+                "total_deductions": float(slip_fields["total_deductions"]),
+                "net_mtm": float(slip_fields["net_mtm"]),
                 "underlying_price": float(self._btc_spot or 0) or None,
                 "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
                 "pnl_pct_of_target": pnl_pct_of_target,
                 "profit_target_usd": target,
                 "stoploss_usd": stoploss,
+                "initial_max_profit": float(
+                    getattr(trade_state.trade, "initial_max_profit", None) or 0
+                )
+                or None,
+                "tp_pct": float(getattr(trade_state.trade, "tp_pct", None) or 50.0),
+                "sl_pct": float(getattr(trade_state.trade, "sl_pct", None) or 100.0),
                 "hours_to_expiry": get_hours_to_expiry(trade_state.trade.expiry_date),
                 "status": "active",
                 "is_settling": settling["is_settling"],
@@ -1247,14 +1498,39 @@ class BotEngine:
                 .count()
             )
             try:
-                trigger_pct = float(
-                    self.strategy.get_current_trigger_pct(trade_state.trade, db)
+                call_trig_pct = float(
+                    self.strategy.get_trigger_for_leg(
+                        call_prem, trade_state.trade, db
+                    )
                 )
+                put_trig_pct = float(
+                    self.strategy.get_trigger_for_leg(
+                        put_prem, trade_state.trade, db
+                    )
+                )
+                trigger_pct = call_trig_pct
+                premium_slabs = None
+                if (
+                    str(getattr(trade_state.trade, "trigger_mode", "") or "").lower()
+                    == "premium"
+                ):
+                    premium_slabs = self.strategy.get_slabs(
+                        trade_state.trade.id, db
+                    )
             except Exception:
                 trigger_pct = 150.0
+                call_trig_pct = 150.0
+                put_trig_pct = 150.0
+                premium_slabs = None
 
         plan = self.build_bot_plan_fields(
-            trade_state, call_prem, put_prem, trigger_pct
+            trade_state,
+            call_prem,
+            put_prem,
+            trigger_pct,
+            call_trigger_pct=call_trig_pct,
+            put_trigger_pct=put_trig_pct,
+            premium_slabs=premium_slabs,
         )
 
         await ws_manager.broadcast(

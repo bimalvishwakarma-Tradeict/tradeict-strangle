@@ -64,8 +64,9 @@ export default function TradeInitiator() {
   const [currentPrice, setCurrentPrice] = useState(0)
 
   const [quantity, setQuantity] = useState(1)
-  const [profitTarget, setProfitTarget] = useState('')
-  const [stoploss, setStoploss] = useState('')
+  const [tpPct, setTpPct] = useState('50')
+  const [slPct, setSlPct] = useState('100')
+  const [slippagePct, setSlippagePct] = useState('2')
   const [slabs, setSlabs] = useState(null)
 
   // Emergency-only: manual fill prices
@@ -139,14 +140,31 @@ export default function TradeInitiator() {
   const qty = Number(quantity) || 0
   // Mark premium points × lots (display only — not real USD)
   const totalPremiumPoints = (callPrem + putPrem) * qty
-  // Real Delta USD: premium × lots × 0.001
-  const totalPremiumUsd = toUsdPnl(callPrem + putPrem, qty)
-  const targetNum = Number(profitTarget)
-  const slNum = Number(stoploss)
+  // Real Delta USD: premium × lots × 0.001 — locked as Initial Max Profit
+  const estMaxProfitUsd = toUsdPnl(callPrem + putPrem, qty)
+  const tpPctNum = Number(tpPct)
+  const slPctNum = Number(slPct)
+  const slippagePctNum = Number(slippagePct)
+  const targetUsdPreview =
+    Number.isFinite(tpPctNum) && tpPctNum > 0
+      ? (estMaxProfitUsd * tpPctNum) / 100
+      : 0
+  const slUsdPreview =
+    Number.isFinite(slPctNum) && slPctNum > 0
+      ? (estMaxProfitUsd * slPctNum) / 100
+      : 0
 
   const slabsValid = useMemo(() => {
     if (!slabs) return false
     if (slabs.mode === 'flat') return isValidPct(slabs.flat_pct)
+    if (slabs.mode === 'premium') {
+      return (
+        isValidPct(slabs.premium_slab_300) &&
+        isValidPct(slabs.premium_slab_200) &&
+        isValidPct(slabs.premium_slab_100) &&
+        isValidPct(slabs.premium_slab_lt100)
+      )
+    }
     return (
       isValidPct(slabs.slab_24h) &&
       isValidPct(slabs.slab_12h) &&
@@ -159,10 +177,14 @@ export default function TradeInitiator() {
     selectedCall &&
     selectedPut &&
     qty > 0 &&
-    Number.isFinite(targetNum) &&
-    targetNum > 0 &&
-    Number.isFinite(slNum) &&
-    slNum > 0 &&
+    Number.isFinite(tpPctNum) &&
+    tpPctNum > 0 &&
+    Number.isFinite(slPctNum) &&
+    slPctNum > 0 &&
+    Number.isFinite(slippagePctNum) &&
+    slippagePctNum >= 0 &&
+    slippagePctNum <= 10 &&
+    estMaxProfitUsd > 0 &&
     slabsValid &&
     !placing &&
     (!emergencyMode || (callPrem > 0 && putPrem > 0))
@@ -178,14 +200,19 @@ export default function TradeInitiator() {
       put_product_id: Number(selectedPut.put_product_id),
       put_symbol: selectedPut.put_symbol,
       quantity: qty,
-      profit_target_usd: targetNum,
-      stoploss_usd: slNum,
+      tp_pct: tpPctNum,
+      sl_pct: slPctNum,
+      slippage_pct: slippagePctNum,
       trigger_mode: slabs.mode,
       flat_trigger_pct: slabs.mode === 'flat' ? slabs.flat_pct : null,
       slab_24h: slabs.slab_24h,
       slab_12h: slabs.slab_12h,
       slab_6h: slabs.slab_6h,
       slab_lt6h: slabs.slab_lt6h,
+      premium_slab_300: slabs.premium_slab_300,
+      premium_slab_200: slabs.premium_slab_200,
+      premium_slab_100: slabs.premium_slab_100,
+      premium_slab_lt100: slabs.premium_slab_lt100,
       call_delta_at_entry: selectedCall.call_delta ?? null,
       put_delta_at_entry: selectedPut.put_delta ?? null,
     }
@@ -392,7 +419,7 @@ export default function TradeInitiator() {
             {OPTIONS_CONTRACT_VALUE}) · Est. max profit{' '}
             <span className="text-green-400">
               $
-              {totalPremiumUsd.toLocaleString('en-US', {
+              {estMaxProfitUsd.toLocaleString('en-US', {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 4,
               })}
@@ -419,30 +446,70 @@ export default function TradeInitiator() {
       {/* 5. Trade parameters */}
       <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
         <h2 className="text-sm font-semibold text-white">Trade Parameters</h2>
+        <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-sm text-gray-300">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>Est. Max Profit (locked at deploy)</span>
+            <span className="font-semibold text-green-400">
+              ${fmtMoney(estMaxProfitUsd)}
+            </span>
+          </div>
+          <p className="mt-1 text-[11px] text-gray-500">
+            (call + put premium) × lots × {OPTIONS_CONTRACT_VALUE} · updates live
+            with strikes / qty · TP/SL $ never change after adjustments
+          </p>
+        </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-sm text-gray-300">
-            Profit Target ($)
+            Profit Target (%)
             <input
               type="number"
-              min={0}
+              min={1}
+              max={500}
               step={1}
-              value={profitTarget}
-              onChange={(e) => setProfitTarget(e.target.value)}
+              value={tpPct}
+              onChange={(e) => setTpPct(e.target.value)}
               className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-              placeholder="200"
+              placeholder="50"
             />
+            <span className="mt-1 block text-xs text-gray-400">
+              = ~${fmtMoney(targetUsdPreview)} ({fmtMoney(tpPctNum) || '—'}% of $
+              {fmtMoney(estMaxProfitUsd)} max)
+            </span>
           </label>
           <label className="text-sm text-gray-300">
-            Stop Loss ($)
+            Stop Loss (%)
+            <input
+              type="number"
+              min={1}
+              max={500}
+              step={1}
+              value={slPct}
+              onChange={(e) => setSlPct(e.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+              placeholder="100"
+            />
+            <span className="mt-1 block text-xs text-gray-400">
+              = ~${fmtMoney(slUsdPreview)} ({fmtMoney(slPctNum) || '—'}% of $
+              {fmtMoney(estMaxProfitUsd)} max)
+            </span>
+          </label>
+        </div>
+        <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-3">
+          <label className="block text-sm text-gray-300">
+            Slippage Estimate (%)
             <input
               type="number"
               min={0}
-              step={1}
-              value={stoploss}
-              onChange={(e) => setStoploss(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-              placeholder="300"
+              max={10}
+              step={0.1}
+              value={slippagePct}
+              onChange={(e) => setSlippagePct(e.target.value)}
+              className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+              placeholder="2"
             />
+            <span className="mt-1 block text-xs text-gray-500">
+              Applied to Net MTM calculation (0–10%). Default 2%.
+            </span>
           </label>
         </div>
         {emergencyMode && (
@@ -524,7 +591,7 @@ export default function TradeInitiator() {
                   Est. premium (marks): ${fmtMoney(totalPremiumPoints)} · Real
                   max profit:{' '}
                   <span className="text-green-400">
-                    ${fmtMoney(totalPremiumUsd)} USD
+                    ${fmtMoney(estMaxProfitUsd)} USD
                   </span>{' '}
                   ({qty} lots × {OPTIONS_CONTRACT_VALUE})
                 </div>
@@ -532,16 +599,12 @@ export default function TradeInitiator() {
               {emergencyMode && (
                 <div className="pt-1">
                   Premium points: ${fmtMoney(totalPremiumPoints)} · Real USD:{' '}
-                  ${fmtMoney(totalPremiumUsd)}
+                  ${fmtMoney(estMaxProfitUsd)}
                 </div>
               )}
               <div>
-                Target: $
-                {Number.isFinite(targetNum) && targetNum > 0
-                  ? fmtMoney(targetNum)
-                  : '—'}{' '}
-                · SL: $
-                {Number.isFinite(slNum) && slNum > 0 ? fmtMoney(slNum) : '—'}
+                Target: {fmtMoney(tpPctNum)}% ≈ ${fmtMoney(targetUsdPreview)} ·
+                SL: {fmtMoney(slPctNum)}% ≈ ${fmtMoney(slUsdPreview)}
               </div>
             </>
           )}

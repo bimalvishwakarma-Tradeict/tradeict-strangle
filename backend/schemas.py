@@ -68,14 +68,20 @@ class TradeInitiateRequest(BaseModel):
     put_product_id: int
     put_symbol: str
     quantity: int
-    profit_target_usd: float
-    stoploss_usd: float
-    trigger_mode: str  # "flat" or "slab"
+    # % of initial max profit — $ targets are computed at initiate and locked
+    tp_pct: float = Field(default=50.0, gt=0, le=500)
+    sl_pct: float = Field(default=100.0, gt=0, le=500)
+    slippage_pct: float = Field(default=2.0, ge=0, le=10)
+    trigger_mode: str  # "flat", "slab", or "premium"
     flat_trigger_pct: float | None = Field(default=None, ge=1, le=500)
     slab_24h: float = Field(default=200.0, ge=1, le=500)
     slab_12h: float = Field(default=175.0, ge=1, le=500)
     slab_6h: float = Field(default=150.0, ge=1, le=500)
     slab_lt6h: float = Field(default=150.0, ge=1, le=500)
+    premium_slab_300: float = Field(default=150.0, ge=1, le=500)
+    premium_slab_200: float = Field(default=160.0, ge=1, le=500)
+    premium_slab_100: float = Field(default=180.0, ge=1, le=500)
+    premium_slab_lt100: float = Field(default=200.0, ge=1, le=500)
     call_delta_at_entry: float | None = None
     put_delta_at_entry: float | None = None
 
@@ -88,6 +94,11 @@ class TradeRegisterExistingRequest(TradeInitiateRequest):
 
 
 class TradeSettingsUpdate(BaseModel):
+    # Prefer % — recalculates locked $ from initial_max_profit
+    tp_pct: float | None = Field(default=None, gt=0, le=500)
+    sl_pct: float | None = Field(default=None, gt=0, le=500)
+    slippage_pct: float | None = Field(default=None, ge=0, le=10)
+    # Legacy direct $ (discouraged; kept for compatibility)
     profit_target_usd: float | None = None
     stoploss_usd: float | None = None
     trigger_mode: str | None = None
@@ -96,6 +107,10 @@ class TradeSettingsUpdate(BaseModel):
     slab_6h: float | None = Field(default=None, ge=1, le=500)
     slab_lt6h: float | None = Field(default=None, ge=1, le=500)
     flat_trigger_pct: float | None = Field(default=None, ge=1, le=500)
+    premium_slab_300: float | None = Field(default=None, ge=1, le=500)
+    premium_slab_200: float | None = Field(default=None, ge=1, le=500)
+    premium_slab_100: float | None = Field(default=None, ge=1, le=500)
+    premium_slab_lt100: float | None = Field(default=None, ge=1, le=500)
 
 
 class TradeExitRequest(BaseModel):
