@@ -86,9 +86,21 @@ export function useTrades() {
       setTradeMap((prev) => {
         const next = new Map(prev)
         const existing = next.get(msg.trade_id) || { trade_id: msg.trade_id }
+        const callEntry =
+          msg.call_entry_premium != null
+            ? Number(msg.call_entry_premium)
+            : existing.call_entry_premium
+        const putEntry =
+          msg.put_entry_premium != null
+            ? Number(msg.put_entry_premium)
+            : existing.put_entry_premium
         const callLeg = existing.call_leg
           ? {
               ...existing.call_leg,
+              initial_premium:
+                callEntry != null
+                  ? callEntry
+                  : existing.call_leg.initial_premium,
               current_premium: msg.call_premium ?? existing.call_leg.current_premium,
               change_pct: msg.call_change_pct ?? existing.call_leg.change_pct,
               leg_pnl:
@@ -100,6 +112,8 @@ export function useTrades() {
         const putLeg = existing.put_leg
           ? {
               ...existing.put_leg,
+              initial_premium:
+                putEntry != null ? putEntry : existing.put_leg.initial_premium,
               current_premium: msg.put_premium ?? existing.put_leg.current_premium,
               change_pct: msg.put_change_pct ?? existing.put_leg.change_pct,
               leg_pnl:
@@ -108,33 +122,82 @@ export function useTrades() {
                   : existing.put_leg.leg_pnl,
             }
           : existing.put_leg
+        const mergedCallLeg = msg.call_leg
+          ? {
+              ...(existing.call_leg || {}),
+              ...msg.call_leg,
+              initial_premium:
+                callEntry != null
+                  ? callEntry
+                  : msg.call_leg.initial_premium,
+            }
+          : callLeg
+            ? {
+                ...callLeg,
+                leg_pnl: msg.call_upnl ?? msg.call_delta_mtm ?? callLeg.leg_pnl,
+              }
+            : existing.call_leg
+        const mergedPutLeg = msg.put_leg
+          ? {
+              ...(existing.put_leg || {}),
+              ...msg.put_leg,
+              initial_premium:
+                putEntry != null ? putEntry : msg.put_leg.initial_premium,
+            }
+          : putLeg
+            ? {
+                ...putLeg,
+                leg_pnl: msg.put_upnl ?? msg.put_delta_mtm ?? putLeg.leg_pnl,
+              }
+            : existing.put_leg
         next.set(msg.trade_id, {
           ...existing,
           ...msg,
-          call_leg: msg.call_leg
-            ? { ...(existing.call_leg || {}), ...msg.call_leg }
-            : callLeg
-              ? {
-                  ...callLeg,
-                  leg_pnl:
-                    msg.call_upnl ?? msg.call_delta_mtm ?? callLeg.leg_pnl,
-                }
-              : existing.call_leg,
-          put_leg: msg.put_leg
-            ? { ...(existing.put_leg || {}), ...msg.put_leg }
-            : putLeg
-              ? {
-                  ...putLeg,
-                  leg_pnl: msg.put_upnl ?? msg.put_delta_mtm ?? putLeg.leg_pnl,
-                }
-              : existing.put_leg,
+          call_leg: mergedCallLeg,
+          put_leg: mergedPutLeg,
+          // Explicit overwrite — never keep stale post-adjustment baselines
+          call_entry_premium:
+            msg.call_entry_premium != null
+              ? Number(msg.call_entry_premium)
+              : existing.call_entry_premium,
+          put_entry_premium:
+            msg.put_entry_premium != null
+              ? Number(msg.put_entry_premium)
+              : existing.put_entry_premium,
+          call_trigger_price:
+            msg.call_trigger_price != null
+              ? Number(msg.call_trigger_price)
+              : existing.call_trigger_price,
+          put_trigger_price:
+            msg.put_trigger_price != null
+              ? Number(msg.put_trigger_price)
+              : existing.put_trigger_price,
+          call_pct_to_trigger:
+            msg.call_pct_to_trigger != null
+              ? Number(msg.call_pct_to_trigger)
+              : existing.call_pct_to_trigger,
+          put_pct_to_trigger:
+            msg.put_pct_to_trigger != null
+              ? Number(msg.put_pct_to_trigger)
+              : existing.put_pct_to_trigger,
+          call_distance_to_trigger:
+            msg.call_distance_to_trigger != null
+              ? Number(msg.call_distance_to_trigger)
+              : existing.call_distance_to_trigger,
+          put_distance_to_trigger:
+            msg.put_distance_to_trigger != null
+              ? Number(msg.put_distance_to_trigger)
+              : existing.put_distance_to_trigger,
+          current_trigger_pct:
+            msg.current_trigger_pct != null
+              ? Number(msg.current_trigger_pct)
+              : existing.current_trigger_pct,
           leg_history: msg.leg_history || existing.leg_history,
           call_upnl: msg.call_upnl ?? msg.call_delta_mtm,
           put_upnl: msg.put_upnl ?? msg.put_delta_mtm,
           delta_upnl: msg.delta_upnl ?? msg.delta_mtm_pnl,
           delta_mtm_pnl: msg.delta_mtm_pnl ?? msg.delta_upnl,
           calculated_pnl: msg.calculated_pnl,
-          // Keep fee/net fields coherent with live MTM (don't leave stale gross_mtm)
           gross_mtm:
             msg.gross_mtm ??
             msg.total_pnl ??
@@ -249,9 +312,22 @@ export function useTrades() {
         )
         const net = gross - feesPaid - estExit
 
-        // Bot plan: live offer vs trigger
-        const callTrigger = Number(existing.call_trigger_price || 0)
-        const putTrigger = Number(existing.put_trigger_price || 0)
+        // Keep server trigger prices; only refresh %/distance from live offers
+        const triggerPct = Number(existing.current_trigger_pct || 0)
+        const callTrigger = Number(
+          existing.call_trigger_price > 0
+            ? existing.call_trigger_price
+            : callEntry > 0 && triggerPct > 0
+              ? callEntry * (triggerPct / 100)
+              : 0,
+        )
+        const putTrigger = Number(
+          existing.put_trigger_price > 0
+            ? existing.put_trigger_price
+            : putEntry > 0 && triggerPct > 0
+              ? putEntry * (triggerPct / 100)
+              : 0,
+        )
 
         next.set(msg.trade_id, {
           ...existing,
@@ -274,6 +350,10 @@ export function useTrades() {
           fees_paid: feesPaid,
           est_exit_fees: estExit,
           total_expected_fees: totalFees,
+          call_entry_premium: callEntry || existing.call_entry_premium,
+          put_entry_premium: putEntry || existing.put_entry_premium,
+          call_trigger_price: callTrigger,
+          put_trigger_price: putTrigger,
           call_pct_to_trigger:
             callTrigger > 0 ? (callPrem / callTrigger) * 100 : existing.call_pct_to_trigger,
           put_pct_to_trigger:
@@ -289,6 +369,7 @@ export function useTrades() {
           call_leg: callLeg
             ? {
                 ...callLeg,
+                initial_premium: callEntry || callLeg.initial_premium,
                 change_pct: callChg,
                 leg_pnl: callOpen ? callMtm : callLeg.leg_pnl,
                 current_premium: callPrem,
@@ -297,6 +378,7 @@ export function useTrades() {
           put_leg: putLeg
             ? {
                 ...putLeg,
+                initial_premium: putEntry || putLeg.initial_premium,
                 change_pct: putChg,
                 leg_pnl: putOpen ? putMtm : putLeg.leg_pnl,
                 current_premium: putPrem,
@@ -314,7 +396,6 @@ export function useTrades() {
         const next = new Map(prev)
         const existing = next.get(msg.trade_id)
         if (existing) {
-          // Prefer full leg snapshots from backend when present
           const callLeg = msg.call_leg
             ? { ...(existing.call_leg || {}), ...msg.call_leg }
             : existing.call_leg
@@ -330,6 +411,35 @@ export function useTrades() {
             last_adjustment: msg,
             adjustment_count:
               msg.adjustment_count ?? (existing.adjustment_count || 0) + 1,
+            // Baselines + triggers from post-adjustment plan (overwrite cache)
+            call_entry_premium:
+              msg.call_entry_premium != null
+                ? Number(msg.call_entry_premium)
+                : callLeg?.initial_premium ?? existing.call_entry_premium,
+            put_entry_premium:
+              msg.put_entry_premium != null
+                ? Number(msg.put_entry_premium)
+                : putLeg?.initial_premium ?? existing.put_entry_premium,
+            call_trigger_price:
+              msg.call_trigger_price != null
+                ? Number(msg.call_trigger_price)
+                : existing.call_trigger_price,
+            put_trigger_price:
+              msg.put_trigger_price != null
+                ? Number(msg.put_trigger_price)
+                : existing.put_trigger_price,
+            call_pct_to_trigger:
+              msg.call_pct_to_trigger != null
+                ? Number(msg.call_pct_to_trigger)
+                : existing.call_pct_to_trigger,
+            put_pct_to_trigger:
+              msg.put_pct_to_trigger != null
+                ? Number(msg.put_pct_to_trigger)
+                : existing.put_pct_to_trigger,
+            current_trigger_pct:
+              msg.current_trigger_pct != null
+                ? Number(msg.current_trigger_pct)
+                : existing.current_trigger_pct,
           })
         }
         return next

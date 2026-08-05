@@ -130,8 +130,8 @@ function normalizeLeg(trade, side) {
     nested?.current_premium ??
     (side === 'call' ? trade.call_premium : trade.put_premium)
   const initial =
-    nested?.initial_premium ??
-    (side === 'call' ? trade.call_entry_premium : trade.put_entry_premium)
+    (side === 'call' ? trade.call_entry_premium : trade.put_entry_premium) ??
+    nested?.initial_premium
   const change =
     nested?.change_pct ??
     (side === 'call' ? trade.call_change_pct : trade.put_change_pct)
@@ -307,31 +307,16 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const progressPositive = totalMtm >= 0
   const displayPct = target > 0 ? Math.round(Math.abs((totalMtm / target) * 100)) : 0
 
-  const triggerPct = Number(trade.current_trigger_pct || 150)
-  const callEntry = Number(trade.call_entry_premium ?? call.initial_premium)
-  const putEntry = Number(trade.put_entry_premium ?? put.initial_premium)
-  const callTrigger = Number(
-    trade.call_trigger_price ?? callEntry * (triggerPct / 100),
-  )
-  const putTrigger = Number(
-    trade.put_trigger_price ?? putEntry * (triggerPct / 100),
-  )
-  const callProgress = Number(
-    trade.call_pct_to_trigger ??
-      (callTrigger > 0
-        ? (Number(call.current_premium) / callTrigger) * 100
-        : 0),
-  )
-  const putProgress = Number(
-    trade.put_pct_to_trigger ??
-      (putTrigger > 0 ? (Number(put.current_premium) / putTrigger) * 100 : 0),
-  )
-  const callDistance = Number(
-    trade.call_distance_to_trigger ?? callTrigger - Number(call.current_premium),
-  )
-  const putDistance = Number(
-    trade.put_distance_to_trigger ?? putTrigger - Number(put.current_premium),
-  )
+  // Bot Monitoring Plan — use ONLY server-sent values (never recalculate trigger)
+  const triggerPct = Number(trade.current_trigger_pct || 0)
+  const callEntry = Number(trade.call_entry_premium ?? call.initial_premium ?? 0)
+  const putEntry = Number(trade.put_entry_premium ?? put.initial_premium ?? 0)
+  const callTrigger = Number(trade.call_trigger_price ?? 0)
+  const putTrigger = Number(trade.put_trigger_price ?? 0)
+  const callProgress = Number(trade.call_pct_to_trigger ?? 0)
+  const putProgress = Number(trade.put_pct_to_trigger ?? 0)
+  const callDistance = Number(trade.call_distance_to_trigger ?? 0)
+  const putDistance = Number(trade.put_distance_to_trigger ?? 0)
 
   const callRepl = trade.estimated_call_replacement
   const putRepl = trade.estimated_put_replacement

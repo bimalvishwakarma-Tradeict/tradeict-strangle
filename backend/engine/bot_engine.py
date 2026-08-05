@@ -523,10 +523,8 @@ class BotEngine:
                 trigger_for_plan = trigger_pct
 
         def _trig_base(leg: Any) -> float:
-            tp = getattr(leg, "trigger_premium", None)
-            if tp is not None and float(tp) > 0:
-                return float(tp)
-            return float(leg.initial_premium)
+            # Always current initial_premium (reset on every adjustment)
+            return float(getattr(leg, "initial_premium", 0) or 0)
 
         call_trigger = _trig_base(call_leg) * (trigger_for_plan / 100.0)
         put_trigger = _trig_base(put_leg) * (trigger_for_plan / 100.0)
@@ -1019,13 +1017,13 @@ class BotEngine:
         call_replacement: dict[str, Any] | None = None,
         put_replacement: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Shared monitoring-plan fields for WS and /api/trade/active."""
-        call_fill = float(trade_state.call_leg.initial_premium)
-        put_fill = float(trade_state.put_leg.initial_premium)
-        call_tp = getattr(trade_state.call_leg, "trigger_premium", None)
-        put_tp = getattr(trade_state.put_leg, "trigger_premium", None)
-        call_entry = float(call_tp) if call_tp and float(call_tp) > 0 else call_fill
-        put_entry = float(put_tp) if put_tp and float(put_tp) > 0 else put_fill
+        """Shared monitoring-plan fields for WS and /api/trade/active.
+
+        Trigger prices ALWAYS use current leg.initial_premium (post-adjustment
+        baseline). Do not use stale trigger_premium — it can lag the DB reset.
+        """
+        call_entry = float(trade_state.call_leg.initial_premium or 0)
+        put_entry = float(trade_state.put_leg.initial_premium or 0)
         pct = float(trigger_pct) if trigger_pct > 0 else 150.0
         call_trigger = call_entry * (pct / 100.0)
         put_trigger = put_entry * (pct / 100.0)
@@ -1039,8 +1037,8 @@ class BotEngine:
             put_replacement = cached.get("estimated_put_replacement")
 
         return {
-            "call_entry_premium": call_fill,
-            "put_entry_premium": put_fill,
+            "call_entry_premium": call_entry,
+            "put_entry_premium": put_entry,
             "call_trigger_baseline": call_entry,
             "put_trigger_baseline": put_entry,
             "call_strike": float(trade_state.call_leg.strike),
@@ -1189,6 +1187,7 @@ class BotEngine:
 
         leg_history: list[dict[str, Any]] = []
         adj_count = 0
+        trigger_pct = 150.0
         with self.db_factory() as db:
             from backend.models import Adjustment
 
@@ -1228,6 +1227,16 @@ class BotEngine:
                 .filter(Adjustment.trade_id == trade_state.trade_id)
                 .count()
             )
+            try:
+                trigger_pct = float(
+                    self.strategy.get_current_trigger_pct(trade_state.trade, db)
+                )
+            except Exception:
+                trigger_pct = 150.0
+
+        plan = self.build_bot_plan_fields(
+            trade_state, call_prem, put_prem, trigger_pct
+        )
 
         await ws_manager.broadcast(
             {
@@ -1255,6 +1264,7 @@ class BotEngine:
                     )
                     if x
                 ),
+                **plan,
             }
         )
 

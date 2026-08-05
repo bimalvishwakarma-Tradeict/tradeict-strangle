@@ -46,14 +46,10 @@ def _trigger_baseline(leg: Any) -> float:
     """
     Premium used for adjustment trigger %.
 
-    After each adjustment both legs reset:
-      triggered → new fill; untouched → offer at adjust time.
-    Prefer trigger_premium when set; else initial_premium.
+    Always use current leg.initial_premium (reset after every adjustment:
+    triggered → new fill; untouched → offer at adjust time).
     """
-    tp = getattr(leg, "trigger_premium", None)
-    if tp is not None and float(tp) > 0:
-        return float(tp)
-    return float(leg.initial_premium)
+    return float(getattr(leg, "initial_premium", 0) or 0)
 
 
 class ShortStrangleStrategy(BaseStrategy):
