@@ -795,30 +795,37 @@ class DeltaClient:
         stop_price: float,
     ) -> dict[str, Any]:
         """
-        POST /v2/orders — stop-loss that triggers a market buy-to-close.
+        POST /v2/orders — stop-loss limit order (buy-to-close short options).
 
-        Delta India format (not stop_market_order):
-          order_type=market_order
+        Confirmed Delta India format:
+          order_type=limit_order
           stop_order_type=stop_loss_order
-          stop_price (string)
-          reduce_only="true"
+          stop_price + limit_price (buy: +5%, sell: -5%)
           time_in_force=gtc
+          (no reduce_only)
         """
+        stop_px = round(float(stop_price), 2)
+        if str(side).lower() == "buy":
+            limit_price = round(stop_px * 1.05, 2)
+        else:
+            limit_price = round(stop_px * 0.95, 2)
+
         body: dict[str, Any] = {
             "product_id": int(product_id),
             "size": abs(int(size)),
             "side": side,
-            "order_type": "market_order",
+            "order_type": "limit_order",
             "stop_order_type": "stop_loss_order",
-            "stop_price": str(round(float(stop_price), 2)),
+            "stop_price": str(stop_px),
+            "limit_price": str(limit_price),
             "time_in_force": "gtc",
-            "reduce_only": "true",
         }
         logger.info(
-            "Placing stop order: product=%s side=%s stop_price=%s body=%s",
+            "Placing stop order: product=%s side=%s stop=%s limit=%s body=%s",
             product_id,
             side,
-            stop_price,
+            stop_px,
+            limit_price,
             body,
         )
         result = await self._request(
@@ -827,13 +834,19 @@ class DeltaClient:
             body=body,
             timeout=ORDER_TIMEOUT_SECONDS,
         )
-        logger.info("Stop order placed: %s", result)
         raw = result if isinstance(result, dict) else {"result": result}
+        logger.info(
+            "Stop order placed: id=%s state=%s",
+            raw.get("id"),
+            raw.get("state"),
+        )
+        # Normalize for delta_sl callers while preserving raw API fields
         return {
             **raw,
             "order_id": raw.get("id") or raw.get("order_id"),
             "status": raw.get("state") or raw.get("status"),
-            "stop_price": float(stop_price),
+            "stop_price": float(stop_px),
+            "limit_price": float(limit_price),
             "size": int(raw.get("size", size) or size),
             "raw": raw,
         }
