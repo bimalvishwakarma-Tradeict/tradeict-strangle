@@ -135,9 +135,8 @@ function normalizeLeg(trade, side) {
   const change =
     nested?.change_pct ??
     (side === 'call' ? trade.call_change_pct : trade.put_change_pct)
-  const legPnl =
-    nested?.leg_pnl ??
-    (side === 'call' ? trade.call_delta_mtm : trade.put_delta_mtm)
+  // Legs-table only — NEVER fall back to call_upnl / Delta MTM (those are NET MTM)
+  const legPnl = nested?.leg_pnl
   const status = (nested?.status || 'open').toLowerCase()
   const entryFee =
     nested?.entry_fee_usd ??
@@ -285,43 +284,49 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
     Boolean(trade.is_settling),
   )
 
-  // NET MTM — ONLY from server TRADE_UPDATE / /active (never from live offer math)
-  const realized = Number(trade.realized_pnl ?? 0)
-  const callUpnl = Number(trade.call_upnl ?? trade.call_delta_mtm ?? 0)
-  const putUpnl = Number(trade.put_upnl ?? trade.put_delta_mtm ?? 0)
-  const unrealized = Number(
-    trade.delta_upnl ??
-      trade.delta_mtm_pnl ??
-      trade.combined_upnl ??
-      trade.unrealized_pnl ??
-      callUpnl + putUpnl,
+  // NET MTM — ONLY server TRADE_UPDATE / /active fields (never leg_pnl / offer math)
+  const n = (v) => {
+    const x = Number(v)
+    return Number.isFinite(x) ? x : 0
+  }
+  const realized = n(trade.realized_pnl)
+  const callUpnl = n(trade.call_upnl)
+  const putUpnl = n(trade.put_upnl)
+  const unrealized = n(
+    trade.combined_upnl ?? trade.delta_upnl ?? trade.delta_mtm_pnl,
   )
-  const feesPaid = Number(trade.fees_paid ?? 0)
-  const estExitFees = Number(trade.est_exit_fees ?? 0)
-  const totalFees = Number(trade.total_expected_fees ?? feesPaid + estExitFees)
-  const grossMtm = Number(
-    trade.gross_mtm ?? trade.total_pnl ?? realized + unrealized,
-  )
-  const netMtm = Number(trade.net_mtm ?? grossMtm - feesPaid - estExitFees)
+  const feesPaid = n(trade.fees_paid)
+  const estExitFees = n(trade.est_exit_fees)
+  const totalFees = n(trade.total_expected_fees ?? feesPaid + estExitFees)
+  const grossMtm = n(trade.gross_mtm)
+  const netMtm = n(trade.net_mtm)
   const totalMtm = grossMtm
   const lastMtmUpdate = trade.last_mtm_update || null
-  const target = Number(trade.profit_target_usd ?? 0)
-  const stoploss = Number(trade.stoploss_usd ?? 0)
+  const target = n(trade.profit_target_usd)
+  const stoploss = n(trade.stoploss_usd)
   const progressPct =
     target > 0 ? Math.min(100, Math.abs((totalMtm / target) * 100)) : 0
   const progressPositive = totalMtm >= 0
   const displayPct = target > 0 ? Math.round(Math.abs((totalMtm / target) * 100)) : 0
 
-  // Bot Monitoring Plan — use ONLY server-sent values (never recalculate trigger)
+  // Bot Monitoring Plan — baselines/triggers from server; live offer from PRICE_TICK leg
   const triggerPct = Number(trade.current_trigger_pct || 0)
   const callEntry = Number(trade.call_entry_premium ?? call.initial_premium ?? 0)
   const putEntry = Number(trade.put_entry_premium ?? put.initial_premium ?? 0)
   const callTrigger = Number(trade.call_trigger_price ?? 0)
   const putTrigger = Number(trade.put_trigger_price ?? 0)
-  const callProgress = Number(trade.call_pct_to_trigger ?? 0)
-  const putProgress = Number(trade.put_pct_to_trigger ?? 0)
-  const callDistance = Number(trade.call_distance_to_trigger ?? 0)
-  const putDistance = Number(trade.put_distance_to_trigger ?? 0)
+  const callOfferLive = Number(call.current_premium ?? 0)
+  const putOfferLive = Number(put.current_premium ?? 0)
+  const callProgress =
+    callTrigger > 0
+      ? (callOfferLive / callTrigger) * 100
+      : Number(trade.call_pct_to_trigger ?? 0)
+  const putProgress =
+    putTrigger > 0
+      ? (putOfferLive / putTrigger) * 100
+      : Number(trade.put_pct_to_trigger ?? 0)
+  const callDistance = callTrigger > 0 ? callTrigger - callOfferLive : 0
+  const putDistance = putTrigger > 0 ? putTrigger - putOfferLive : 0
 
   const callRepl = trade.estimated_call_replacement
   const putRepl = trade.estimated_put_replacement
@@ -489,7 +494,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
               <th className="px-2 py-2">Entry $</th>
               <th className="px-2 py-2">Offer $</th>
               <th className="px-2 py-2">Change</th>
-              <th className="px-2 py-2">Leg P&L</th>
+              <th className="px-2 py-2">Leg P&L*</th>
               <th className="px-2 py-2">Entry Fee</th>
               <th className="px-2 py-2">Est Exit Fee</th>
             </tr>
@@ -499,6 +504,10 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             <LegRow label="📉 PUT" leg={put} />
           </tbody>
         </table>
+        <div className="px-2 pb-1 text-[10px] text-gray-500">
+          * Leg P&L = live offer estimate only. Official UPL is in NET MTM below
+          (updates each bot cycle).
+        </div>
       </div>
 
       {closedHistory.length > 0 && (

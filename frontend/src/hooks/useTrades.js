@@ -94,34 +94,8 @@ export function useTrades() {
           msg.put_entry_premium != null
             ? Number(msg.put_entry_premium)
             : existing.put_entry_premium
-        const callLeg = existing.call_leg
-          ? {
-              ...existing.call_leg,
-              initial_premium:
-                callEntry != null
-                  ? callEntry
-                  : existing.call_leg.initial_premium,
-              current_premium: msg.call_premium ?? existing.call_leg.current_premium,
-              change_pct: msg.call_change_pct ?? existing.call_leg.change_pct,
-              leg_pnl:
-                msg.call_delta_mtm != null
-                  ? msg.call_delta_mtm
-                  : existing.call_leg.leg_pnl,
-            }
-          : existing.call_leg
-        const putLeg = existing.put_leg
-          ? {
-              ...existing.put_leg,
-              initial_premium:
-                putEntry != null ? putEntry : existing.put_leg.initial_premium,
-              current_premium: msg.put_premium ?? existing.put_leg.current_premium,
-              change_pct: msg.put_change_pct ?? existing.put_leg.change_pct,
-              leg_pnl:
-                msg.put_delta_mtm != null
-                  ? msg.put_delta_mtm
-                  : existing.put_leg.leg_pnl,
-            }
-          : existing.put_leg
+
+        // Prefer server leg snapshots for strike/symbol; keep live offer/leg_pnl from ticks
         const mergedCallLeg = msg.call_leg
           ? {
               ...(existing.call_leg || {}),
@@ -130,40 +104,102 @@ export function useTrades() {
                 callEntry != null
                   ? callEntry
                   : msg.call_leg.initial_premium,
+              // Do not overwrite live offer / display leg_pnl with UPL
+              current_premium:
+                existing.call_leg?.current_premium ??
+                msg.call_premium ??
+                msg.call_leg.current_premium,
+              leg_pnl: existing.call_leg?.leg_pnl,
             }
-          : callLeg
+          : existing.call_leg
             ? {
-                ...callLeg,
-                leg_pnl: msg.call_upnl ?? msg.call_delta_mtm ?? callLeg.leg_pnl,
+                ...existing.call_leg,
+                initial_premium:
+                  callEntry != null
+                    ? callEntry
+                    : existing.call_leg.initial_premium,
+                current_premium:
+                  msg.call_premium ?? existing.call_leg.current_premium,
+                change_pct:
+                  msg.call_change_pct ?? existing.call_leg.change_pct,
               }
             : existing.call_leg
+
         const mergedPutLeg = msg.put_leg
           ? {
               ...(existing.put_leg || {}),
               ...msg.put_leg,
               initial_premium:
                 putEntry != null ? putEntry : msg.put_leg.initial_premium,
+              current_premium:
+                existing.put_leg?.current_premium ??
+                msg.put_premium ??
+                msg.put_leg.current_premium,
+              leg_pnl: existing.put_leg?.leg_pnl,
             }
-          : putLeg
+          : existing.put_leg
             ? {
-                ...putLeg,
-                leg_pnl: msg.put_upnl ?? msg.put_delta_mtm ?? putLeg.leg_pnl,
+                ...existing.put_leg,
+                initial_premium:
+                  putEntry != null
+                    ? putEntry
+                    : existing.put_leg.initial_premium,
+                current_premium:
+                  msg.put_premium ?? existing.put_leg.current_premium,
+                change_pct: msg.put_change_pct ?? existing.put_leg.change_pct,
               }
             : existing.put_leg
+
+        const callUpnl =
+          msg.call_upnl != null
+            ? Number(msg.call_upnl)
+            : msg.call_delta_mtm != null
+              ? Number(msg.call_delta_mtm)
+              : existing.call_upnl
+        const putUpnl =
+          msg.put_upnl != null
+            ? Number(msg.put_upnl)
+            : msg.put_delta_mtm != null
+              ? Number(msg.put_delta_mtm)
+              : existing.put_upnl
+        const deltaUpnl =
+          msg.delta_upnl != null
+            ? Number(msg.delta_upnl)
+            : msg.delta_mtm_pnl != null
+              ? Number(msg.delta_mtm_pnl)
+              : existing.delta_upnl
+        const realized =
+          msg.realized_pnl != null
+            ? Number(msg.realized_pnl)
+            : existing.realized_pnl
+        const gross =
+          msg.gross_mtm != null
+            ? Number(msg.gross_mtm)
+            : msg.total_pnl != null
+              ? Number(msg.total_pnl)
+              : existing.gross_mtm
+        const feesPaid =
+          msg.fees_paid != null ? Number(msg.fees_paid) : existing.fees_paid
+        const estExit =
+          msg.est_exit_fees != null
+            ? Number(msg.est_exit_fees)
+            : existing.est_exit_fees
+        const net =
+          msg.net_mtm != null
+            ? Number(msg.net_mtm)
+            : gross != null && feesPaid != null && estExit != null
+              ? Number(gross) - Number(feesPaid || 0) - Number(estExit || 0)
+              : existing.net_mtm
+
         next.set(msg.trade_id, {
           ...existing,
           ...msg,
           call_leg: mergedCallLeg,
           put_leg: mergedPutLeg,
-          // Explicit overwrite — never keep stale post-adjustment baselines
           call_entry_premium:
-            msg.call_entry_premium != null
-              ? Number(msg.call_entry_premium)
-              : existing.call_entry_premium,
+            callEntry != null ? callEntry : existing.call_entry_premium,
           put_entry_premium:
-            msg.put_entry_premium != null
-              ? Number(msg.put_entry_premium)
-              : existing.put_entry_premium,
+            putEntry != null ? putEntry : existing.put_entry_premium,
           call_trigger_price:
             msg.call_trigger_price != null
               ? Number(msg.call_trigger_price)
@@ -193,30 +229,26 @@ export function useTrades() {
               ? Number(msg.current_trigger_pct)
               : existing.current_trigger_pct,
           leg_history: msg.leg_history || existing.leg_history,
-          call_upnl: msg.call_upnl ?? msg.call_delta_mtm,
-          put_upnl: msg.put_upnl ?? msg.put_delta_mtm,
-          delta_upnl: msg.delta_upnl ?? msg.delta_mtm_pnl,
-          delta_mtm_pnl: msg.delta_mtm_pnl ?? msg.delta_upnl,
-          calculated_pnl: msg.calculated_pnl,
-          gross_mtm:
-            msg.gross_mtm ??
-            msg.total_pnl ??
-            (Number(msg.realized_pnl ?? existing.realized_pnl ?? 0) +
-              Number(msg.delta_upnl ?? msg.delta_mtm_pnl ?? 0)),
-          net_mtm:
-            msg.net_mtm ??
-            (Number(
-              msg.gross_mtm ??
-                msg.total_pnl ??
-                Number(msg.realized_pnl ?? existing.realized_pnl ?? 0) +
-                  Number(msg.delta_upnl ?? msg.delta_mtm_pnl ?? 0),
-            ) -
-              Number(msg.fees_paid ?? existing.fees_paid ?? 0) -
-              Number(msg.est_exit_fees ?? existing.est_exit_fees ?? 0)),
-          fees_paid: msg.fees_paid ?? existing.fees_paid,
-          est_exit_fees: msg.est_exit_fees ?? existing.est_exit_fees,
+          // Server MTM only — never undefined-overwrite
+          call_upnl: callUpnl,
+          put_upnl: putUpnl,
+          call_delta_mtm: callUpnl,
+          put_delta_mtm: putUpnl,
+          delta_upnl: deltaUpnl,
+          delta_mtm_pnl: deltaUpnl,
+          combined_upnl: deltaUpnl,
+          unrealized_pnl: deltaUpnl,
+          realized_pnl: realized,
+          gross_mtm: gross,
+          total_pnl: gross,
+          net_mtm: net,
+          fees_paid: feesPaid,
+          est_exit_fees: estExit,
           total_expected_fees:
-            msg.total_expected_fees ?? existing.total_expected_fees,
+            msg.total_expected_fees != null
+              ? Number(msg.total_expected_fees)
+              : existing.total_expected_fees,
+          last_mtm_update: msg.last_mtm_update ?? existing.last_mtm_update,
           underlying_price:
             Number(msg.underlying_price) > 0
               ? Number(msg.underlying_price)
@@ -233,115 +265,59 @@ export function useTrades() {
     }
 
     if (msg.type === 'PRICE_TICK') {
-      // Offer display only — NEVER recalculate basket MTM here.
-      // MTM comes exclusively from TRADE_UPDATE / /active (realized + Delta UPL).
+      // Offer / leg-table display ONLY. Never touch basket MTM / UPL fields.
       if (msg.price_type !== 'ask') return
       const tickPx = Number(msg.price)
       if (!Number.isFinite(tickPx) || tickPx <= 0) return
 
       setTradeMap((prev) => {
         const next = new Map(prev)
-        const existing = next.get(msg.trade_id)
-        if (!existing) return prev
+        const trade = next.get(msg.trade_id)
+        if (!trade) return prev
 
-        const callOpen =
-          String(existing.call_leg?.status || 'open').toLowerCase() === 'open'
-        const putOpen =
-          String(existing.put_leg?.status || 'open').toLowerCase() === 'open'
+        const isCall = trade.call_leg?.symbol === msg.symbol
+        const isPut = trade.put_leg?.symbol === msg.symbol
+        if (!isCall && !isPut) return prev
 
-        const callPrem =
-          callOpen && existing.call_leg?.symbol === msg.symbol
-            ? tickPx
-            : Number(
-                msg.call_premium ?? existing.call_leg?.current_premium ?? existing.call_premium ?? 0,
-              )
-        const putPrem =
-          putOpen && existing.put_leg?.symbol === msg.symbol
-            ? tickPx
-            : Number(
-                msg.put_premium ?? existing.put_leg?.current_premium ?? existing.put_premium ?? 0,
-              )
-
-        const callEntry = Number(
-          existing.call_entry_premium ?? existing.call_leg?.initial_premium ?? 0,
-        )
-        const putEntry = Number(
-          existing.put_entry_premium ?? existing.put_leg?.initial_premium ?? 0,
-        )
-        const callQty = Math.abs(
-          Number(
-            msg.call_quantity ??
-              existing.call_quantity ??
-              existing.call_leg?.quantity ??
+        const patchLeg = (leg) => {
+          if (!leg) return leg
+          const entry = Number(
+            leg.initial_premium ??
+              (isCall ? trade.call_entry_premium : trade.put_entry_premium) ??
               0,
-          ),
-        )
-        const putQty = Math.abs(
-          Number(
-            msg.put_quantity ??
-              existing.put_quantity ??
-              existing.put_leg?.quantity ??
-              0,
-          ),
-        )
-        const callChg = callEntry > 0 ? (callPrem / callEntry - 1) * 100 : 0
-        const putChg = putEntry > 0 ? (putPrem / putEntry - 1) * 100 : 0
-        // Per-leg display only (not basket NET MTM)
-        const callLegPnl = callOpen
-          ? shortLegUpnl(callEntry, callPrem, callQty)
-          : existing.call_leg?.leg_pnl
-        const putLegPnl = putOpen
-          ? shortLegUpnl(putEntry, putPrem, putQty)
-          : existing.put_leg?.leg_pnl
-
-        const callTrigger = Number(existing.call_trigger_price || 0)
-        const putTrigger = Number(existing.put_trigger_price || 0)
+          )
+          const qty = Math.abs(Number(leg.quantity ?? 0))
+          const changePct = entry > 0 ? (tickPx / entry - 1) * 100 : 0
+          return {
+            ...leg,
+            current_premium: tickPx,
+            change_pct: changePct,
+            // Legs-table display only — must never feed NET MTM
+            leg_pnl: shortLegUpnl(entry, tickPx, qty),
+          }
+        }
 
         next.set(msg.trade_id, {
-          ...existing,
-          // Live offers + change% only — leave gross_mtm/net_mtm/upnl untouched
-          call_premium: callPrem,
-          put_premium: putPrem,
-          call_offer: callPrem,
-          put_offer: putPrem,
-          call_change_pct: callChg,
-          put_change_pct: putChg,
-          call_pct_to_trigger:
-            callTrigger > 0
-              ? (callPrem / callTrigger) * 100
-              : existing.call_pct_to_trigger,
-          put_pct_to_trigger:
-            putTrigger > 0
-              ? (putPrem / putTrigger) * 100
-              : existing.put_pct_to_trigger,
-          call_distance_to_trigger:
-            callTrigger > 0
-              ? callTrigger - callPrem
-              : existing.call_distance_to_trigger,
-          put_distance_to_trigger:
-            putTrigger > 0
-              ? putTrigger - putPrem
-              : existing.put_distance_to_trigger,
-          underlying_price:
-            Number(msg.underlying_price) > 0
-              ? Number(msg.underlying_price)
-              : existing.underlying_price,
-          call_leg: existing.call_leg
-            ? {
-                ...existing.call_leg,
-                current_premium: callPrem,
-                change_pct: callChg,
-                leg_pnl: callLegPnl,
-              }
-            : existing.call_leg,
-          put_leg: existing.put_leg
-            ? {
-                ...existing.put_leg,
-                current_premium: putPrem,
-                change_pct: putChg,
-                leg_pnl: putLegPnl,
-              }
-            : existing.put_leg,
+          ...trade,
+          call_leg: isCall ? patchLeg(trade.call_leg) : trade.call_leg,
+          put_leg: isPut ? patchLeg(trade.put_leg) : trade.put_leg,
+          // Pin server MTM — PRICE_TICK must never alter these
+          call_upnl: trade.call_upnl,
+          put_upnl: trade.put_upnl,
+          combined_upnl: trade.combined_upnl,
+          delta_upnl: trade.delta_upnl,
+          delta_mtm_pnl: trade.delta_mtm_pnl,
+          unrealized_pnl: trade.unrealized_pnl,
+          call_delta_mtm: trade.call_delta_mtm,
+          put_delta_mtm: trade.put_delta_mtm,
+          realized_pnl: trade.realized_pnl,
+          gross_mtm: trade.gross_mtm,
+          net_mtm: trade.net_mtm,
+          total_pnl: trade.total_pnl,
+          fees_paid: trade.fees_paid,
+          est_exit_fees: trade.est_exit_fees,
+          total_expected_fees: trade.total_expected_fees,
+          last_mtm_update: trade.last_mtm_update,
         })
         return next
       })
