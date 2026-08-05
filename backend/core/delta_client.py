@@ -793,38 +793,49 @@ class DeltaClient:
         size: int,
         side: str,
         stop_price: float,
-        order_type: str = "market_order",
-        time_in_force: str = "gtc",
-        reduce_only: bool = True,
     ) -> dict[str, Any]:
         """
-        POST /v2/orders — stop-market (safety SL) that triggers a market order.
+        POST /v2/orders — stop-loss that triggers a market buy-to-close.
 
-        Delta India: order_type=market_order + stop_order_type=stop_loss_order
-        + stop_price. reduce_only=True so it only closes an existing short.
+        Delta India format (not stop_market_order):
+          order_type=market_order
+          stop_order_type=stop_loss_order
+          stop_price (string)
+          reduce_only="true"
+          time_in_force=gtc
         """
         body: dict[str, Any] = {
             "product_id": int(product_id),
             "size": abs(int(size)),
             "side": side,
-            "order_type": order_type or "market_order",
+            "order_type": "market_order",
             "stop_order_type": "stop_loss_order",
             "stop_price": str(round(float(stop_price), 2)),
-            "time_in_force": time_in_force or "gtc",
-            "reduce_only": bool(reduce_only),
+            "time_in_force": "gtc",
+            "reduce_only": "true",
         }
+        logger.info(
+            "Placing stop order: product=%s side=%s stop_price=%s body=%s",
+            product_id,
+            side,
+            stop_price,
+            body,
+        )
         result = await self._request(
             "POST",
             "/v2/orders",
             body=body,
             timeout=ORDER_TIMEOUT_SECONDS,
         )
+        logger.info("Stop order placed: %s", result)
+        raw = result if isinstance(result, dict) else {"result": result}
         return {
-            "order_id": result.get("id") or result.get("order_id"),
-            "status": result.get("state") or result.get("status"),
+            **raw,
+            "order_id": raw.get("id") or raw.get("order_id"),
+            "status": raw.get("state") or raw.get("status"),
             "stop_price": float(stop_price),
-            "size": int(result.get("size", size) or size),
-            "raw": result if isinstance(result, dict) else {},
+            "size": int(raw.get("size", size) or size),
+            "raw": raw,
         }
 
     async def modify_stop_order(
