@@ -74,6 +74,7 @@ class OrderExecutor:
         quantity: int,
         delta_client: Any,
         symbol_for_fallback: str | None = None,
+        bracket_sl_price: float | None = None,
     ) -> OrderResult:
         """Place a SELL market IOC order to open a new short option."""
         logger.info(
@@ -81,12 +82,24 @@ class OrderExecutor:
             product_id,
             quantity,
         )
+
+        sl_px: float | None = (
+            round(float(bracket_sl_price), 2)
+            if bracket_sl_price is not None
+            else None
+        )
+        sl_limit_px: float | None = (
+            round(sl_px * 1.05, 2) if sl_px is not None and sl_px > 0 else None
+        )
+
         return await self._execute_with_retry(
             delta_client=delta_client,
             product_id=int(product_id),
             size=int(quantity),
             side="sell",
             symbol_for_fallback=symbol_for_fallback,
+            bracket_stop_loss_price=sl_px,
+            bracket_stop_loss_limit_price=sl_limit_px,
         )
 
     async def _execute_with_retry(
@@ -96,6 +109,8 @@ class OrderExecutor:
         size: int,
         side: str,
         symbol_for_fallback: str | None = None,
+        bracket_stop_loss_price: float | None = None,
+        bracket_stop_loss_limit_price: float | None = None,
     ) -> OrderResult:
         """
         Attempt order once; on DeltaAPIError wait 2s and retry once only.
@@ -119,6 +134,8 @@ class OrderExecutor:
                     side=side,
                     order_type="market_order",
                     time_in_force="ioc",
+                    bracket_stop_loss_price=bracket_stop_loss_price,
+                    bracket_stop_loss_limit_price=bracket_stop_loss_limit_price,
                 )
                 filled_price = await delta_client.resolve_fill_price(
                     result,

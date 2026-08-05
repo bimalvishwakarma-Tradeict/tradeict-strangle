@@ -1277,13 +1277,6 @@ class BotEngine:
         except Exception as exc:
             logger.warning("Mirror exit queue failed: %s", exc)
 
-        # Cancel Delta SL safety orders before closing legs
-        from backend.core.delta_sl import cancel_leg_sl_order
-
-        for leg in (trade_state.call_leg, trade_state.put_leg):
-            if getattr(leg, "delta_sl_order_id", None):
-                await cancel_leg_sl_order(self.delta_client, leg, clear_fields=True)
-
         call_close = await self.order_executor.close_leg(
             trade_state.call_leg, self.delta_client
         )
@@ -1784,7 +1777,8 @@ class BotEngine:
             ),
             "call_sl_order_id": call_sl_id,
             "put_sl_order_id": put_sl_id,
-            "delta_sl_active": bool(call_sl_id and put_sl_id),
+            # For bracket SLs, delta_sl_order_id may be None, but sl_trigger_price is present.
+            "delta_sl_active": bool(call_sl_px and put_sl_px),
         }
         if premium_slabs:
             out.update(

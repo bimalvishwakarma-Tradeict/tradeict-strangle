@@ -154,7 +154,6 @@ class AutoTradeEngine:
             await self._place_trade(settings, db)
 
     async def _place_trade(self, settings: Any, db: Any) -> None:
-        from backend.core.delta_sl import place_basket_sl_orders
         from backend.models import Account, Leg, Setting, Trade
 
         client = self._resolve_delta_client()
@@ -198,6 +197,13 @@ class AutoTradeEngine:
             put_mark = float(straddle["put_premium"])
             tp_pct = float(settings.tp_pct or 50.0)
             sl_pct = float(settings.sl_pct or 100.0)
+            universal_sl_pct = float(settings.universal_sl_pct or 200.0)
+            call_sl_trigger_price = round(
+                call_mark * (universal_sl_pct / 100.0), 2
+            )
+            put_sl_trigger_price = round(
+                put_mark * (universal_sl_pct / 100.0), 2
+            )
 
             # --- Place CALL ---
             logger.info(
@@ -208,6 +214,7 @@ class AutoTradeEngine:
                 quantity=qty,
                 delta_client=client,
                 symbol_for_fallback=str(straddle["call_symbol"]),
+                bracket_sl_price=call_sl_trigger_price if call_sl_trigger_price > 0 else None,
             )
             if not call_result.success:
                 raise RuntimeError(
@@ -240,6 +247,7 @@ class AutoTradeEngine:
                 quantity=qty,
                 delta_client=client,
                 symbol_for_fallback=str(straddle["put_symbol"]),
+                bracket_sl_price=put_sl_trigger_price if put_sl_trigger_price > 0 else None,
             )
             if not put_result.success:
                 raise RuntimeError(
@@ -330,6 +338,9 @@ class AutoTradeEngine:
                 delta_order_id=call_order_id,
                 delta_at_entry=float(straddle.get("call_delta") or 0),
                 entry_fee_usd=call_fee,
+                sl_trigger_price=float(call_sl_trigger_price)
+                if call_sl_trigger_price and call_sl_trigger_price > 0
+                else None,
             )
             put_leg = Leg(
                 trade_id=trade.id,
@@ -347,6 +358,9 @@ class AutoTradeEngine:
                 delta_order_id=put_order_id,
                 delta_at_entry=float(straddle.get("put_delta") or 0),
                 entry_fee_usd=put_fee,
+                sl_trigger_price=float(put_sl_trigger_price)
+                if put_sl_trigger_price and put_sl_trigger_price > 0
+                else None,
             )
             db.add(call_leg)
             db.add(put_leg)
@@ -377,34 +391,8 @@ class AutoTradeEngine:
             db.refresh(trade)
             db.refresh(call_leg)
             db.refresh(put_leg)
-
-            # Delta SL safety orders (non-fatal)
-            try:
-                sl_result = await place_basket_sl_orders(
-                    client,
-                    call_leg,
-                    put_leg,
-                    universal_sl_pct=float(settings.universal_sl_pct or 200.0),
-                    call_baseline=call_fill,
-                    put_baseline=put_fill,
-                )
-                db.add(call_leg)
-                db.add(put_leg)
-                db.commit()
-                if not sl_result.get("all_ok"):
-                    logger.warning(
-                        "Auto trade Delta SL incomplete: %s", sl_result
-                    )
-                else:
-                    logger.info("Delta SL orders placed for auto trade")
-            except Exception as exc:
-                logger.warning(
-                    "Delta SL placement failed (non-fatal): %s", exc
-                )
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
+            # With bracket SLs attached at entry, there is no separate
+            # stop-loss order to place/refresh for auto-trades.
 
             # Detach for tracker after session commits
             db.expunge(trade)

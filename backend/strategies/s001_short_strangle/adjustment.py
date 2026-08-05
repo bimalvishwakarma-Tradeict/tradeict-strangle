@@ -137,6 +137,24 @@ class AdjustmentExecutor:
                 )
 
             # Step 4: Close triggered leg
+            # If this leg was protected by a legacy *separate* SL order
+            # (delta_sl_order_id exists), cancel it before/around the close so
+            # we don't leave orphan stop orders behind.
+            legacy_sl_oid = getattr(triggered_leg, "delta_sl_order_id", None)
+            if legacy_sl_oid:
+                try:
+                    await delta_client.cancel_order(int(legacy_sl_oid))
+                    triggered_leg.delta_sl_order_id = None
+                except Exception as exc:
+                    logger.warning(
+                        "Could not cancel legacy SL before adjustment "
+                        "trade=%s leg=%s sl_order_id=%s: %s",
+                        trade.id,
+                        triggered_leg_type,
+                        legacy_sl_oid,
+                        exc,
+                    )
+
             exit_result: OrderResult = await order_executor.close_leg(
                 triggered_leg, delta_client
             )
@@ -149,10 +167,19 @@ class AdjustmentExecutor:
                 return AdjustmentResult(success=False, error_message=msg)
 
             # Step 5: Enter new leg
+            uni_sl = float(getattr(trade, "universal_sl_pct", None) or 200.0)
+            try:
+                expected_new_entry = float(await delta_client.get_mark_price(plan.new_symbol))
+            except Exception:
+                # Fallback: strategy target (other_leg_current_premium)
+                expected_new_entry = float(other_premium)
+            bracket_sl_price = round(expected_new_entry * (uni_sl / 100.0), 2)
             entry_result: OrderResult = await order_executor.sell_option(
-                plan.new_product_id,
-                int(triggered_leg.quantity),
-                delta_client,
+                product_id=int(plan.new_product_id),
+                quantity=int(triggered_leg.quantity),
+                delta_client=delta_client,
+                symbol_for_fallback=str(plan.new_symbol),
+                bracket_sl_price=bracket_sl_price if bracket_sl_price > 0 else None,
             )
             if not entry_result.success:
                 self._log_partial_error(trade, triggered_leg_type, exit_result)
@@ -212,6 +239,9 @@ class AdjustmentExecutor:
                     if entry_result.order_id is not None
                     else None
                 ),
+                sl_trigger_price=float(bracket_sl_price)
+                if bracket_sl_price > 0
+                else None,
                 is_bot_managed=True,
             )
             db_session.add(new_leg)
@@ -259,44 +289,9 @@ class AdjustmentExecutor:
             db_session.add(adjustment)
             db_session.commit()
 
-            # Refresh Delta SL safety orders (non-fatal)
-            from backend.core.delta_sl import (
-                cancel_leg_sl_order,
-                place_leg_sl_order,
-                refresh_leg_sl_order,
-            )
-
-            uni_sl = float(getattr(trade_row, "universal_sl_pct", None) or 200.0)
-            # Old triggered leg is closed — cancel any leftover SL
-            await cancel_leg_sl_order(delta_client, triggered_leg, clear_fields=True)
-            # New leg: SL from new entry fill
-            await place_leg_sl_order(
-                delta_client,
-                new_leg,
-                baseline_premium=new_entry_premium,
-                universal_sl_pct=uni_sl,
-            )
-            # Untouched: cancel + re-place from new trigger_baseline_premium
-            other_baseline = float(
-                getattr(other_leg, "trigger_baseline_premium", None)
-                or other_premium
-                or 0
-            )
-            await refresh_leg_sl_order(
-                delta_client,
-                other_leg,
-                baseline_premium=other_baseline,
-                universal_sl_pct=uni_sl,
-            )
-            try:
-                db_session.commit()
-            except Exception as exc:
-                logger.warning(
-                    "Could not persist post-adjust SL order IDs trade=%s: %s",
-                    trade.id,
-                    exc,
-                )
-                db_session.rollback()
+            # With bracket SLs attached to entry orders, there is nothing to
+            # "refresh" as part of adjustment. The new leg's bracket SL was
+            # attached at order placement time above.
 
             logger.info(
                 "Adjustment baseline reset: "

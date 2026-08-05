@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -12,7 +13,7 @@ from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt, encrypt
 from backend.core.time_utils import get_ist_now
 from backend.database import get_db, get_or_create_auto_settings
-from backend.models import Account
+from backend.models import Account, Leg, Trade
 from backend.schemas import (
     AccountConnectRequest,
     AccountConnectResponse,
@@ -24,6 +25,73 @@ from backend.schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/account", tags=["account"])
+
+async def cleanup_orphan_sl_orders(db: Session) -> dict[str, Any]:
+    """
+    Cancel open Delta stop-loss orders that are NOT for any currently-open
+    bot-managed leg in our DB.
+    """
+    account = (
+        db.query(Account)
+        .filter(Account.is_active.is_(True))
+        .order_by(Account.id.asc())
+        .first()
+    )
+    if account is None:
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "No active account",
+            "cancelled": 0,
+            "kept": 0,
+        }
+
+    active_product_ids: set[int] = {
+        int(row[0])
+        for row in (
+            db.query(Leg.product_id)
+            .filter(Leg.status == "open", Leg.is_bot_managed.is_(True))
+            .all()
+        )
+        if row and row[0]
+    }
+
+    client = DeltaClient(
+        decrypt(account.api_key_encrypted),
+        decrypt(account.api_secret_encrypted),
+    )
+
+    try:
+        orders = await client.get_open_stop_orders()
+        cancelled = 0
+        kept = 0
+
+        for order in orders:
+            product_id = order.get("product_id")
+            order_id = order.get("id") or order.get("order_id")
+            try:
+                pid = int(product_id) if product_id is not None else 0
+            except (TypeError, ValueError):
+                pid = 0
+            if pid <= 0 or order_id is None:
+                kept += 1
+                continue
+
+            if pid not in active_product_ids:
+                await client.cancel_order(int(order_id))
+                cancelled += 1
+            else:
+                kept += 1
+
+        return {
+            "success": True,
+            "skipped": False,
+            "cancelled": cancelled,
+            "kept": kept,
+            "active_product_count": len(active_product_ids),
+        }
+    finally:
+        await client.close()
 
 
 @router.post("/connect", response_model=AccountConnectResponse)
@@ -166,3 +234,9 @@ async def disconnect_account(db: Session = Depends(get_db)) -> AccountDisconnect
     db.commit()
     logger.info("Disconnected accounts deleted=%s", deleted)
     return AccountDisconnectResponse(success=True, message="Disconnected")
+
+
+@router.post("/cleanup-sl-orders")
+async def cleanup_sl_orders(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """One-time orphan stop-loss cleanup."""
+    return await cleanup_orphan_sl_orders(db)

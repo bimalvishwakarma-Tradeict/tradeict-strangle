@@ -578,6 +578,8 @@ class DeltaClient:
         side: str,
         order_type: str = "market_order",
         time_in_force: str = "ioc",
+        bracket_stop_loss_price: float | None = None,
+        bracket_stop_loss_limit_price: float | None = None,
     ) -> dict[str, Any]:
         """
         POST /v2/orders — place an order (10s timeout).
@@ -592,6 +594,21 @@ class DeltaClient:
             "order_type": order_type,
             "time_in_force": time_in_force,
         }
+
+        # Delta "bracket" stop-loss: attach stop-loss directly to entry order.
+        # When the position is closed for any reason, the bracket SL auto-cancels.
+        if bracket_stop_loss_price is not None:
+            stop_px = round(float(bracket_stop_loss_price), 2)
+            if stop_px > 0:
+                body["bracket_stop_loss_price"] = str(stop_px)
+                if bracket_stop_loss_limit_price is not None:
+                    limit_px = round(float(bracket_stop_loss_limit_price), 2)
+                else:
+                    # For SHORT entry (side="sell"), the bracket SL is a BUY order.
+                    # Default limit is 5% above the stop trigger.
+                    limit_px = round(stop_px * 1.05, 2)
+                body["bracket_stop_loss_limit_price"] = str(limit_px)
+
         result = await self._request(
             "POST",
             "/v2/orders",
@@ -610,6 +627,29 @@ class DeltaClient:
             "size": int(result.get("size", size) or size),
             "raw": result if isinstance(result, dict) else {},
         }
+
+    async def get_open_stop_orders(self) -> list[dict[str, Any]]:
+        """
+        Fetch open stop-loss orders for this account.
+
+        Used for one-time orphan cleanup after deploying bracket orders.
+        """
+        result = await self._request(
+            "GET",
+            "/v2/orders",
+            params={
+                "state": "open",
+                "stop_order_type": "stop_loss_order",
+            },
+        )
+        if isinstance(result, list):
+            return [r for r in result if isinstance(r, dict)]
+        if isinstance(result, dict):
+            # Some Delta deployments return a wrapper envelope under `orders` or `result`.
+            maybe = result.get("orders") or result.get("result") or []
+            if isinstance(maybe, list):
+                return [r for r in maybe if isinstance(r, dict)]
+        return []
 
     async def get_order(self, order_id: int | str) -> dict[str, Any]:
         """

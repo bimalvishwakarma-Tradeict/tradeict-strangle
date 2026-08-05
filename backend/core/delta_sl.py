@@ -67,6 +67,21 @@ async def place_leg_sl_order(
     product_id = int(getattr(leg, "product_id", 0) or 0)
     leg_type = str(getattr(leg, "leg_type", "?") or "?")
 
+    # Bracket-based mode: when the leg was placed with bracket SL attached,
+    # we already persist `sl_trigger_price` for display and there is no
+    # separate stop-loss order to place/refresh.
+    if (
+        getattr(leg, "delta_order_id", None)
+        and getattr(leg, "sl_trigger_price", None) is not None
+        and not getattr(leg, "delta_sl_order_id", None)
+    ):
+        return {
+            "success": True,
+            "order_id": None,
+            "stop_price": float(getattr(leg, "sl_trigger_price") or stop_px),
+            "error": None,
+        }
+
     if stop_px <= 0 or qty <= 0 or product_id <= 0:
         msg = (
             f"Invalid SL params leg={leg_type} stop={stop_px} "

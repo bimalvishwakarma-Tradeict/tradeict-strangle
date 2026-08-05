@@ -41,6 +41,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_bot_logger()
     logger.info("Database initialized / tables ready")
 
+    # One-time orphan stop-loss cleanup (runs on startup).
+    # This targets legacy `stop_loss_order` orders that may remain open
+    # even after the associated position was closed.
+    try:
+        from backend.api.routes_account import cleanup_orphan_sl_orders
+
+        with SessionLocal() as db:
+            cleanup_summary = await cleanup_orphan_sl_orders(db)
+        logger.info(
+            "Orphan SL cleanup: cancelled=%s kept=%s (active_product_count=%s)",
+            cleanup_summary.get("cancelled"),
+            cleanup_summary.get("kept"),
+            cleanup_summary.get("active_product_count"),
+        )
+    except Exception as exc:
+        logger.warning("Orphan SL cleanup skipped/failed: %s", exc)
+
     auto_trade_engine = AutoTradeEngine(
         db_factory=SessionLocal,
         delta_client=bot_engine.delta_client,

@@ -402,6 +402,8 @@ async def _persist_strangle_trade(
     put_fill_price: float,
     call_order_id: str | None,
     put_order_id: str | None,
+    call_sl_trigger_price: float | None = None,
+    put_sl_trigger_price: float | None = None,
     monitoring_starts: datetime,
     call_entry_fee: float | None = None,
     put_entry_fee: float | None = None,
@@ -475,6 +477,11 @@ async def _persist_strangle_trade(
         delta_at_entry=payload.call_delta_at_entry,
         is_bot_managed=True,
         delta_order_id=call_order_id,
+        sl_trigger_price=(
+            float(call_sl_trigger_price)
+            if call_sl_trigger_price is not None
+            else None
+        ),
         entry_fee_usd=(
             abs(float(call_entry_fee)) if call_entry_fee is not None else None
         ),
@@ -494,6 +501,11 @@ async def _persist_strangle_trade(
         delta_at_entry=payload.put_delta_at_entry,
         is_bot_managed=True,
         delta_order_id=put_order_id,
+        sl_trigger_price=(
+            float(put_sl_trigger_price)
+            if put_sl_trigger_price is not None
+            else None
+        ),
         entry_fee_usd=(
             abs(float(put_entry_fee)) if put_entry_fee is not None else None
         ),
@@ -548,8 +560,23 @@ async def initiate_trade(
     put_order_id: str | None = None
     call_fill_price = 0.0
     put_fill_price = 0.0
+    uni_sl = float(getattr(payload, "universal_sl_pct", None) or 200.0)
+    call_sl_trigger_price: float | None = None
+    put_sl_trigger_price: float | None = None
 
     try:
+        # Compute bracket SL trigger prices BEFORE entry orders.
+        # With bracket orders, the SL is attached to the entry and auto-cancels
+        # when the position is closed (any reason).
+        call_baseline_for_sl = float(await client.get_mark_price(payload.call_symbol))
+        put_baseline_for_sl = float(await client.get_mark_price(payload.put_symbol))
+        call_sl_trigger_price = round(
+            call_baseline_for_sl * (uni_sl / 100.0), 2
+        )
+        put_sl_trigger_price = round(
+            put_baseline_for_sl * (uni_sl / 100.0), 2
+        )
+
         # --- Step 1: Place CALL ---
         logger.info("Step 1: Placing call order %s", payload.call_symbol)
         call_result = await bot_engine.order_executor.sell_option(
@@ -557,6 +584,7 @@ async def initiate_trade(
             quantity=int(payload.quantity),
             delta_client=client,
             symbol_for_fallback=payload.call_symbol,
+            bracket_sl_price=call_sl_trigger_price,
         )
         if not call_result.success:
             raise HTTPException(
@@ -599,6 +627,7 @@ async def initiate_trade(
             quantity=int(payload.quantity),
             delta_client=client,
             symbol_for_fallback=payload.put_symbol,
+            bracket_sl_price=put_sl_trigger_price,
         )
         if not put_result.success:
             logger.critical(
@@ -659,6 +688,8 @@ async def initiate_trade(
                 put_fill_price=put_fill_price,
                 call_order_id=call_order_id,
                 put_order_id=put_order_id,
+                call_sl_trigger_price=call_sl_trigger_price,
+                put_sl_trigger_price=put_sl_trigger_price,
                 monitoring_starts=monitoring_starts,
                 call_entry_fee=(
                     float(call_result.commission)
@@ -691,11 +722,8 @@ async def initiate_trade(
                 ),
             ) from exc
 
-        # --- Step 8b: Delta per-leg stop-loss safety orders (non-fatal) ---
-        from backend.core.delta_sl import place_basket_sl_orders
-
-        uni_sl = float(getattr(trade, "universal_sl_pct", None) or 200.0)
-        # Soft warning: Delta SL should be above adjustment trigger %
+        # Soft warning: bracket SL trigger should be above adjustment trigger %.
+        # (For SHORT strangles, Delta SL triggers when premium spikes.)
         max_trig = 150.0
         if payload.trigger_mode == "flat" and payload.flat_trigger_pct:
             max_trig = float(payload.flat_trigger_pct)
@@ -721,33 +749,13 @@ async def initiate_trade(
                 max_trig,
             )
 
-        sl_result = await place_basket_sl_orders(
-            client,
-            call_leg,
-            put_leg,
-            universal_sl_pct=uni_sl,
-            call_baseline=call_fill_price,
-            put_baseline=put_fill_price,
+        # With bracket orders, SL attachment is part of the entry order.
+        # If entry succeeded, both bracket SL triggers were attached.
+        delta_sl_ok = bool(
+            (call_sl_trigger_price is not None and call_sl_trigger_price > 0)
+            and (put_sl_trigger_price is not None and put_sl_trigger_price > 0)
         )
-        try:
-            db.add(call_leg)
-            db.add(put_leg)
-            db.commit()
-            db.refresh(call_leg)
-            db.refresh(put_leg)
-        except Exception as exc:
-            logger.warning("Could not persist SL order IDs: %s", exc)
-            db.rollback()
-
-        delta_sl_ok = bool(sl_result.get("all_ok"))
         delta_sl_warning = None
-        if sl_result.get("any_failed"):
-            delta_sl_warning = (
-                "Delta SL order failed — bot monitoring only. "
-                f"call_ok={sl_result['call'].get('success')} "
-                f"put_ok={sl_result['put'].get('success')}"
-            )
-            logger.warning("Trade %s: %s", trade.id, delta_sl_warning)
 
         db.expunge(trade)
         db.expunge(call_leg)
@@ -1714,26 +1722,6 @@ async def close_single_leg(
     account = _get_active_account(db)
     client = _build_delta_client(account)
     try:
-        # Cancel Delta SL for this leg before closing (avoid orphan stop)
-        if getattr(leg, "delta_sl_order_id", None):
-            try:
-                await client.cancel_order(int(leg.delta_sl_order_id))
-                logger.info(
-                    "Cancelled SL order %s for manually closed %s leg trade=%s",
-                    leg.delta_sl_order_id,
-                    leg_key,
-                    trade_id,
-                )
-                leg.delta_sl_order_id = None
-                db.commit()
-            except Exception as exc:
-                logger.warning(
-                    "Could not cancel SL on manual close trade=%s %s: %s",
-                    trade_id,
-                    leg_key,
-                    exc,
-                )
-
         result = await bot_engine.order_executor.close_leg(leg, client)
         if not result.success:
             raise HTTPException(
