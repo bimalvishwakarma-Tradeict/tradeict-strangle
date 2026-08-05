@@ -1841,56 +1841,81 @@ class BotEngine:
             est_exit_fees=est_exit,
             slippage_pct=getattr(trade_state.trade, "slippage_pct", None),
         )
+        slip_pct = float(slip_fields["slippage_pct"])
+        slip_amt = float(slip_fields["slippage_amount"])
+        net_mtm_out = float(slip_fields["net_mtm"])
+        total_deductions = float(slip_fields["total_deductions"])
 
-        await ws_manager.broadcast(
-            {
-                "type": "TRADE_UPDATE",
-                "trade_id": trade_state.trade_id,
-                "underlying": getattr(trade_state.trade, "underlying", ""),
-                "call_premium": call_prem,
-                "put_premium": put_prem,
-                "call_change_pct": call_change,
-                "put_change_pct": put_change,
-                "calculated_pnl": calculated_total,
-                "realized_pnl": realized_pnl,
-                "unrealized_pnl": float(delta_mtm),
-                "total_pnl": display_total,
-                "delta_mtm_pnl": delta_mtm,
-                "delta_upnl": float(delta_mtm),
-                "call_delta_mtm": call_delta_mtm,
-                "put_delta_mtm": put_delta_mtm,
-                "call_upnl": float(call_delta_mtm),
-                "put_upnl": float(put_delta_mtm),
-                "call_offer": float(call_prem),
-                "put_offer": float(put_prem),
-                "pnl": delta_mtm,
-                "gross_mtm": display_total,
-                "fees_paid": round(fees_paid, 6),
-                "est_exit_fees": round(est_exit, 6),
-                "total_expected_fees": round(fees_paid + est_exit, 6),
-                "slippage_pct": float(slip_fields["slippage_pct"]),
-                "slippage_amount": float(slip_fields["slippage_amount"]),
-                "total_deductions": float(slip_fields["total_deductions"]),
-                "net_mtm": float(slip_fields["net_mtm"]),
-                "underlying_price": float(self._btc_spot or 0) or None,
-                "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
-                "pnl_pct_of_target": pnl_pct_of_target,
-                "profit_target_usd": target,
-                "stoploss_usd": stoploss,
-                "initial_max_profit": float(
-                    getattr(trade_state.trade, "initial_max_profit", None) or 0
+        payload: dict[str, Any] = {
+            "type": "TRADE_UPDATE",
+            "trade_id": trade_state.trade_id,
+            "underlying": getattr(trade_state.trade, "underlying", ""),
+            "call_premium": call_prem,
+            "put_premium": put_prem,
+            "call_change_pct": call_change,
+            "put_change_pct": put_change,
+            "calculated_pnl": calculated_total,
+            "realized_pnl": realized_pnl,
+            "unrealized_pnl": float(delta_mtm),
+            "total_pnl": display_total,
+            "delta_mtm_pnl": delta_mtm,
+            "delta_upnl": float(delta_mtm),
+            "call_delta_mtm": call_delta_mtm,
+            "put_delta_mtm": put_delta_mtm,
+            "call_upnl": float(call_delta_mtm),
+            "put_upnl": float(put_delta_mtm),
+            "call_offer": float(call_prem),
+            "put_offer": float(put_prem),
+            "pnl": delta_mtm,
+            "gross_mtm": display_total,
+            "fees_paid": round(fees_paid, 6),
+            "est_exit_fees": round(est_exit, 6),
+            "total_expected_fees": round(fees_paid + est_exit, 6),
+            "underlying_price": float(self._btc_spot or 0) or None,
+            "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
+            "pnl_pct_of_target": pnl_pct_of_target,
+            "profit_target_usd": target,
+            "stoploss_usd": stoploss,
+            "initial_max_profit": float(
+                getattr(trade_state.trade, "initial_max_profit", None) or 0
+            )
+            or None,
+            "tp_pct": float(getattr(trade_state.trade, "tp_pct", None) or 50.0),
+            "sl_pct": float(getattr(trade_state.trade, "sl_pct", None) or 100.0),
+            "hours_to_expiry": get_hours_to_expiry(trade_state.trade.expiry_date),
+            "status": "active",
+            "is_settling": settling["is_settling"],
+            "settling_ends_at": settling["settling_ends_at"],
+            "settling_minutes_left": settling["settling_minutes_left"],
+            **plan,
+            # Slippage AFTER plan so keys are never overwritten
+            "slippage_pct": slip_pct,
+            "slippage_amount": slip_amt,
+            "total_deductions": total_deductions,
+            "net_mtm": net_mtm_out,
+        }
+        logger.info(
+            "TRADE_UPDATE slippage: trade=%s pct=%s amount=%s net=%s "
+            "gross=%s fees=%s exit_fees=%s keys=%s",
+            trade_state.trade_id,
+            slip_pct,
+            slip_amt,
+            net_mtm_out,
+            display_total,
+            fees_paid,
+            est_exit,
+            sorted(
+                k
+                for k in (
+                    "slippage_pct",
+                    "slippage_amount",
+                    "total_deductions",
+                    "net_mtm",
                 )
-                or None,
-                "tp_pct": float(getattr(trade_state.trade, "tp_pct", None) or 50.0),
-                "sl_pct": float(getattr(trade_state.trade, "sl_pct", None) or 100.0),
-                "hours_to_expiry": get_hours_to_expiry(trade_state.trade.expiry_date),
-                "status": "active",
-                "is_settling": settling["is_settling"],
-                "settling_ends_at": settling["settling_ends_at"],
-                "settling_minutes_left": settling["settling_minutes_left"],
-                **plan,
-            }
+                if k in payload
+            ),
         )
+        await ws_manager.broadcast(payload)
 
     async def _push_adjustment(
         self,

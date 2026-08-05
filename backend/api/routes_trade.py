@@ -1235,78 +1235,85 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             gross_mtm=gross_mtm,
             fees_paid=fees_paid,
             est_exit_fees=est_exit,
-            slippage_pct=getattr(state.trade, "slippage_pct", None),
+            slippage_pct=getattr(state.trade, "slippage_pct", None) or 2.0,
         )
         net_mtm = float(slip_fields["net_mtm"])
 
         leg_history = _basket_leg_history(db, state.trade_id)
         open_count = sum(1 for x in (call_open, put_open) if x)
 
-        trades_out.append(
-            {
-                "trade_id": state.trade_id,
-                "basket_number": getattr(state.trade, "basket_number", None)
-                or state.trade_id,
-                "underlying": state.trade.underlying,
-                "expiry_date": str(state.trade.expiry_date),
-                "expiry_label": get_dte_label(state.trade.expiry_date),
-                "status": state.trade.status,
-                "open_leg_count": open_count,
-                "call_leg": call_snap,
-                "put_leg": put_snap,
-                "leg_history": leg_history,
-                "call_premium": call_prem,
-                "put_premium": put_prem,
-                "call_offer": call_prem,
-                "put_offer": put_prem,
-                "call_change_pct": call_snap["change_pct"],
-                "put_change_pct": put_snap["change_pct"],
-                "calculated_pnl": calculated,
-                "delta_mtm_pnl": delta_mtm,
-                "delta_upnl": delta_mtm,
-                "call_delta_mtm": call_mtm,
-                "put_delta_mtm": put_mtm,
-                "call_upnl": call_mtm,
-                "put_upnl": put_mtm,
-                "realized_pnl": realized,
-                "unrealized_pnl": delta_mtm,
-                "total_pnl": display_total,
-                "gross_mtm": gross_mtm,
-                "fees_paid": fees_paid,
-                "est_exit_fees": est_exit,
-                "total_expected_fees": total_fees,
-                "slippage_pct": float(slip_fields["slippage_pct"]),
-                "slippage_amount": float(slip_fields["slippage_amount"]),
-                "total_deductions": float(slip_fields["total_deductions"]),
-                "net_mtm": net_mtm,
-                "underlying_price": (
-                    float(fee_fields.get("btc_index_for_fees") or 0)
-                    or float(getattr(bot_engine, "_btc_spot", 0) or 0)
-                    or None
-                ),
-                "call_entry_fee": fee_fields.get("call_entry_fee"),
-                "put_entry_fee": fee_fields.get("put_entry_fee"),
-                "call_est_exit_fee": fee_fields.get("call_est_exit_fee"),
-                "put_est_exit_fee": fee_fields.get("put_est_exit_fee"),
-                "profit_target_usd": target,
-                "stoploss_usd": float(state.trade.stoploss_usd),
-                "initial_max_profit": float(
-                    getattr(state.trade, "initial_max_profit", None) or 0
-                )
-                or None,
-                "tp_pct": float(getattr(state.trade, "tp_pct", None) or 50.0),
-                "sl_pct": float(getattr(state.trade, "sl_pct", None) or 100.0),
-                "pnl_pct_of_target": round(pnl_pct, 2),
-                "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
-                "adjustment_count": adj_count,
-                "last_adjustment": last_adjustment,
-                "is_settling": settling["is_settling"],
-                "settling_ends_at": settling["settling_ends_at"],
-                "settling_minutes_left": settling["settling_minutes_left"],
-                "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
-                **plan,
-            }
+        row: dict[str, Any] = {
+            "trade_id": state.trade_id,
+            "basket_number": getattr(state.trade, "basket_number", None)
+            or state.trade_id,
+            "underlying": state.trade.underlying,
+            "expiry_date": str(state.trade.expiry_date),
+            "expiry_label": get_dte_label(state.trade.expiry_date),
+            "status": state.trade.status,
+            "open_leg_count": open_count,
+            "call_leg": call_snap,
+            "put_leg": put_snap,
+            "leg_history": leg_history,
+            "call_premium": call_prem,
+            "put_premium": put_prem,
+            "call_offer": call_prem,
+            "put_offer": put_prem,
+            "call_change_pct": call_snap["change_pct"],
+            "put_change_pct": put_snap["change_pct"],
+            "calculated_pnl": calculated,
+            "delta_mtm_pnl": delta_mtm,
+            "delta_upnl": delta_mtm,
+            "call_delta_mtm": call_mtm,
+            "put_delta_mtm": put_mtm,
+            "call_upnl": call_mtm,
+            "put_upnl": put_mtm,
+            "realized_pnl": realized,
+            "unrealized_pnl": delta_mtm,
+            "total_pnl": display_total,
+            "gross_mtm": gross_mtm,
+            "fees_paid": fees_paid,
+            "est_exit_fees": est_exit,
+            "total_expected_fees": total_fees,
+            "underlying_price": (
+                float(fee_fields.get("btc_index_for_fees") or 0)
+                or float(getattr(bot_engine, "_btc_spot", 0) or 0)
+                or None
+            ),
+            "call_entry_fee": fee_fields.get("call_entry_fee"),
+            "put_entry_fee": fee_fields.get("put_entry_fee"),
+            "call_est_exit_fee": fee_fields.get("call_est_exit_fee"),
+            "put_est_exit_fee": fee_fields.get("put_est_exit_fee"),
+            "profit_target_usd": target,
+            "stoploss_usd": float(state.trade.stoploss_usd),
+            "initial_max_profit": float(
+                getattr(state.trade, "initial_max_profit", None) or 0
+            )
+            or None,
+            "tp_pct": float(getattr(state.trade, "tp_pct", None) or 50.0),
+            "sl_pct": float(getattr(state.trade, "sl_pct", None) or 100.0),
+            "pnl_pct_of_target": round(pnl_pct, 2),
+            "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
+            "adjustment_count": adj_count,
+            "last_adjustment": last_adjustment,
+            "is_settling": settling["is_settling"],
+            "settling_ends_at": settling["settling_ends_at"],
+            "settling_minutes_left": settling["settling_minutes_left"],
+            "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
+            **plan,
+            # Always last — never overwritten by plan
+            "slippage_pct": float(slip_fields["slippage_pct"]),
+            "slippage_amount": float(slip_fields["slippage_amount"]),
+            "total_deductions": float(slip_fields["total_deductions"]),
+            "net_mtm": net_mtm,
+        }
+        logger.info(
+            "/active trade=%s slippage_pct=%s slippage_amount=%s net_mtm=%s",
+            state.trade_id,
+            row["slippage_pct"],
+            row["slippage_amount"],
+            row["net_mtm"],
         )
+        trades_out.append(row)
     return {"trades": trades_out}
 
 

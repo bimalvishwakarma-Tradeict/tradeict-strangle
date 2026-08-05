@@ -36,7 +36,35 @@ export function useTrades() {
       // Never keep flat/closed baskets on the live dashboard
       if (status && status !== 'active') continue
       if (Number.isFinite(openCount) && openCount <= 0) continue
-      next.set(id, trade)
+      const gross = Number(trade.gross_mtm ?? trade.total_pnl ?? 0) || 0
+      const slipPct =
+        trade.slippage_pct != null && Number.isFinite(Number(trade.slippage_pct))
+          ? Number(trade.slippage_pct)
+          : 2.0
+      const slipAmt =
+        trade.slippage_amount != null &&
+        Number.isFinite(Number(trade.slippage_amount))
+          ? Number(trade.slippage_amount)
+          : Math.abs(gross) * (slipPct / 100)
+      const fees = Number(trade.fees_paid) || 0
+      const estExit = Number(trade.est_exit_fees) || 0
+      const deductions =
+        trade.total_deductions != null &&
+        Number.isFinite(Number(trade.total_deductions))
+          ? Number(trade.total_deductions)
+          : fees + estExit + slipAmt
+      const net =
+        trade.net_mtm != null && Number.isFinite(Number(trade.net_mtm))
+          ? Number(trade.net_mtm)
+          : gross - deductions
+      next.set(id, {
+        ...trade,
+        slippage_pct: slipPct,
+        slippage_amount: slipAmt,
+        total_deductions: deductions,
+        net_mtm: net,
+        gross_mtm: gross,
+      })
     }
     setTradeMap(next)
   }, [])
@@ -184,10 +212,36 @@ export function useTrades() {
           msg.est_exit_fees != null
             ? Number(msg.est_exit_fees)
             : existing.est_exit_fees
+        const slipPctRaw =
+          msg.slippage_pct != null
+            ? Number(msg.slippage_pct)
+            : existing.slippage_pct
+        const slipPct =
+          slipPctRaw != null && Number.isFinite(Number(slipPctRaw))
+            ? Number(slipPctRaw)
+            : 2.0
+        const slipAmtRaw =
+          msg.slippage_amount != null
+            ? Number(msg.slippage_amount)
+            : existing.slippage_amount
+        const slipAmt =
+          slipAmtRaw != null && Number.isFinite(Number(slipAmtRaw))
+            ? Number(slipAmtRaw)
+            : Math.abs(Number(gross) || 0) * (slipPct / 100)
+        const deductionsRaw =
+          msg.total_deductions != null
+            ? Number(msg.total_deductions)
+            : existing.total_deductions
+        const deductions =
+          deductionsRaw != null && Number.isFinite(Number(deductionsRaw))
+            ? Number(deductionsRaw)
+            : (Number(feesPaid) || 0) + (Number(estExit) || 0) + slipAmt
         const net =
           msg.net_mtm != null
             ? Number(msg.net_mtm)
-            : existing.net_mtm
+            : existing.net_mtm != null
+              ? Number(existing.net_mtm)
+              : (Number(gross) || 0) - deductions
 
         next.set(msg.trade_id, {
           ...existing,
@@ -268,18 +322,9 @@ export function useTrades() {
             msg.total_expected_fees != null
               ? Number(msg.total_expected_fees)
               : existing.total_expected_fees,
-          slippage_pct:
-            msg.slippage_pct != null
-              ? Number(msg.slippage_pct)
-              : existing.slippage_pct,
-          slippage_amount:
-            msg.slippage_amount != null
-              ? Number(msg.slippage_amount)
-              : existing.slippage_amount,
-          total_deductions:
-            msg.total_deductions != null
-              ? Number(msg.total_deductions)
-              : existing.total_deductions,
+          slippage_pct: slipPct,
+          slippage_amount: slipAmt,
+          total_deductions: deductions,
           universal_sl_pct:
             msg.universal_sl_pct != null
               ? Number(msg.universal_sl_pct)

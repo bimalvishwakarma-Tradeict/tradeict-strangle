@@ -338,7 +338,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
     Boolean(trade.is_settling),
   )
 
-  // NET MTM — ONLY server TRADE_UPDATE / /active fields (never leg_pnl / offer math)
+  // NET MTM — server fields preferred; always compute slippage locally as fallback
   const n = (v) => {
     const x = Number(v)
     return Number.isFinite(x) ? x : 0
@@ -351,27 +351,24 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   )
   const feesPaid = n(trade.fees_paid)
   const estExitFees = n(trade.est_exit_fees)
-  const slippagePct = n(trade.slippage_pct ?? 2)
   const grossMtm = n(trade.gross_mtm)
-  // Prefer server amount; fallback = |gross| × pct / 100
-  const slippageAmount = n(
+  // Always show slippage row — default 2% if API omitted fields
+  const slippagePct =
+    trade.slippage_pct != null && trade.slippage_pct !== ''
+      ? n(trade.slippage_pct)
+      : 2.0
+  const slippageAmountComputed = Math.abs(grossMtm) * (slippagePct / 100)
+  const slippageAmount =
     trade.slippage_amount != null && trade.slippage_amount !== ''
-      ? trade.slippage_amount
-      : Math.abs(grossMtm) * (slippagePct / 100),
-  )
-  // Always fees + exit + slippage (never fees-only "Total Fees")
-  const totalDeductions = n(
+      ? n(trade.slippage_amount)
+      : slippageAmountComputed
+  const totalDeductions =
     trade.total_deductions != null && trade.total_deductions !== ''
-      ? trade.total_deductions
-      : feesPaid + estExitFees + slippageAmount,
-  )
-  const computedNet =
-    grossMtm - feesPaid - estExitFees - slippageAmount
-  const netMtm = n(
-    trade.net_mtm != null && trade.net_mtm !== ''
-      ? trade.net_mtm
-      : computedNet,
-  )
+      ? n(trade.total_deductions)
+      : feesPaid + estExitFees + slippageAmount
+  const computedNet = grossMtm - feesPaid - estExitFees - slippageAmount
+  const netMtm =
+    trade.net_mtm != null && trade.net_mtm !== '' ? n(trade.net_mtm) : computedNet
   const totalMtm = grossMtm
   const lastMtmUpdate = trade.last_mtm_update || null
   const target = n(trade.profit_target_usd)
@@ -772,7 +769,11 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             <span>Est. Exit Fees</span>
             <span>-${fmtMoney(estExitFees)}</span>
           </div>
-          <div className="flex justify-between text-yellow-400">
+          {/* Always rendered — never gated on trade.slippage_pct */}
+          <div
+            className="flex justify-between rounded bg-yellow-950/40 px-1 py-0.5 font-medium text-yellow-300"
+            data-testid="slippage-row"
+          >
             <span>Slippage ({fmtMoney(slippagePct)}%)</span>
             <span>-${fmtMoney(slippageAmount)}</span>
           </div>
