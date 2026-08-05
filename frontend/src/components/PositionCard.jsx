@@ -285,21 +285,26 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
     Boolean(trade.is_settling),
   )
 
+  // NET MTM — ONLY from server TRADE_UPDATE / /active (never from live offer math)
   const realized = Number(trade.realized_pnl ?? 0)
-  const callUpnl = Number(
-    trade.call_upnl ?? trade.call_delta_mtm ?? call.leg_pnl ?? 0,
+  const callUpnl = Number(trade.call_upnl ?? trade.call_delta_mtm ?? 0)
+  const putUpnl = Number(trade.put_upnl ?? trade.put_delta_mtm ?? 0)
+  const unrealized = Number(
+    trade.delta_upnl ??
+      trade.delta_mtm_pnl ??
+      trade.combined_upnl ??
+      trade.unrealized_pnl ??
+      callUpnl + putUpnl,
   )
-  const putUpnl = Number(
-    trade.put_upnl ?? trade.put_delta_mtm ?? put.leg_pnl ?? 0,
-  )
-  // Always derive from live legs — never trust cached gross_mtm alone (stale vs ticks)
-  const unrealized = callUpnl + putUpnl
-  const grossMtm = realized + unrealized
   const feesPaid = Number(trade.fees_paid ?? 0)
   const estExitFees = Number(trade.est_exit_fees ?? 0)
   const totalFees = Number(trade.total_expected_fees ?? feesPaid + estExitFees)
-  const netMtm = grossMtm - feesPaid - estExitFees
+  const grossMtm = Number(
+    trade.gross_mtm ?? trade.total_pnl ?? realized + unrealized,
+  )
+  const netMtm = Number(trade.net_mtm ?? grossMtm - feesPaid - estExitFees)
   const totalMtm = grossMtm
+  const lastMtmUpdate = trade.last_mtm_update || null
   const target = Number(trade.profit_target_usd ?? 0)
   const stoploss = Number(trade.stoploss_usd ?? 0)
   const progressPct =
@@ -555,6 +560,11 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
         <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">
           Net MTM P&L (gross matches Delta UPL @offer; fees separate)
         </div>
+        {lastMtmUpdate && (
+          <div className="text-[11px] text-gray-500">
+            MTM Updated: {lastMtmUpdate}
+          </div>
+        )}
         <div className="space-y-1 rounded-lg border border-gray-700 bg-gray-900/40 px-3 py-2 text-sm text-gray-300">
           <div className="flex justify-between">
             <span>CALL UPL</span>

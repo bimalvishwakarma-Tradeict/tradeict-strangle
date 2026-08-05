@@ -48,7 +48,7 @@ from backend.strategies.s001_short_strangle.logic import ShortStrangleStrategy
 logger = logging.getLogger(__name__)
 
 _CHAIN_CACHE_TTL_SECONDS = 60.0
-_PRICE_TICK_MIN_INTERVAL_SECONDS = 0.4
+_PRICE_TICK_MIN_INTERVAL_SECONDS = 2.0
 
 
 class BotEngine:
@@ -1125,8 +1125,9 @@ class BotEngine:
                 "put_offer": float(put_prem),
                 "pnl": delta_mtm,
                 "gross_mtm": display_total,
-                "net_mtm": display_total,  # fees applied on /active; tick path recomputes
+                "net_mtm": display_total,  # fees applied on /active; tick path must not recompute
                 "underlying_price": float(self._btc_spot or 0) or None,
+                "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
                 "pnl_pct_of_target": pnl_pct_of_target,
                 "profit_target_usd": target,
                 "stoploss_usd": stoploss,

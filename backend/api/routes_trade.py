@@ -1089,6 +1089,7 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "is_settling": settling["is_settling"],
                 "settling_ends_at": settling["settling_ends_at"],
                 "settling_minutes_left": settling["settling_minutes_left"],
+                "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
                 **plan,
             }
         )

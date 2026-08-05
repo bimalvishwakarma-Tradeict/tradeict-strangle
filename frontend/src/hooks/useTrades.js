@@ -233,7 +233,8 @@ export function useTrades() {
     }
 
     if (msg.type === 'PRICE_TICK') {
-      // Ignore mark/mid ticks — only Best Offer drives short UPNL
+      // Offer display only — NEVER recalculate basket MTM here.
+      // MTM comes exclusively from TRADE_UPDATE / /active (realized + Delta UPL).
       if (msg.price_type !== 'ask') return
       const tickPx = Number(msg.price)
       if (!Number.isFinite(tickPx) || tickPx <= 0) return
@@ -248,43 +249,30 @@ export function useTrades() {
         const putOpen =
           String(existing.put_leg?.status || 'open').toLowerCase() === 'open'
 
-        const callLeg = existing.call_leg
-          ? {
-              ...existing.call_leg,
-              current_premium:
-                callOpen && existing.call_leg.symbol === msg.symbol
-                  ? tickPx
-                  : Number(
-                      msg.call_premium ?? existing.call_leg.current_premium ?? 0,
-                    ),
-            }
-          : existing.call_leg
-        const putLeg = existing.put_leg
-          ? {
-              ...existing.put_leg,
-              current_premium:
-                putOpen && existing.put_leg.symbol === msg.symbol
-                  ? tickPx
-                  : Number(
-                      msg.put_premium ?? existing.put_leg.current_premium ?? 0,
-                    ),
-            }
-          : existing.put_leg
+        const callPrem =
+          callOpen && existing.call_leg?.symbol === msg.symbol
+            ? tickPx
+            : Number(
+                msg.call_premium ?? existing.call_leg?.current_premium ?? existing.call_premium ?? 0,
+              )
+        const putPrem =
+          putOpen && existing.put_leg?.symbol === msg.symbol
+            ? tickPx
+            : Number(
+                msg.put_premium ?? existing.put_leg?.current_premium ?? existing.put_premium ?? 0,
+              )
 
         const callEntry = Number(
-          callLeg?.initial_premium ?? existing.call_entry_premium ?? 0,
+          existing.call_entry_premium ?? existing.call_leg?.initial_premium ?? 0,
         )
         const putEntry = Number(
-          putLeg?.initial_premium ?? existing.put_entry_premium ?? 0,
+          existing.put_entry_premium ?? existing.put_leg?.initial_premium ?? 0,
         )
-        const callPrem = Number(callLeg?.current_premium ?? 0)
-        const putPrem = Number(putLeg?.current_premium ?? 0)
         const callQty = Math.abs(
           Number(
             msg.call_quantity ??
               existing.call_quantity ??
-              callLeg?.quantity ??
-              existing.quantity ??
+              existing.call_leg?.quantity ??
               0,
           ),
         )
@@ -292,98 +280,68 @@ export function useTrades() {
           Number(
             msg.put_quantity ??
               existing.put_quantity ??
-              putLeg?.quantity ??
-              existing.quantity ??
+              existing.put_leg?.quantity ??
               0,
           ),
         )
         const callChg = callEntry > 0 ? (callPrem / callEntry - 1) * 100 : 0
         const putChg = putEntry > 0 ? (putPrem / putEntry - 1) * 100 : 0
+        // Per-leg display only (not basket NET MTM)
+        const callLegPnl = callOpen
+          ? shortLegUpnl(callEntry, callPrem, callQty)
+          : existing.call_leg?.leg_pnl
+        const putLegPnl = putOpen
+          ? shortLegUpnl(putEntry, putPrem, putQty)
+          : existing.put_leg?.leg_pnl
 
-        const callMtm = callOpen ? shortLegUpnl(callEntry, callPrem, callQty) : 0
-        const putMtm = putOpen ? shortLegUpnl(putEntry, putPrem, putQty) : 0
-        const unrealized = callMtm + putMtm
-        const realized = Number(existing.realized_pnl ?? 0)
-        const gross = realized + unrealized
-        const feesPaid = Number(existing.fees_paid ?? 0)
-        const estExit = Number(existing.est_exit_fees ?? 0)
-        const totalFees = Number(
-          existing.total_expected_fees ?? feesPaid + estExit,
-        )
-        const net = gross - feesPaid - estExit
-
-        // Keep server trigger prices; only refresh %/distance from live offers
-        const triggerPct = Number(existing.current_trigger_pct || 0)
-        const callTrigger = Number(
-          existing.call_trigger_price > 0
-            ? existing.call_trigger_price
-            : callEntry > 0 && triggerPct > 0
-              ? callEntry * (triggerPct / 100)
-              : 0,
-        )
-        const putTrigger = Number(
-          existing.put_trigger_price > 0
-            ? existing.put_trigger_price
-            : putEntry > 0 && triggerPct > 0
-              ? putEntry * (triggerPct / 100)
-              : 0,
-        )
+        const callTrigger = Number(existing.call_trigger_price || 0)
+        const putTrigger = Number(existing.put_trigger_price || 0)
 
         next.set(msg.trade_id, {
           ...existing,
+          // Live offers + change% only — leave gross_mtm/net_mtm/upnl untouched
           call_premium: callPrem,
           put_premium: putPrem,
           call_offer: callPrem,
           put_offer: putPrem,
           call_change_pct: callChg,
           put_change_pct: putChg,
-          call_upnl: callMtm,
-          put_upnl: putMtm,
-          call_delta_mtm: callMtm,
-          put_delta_mtm: putMtm,
-          delta_upnl: unrealized,
-          delta_mtm_pnl: unrealized,
-          unrealized_pnl: unrealized,
-          total_pnl: gross,
-          gross_mtm: gross,
-          net_mtm: net,
-          fees_paid: feesPaid,
-          est_exit_fees: estExit,
-          total_expected_fees: totalFees,
-          call_entry_premium: callEntry || existing.call_entry_premium,
-          put_entry_premium: putEntry || existing.put_entry_premium,
-          call_trigger_price: callTrigger,
-          put_trigger_price: putTrigger,
           call_pct_to_trigger:
-            callTrigger > 0 ? (callPrem / callTrigger) * 100 : existing.call_pct_to_trigger,
+            callTrigger > 0
+              ? (callPrem / callTrigger) * 100
+              : existing.call_pct_to_trigger,
           put_pct_to_trigger:
-            putTrigger > 0 ? (putPrem / putTrigger) * 100 : existing.put_pct_to_trigger,
+            putTrigger > 0
+              ? (putPrem / putTrigger) * 100
+              : existing.put_pct_to_trigger,
           call_distance_to_trigger:
-            callTrigger > 0 ? callTrigger - callPrem : existing.call_distance_to_trigger,
+            callTrigger > 0
+              ? callTrigger - callPrem
+              : existing.call_distance_to_trigger,
           put_distance_to_trigger:
-            putTrigger > 0 ? putTrigger - putPrem : existing.put_distance_to_trigger,
+            putTrigger > 0
+              ? putTrigger - putPrem
+              : existing.put_distance_to_trigger,
           underlying_price:
             Number(msg.underlying_price) > 0
               ? Number(msg.underlying_price)
               : existing.underlying_price,
-          call_leg: callLeg
+          call_leg: existing.call_leg
             ? {
-                ...callLeg,
-                initial_premium: callEntry || callLeg.initial_premium,
-                change_pct: callChg,
-                leg_pnl: callOpen ? callMtm : callLeg.leg_pnl,
+                ...existing.call_leg,
                 current_premium: callPrem,
+                change_pct: callChg,
+                leg_pnl: callLegPnl,
               }
-            : callLeg,
-          put_leg: putLeg
+            : existing.call_leg,
+          put_leg: existing.put_leg
             ? {
-                ...putLeg,
-                initial_premium: putEntry || putLeg.initial_premium,
-                change_pct: putChg,
-                leg_pnl: putOpen ? putMtm : putLeg.leg_pnl,
+                ...existing.put_leg,
                 current_premium: putPrem,
+                change_pct: putChg,
+                leg_pnl: putLegPnl,
               }
-            : putLeg,
+            : existing.put_leg,
         })
         return next
       })
