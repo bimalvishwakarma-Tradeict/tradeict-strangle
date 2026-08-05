@@ -666,7 +666,9 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             )
             last_mtm = float(active_st.last_mtm or 0.0)
 
-            # Best-effort live MTM from slave positions
+            # Best-effort live MTM from slave positions (same field scan as
+            # MirrorEngine.update_all_slave_mtm). Prefer real Delta UPNL —
+            # never master_net_mtm × multiplier.
             try:
                 client = DeltaClient(
                     decrypt(slave.api_key_encrypted),
@@ -676,20 +678,43 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                     positions = await client._request(
                         "GET", "/v2/positions/margined"
                     )
-                    raw_list = positions if isinstance(positions, list) else []
+                    if isinstance(positions, dict):
+                        positions = (
+                            positions.get("result")
+                            or positions.get("positions")
+                            or []
+                        )
+                    if not isinstance(positions, list):
+                        positions = []
                     total_mtm = 0.0
-                    for pos in raw_list:
+                    for pos in positions:
                         if not isinstance(pos, dict):
                             continue
-                        if float(pos.get("size") or 0) == 0:
-                            continue
-                        upnl = pos.get("unrealized_pnl") or pos.get("uPnl") or 0
                         try:
-                            total_mtm += float(upnl)
+                            if float(pos.get("size") or 0) == 0:
+                                continue
                         except (TypeError, ValueError):
-                            pass
-                    last_mtm = total_mtm
-                    active_st.last_mtm = total_mtm
+                            continue
+                        upnl: float | None = None
+                        for field in (
+                            "unrealized_pnl",
+                            "unrealized_pnl_usd",
+                            "unrealized_cash_pnl",
+                            "upnl",
+                            "uPnl",
+                        ):
+                            val = pos.get(field)
+                            if val is None or val == "":
+                                continue
+                            try:
+                                upnl = float(val)
+                                break
+                            except (TypeError, ValueError):
+                                continue
+                        if upnl is not None:
+                            total_mtm += upnl
+                    last_mtm = round(total_mtm, 4)
+                    active_st.last_mtm = last_mtm
                     active_st.last_updated = get_ist_now()
                     db.commit()
                 finally:
@@ -698,6 +723,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 logger.warning("Slave %s MTM fetch failed: %s", slave.name, exc)
 
             mult = float(slave.qty_multiplier or 1.0)
+            last_updated_iso = _iso(active_st.last_updated)
             slave_trade_data = {
                 "slave_trade_id": active_st.id,
                 "master_trade_id": active_st.master_trade_id,
@@ -706,7 +732,10 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "put_fill_price": active_st.put_fill_price,
                 "status": active_st.status,
                 "last_mtm": last_mtm,
-                "last_updated": _iso(active_st.last_updated),
+                "net_mtm": last_mtm,  # real Delta UPNL — not master × multiplier
+                "last_updated": last_updated_iso,
+                "last_mtm_updated": last_updated_iso,
+                "net_mtm_updated": last_updated_iso,
                 "last_error": active_st.last_error,
                 "profit_target_usd": round(master_target * mult, 2)
                 if master_target

@@ -42,6 +42,25 @@ function formatAdjTime(iso) {
   }
 }
 
+function syncAgeSeconds(iso) {
+  if (!iso) return null
+  try {
+    const t = new Date(iso).getTime()
+    if (!Number.isFinite(t)) return null
+    return Math.max(0, Math.floor((Date.now() - t) / 1000))
+  } catch {
+    return null
+  }
+}
+
+function formatSyncAge(iso) {
+  const secs = syncAgeSeconds(iso)
+  if (secs == null) return null
+  if (secs < 60) return `${secs}s ago`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  return `${Math.floor(secs / 3600)}h ago`
+}
+
 function fmtStrike(v) {
   if (v == null || !Number.isFinite(Number(v))) return '—'
   return Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 })
@@ -116,6 +135,7 @@ function AccountOverviewRow({
   availableUsd,
   availableInr,
   netMtm,
+  mtmSyncIso,
   targetUsd,
   isExpanded,
   onToggle,
@@ -123,6 +143,10 @@ function AccountOverviewRow({
   dimmed,
   expandContent,
 }) {
+  const syncAge = formatSyncAge(mtmSyncIso)
+  const syncSecs = syncAgeSeconds(mtmSyncIso)
+  const syncStale = syncSecs != null && syncSecs > 60
+
   return (
     <>
       <tr
@@ -190,9 +214,27 @@ function AccountOverviewRow({
           )}
         </td>
         <td className={`px-3 py-3 text-sm font-medium ${mtmClass(netMtm)}`}>
-          {netMtm == null || !Number.isFinite(Number(netMtm))
-            ? '—'
-            : formatSignedMoney(netMtm)}
+          {netMtm == null || !Number.isFinite(Number(netMtm)) ? (
+            '—'
+          ) : (
+            <>
+              <div>{formatSignedMoney(netMtm)}</div>
+              {syncAge ? (
+                <div
+                  className={`text-[10px] font-normal ${
+                    syncStale ? 'text-yellow-300' : 'text-gray-500'
+                  }`}
+                  title={
+                    syncStale
+                      ? 'MTM sync older than 60s — may be stale'
+                      : undefined
+                  }
+                >
+                  {syncStale ? '⚠️ ' : ''}last sync: {syncAge}
+                </div>
+              ) : null}
+            </>
+          )}
         </td>
         <td className="px-3 py-3 text-sm text-gray-300">
           {targetUsd != null && Number.isFinite(Number(targetUsd))
@@ -319,6 +361,14 @@ function MultiAccountOverview({ overview }) {
               }
 
               const key = `slave-${slave.id}`
+              const slaveMtm =
+                st?.net_mtm ?? st?.last_mtm ?? null
+              const slaveMtmUpdated =
+                st?.last_mtm_updated || st?.net_mtm_updated || st?.last_updated
+              const syncAge = formatSyncAge(slaveMtmUpdated)
+              const syncSecs = syncAgeSeconds(slaveMtmUpdated)
+              const syncStale = syncSecs != null && syncSecs > 60
+
               const expand = st ? (
                 <div className="space-y-1 font-mono">
                   <div>
@@ -330,15 +380,23 @@ function MultiAccountOverview({ overview }) {
                     | Fill ${fmtMoney(st.put_fill_price)}
                   </div>
                   <div className="pt-1 text-gray-400">
-                    Est. MTM:{' '}
-                    <span className={mtmClass(st.last_mtm)}>
-                      {formatSignedMoney(st.last_mtm)}
+                    Net MTM (Delta):{' '}
+                    <span className={mtmClass(slaveMtm)}>
+                      {formatSignedMoney(slaveMtm)}
                     </span>
+                    {syncAge ? (
+                      <span
+                        className={
+                          syncStale ? ' text-yellow-300' : ' text-gray-500'
+                        }
+                      >
+                        {' '}
+                        (last sync: {syncAge}
+                        {syncStale ? ' ⚠️' : ''})
+                      </span>
+                    ) : null}
                     {' · '}
                     Status: {st.status}
-                    {st.last_updated
-                      ? ` · Last sync: ${formatAdjTime(st.last_updated)}`
-                      : ''}
                   </div>
                 </div>
               ) : (
@@ -368,7 +426,8 @@ function MultiAccountOverview({ overview }) {
                       : slave.available_usd ?? null
                   }
                   availableInr={slave.available_inr}
-                  netMtm={st?.last_mtm ?? null}
+                  netMtm={slaveMtm}
+                  mtmSyncIso={slaveMtmUpdated}
                   targetUsd={st?.profit_target_usd ?? null}
                   isExpanded={Boolean(expanded[key])}
                   onToggle={() => toggle(key)}

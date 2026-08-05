@@ -1201,6 +1201,26 @@ class BotEngine:
                 premium_slabs=premium_slabs,
             )
 
+            # Update slave MTM from each slave's Delta positions every cycle
+            try:
+                import backend.engine.mirror_engine as mirror_mod
+
+                if (
+                    mirror_mod.mirror_engine is not None
+                    and hasattr(mirror_mod.mirror_engine, "update_all_slave_mtm")
+                ):
+                    asyncio.create_task(
+                        mirror_mod.mirror_engine.update_all_slave_mtm(
+                            trade_state.trade_id
+                        )
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Slave MTM update queue failed trade=%s: %s",
+                    trade_state.trade_id,
+                    exc,
+                )
+
     async def _exit_trade(
         self,
         trade_state: TradeState,

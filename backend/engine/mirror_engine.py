@@ -596,5 +596,102 @@ class MirrorEngine:
         return results
 
 
+    async def update_all_slave_mtm(self, master_trade_id: int) -> None:
+        """
+        Refresh last_mtm for every active SlaveTrade under this master trade.
+
+        Fetches live UPNL from each slave's Delta /v2/positions/margined so the
+        Multi-Account Overview never shows a stale one-time copy value.
+        """
+        with self.db_factory() as db:
+            slave_trades = (
+                db.query(SlaveTrade)
+                .filter(
+                    SlaveTrade.master_trade_id == int(master_trade_id),
+                    SlaveTrade.status == "active",
+                )
+                .all()
+            )
+            if not slave_trades:
+                return
+
+            for slave_trade in slave_trades:
+                slave = (
+                    db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == slave_trade.slave_account_id)
+                    .first()
+                )
+                if slave is None or not slave.is_active:
+                    continue
+
+                client = self._get_slave_client(slave)
+                try:
+                    positions = await client._request(
+                        "GET", "/v2/positions/margined"
+                    )
+                    if isinstance(positions, dict):
+                        positions = (
+                            positions.get("result")
+                            or positions.get("positions")
+                            or []
+                        )
+                    if not isinstance(positions, list):
+                        positions = []
+
+                    total_upnl = 0.0
+                    for pos in positions:
+                        if not isinstance(pos, dict):
+                            continue
+                        try:
+                            size = float(pos.get("size") or 0)
+                        except (TypeError, ValueError):
+                            size = 0.0
+                        if size == 0:
+                            continue
+
+                        upnl: float | None = None
+                        for field in (
+                            "unrealized_pnl",
+                            "unrealized_pnl_usd",
+                            "unrealized_cash_pnl",
+                            "upnl",
+                            "uPnl",
+                        ):
+                            val = pos.get(field)
+                            if val is None or val == "":
+                                continue
+                            try:
+                                upnl = float(val)
+                                break
+                            except (TypeError, ValueError):
+                                continue
+                        if upnl is not None:
+                            total_upnl += upnl
+
+                    old_mtm = float(slave_trade.last_mtm or 0.0)
+                    slave_trade.last_mtm = round(total_upnl, 4)
+                    slave_trade.last_updated = get_ist_now()
+                    db.commit()
+
+                    logger.info(
+                        "Slave '%s' MTM updated: %s → %.4f",
+                        slave.name,
+                        old_mtm,
+                        total_upnl,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Slave '%s' MTM fetch failed: %s",
+                        slave.name,
+                        exc,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                finally:
+                    await client.close()
+
+
 # Global singleton — set during app lifespan
 mirror_engine: MirrorEngine | None = None
