@@ -72,6 +72,8 @@ class TradeInitiateRequest(BaseModel):
     tp_pct: float = Field(default=50.0, gt=0, le=500)
     sl_pct: float = Field(default=100.0, gt=0, le=500)
     slippage_pct: float = Field(default=2.0, ge=0, le=10)
+    # Delta Exchange per-leg stop-market safety net (% of entry premium)
+    universal_sl_pct: float = Field(default=200.0, ge=100, le=1000)
     trigger_mode: str  # "flat", "slab", or "premium"
     flat_trigger_pct: float | None = Field(default=None, ge=1, le=500)
     slab_24h: float = Field(default=200.0, ge=1, le=500)
@@ -98,6 +100,7 @@ class TradeSettingsUpdate(BaseModel):
     tp_pct: float | None = Field(default=None, gt=0, le=500)
     sl_pct: float | None = Field(default=None, gt=0, le=500)
     slippage_pct: float | None = Field(default=None, ge=0, le=10)
+    universal_sl_pct: float | None = Field(default=None, ge=100, le=1000)
     # Legacy direct $ (discouraged; kept for compatibility)
     profit_target_usd: float | None = None
     stoploss_usd: float | None = None

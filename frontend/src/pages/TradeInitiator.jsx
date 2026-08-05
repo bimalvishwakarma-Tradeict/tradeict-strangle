@@ -67,6 +67,7 @@ export default function TradeInitiator() {
   const [tpPct, setTpPct] = useState('50')
   const [slPct, setSlPct] = useState('100')
   const [slippagePct, setSlippagePct] = useState('2')
+  const [universalSlPct, setUniversalSlPct] = useState('200')
   const [slabs, setSlabs] = useState(null)
 
   // Emergency-only: manual fill prices
@@ -145,6 +146,7 @@ export default function TradeInitiator() {
   const tpPctNum = Number(tpPct)
   const slPctNum = Number(slPct)
   const slippagePctNum = Number(slippagePct)
+  const universalSlPctNum = Number(universalSlPct)
   const targetUsdPreview =
     Number.isFinite(tpPctNum) && tpPctNum > 0
       ? (estMaxProfitUsd * tpPctNum) / 100
@@ -153,6 +155,45 @@ export default function TradeInitiator() {
     Number.isFinite(slPctNum) && slPctNum > 0
       ? (estMaxProfitUsd * slPctNum) / 100
       : 0
+
+  const callPremPreview = emergencyMode
+    ? Number(callEntry) || 0
+    : Number(selectedCall?.call_mark_price) || 0
+  const putPremPreview = emergencyMode
+    ? Number(putEntry) || 0
+    : Number(selectedPut?.put_mark_price) || 0
+  const callDeltaSlPreview =
+    callPremPreview > 0 && Number.isFinite(universalSlPctNum)
+      ? (callPremPreview * universalSlPctNum) / 100
+      : 0
+  const putDeltaSlPreview =
+    putPremPreview > 0 && Number.isFinite(universalSlPctNum)
+      ? (putPremPreview * universalSlPctNum) / 100
+      : 0
+
+  const maxTriggerPct = useMemo(() => {
+    if (!slabs) return 150
+    if (slabs.mode === 'flat') return Number(slabs.flat_pct) || 150
+    if (slabs.mode === 'premium') {
+      return Math.max(
+        Number(slabs.premium_slab_300) || 0,
+        Number(slabs.premium_slab_200) || 0,
+        Number(slabs.premium_slab_100) || 0,
+        Number(slabs.premium_slab_lt100) || 0,
+      )
+    }
+    return Math.max(
+      Number(slabs.slab_24h) || 0,
+      Number(slabs.slab_12h) || 0,
+      Number(slabs.slab_6h) || 0,
+      Number(slabs.slab_lt6h) || 0,
+    )
+  }, [slabs])
+
+  const deltaSlBelowTrigger =
+    Number.isFinite(universalSlPctNum) &&
+    universalSlPctNum > 0 &&
+    universalSlPctNum <= maxTriggerPct
 
   const slabsValid = useMemo(() => {
     if (!slabs) return false
@@ -184,6 +225,9 @@ export default function TradeInitiator() {
     Number.isFinite(slippagePctNum) &&
     slippagePctNum >= 0 &&
     slippagePctNum <= 10 &&
+    Number.isFinite(universalSlPctNum) &&
+    universalSlPctNum >= 100 &&
+    universalSlPctNum <= 1000 &&
     estMaxProfitUsd > 0 &&
     slabsValid &&
     !placing &&
@@ -203,6 +247,7 @@ export default function TradeInitiator() {
       tp_pct: tpPctNum,
       sl_pct: slPctNum,
       slippage_pct: slippagePctNum,
+      universal_sl_pct: universalSlPctNum,
       trigger_mode: slabs.mode,
       flat_trigger_pct: slabs.mode === 'flat' ? slabs.flat_pct : null,
       slab_24h: slabs.slab_24h,
@@ -291,6 +336,21 @@ export default function TradeInitiator() {
             <div className="text-gray-400">
               Bot monitoring starts in {settleMins} minutes.
             </div>
+            {successResult.delta_sl_active ? (
+              <div className="pt-2 text-green-400">
+                🛡️ Delta SL orders placed (Call @ $
+                {fmtMoney(successResult.call_sl_trigger_price)} / Put @ $
+                {fmtMoney(successResult.put_sl_trigger_price)})
+              </div>
+            ) : successResult.delta_sl_warning ? (
+              <div className="pt-2 text-amber-300">
+                ⚠️ {successResult.delta_sl_warning}
+              </div>
+            ) : !emergencyMode ? (
+              <div className="pt-2 text-amber-300">
+                ⚠️ Delta SL: Not confirmed — bot monitoring only
+              </div>
+            ) : null}
           </div>
           <button
             type="button"
@@ -511,6 +571,47 @@ export default function TradeInitiator() {
               Applied to Net MTM calculation (0–10%). Default 2%.
             </span>
           </label>
+        </div>
+        <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 px-3 py-3">
+          <div className="mb-2 text-sm font-semibold text-amber-200">
+            SAFETY STOP LOSS (Delta Exchange Order)
+          </div>
+          <label className="block text-sm text-gray-300">
+            Stop Loss at (% of each leg entry)
+            <input
+              type="number"
+              min={100}
+              max={1000}
+              step={1}
+              value={universalSlPct}
+              onChange={(e) => setUniversalSlPct(e.target.value)}
+              className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+              placeholder="200"
+            />
+          </label>
+          <div className="mt-2 space-y-1 text-xs text-gray-400">
+            <div>
+              Call SL triggers at: ~${fmtMoney(callDeltaSlPreview)} (
+              {fmtMoney(universalSlPctNum) || '—'}% of $
+              {fmtMoney(callPremPreview)})
+            </div>
+            <div>
+              Put SL triggers at: ~${fmtMoney(putDeltaSlPreview)} (
+              {fmtMoney(universalSlPctNum) || '—'}% of $
+              {fmtMoney(putPremPreview)})
+            </div>
+          </div>
+          {deltaSlBelowTrigger && (
+            <p className="mt-2 text-xs text-amber-300">
+              Warning: Delta SL % ({fmtMoney(universalSlPctNum)}) is ≤ max
+              adjustment trigger ({fmtMoney(maxTriggerPct)}%). Delta may close
+              a leg before the bot can adjust.
+            </p>
+          )}
+          <p className="mt-2 text-xs text-gray-500">
+            These are placed as stop orders on Delta as backup if the bot
+            misses an exit. Updated automatically on each adjustment.
+          </p>
         </div>
         {emergencyMode && (
           <div className="grid gap-3 sm:grid-cols-2">

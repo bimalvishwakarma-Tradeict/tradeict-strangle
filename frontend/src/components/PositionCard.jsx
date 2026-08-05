@@ -237,6 +237,8 @@ function TriggerWatch({
   progressPct,
   triggerPct,
   triggerMode,
+  deltaSlPrice,
+  universalSlPct,
 }) {
   const pct = Math.max(0, Math.min(120, Number(progressPct) || 0))
   const warn = pct > 70
@@ -244,6 +246,7 @@ function TriggerWatch({
   const entryN = Number(entry) || 0
   const baselineN = Number(baseline) || 0
   const currentN = Number(current) || 0
+  const deltaSlN = Number(deltaSlPrice) || 0
   const showAdjBaseline =
     baselineN > 0 && Math.abs(baselineN - entryN) > 0.005
   const isPremium = triggerMode === 'premium'
@@ -277,6 +280,17 @@ function TriggerWatch({
         <div className="flex justify-between">
           <span>Trigger ({fmtMoney(triggerPct)}%)</span>
           <span className="text-amber-300">${fmtMoney(trigger)}</span>
+        </div>
+        <div className="flex justify-between text-red-300/90">
+          <span>
+            Delta SL at
+            {universalSlPct != null
+              ? ` (${fmtMoney(universalSlPct)}%)`
+              : ''}
+          </span>
+          <span className="font-medium">
+            {deltaSlN > 0 ? `$${fmtMoney(deltaSlN)}` : '—'}
+          </span>
         </div>
         <div className="flex justify-between">
           <span>Offer</span>
@@ -382,6 +396,10 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   )
   const callTrigger = Number(trade.call_trigger_price ?? 0)
   const putTrigger = Number(trade.put_trigger_price ?? 0)
+  const callDeltaSl = Number(trade.call_sl_trigger_price ?? 0)
+  const putDeltaSl = Number(trade.put_sl_trigger_price ?? 0)
+  const universalSlPct = Number(trade.universal_sl_pct ?? 200)
+  const deltaSlActive = Boolean(trade.delta_sl_active)
   const callOfferLive = Number(call.current_premium ?? 0)
   const putOfferLive = Number(put.current_premium ?? 0)
   const callProgress =
@@ -586,6 +604,19 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             </span>
           )}
         </div>
+        <div className="flex flex-wrap items-center gap-3 text-xs sm:text-sm">
+          <span className="font-semibold text-green-400">
+            🎯 Target{' '}
+            <span className="text-base font-bold">+${fmtMoney(target)}</span>
+          </span>
+          <span className="font-semibold text-red-400">
+            🛑 SL{' '}
+            <span className="text-base font-bold">-${fmtMoney(stoploss)}</span>
+          </span>
+          <span className={pnlColor(netMtm)}>
+            Net {fmtSignedMoney(netMtm)}
+          </span>
+        </div>
         <div className="text-gray-300">Exp: {expiryLabel}</div>
         <div
           className={
@@ -755,20 +786,36 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             style={{ width: `${progressPct}%` }}
           />
         </div>
-        <div className="flex flex-wrap justify-between gap-2 text-xs text-gray-400">
-          <span>
-            Target: ${fmtMoney(target)}{' '}
-            <span className="text-gray-300">
-              [{fmtMoney(tpPctLocked)}% of ${fmtMoney(initialMax)} max]
-            </span>{' '}
-            <span className="text-gray-500">[{displayPct}% reached]</span>
-          </span>
-          <span>
-            Stop Loss: ${fmtMoney(stoploss)}{' '}
-            <span className="text-gray-300">
-              [{fmtMoney(slPctLocked)}% of ${fmtMoney(initialMax)} max]
+        <div className="text-xs text-gray-400">{displayPct}% of target</div>
+        <div className="mt-2 space-y-1.5 rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2.5">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <span className="text-sm text-green-400">🎯 Target</span>
+            <span className="text-right">
+              <span className="text-base font-bold text-green-400">
+                +${fmtMoney(target)}
+              </span>
+              <span className="ml-2 text-xs text-gray-400">
+                [{fmtMoney(tpPctLocked)}% of ${fmtMoney(initialMax)} max]
+              </span>
             </span>
-          </span>
+          </div>
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <span className="text-sm text-red-400">🛑 Stop Loss</span>
+            <span className="text-right">
+              <span className="text-base font-bold text-red-400">
+                -${fmtMoney(stoploss)}
+              </span>
+              <span className="ml-2 text-xs text-gray-400">
+                [{fmtMoney(slPctLocked)}% of ${fmtMoney(initialMax)} max]
+              </span>
+            </span>
+          </div>
+          <div className="flex flex-wrap items-baseline justify-between gap-2 border-t border-gray-700 pt-1.5">
+            <span className="text-sm text-gray-300">📊 Net MTM</span>
+            <span className={`text-base font-bold ${pnlColor(netMtm)}`}>
+              {fmtSignedMoney(netMtm)}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -817,8 +864,19 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
 
       {/* Bot plan */}
       <div className="border-t border-gray-700 px-4 py-3">
-        <div className="mb-3 text-sm font-semibold text-white">
-          🤖 Bot Monitoring Plan
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-semibold text-white">
+            🤖 Bot Monitoring Plan
+          </div>
+          <div
+            className={`text-xs ${
+              deltaSlActive ? 'text-green-400' : 'text-amber-300'
+            }`}
+          >
+            {deltaSlActive
+              ? '🛡️ Delta SL Orders: Active'
+              : '⚠️ Delta SL: Not placed / incomplete'}
+          </div>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <TriggerWatch
@@ -831,6 +889,8 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             progressPct={callProgress}
             triggerPct={callTriggerPct}
             triggerMode={triggerMode}
+            deltaSlPrice={callDeltaSl}
+            universalSlPct={universalSlPct}
           />
           <TriggerWatch
             title="Put Leg Watch"
@@ -842,6 +902,8 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             progressPct={putProgress}
             triggerPct={putTriggerPct}
             triggerMode={triggerMode}
+            deltaSlPrice={putDeltaSl}
+            universalSlPct={universalSlPct}
           />
         </div>
 

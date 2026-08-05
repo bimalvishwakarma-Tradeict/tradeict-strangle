@@ -770,6 +770,13 @@ class BotEngine:
             )
         assert self.delta_client is not None
 
+        # Cancel Delta SL safety orders before closing legs
+        from backend.core.delta_sl import cancel_leg_sl_order
+
+        for leg in (trade_state.call_leg, trade_state.put_leg):
+            if getattr(leg, "delta_sl_order_id", None):
+                await cancel_leg_sl_order(self.delta_client, leg, clear_fields=True)
+
         call_close = await self.order_executor.close_leg(
             trade_state.call_leg, self.delta_client
         )
@@ -1224,6 +1231,17 @@ class BotEngine:
             put_replacement = cached.get("estimated_put_replacement")
 
         mode = str(getattr(trade_state.trade, "trigger_mode", "slab") or "slab")
+        uni_sl = float(getattr(trade_state.trade, "universal_sl_pct", None) or 200.0)
+        call_sl_px = getattr(trade_state.call_leg, "sl_trigger_price", None)
+        put_sl_px = getattr(trade_state.put_leg, "sl_trigger_price", None)
+        call_sl_id = getattr(trade_state.call_leg, "delta_sl_order_id", None)
+        put_sl_id = getattr(trade_state.put_leg, "delta_sl_order_id", None)
+        # Fallback estimate if order not stored yet
+        if call_sl_px is None or float(call_sl_px or 0) <= 0:
+            call_sl_px = round(call_base * (uni_sl / 100.0), 4) if call_base > 0 else None
+        if put_sl_px is None or float(put_sl_px or 0) <= 0:
+            put_sl_px = round(put_base * (uni_sl / 100.0), 4) if put_base > 0 else None
+
         out: dict[str, Any] = {
             "call_entry_premium": call_entry,
             "put_entry_premium": put_entry,
@@ -1247,6 +1265,16 @@ class BotEngine:
             "estimated_call_replacement": call_replacement,
             "estimated_put_replacement": put_replacement,
             "trigger_mode": mode,
+            "universal_sl_pct": uni_sl,
+            "call_sl_trigger_price": (
+                float(call_sl_px) if call_sl_px is not None else None
+            ),
+            "put_sl_trigger_price": (
+                float(put_sl_px) if put_sl_px is not None else None
+            ),
+            "call_sl_order_id": call_sl_id,
+            "put_sl_order_id": put_sl_id,
+            "delta_sl_active": bool(call_sl_id and put_sl_id),
         }
         if premium_slabs:
             out.update(

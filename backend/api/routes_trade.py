@@ -428,6 +428,7 @@ async def _persist_strangle_trade(
         profit_target_usd=profit_target_usd,
         stoploss_usd=stoploss_usd,
         slippage_pct=float(getattr(payload, "slippage_pct", None) or 2.0),
+        universal_sl_pct=float(getattr(payload, "universal_sl_pct", None) or 200.0),
         trigger_mode=payload.trigger_mode,
         notes=None,
         realized_pnl=0.0,
@@ -668,16 +669,75 @@ async def initiate_trade(
                 ),
             ) from exc
 
+        # --- Step 8b: Delta per-leg stop-loss safety orders (non-fatal) ---
+        from backend.core.delta_sl import place_basket_sl_orders
+
+        uni_sl = float(getattr(trade, "universal_sl_pct", None) or 200.0)
+        # Soft warning: Delta SL should be above adjustment trigger %
+        max_trig = 150.0
+        if payload.trigger_mode == "flat" and payload.flat_trigger_pct:
+            max_trig = float(payload.flat_trigger_pct)
+        elif payload.trigger_mode == "slab":
+            max_trig = max(
+                float(payload.slab_24h or 0),
+                float(payload.slab_12h or 0),
+                float(payload.slab_6h or 0),
+                float(payload.slab_lt6h or 0),
+            )
+        elif payload.trigger_mode == "premium":
+            max_trig = max(
+                float(payload.premium_slab_300 or 0),
+                float(payload.premium_slab_200 or 0),
+                float(payload.premium_slab_100 or 0),
+                float(payload.premium_slab_lt100 or 0),
+            )
+        if uni_sl <= max_trig:
+            logger.warning(
+                "universal_sl_pct=%.1f <= max trigger %.1f — Delta may "
+                "close before bot can adjust",
+                uni_sl,
+                max_trig,
+            )
+
+        sl_result = await place_basket_sl_orders(
+            client,
+            call_leg,
+            put_leg,
+            universal_sl_pct=uni_sl,
+            call_baseline=call_fill_price,
+            put_baseline=put_fill_price,
+        )
+        try:
+            db.add(call_leg)
+            db.add(put_leg)
+            db.commit()
+            db.refresh(call_leg)
+            db.refresh(put_leg)
+        except Exception as exc:
+            logger.warning("Could not persist SL order IDs: %s", exc)
+            db.rollback()
+
+        delta_sl_ok = bool(sl_result.get("all_ok"))
+        delta_sl_warning = None
+        if sl_result.get("any_failed"):
+            delta_sl_warning = (
+                "Delta SL order failed — bot monitoring only. "
+                f"call_ok={sl_result['call'].get('success')} "
+                f"put_ok={sl_result['put'].get('success')}"
+            )
+            logger.warning("Trade %s: %s", trade.id, delta_sl_warning)
+
         db.expunge(trade)
         db.expunge(call_leg)
         db.expunge(put_leg)
         bot_engine.position_tracker.add(trade, call_leg, put_leg)
         logger.info(
             "Step 9: Added to position tracker trade_id=%s active_count=%s "
-            "(P&L checks start at %s IST)",
+            "(P&L checks start at %s IST) delta_sl_ok=%s",
             trade.id,
             len(bot_engine.position_tracker.get_all_active()),
             monitoring_starts.isoformat(),
+            delta_sl_ok,
         )
 
         await ws_manager.broadcast(
@@ -686,6 +746,9 @@ async def initiate_trade(
                 "trade_id": trade.id,
                 "underlying": underlying,
                 "status": TradeStatus.ACTIVE.value,
+                "delta_sl_active": delta_sl_ok,
+                "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
+                "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
                 **get_settling_info(trade.monitoring_starts_at),
             }
         )
@@ -702,6 +765,13 @@ async def initiate_trade(
             "call_order_id": call_order_id,
             "put_order_id": put_order_id,
             "total_premium": total_prem,
+            "delta_sl_active": delta_sl_ok,
+            "delta_sl_warning": delta_sl_warning,
+            "call_sl_order_id": getattr(call_leg, "delta_sl_order_id", None),
+            "put_sl_order_id": getattr(put_leg, "delta_sl_order_id", None),
+            "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
+            "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
+            "universal_sl_pct": uni_sl,
             "monitoring_starts_at": (
                 trade.monitoring_starts_at.isoformat()
                 if trade.monitoring_starts_at
@@ -719,6 +789,7 @@ async def initiate_trade(
                 "initial_max_profit": float(getattr(trade, "initial_max_profit", 0) or 0),
                 "tp_pct": float(getattr(trade, "tp_pct", 50) or 50),
                 "sl_pct": float(getattr(trade, "sl_pct", 100) or 100),
+                "universal_sl_pct": uni_sl,
                 "profit_target_usd": float(trade.profit_target_usd),
                 "stoploss_usd": float(trade.stoploss_usd),
             },
@@ -761,14 +832,55 @@ async def register_existing_trade(
         monitoring_starts=monitoring_starts,
     )
 
+    # Place Delta SL safety orders on existing shorts (non-fatal)
+    from backend.core.delta_sl import place_basket_sl_orders
+
+    uni_sl = float(getattr(trade, "universal_sl_pct", None) or 200.0)
+    client = _build_delta_client(account)
+    delta_sl_ok = False
+    delta_sl_warning = None
+    try:
+        sl_result = await place_basket_sl_orders(
+            client,
+            call_leg,
+            put_leg,
+            universal_sl_pct=uni_sl,
+            call_baseline=float(payload.call_entry_premium),
+            put_baseline=float(payload.put_entry_premium),
+        )
+        try:
+            db.add(call_leg)
+            db.add(put_leg)
+            db.commit()
+            db.refresh(call_leg)
+            db.refresh(put_leg)
+        except Exception as exc:
+            logger.warning("Could not persist SL order IDs (register): %s", exc)
+            db.rollback()
+        delta_sl_ok = bool(sl_result.get("all_ok"))
+        if sl_result.get("any_failed"):
+            delta_sl_warning = (
+                "Delta SL order failed — bot monitoring only. "
+                f"call_ok={sl_result['call'].get('success')} "
+                f"put_ok={sl_result['put'].get('success')}"
+            )
+            logger.warning("Register trade %s: %s", trade.id, delta_sl_warning)
+    except Exception as exc:
+        delta_sl_warning = f"Delta SL order failed — bot monitoring only ({exc})"
+        logger.warning("Register trade %s SL failed: %s", trade.id, exc)
+    finally:
+        await client.close()
+
     db.expunge(trade)
     db.expunge(call_leg)
     db.expunge(put_leg)
     bot_engine.position_tracker.add(trade, call_leg, put_leg)
     logger.info(
-        "Emergency register trade id=%s (no Delta orders) — monitoring at %s",
+        "Emergency register trade id=%s (no entry orders) — monitoring at %s "
+        "delta_sl_ok=%s",
         trade.id,
         monitoring_starts.isoformat(),
+        delta_sl_ok,
     )
 
     await ws_manager.broadcast(
@@ -777,6 +889,10 @@ async def register_existing_trade(
             "trade_id": trade.id,
             "underlying": underlying,
             "status": TradeStatus.ACTIVE.value,
+            "delta_sl_active": delta_sl_ok,
+            "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
+            "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
+            "universal_sl_pct": uni_sl,
             **get_settling_info(trade.monitoring_starts_at),
         }
     )
@@ -784,7 +900,7 @@ async def register_existing_trade(
     return {
         "success": True,
         "trade_id": trade.id,
-        "message": "Existing strangle registered for monitoring (no orders placed)",
+        "message": "Existing strangle registered for monitoring (no entry orders placed)",
         "call_filled_at": float(payload.call_entry_premium),
         "put_filled_at": float(payload.put_entry_premium),
         "monitoring_starts_at": (
@@ -792,6 +908,11 @@ async def register_existing_trade(
             if trade.monitoring_starts_at
             else None
         ),
+        "delta_sl_active": delta_sl_ok,
+        "delta_sl_warning": delta_sl_warning,
+        "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
+        "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
+        "universal_sl_pct": uni_sl,
     }
 
 
@@ -1705,6 +1826,19 @@ async def update_trade_settings(
         trade.slippage_pct = sp
         updated["slippage_pct"] = trade.slippage_pct
         _sync_tracker_money()
+
+    if "universal_sl_pct" in updates and updates["universal_sl_pct"] is not None:
+        usp = float(updates["universal_sl_pct"])
+        if usp < 100 or usp > 1000:
+            raise HTTPException(
+                status_code=400, detail="universal_sl_pct must be between 100 and 1000"
+            )
+        trade.universal_sl_pct = usp
+        updated["universal_sl_pct"] = trade.universal_sl_pct
+        if state is not None and hasattr(state.trade, "universal_sl_pct"):
+            state.trade.universal_sl_pct = trade.universal_sl_pct
+        # Note: live Delta SL orders are not auto-moved on PATCH —
+        # next adjustment / re-deploy refreshes them.
 
     for key in (
         "slab_24h",

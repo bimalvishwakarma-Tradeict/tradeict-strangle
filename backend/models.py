@@ -56,6 +56,10 @@ class Trade(Base):
     sl_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=100.0)
     # Est. execution slippage applied to Net MTM (and exit decisions)
     slippage_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=2.0)
+    # Delta Exchange per-leg stop-loss safety net (% of entry / baseline premium)
+    universal_sl_pct: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=200.0
+    )
     trigger_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -105,6 +109,9 @@ class Leg(Base):
     delta_at_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
     # BOT TRADE ISOLATION: order ID from Delta when bot placed this leg
     delta_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Delta stop-loss safety order (buy-to-close when premium spikes)
+    delta_sl_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    sl_trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Exit order id (buy-to-close / adjust exit) for fee lookup
     exit_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # BOT TRADE ISOLATION: True = bot-placed; never manage manual account positions

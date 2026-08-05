@@ -787,6 +787,68 @@ class DeltaClient:
         )
         return result if isinstance(result, dict) else {"result": result}
 
+    async def place_stop_order(
+        self,
+        product_id: int,
+        size: int,
+        side: str,
+        stop_price: float,
+        order_type: str = "market_order",
+        time_in_force: str = "gtc",
+        reduce_only: bool = True,
+    ) -> dict[str, Any]:
+        """
+        POST /v2/orders — stop-market (safety SL) that triggers a market order.
+
+        Delta India: order_type=market_order + stop_order_type=stop_loss_order
+        + stop_price. reduce_only=True so it only closes an existing short.
+        """
+        body: dict[str, Any] = {
+            "product_id": int(product_id),
+            "size": abs(int(size)),
+            "side": side,
+            "order_type": order_type or "market_order",
+            "stop_order_type": "stop_loss_order",
+            "stop_price": str(round(float(stop_price), 2)),
+            "time_in_force": time_in_force or "gtc",
+            "reduce_only": bool(reduce_only),
+        }
+        result = await self._request(
+            "POST",
+            "/v2/orders",
+            body=body,
+            timeout=ORDER_TIMEOUT_SECONDS,
+        )
+        return {
+            "order_id": result.get("id") or result.get("order_id"),
+            "status": result.get("state") or result.get("status"),
+            "stop_price": float(stop_price),
+            "size": int(result.get("size", size) or size),
+            "raw": result if isinstance(result, dict) else {},
+        }
+
+    async def modify_stop_order(
+        self,
+        order_id: int,
+        new_stop_price: float,
+    ) -> dict[str, Any]:
+        """
+        Cancel existing stop order. Caller must place a replacement.
+
+        Delta does not reliably support in-place stop modify for options.
+        """
+        try:
+            await self.cancel_order(int(order_id))
+            return {"cancelled": True, "order_id": int(order_id)}
+        except Exception as exc:
+            logger.warning(
+                "Could not cancel SL order %s for modify (stop=%.2f): %s",
+                order_id,
+                new_stop_price,
+                exc,
+            )
+            return {"cancelled": False, "order_id": int(order_id), "error": str(exc)}
+
     async def get_ticker(self, symbol: str) -> dict[str, Any]:
         """GET /v2/tickers/{symbol} — full ticker including mark/bid/ask."""
         result = await self._request("GET", f"/v2/tickers/{symbol}")

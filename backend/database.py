@@ -185,6 +185,35 @@ def _migrate_schema() -> None:
                 conn.execute(
                     text("ALTER TABLE legs ADD COLUMN exit_order_id VARCHAR(100)")
                 )
+        leg_cols = {col["name"] for col in inspector.get_columns("legs")}
+        if "delta_sl_order_id" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE legs ADD COLUMN delta_sl_order_id VARCHAR(100)"
+                    )
+                )
+        if "sl_trigger_price" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE legs ADD COLUMN sl_trigger_price FLOAT")
+                )
+    if "trades" in tables:
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "universal_sl_pct" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN universal_sl_pct "
+                        "FLOAT DEFAULT 200.0"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE trades SET universal_sl_pct = 200.0 "
+                        "WHERE universal_sl_pct IS NULL"
+                    )
+                )
     if "adjustments" in tables:
         adj_cols = {col["name"] for col in inspector.get_columns("adjustments")}
         if "decision_type" not in adj_cols:

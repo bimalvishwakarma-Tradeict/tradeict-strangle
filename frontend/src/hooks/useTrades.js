@@ -280,6 +280,30 @@ export function useTrades() {
             msg.total_deductions != null
               ? Number(msg.total_deductions)
               : existing.total_deductions,
+          universal_sl_pct:
+            msg.universal_sl_pct != null
+              ? Number(msg.universal_sl_pct)
+              : existing.universal_sl_pct,
+          call_sl_trigger_price:
+            msg.call_sl_trigger_price != null
+              ? Number(msg.call_sl_trigger_price)
+              : existing.call_sl_trigger_price,
+          put_sl_trigger_price:
+            msg.put_sl_trigger_price != null
+              ? Number(msg.put_sl_trigger_price)
+              : existing.put_sl_trigger_price,
+          call_sl_order_id:
+            msg.call_sl_order_id != null
+              ? msg.call_sl_order_id
+              : existing.call_sl_order_id,
+          put_sl_order_id:
+            msg.put_sl_order_id != null
+              ? msg.put_sl_order_id
+              : existing.put_sl_order_id,
+          delta_sl_active:
+            msg.delta_sl_active != null
+              ? Boolean(msg.delta_sl_active)
+              : existing.delta_sl_active,
           last_mtm_update: msg.last_mtm_update ?? existing.last_mtm_update,
           underlying_price:
             Number(msg.underlying_price) > 0

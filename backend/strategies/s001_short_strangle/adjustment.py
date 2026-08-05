@@ -254,6 +254,45 @@ class AdjustmentExecutor:
             db_session.add(adjustment)
             db_session.commit()
 
+            # Refresh Delta SL safety orders (non-fatal)
+            from backend.core.delta_sl import (
+                cancel_leg_sl_order,
+                place_leg_sl_order,
+                refresh_leg_sl_order,
+            )
+
+            uni_sl = float(getattr(trade_row, "universal_sl_pct", None) or 200.0)
+            # Old triggered leg is closed — cancel any leftover SL
+            await cancel_leg_sl_order(delta_client, triggered_leg, clear_fields=True)
+            # New leg: SL from new entry fill
+            await place_leg_sl_order(
+                delta_client,
+                new_leg,
+                baseline_premium=new_entry_premium,
+                universal_sl_pct=uni_sl,
+            )
+            # Untouched: cancel + re-place from new trigger_baseline_premium
+            other_baseline = float(
+                getattr(other_leg, "trigger_baseline_premium", None)
+                or other_premium
+                or 0
+            )
+            await refresh_leg_sl_order(
+                delta_client,
+                other_leg,
+                baseline_premium=other_baseline,
+                universal_sl_pct=uni_sl,
+            )
+            try:
+                db_session.commit()
+            except Exception as exc:
+                logger.warning(
+                    "Could not persist post-adjust SL order IDs trade=%s: %s",
+                    trade.id,
+                    exc,
+                )
+                db_session.rollback()
+
             logger.info(
                 "Adjustment baseline reset: "
                 "triggered_leg entry=%s baseline=%s "
