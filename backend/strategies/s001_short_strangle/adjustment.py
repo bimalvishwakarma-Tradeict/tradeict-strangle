@@ -71,7 +71,20 @@ class AdjustmentExecutor:
                 triggered_leg.product_id,
             )
 
-            other_premium = await delta_client.get_mark_price(other_leg.symbol)
+            # Untouched leg's Best Offer at adjust time — strike match target
+            # AND new trigger baseline for that leg after success.
+            try:
+                other_premium = float(
+                    await delta_client.get_short_exit_price(other_leg.symbol)
+                )
+            except Exception:
+                other_premium = float(
+                    await delta_client.get_mark_price(other_leg.symbol)
+                )
+            if other_premium <= 0:
+                raise AdjustmentError(
+                    f"Invalid other-leg offer for {other_leg.symbol}: {other_premium}"
+                )
             try:
                 plan = await strategy.find_adjustment_strike(
                     delta_client,
@@ -152,11 +165,13 @@ class AdjustmentExecutor:
                 )
 
             # Steps 6–8: Update DB on full success
-            # Triggered leg → new fill as trigger baseline.
-            # Other leg → keep existing trigger_premium (no mark reset).
+            # BOTH legs reset trigger baseline after a successful adjustment:
+            #   triggered → new fill price
+            #   untouched → its Best Offer at adjustment time (other_premium)
             now_utc = datetime.now(timezone.utc)
             old_strike = float(triggered_leg.strike)
-            old_baseline = float(triggered_leg.initial_premium)
+            # Accounting entry for closed leg (true fill) — before any baseline reset
+            old_entry_fill = float(triggered_leg.initial_premium)
             old_exit_premium = float(exit_result.filled_price or 0.0)
             new_entry_premium = float(entry_result.filled_price or 0.0)
 
@@ -195,16 +210,14 @@ class AdjustmentExecutor:
             )
             db_session.add(new_leg)
 
-            # Other leg keeps its existing trigger baseline (avoids 103% cascades)
-            other_baseline = float(
-                getattr(other_leg, "trigger_premium", None)
-                or other_leg.initial_premium
-            )
+            # Step 6b — Reset untouched leg baseline to offer used for strike match
+            other_leg.initial_premium = float(other_premium)
+            other_leg.trigger_premium = float(other_premium)
 
-            # Realized from TRUE fill premium (initial_premium), not trigger baseline
+            # Realized from TRUE fill premium of closed leg (not post-reset baseline)
             # USD = (entry - exit) * qty * contract_value  (matches Delta scale)
             leg_realized = short_leg_realized_pnl(
-                entry_fill=old_baseline,
+                entry_fill=old_entry_fill,
                 exit_fill=old_exit_premium,
                 quantity=int(triggered_leg.quantity),
             )
@@ -219,7 +232,9 @@ class AdjustmentExecutor:
 
             hours_left = get_hours_to_expiry(trade.expiry_date)
             trigger_pct = (
-                (old_exit_premium / old_baseline) * 100.0 if old_baseline > 0 else 0.0
+                (old_exit_premium / old_entry_fill) * 100.0
+                if old_entry_fill > 0
+                else 0.0
             )
             adjustment = Adjustment(
                 trade_id=trade.id,
@@ -237,6 +252,12 @@ class AdjustmentExecutor:
             db_session.commit()
 
             logger.info(
+                "Adjustment baseline reset: "
+                "triggered_leg new_premium=%s other_leg new_baseline=%s",
+                new_entry_premium,
+                other_premium,
+            )
+            logger.info(
                 "Adjustment success trade=%s %s %s→%s premium_collected=%s "
                 "delta_order_id=%s baselines reset triggered=%s other=%s "
                 "leg_realized=%s trade_realized_pnl=%s",
@@ -247,7 +268,7 @@ class AdjustmentExecutor:
                 new_entry_premium,
                 new_leg.delta_order_id,
                 new_entry_premium,
-                other_baseline,
+                other_premium,
                 leg_realized,
                 trade_row.realized_pnl,
             )

@@ -866,31 +866,22 @@ class BotEngine:
         """
         Reload open bot-managed legs from DB after adjustment.
 
-        CRITICAL: Must re-query so updated initial_premium baselines
-        (triggered = new fill, untouched = mark at adjustment) are used
+        CRITICAL: Must re-query BOTH legs so updated initial_premium baselines
+        (triggered = new fill, untouched = offer at adjustment) are used
         by the next on_tick() trigger check.
         """
         with self.db_factory() as db:
-            call_leg = (
+            legs = (
                 db.query(Leg)
                 .filter(
                     Leg.trade_id == trade_state.trade_id,
-                    Leg.leg_type == "call",
                     Leg.status == "open",
                     Leg.is_bot_managed.is_(True),
                 )
-                .first()
+                .all()
             )
-            put_leg = (
-                db.query(Leg)
-                .filter(
-                    Leg.trade_id == trade_state.trade_id,
-                    Leg.leg_type == "put",
-                    Leg.status == "open",
-                    Leg.is_bot_managed.is_(True),
-                )
-                .first()
-            )
+            call_leg = next((leg for leg in legs if leg.leg_type == "call"), None)
+            put_leg = next((leg for leg in legs if leg.leg_type == "put"), None)
             if call_leg is None or put_leg is None:
                 logger.error(
                     "After adjustment, open legs missing for trade %s",
@@ -909,11 +900,11 @@ class BotEngine:
                 # Keep in-memory trade.realized_pnl in sync for next on_tick
                 trade_state.trade.realized_pnl = float(trade_row.realized_pnl or 0.0)
             logger.info(
-                "Reloaded legs after adjustment trade=%s call_baseline=%s "
-                "put_baseline=%s realized_pnl=%s",
-                trade_state.trade_id,
+                "Legs reloaded after adjustment: "
+                "call baseline=%s put baseline=%s trade=%s realized_pnl=%s",
                 call_leg.initial_premium,
                 put_leg.initial_premium,
+                trade_state.trade_id,
                 getattr(trade_state.trade, "realized_pnl", 0.0),
             )
 

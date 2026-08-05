@@ -43,7 +43,13 @@ _SLAB_DEFAULTS: dict[str, float] = {
 
 
 def _trigger_baseline(leg: Any) -> float:
-    """Premium used for adjustment trigger % (may differ from fill after adj)."""
+    """
+    Premium used for adjustment trigger %.
+
+    After each adjustment both legs reset:
+      triggered → new fill; untouched → offer at adjust time.
+    Prefer trigger_premium when set; else initial_premium.
+    """
     tp = getattr(leg, "trigger_premium", None)
     if tp is not None and float(tp) > 0:
         return float(tp)
