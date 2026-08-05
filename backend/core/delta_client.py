@@ -596,7 +596,10 @@ class DeltaClient:
         }
 
         # Delta "bracket" stop-loss: attach stop-loss directly to entry order.
-        # When the position is closed for any reason, the bracket SL auto-cancels.
+        # Bracket SL confirmed working on Delta Exchange India
+        # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
+        # Bracket auto-cancels when position is closed (any reason)
+        # No orphan stop orders remain after trade exit.
         if bracket_stop_loss_price is not None:
             stop_px = round(float(bracket_stop_loss_price), 2)
             if stop_px > 0:

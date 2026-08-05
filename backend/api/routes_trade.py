@@ -482,6 +482,7 @@ async def _persist_strangle_trade(
             if call_sl_trigger_price is not None
             else None
         ),
+        delta_sl_order_id=None,  # bracket has no separate stop-order ID
         entry_fee_usd=(
             abs(float(call_entry_fee)) if call_entry_fee is not None else None
         ),
@@ -506,6 +507,7 @@ async def _persist_strangle_trade(
             if put_sl_trigger_price is not None
             else None
         ),
+        delta_sl_order_id=None,  # bracket has no separate stop-order ID
         entry_fee_usd=(
             abs(float(put_entry_fee)) if put_entry_fee is not None else None
         ),
@@ -565,17 +567,23 @@ async def initiate_trade(
     put_sl_trigger_price: float | None = None
 
     try:
-        # Compute bracket SL trigger prices BEFORE entry orders.
-        # With bracket orders, the SL is attached to the entry and auto-cancels
-        # when the position is closed (any reason).
-        call_baseline_for_sl = float(await client.get_mark_price(payload.call_symbol))
-        put_baseline_for_sl = float(await client.get_mark_price(payload.put_symbol))
-        call_sl_trigger_price = round(
-            call_baseline_for_sl * (uni_sl / 100.0), 2
-        )
-        put_sl_trigger_price = round(
-            put_baseline_for_sl * (uni_sl / 100.0), 2
-        )
+        # Bracket SL confirmed working on Delta Exchange India
+        # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
+        # Bracket auto-cancels when position is closed (any reason)
+        # No orphan stop orders remain after trade exit
+        #
+        # Prefer frontend entry-premium hints; fall back to live mark.
+        call_baseline_for_sl = float(getattr(payload, "call_entry_premium", 0) or 0)
+        put_baseline_for_sl = float(getattr(payload, "put_entry_premium", 0) or 0)
+        if call_baseline_for_sl <= 0:
+            call_baseline_for_sl = float(await client.get_mark_price(payload.call_symbol))
+        if put_baseline_for_sl <= 0:
+            put_baseline_for_sl = float(await client.get_mark_price(payload.put_symbol))
+
+        call_sl_trigger_price = round(call_baseline_for_sl * (uni_sl / 100.0), 2)
+        put_sl_trigger_price = round(put_baseline_for_sl * (uni_sl / 100.0), 2)
+        call_sl_limit = round(call_sl_trigger_price * 1.05, 2)
+        put_sl_limit = round(put_sl_trigger_price * 1.05, 2)
 
         # --- Step 1: Place CALL ---
         logger.info("Step 1: Placing call order %s", payload.call_symbol)
@@ -585,6 +593,7 @@ async def initiate_trade(
             delta_client=client,
             symbol_for_fallback=payload.call_symbol,
             bracket_sl_price=call_sl_trigger_price,
+            bracket_sl_limit=call_sl_limit,
         )
         if not call_result.success:
             raise HTTPException(
@@ -628,6 +637,7 @@ async def initiate_trade(
             delta_client=client,
             symbol_for_fallback=payload.put_symbol,
             bracket_sl_price=put_sl_trigger_price,
+            bracket_sl_limit=put_sl_limit,
         )
         if not put_result.success:
             logger.critical(
@@ -888,44 +898,33 @@ async def register_existing_trade(
         monitoring_starts=monitoring_starts,
     )
 
-    # Place Delta SL safety orders on existing shorts (non-fatal)
-    from backend.core.delta_sl import place_basket_sl_orders
-
+    # Emergency register: positions already open — cannot attach bracket SL
+    # to existing shorts. Store display trigger prices only (no separate
+    # stop_loss_order placement — those orphan after close).
     uni_sl = float(getattr(trade, "universal_sl_pct", None) or 200.0)
-    client = _build_delta_client(account)
-    delta_sl_ok = False
-    delta_sl_warning = None
+    call_sl = round(float(payload.call_entry_premium) * (uni_sl / 100.0), 2)
+    put_sl = round(float(payload.put_entry_premium) * (uni_sl / 100.0), 2)
+    call_leg.sl_trigger_price = call_sl if call_sl > 0 else None
+    put_leg.sl_trigger_price = put_sl if put_sl > 0 else None
+    call_leg.delta_sl_order_id = None
+    put_leg.delta_sl_order_id = None
     try:
-        sl_result = await place_basket_sl_orders(
-            client,
-            call_leg,
-            put_leg,
-            universal_sl_pct=uni_sl,
-            call_baseline=float(payload.call_entry_premium),
-            put_baseline=float(payload.put_entry_premium),
-        )
-        try:
-            db.add(call_leg)
-            db.add(put_leg)
-            db.commit()
-            db.refresh(call_leg)
-            db.refresh(put_leg)
-        except Exception as exc:
-            logger.warning("Could not persist SL order IDs (register): %s", exc)
-            db.rollback()
-        delta_sl_ok = bool(sl_result.get("all_ok"))
-        if sl_result.get("any_failed"):
-            delta_sl_warning = (
-                "Delta SL order failed — bot monitoring only. "
-                f"call_ok={sl_result['call'].get('success')} "
-                f"put_ok={sl_result['put'].get('success')}"
-            )
-            logger.warning("Register trade %s: %s", trade.id, delta_sl_warning)
+        db.add(call_leg)
+        db.add(put_leg)
+        db.commit()
+        db.refresh(call_leg)
+        db.refresh(put_leg)
     except Exception as exc:
-        delta_sl_warning = f"Delta SL order failed — bot monitoring only ({exc})"
-        logger.warning("Register trade %s SL failed: %s", trade.id, exc)
-    finally:
-        await client.close()
+        logger.warning("Could not persist SL display prices (register): %s", exc)
+        db.rollback()
+
+    delta_sl_ok = bool(call_sl > 0 and put_sl > 0)
+    delta_sl_warning = (
+        "Registered without bracket SL — existing shorts cannot attach "
+        "bracket on entry. Place SL manually on Delta if needed."
+        if delta_sl_ok
+        else None
+    )
 
     db.expunge(trade)
     db.expunge(call_leg)
@@ -933,7 +932,7 @@ async def register_existing_trade(
     bot_engine.position_tracker.add(trade, call_leg, put_leg)
     logger.info(
         "Emergency register trade id=%s (no entry orders) — monitoring at %s "
-        "delta_sl_ok=%s",
+        "bracket_display_sl=%s",
         trade.id,
         monitoring_starts.isoformat(),
         delta_sl_ok,

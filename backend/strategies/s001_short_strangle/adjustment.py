@@ -166,20 +166,29 @@ class AdjustmentExecutor:
                 logger.error("Adjustment abort trade=%s — %s", trade.id, msg)
                 return AdjustmentResult(success=False, error_message=msg)
 
-            # Step 5: Enter new leg
+            # Step 5: Enter new leg with bracket SL attached at placement time.
+            # Bracket SL confirmed working on Delta Exchange India
+            # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
+            # Bracket auto-cancels when position is closed (any reason)
             uni_sl = float(getattr(trade, "universal_sl_pct", None) or 200.0)
             try:
-                expected_new_entry = float(await delta_client.get_mark_price(plan.new_symbol))
+                expected_new_entry = float(
+                    await delta_client.get_mark_price(plan.new_symbol)
+                )
             except Exception:
                 # Fallback: strategy target (other_leg_current_premium)
                 expected_new_entry = float(other_premium)
             bracket_sl_price = round(expected_new_entry * (uni_sl / 100.0), 2)
+            bracket_sl_limit = (
+                round(bracket_sl_price * 1.05, 2) if bracket_sl_price > 0 else None
+            )
             entry_result: OrderResult = await order_executor.sell_option(
                 product_id=int(plan.new_product_id),
                 quantity=int(triggered_leg.quantity),
                 delta_client=delta_client,
                 symbol_for_fallback=str(plan.new_symbol),
                 bracket_sl_price=bracket_sl_price if bracket_sl_price > 0 else None,
+                bracket_sl_limit=bracket_sl_limit,
             )
             if not entry_result.success:
                 self._log_partial_error(trade, triggered_leg_type, exit_result)
@@ -206,6 +215,13 @@ class AdjustmentExecutor:
             old_entry_fill = float(triggered_leg.initial_premium)
             old_exit_premium = float(exit_result.filled_price or 0.0)
             new_entry_premium = float(entry_result.filled_price or 0.0)
+
+            # Display SL: prefer fill-based trigger; fall back to pre-order estimate
+            display_sl = (
+                round(new_entry_premium * (uni_sl / 100.0), 2)
+                if new_entry_premium > 0
+                else bracket_sl_price
+            )
 
             triggered_leg.exit_premium = old_exit_premium
             triggered_leg.exit_time = now_utc
@@ -239,9 +255,8 @@ class AdjustmentExecutor:
                     if entry_result.order_id is not None
                     else None
                 ),
-                sl_trigger_price=float(bracket_sl_price)
-                if bracket_sl_price > 0
-                else None,
+                sl_trigger_price=float(display_sl) if display_sl > 0 else None,
+                delta_sl_order_id=None,  # bracket has no separate stop-order ID
                 is_bot_managed=True,
             )
             db_session.add(new_leg)

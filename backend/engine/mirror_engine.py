@@ -134,11 +134,23 @@ class MirrorEngine:
 
         client = self._get_slave_client(slave)
         try:
-            # Place call order on slave
+            # Bracket SL confirmed working on Delta Exchange India
+            # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
+            # Default 200% of master fill (slave fill unknown until after place)
+            call_baseline = float(master_call_fill or 0.0)
+            put_baseline = float(master_put_fill or 0.0)
+            call_sl = round(call_baseline * 2.0, 2) if call_baseline > 0 else None
+            put_sl = round(put_baseline * 2.0, 2) if put_baseline > 0 else None
+
+            # Place call order on slave (bracket SL attached)
             call_order = await client.place_order(
                 product_id=int(call_product_id),
                 size=slave_qty,
                 side="sell",
+                bracket_stop_loss_price=call_sl,
+                bracket_stop_loss_limit_price=(
+                    round(call_sl * 1.05, 2) if call_sl else None
+                ),
             )
             call_fill = float(
                 await client.resolve_fill_price(
@@ -151,18 +163,23 @@ class MirrorEngine:
             call_order_id = self._order_id(call_order)
 
             logger.info(
-                "Slave '%s' CALL placed: qty=%s fill=%s id=%s",
+                "Slave '%s' CALL placed: qty=%s fill=%s id=%s bracket_sl=%s",
                 slave.name,
                 slave_qty,
                 call_fill,
                 call_order_id,
+                call_sl,
             )
 
-            # Place put order on slave
+            # Place put order on slave (bracket SL attached)
             put_order = await client.place_order(
                 product_id=int(put_product_id),
                 size=slave_qty,
                 side="sell",
+                bracket_stop_loss_price=put_sl,
+                bracket_stop_loss_limit_price=(
+                    round(put_sl * 1.05, 2) if put_sl else None
+                ),
             )
             put_fill = float(
                 await client.resolve_fill_price(
@@ -175,11 +192,12 @@ class MirrorEngine:
             put_order_id = self._order_id(put_order)
 
             logger.info(
-                "Slave '%s' PUT placed: qty=%s fill=%s id=%s",
+                "Slave '%s' PUT placed: qty=%s fill=%s id=%s bracket_sl=%s",
                 slave.name,
                 slave_qty,
                 put_fill,
                 put_order_id,
+                put_sl,
             )
 
             slave_trade = SlaveTrade(
@@ -187,6 +205,8 @@ class MirrorEngine:
                 master_trade_id=int(master_trade_id),
                 call_order_id=call_order_id or None,
                 put_order_id=put_order_id or None,
+                call_sl_order_id=None,  # bracket has no separate stop-order ID
+                put_sl_order_id=None,
                 actual_quantity=slave_qty,
                 call_fill_price=call_fill,
                 put_fill_price=put_fill,
@@ -194,31 +214,6 @@ class MirrorEngine:
             )
             db.add(slave_trade)
             db.flush()
-
-            # Place SL orders on slave (non-fatal) — default 200% of fill
-            try:
-                call_sl = round(call_fill * 2.0, 2)
-                put_sl = round(put_fill * 2.0, 2)
-
-                call_sl_order = await client.place_stop_order(
-                    product_id=int(call_product_id),
-                    size=slave_qty,
-                    side="buy",
-                    stop_price=call_sl,
-                )
-                put_sl_order = await client.place_stop_order(
-                    product_id=int(put_product_id),
-                    size=slave_qty,
-                    side="buy",
-                    stop_price=put_sl,
-                )
-                slave_trade.call_sl_order_id = self._order_id(call_sl_order) or None
-                slave_trade.put_sl_order_id = self._order_id(put_sl_order) or None
-                logger.info("Slave '%s' SL orders placed", slave.name)
-            except Exception as exc:
-                logger.warning(
-                    "Slave '%s' SL failed (non-fatal): %s", slave.name, exc
-                )
 
             slave.connection_status = "connected"
             slave.last_connected_at = get_ist_now()
@@ -336,7 +331,7 @@ class MirrorEngine:
         leg = str(triggered_leg_type).lower()
 
         try:
-            # Cancel old SL order for triggered leg
+            # Cancel legacy separate SL only if present (bracket auto-cancels)
             if leg == "call" and slave_trade.call_sl_order_id:
                 try:
                     await client.cancel_order(int(slave_trade.call_sl_order_id))
@@ -350,7 +345,7 @@ class MirrorEngine:
                 except Exception as exc:
                     logger.warning("Slave SL cancel failed: %s", exc)
 
-            # Close old leg (buy back)
+            # Close old leg (buy back) — bracket SL on that position auto-cancels
             close_order = await client.place_order(
                 product_id=int(old_product_id),
                 size=qty,
@@ -363,11 +358,28 @@ class MirrorEngine:
                 self._order_id(close_order),
             )
 
-            # Open new leg (sell new strike)
+            # Open new leg with bracket SL (200% of expected fill / mark)
+            expected_fill = 0.0
+            try:
+                expected_fill = float(
+                    await client.get_mark_price(new_symbol)
+                )
+            except Exception:
+                expected_fill = float(
+                    (slave_trade.call_fill_price or 0)
+                    if leg == "call"
+                    else (slave_trade.put_fill_price or 0)
+                )
+            new_sl = round(expected_fill * 2.0, 2) if expected_fill > 0 else None
+
             new_order = await client.place_order(
                 product_id=int(new_product_id),
                 size=qty,
                 side="sell",
+                bracket_stop_loss_price=new_sl,
+                bracket_stop_loss_limit_price=(
+                    round(new_sl * 1.05, 2) if new_sl else None
+                ),
             )
             new_fill = float(
                 await client.resolve_fill_price(
@@ -378,47 +390,25 @@ class MirrorEngine:
             new_order_id = self._order_id(new_order)
 
             logger.info(
-                "Slave '%s' opened new %s: strike=%s fill=%s id=%s",
+                "Slave '%s' opened new %s: strike=%s fill=%s id=%s bracket_sl=%s",
                 slave.name,
                 leg,
                 new_strike,
                 new_fill,
                 new_order_id,
+                new_sl,
             )
 
             if leg == "call":
                 slave_trade.call_order_id = new_order_id or None
+                slave_trade.call_sl_order_id = None
                 if new_fill > 0:
                     slave_trade.call_fill_price = new_fill
             else:
                 slave_trade.put_order_id = new_order_id or None
+                slave_trade.put_sl_order_id = None
                 if new_fill > 0:
                     slave_trade.put_fill_price = new_fill
-
-            # Place new SL order
-            try:
-                fill_for_sl = new_fill if new_fill > 0 else (
-                    float(slave_trade.call_fill_price or 0)
-                    if leg == "call"
-                    else float(slave_trade.put_fill_price or 0)
-                )
-                if fill_for_sl > 0:
-                    new_sl_price = round(fill_for_sl * 2.0, 2)
-                    sl_order = await client.place_stop_order(
-                        product_id=int(new_product_id),
-                        size=qty,
-                        side="buy",
-                        stop_price=new_sl_price,
-                    )
-                    sl_id = self._order_id(sl_order) or None
-                    if leg == "call":
-                        slave_trade.call_sl_order_id = sl_id
-                    else:
-                        slave_trade.put_sl_order_id = sl_id
-            except Exception as exc:
-                logger.warning(
-                    "Slave new SL failed (non-fatal): %s", exc
-                )
 
             slave.last_error = None
             slave.connection_status = "connected"

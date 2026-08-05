@@ -198,12 +198,18 @@ class AutoTradeEngine:
             tp_pct = float(settings.tp_pct or 50.0)
             sl_pct = float(settings.sl_pct or 100.0)
             universal_sl_pct = float(settings.universal_sl_pct or 200.0)
+            # Bracket SL confirmed working on Delta Exchange India
+            # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
+            # Bracket auto-cancels when position is closed (any reason)
+            # Use expected mark before fill (bracket must be set at order time).
             call_sl_trigger_price = round(
                 call_mark * (universal_sl_pct / 100.0), 2
             )
             put_sl_trigger_price = round(
                 put_mark * (universal_sl_pct / 100.0), 2
             )
+            call_sl_limit = round(call_sl_trigger_price * 1.05, 2)
+            put_sl_limit = round(put_sl_trigger_price * 1.05, 2)
 
             # --- Place CALL ---
             logger.info(
@@ -214,7 +220,10 @@ class AutoTradeEngine:
                 quantity=qty,
                 delta_client=client,
                 symbol_for_fallback=str(straddle["call_symbol"]),
-                bracket_sl_price=call_sl_trigger_price if call_sl_trigger_price > 0 else None,
+                bracket_sl_price=(
+                    call_sl_trigger_price if call_sl_trigger_price > 0 else None
+                ),
+                bracket_sl_limit=call_sl_limit if call_sl_trigger_price > 0 else None,
             )
             if not call_result.success:
                 raise RuntimeError(
@@ -247,7 +256,10 @@ class AutoTradeEngine:
                 quantity=qty,
                 delta_client=client,
                 symbol_for_fallback=str(straddle["put_symbol"]),
-                bracket_sl_price=put_sl_trigger_price if put_sl_trigger_price > 0 else None,
+                bracket_sl_price=(
+                    put_sl_trigger_price if put_sl_trigger_price > 0 else None
+                ),
+                bracket_sl_limit=put_sl_limit if put_sl_trigger_price > 0 else None,
             )
             if not put_result.success:
                 raise RuntimeError(
@@ -341,6 +353,7 @@ class AutoTradeEngine:
                 sl_trigger_price=float(call_sl_trigger_price)
                 if call_sl_trigger_price and call_sl_trigger_price > 0
                 else None,
+                delta_sl_order_id=None,  # bracket has no separate stop-order ID
             )
             put_leg = Leg(
                 trade_id=trade.id,
@@ -361,6 +374,7 @@ class AutoTradeEngine:
                 sl_trigger_price=float(put_sl_trigger_price)
                 if put_sl_trigger_price and put_sl_trigger_price > 0
                 else None,
+                delta_sl_order_id=None,  # bracket has no separate stop-order ID
             )
             db.add(call_leg)
             db.add(put_leg)

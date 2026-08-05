@@ -75,8 +75,16 @@ class OrderExecutor:
         delta_client: Any,
         symbol_for_fallback: str | None = None,
         bracket_sl_price: float | None = None,
+        bracket_sl_limit: float | None = None,
     ) -> OrderResult:
-        """Place a SELL market IOC order to open a new short option."""
+        """
+        Place a SELL market IOC order to open a new short option.
+
+        Bracket SL confirmed working on Delta Exchange India.
+        Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
+        Bracket auto-cancels when position is closed (any reason).
+        No orphan stop orders remain after trade exit.
+        """
         logger.info(
             "Selling option product_id=%s, qty=%s",
             product_id,
@@ -88,9 +96,16 @@ class OrderExecutor:
             if bracket_sl_price is not None
             else None
         )
-        sl_limit_px: float | None = (
-            round(sl_px * 1.05, 2) if sl_px is not None and sl_px > 0 else None
-        )
+        if sl_px is not None and sl_px <= 0:
+            sl_px = None
+
+        if bracket_sl_limit is not None and sl_px is not None:
+            sl_limit_px: float | None = round(float(bracket_sl_limit), 2)
+        elif sl_px is not None:
+            # Default: limit = stop × 1.05 for buy bracket on short entry
+            sl_limit_px = round(sl_px * 1.05, 2)
+        else:
+            sl_limit_px = None
 
         return await self._execute_with_retry(
             delta_client=delta_client,

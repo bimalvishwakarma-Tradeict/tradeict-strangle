@@ -282,8 +282,8 @@ function TriggerWatch({
           <span className="text-amber-300">${fmtMoney(trigger)}</span>
         </div>
         <div className="flex justify-between text-red-300/90">
-          <span>
-            Delta SL at
+          <span title="Attached to Delta position — no separate stop order">
+            🔒 Bracket SL
             {universalSlPct != null
               ? ` (${fmtMoney(universalSlPct)}%)`
               : ''}
@@ -292,6 +292,11 @@ function TriggerWatch({
             {deltaSlN > 0 ? `$${fmtMoney(deltaSlN)}` : '—'}
           </span>
         </div>
+        {deltaSlN > 0 && (
+          <div className="text-[10px] text-gray-500">
+            auto-cancels on close
+          </div>
+        )}
         <div className="flex justify-between">
           <span>Offer</span>
           <span>${fmtMoney(currentN)}</span>
@@ -886,10 +891,11 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             className={`text-xs ${
               deltaSlActive ? 'text-green-400' : 'text-amber-300'
             }`}
+            title="Attached to Delta position — no separate stop order"
           >
             {deltaSlActive
-              ? '🛡️ Delta SL Orders: Active'
-              : '⚠️ Delta SL: Not placed / incomplete'}
+              ? '🔒 Bracket SL: Active (auto-cancels on close)'
+              : '⚠️ Bracket SL: Not set / incomplete'}
           </div>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
