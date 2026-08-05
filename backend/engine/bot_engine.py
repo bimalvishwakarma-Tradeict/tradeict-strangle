@@ -493,12 +493,43 @@ class BotEngine:
         put_open = (
             str(getattr(trade_state.put_leg, "status", "open")).lower() == "open"
         )
+        # Already one-legged in memory (e.g. after partial adjustment) —
+        # do NOT emergency-close; keep monitoring remaining leg.
         if not (call_open and put_open):
             return True
 
         if trade_state.trade_id in self._integrity_in_progress:
             return True
         if self.delta_client is None:
+            return True
+
+        # DB may already show one-legged (partial adjust) while memory stale
+        with self.db_factory() as db:
+            open_n = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_state.trade_id,
+                    Leg.status == "open",
+                    Leg.is_bot_managed.is_(True),
+                )
+                .count()
+            )
+        if open_n < 2:
+            logger.critical(
+                "Trade %s integrity: DB has %s open leg(s) — syncing memory, "
+                "skipping emergency close (likely partial adjustment)",
+                trade_state.trade_id,
+                open_n,
+            )
+            self._reload_legs_after_partial(trade_state)
+            await self._push_error(
+                trade_state.trade_id,
+                (
+                    "One-legged position after partial adjustment. "
+                    "Close remaining leg manually — auto emergency close disabled."
+                ),
+                requires_manual_action=True,
+            )
             return True
 
         positions = await self._fetch_positions_safe()
@@ -1493,6 +1524,34 @@ class BotEngine:
                         trade_id,
                         err,
                     )
+                elif result.is_partial:
+                    # CRITICAL: do NOT mark trade closed / remove from tracker /
+                    # schedule auto re-entry. Sync memory so integrity check
+                    # sees one closed leg and will NOT emergency-close remaining.
+                    self._reload_legs_after_partial(trade_state)
+                    log_and_buffer(
+                        "PARTIAL_ADJUSTMENT",
+                        trade_id,
+                        {
+                            "leg": triggered,
+                            "error": err,
+                            "action": "KEEP_MONITORING_REMAINING_LEG",
+                        },
+                    )
+                    logger.critical(
+                        "Trade %s PARTIAL adjustment — remaining leg stays "
+                        "ACTIVE in tracker. Manual close required. %s",
+                        trade_id,
+                        err,
+                    )
+                    await self._push_error(
+                        trade_id,
+                        (
+                            f"PARTIAL ADJUSTMENT: {err} "
+                            "Trade kept open — close remaining leg manually."
+                        ),
+                        requires_manual_action=True,
+                    )
                 else:
                     log_and_buffer(
                         "ADJUSTMENT_FAIL",
@@ -1500,13 +1559,13 @@ class BotEngine:
                         {
                             "leg": triggered,
                             "error": err,
-                            "is_partial": bool(result.is_partial),
+                            "is_partial": False,
                         },
                     )
                     await self._push_error(
                         trade_id,
                         err,
-                        requires_manual_action=bool(result.is_partial),
+                        requires_manual_action=False,
                     )
         except Exception as exc:
             log_and_buffer(
@@ -1552,8 +1611,8 @@ class BotEngine:
         """
         Reload open bot-managed legs from DB after adjustment.
 
-        CRITICAL: Must re-query BOTH legs so updated initial_premium baselines
-        (triggered = new fill, untouched = offer at adjustment) are used
+        CRITICAL: Must re-query BOTH legs so updated trigger baselines
+        (triggered = new fill, untouched = best offer at adjustment) are used
         by the next on_tick() trigger check.
         """
         with self.db_factory() as db:
@@ -1570,9 +1629,13 @@ class BotEngine:
             put_leg = next((leg for leg in legs if leg.leg_type == "put"), None)
             if call_leg is None or put_leg is None:
                 logger.error(
-                    "After adjustment, open legs missing for trade %s",
+                    "After adjustment, open legs missing for trade %s "
+                    "(call=%s put=%s) — falling back to partial reload",
                     trade_state.trade_id,
+                    call_leg is not None,
+                    put_leg is not None,
                 )
+                self._reload_legs_after_partial(trade_state)
                 return
             trade_row = (
                 db.query(Trade).filter(Trade.id == trade_state.trade_id).first()
@@ -1597,6 +1660,77 @@ class BotEngine:
                 or getattr(put_leg, "trigger_premium", None),
                 trade_state.trade_id,
                 getattr(trade_state.trade, "realized_pnl", 0.0),
+            )
+
+    def _reload_legs_after_partial(self, trade_state: TradeState) -> None:
+        """
+        After partial adjustment: sync in-memory legs from DB.
+
+        One leg is closed; keep the remaining open leg in the tracker.
+        Does NOT remove the trade or mark it closed — integrity check must
+        see the closed status so it will not emergency-exit the remaining leg.
+        """
+        from backend.engine.trade_reconcile import pick_call_put_legs
+
+        with self.db_factory() as db:
+            all_legs = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_state.trade_id,
+                    Leg.is_bot_managed.is_(True),
+                )
+                .all()
+            )
+            call_leg, put_leg = pick_call_put_legs(all_legs)
+            trade_row = (
+                db.query(Trade).filter(Trade.id == trade_state.trade_id).first()
+            )
+            if call_leg is None or put_leg is None:
+                logger.critical(
+                    "Partial reload failed trade=%s — incomplete leg history "
+                    "(call=%s put=%s). Keeping prior in-memory legs.",
+                    trade_state.trade_id,
+                    call_leg is not None,
+                    put_leg is not None,
+                )
+                return
+
+            # Ensure trade stays ACTIVE in DB
+            if trade_row is not None:
+                if str(trade_row.status).lower() != TradeStatus.ACTIVE.value:
+                    logger.critical(
+                        "Partial reload: trade %s status was %s — restoring ACTIVE",
+                        trade_row.id,
+                        trade_row.status,
+                    )
+                    trade_row.status = TradeStatus.ACTIVE.value
+                    trade_row.exit_reason = None
+                    trade_row.exit_time = None
+                    db.commit()
+                trade_state.trade.realized_pnl = float(trade_row.realized_pnl or 0.0)
+                trade_state.trade.status = TradeStatus.ACTIVE.value
+
+            db.expunge(call_leg)
+            db.expunge(put_leg)
+            trade_state.call_leg = call_leg
+            trade_state.put_leg = put_leg
+            self.position_tracker.update_legs(
+                trade_state.trade_id, call_leg, put_leg, trade_state.trade
+            )
+            open_n = sum(
+                1
+                for leg in (call_leg, put_leg)
+                if str(getattr(leg, "status", "")).lower() == "open"
+            )
+            logger.critical(
+                "Partial reload trade=%s: call=%s(%s) put=%s(%s) open_count=%s "
+                "— trade remains in tracker",
+                trade_state.trade_id,
+                call_leg.symbol,
+                call_leg.status,
+                put_leg.symbol,
+                put_leg.status,
+                open_n,
             )
 
     async def _get_cached_chain(

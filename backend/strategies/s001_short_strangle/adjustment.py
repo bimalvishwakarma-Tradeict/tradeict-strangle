@@ -68,28 +68,49 @@ class AdjustmentExecutor:
                 logger.error(msg)
                 return AdjustmentResult(success=False, error_message=msg)
 
-            logger.info(
-                "Adjustment start trade=%s leg=%s old_strike=%s product_id=%s",
-                trade.id,
-                triggered_leg_type,
-                triggered_leg.strike,
-                triggered_leg.product_id,
-            )
-
-            # Untouched leg's Best Offer at adjust time — strike match target
-            # AND new trigger baseline for that leg after success.
+            # Untouched leg's Best Offer (ask) at adjust time — strike match
+            # target AND new trigger baseline after success.
+            # NEVER use mark/bid — a depressed mark resets baseline too low
+            # and the next tick fires "150%" while exit/entry looks ~96%.
             try:
                 other_premium = float(
                     await delta_client.get_short_exit_price(other_leg.symbol)
                 )
-            except Exception:
-                other_premium = float(
-                    await delta_client.get_mark_price(other_leg.symbol)
-                )
+            except Exception as exc:
+                raise AdjustmentError(
+                    f"Could not fetch Best Offer for untouched "
+                    f"{other_leg.symbol}: {exc}"
+                ) from exc
             if other_premium <= 0:
                 raise AdjustmentError(
                     f"Invalid other-leg offer for {other_leg.symbol}: {other_premium}"
                 )
+
+            triggered_baseline = float(
+                getattr(triggered_leg, "trigger_baseline_premium", None)
+                or getattr(triggered_leg, "trigger_premium", None)
+                or triggered_leg.initial_premium
+                or 0.0
+            )
+            other_old_baseline = float(
+                getattr(other_leg, "trigger_baseline_premium", None)
+                or getattr(other_leg, "trigger_premium", None)
+                or other_leg.initial_premium
+                or 0.0
+            )
+            logger.info(
+                "[ADJUSTMENT_START] Trade %s "
+                "triggered_leg=%s strike=%s product_id=%s "
+                "trigger_baseline=%s other_leg_offer=%s "
+                "other_leg_old_baseline=%s",
+                trade.id,
+                triggered_leg_type,
+                triggered_leg.strike,
+                triggered_leg.product_id,
+                triggered_baseline,
+                other_premium,
+                other_old_baseline,
+            )
             try:
                 plan = await strategy.find_adjustment_strike(
                     delta_client,
@@ -136,7 +157,7 @@ class AdjustmentExecutor:
                     error_message=msg,
                 )
 
-            # Step 4: Close triggered leg
+            # Step 3→4: Close triggered leg
             # If this leg was protected by a legacy *separate* SL order
             # (delta_sl_order_id exists), cancel it before/around the close so
             # we don't leave orphan stop orders behind.
@@ -262,9 +283,18 @@ class AdjustmentExecutor:
             db_session.add(new_leg)
 
             # Untouched leg: KEEP original entry; ONLY reset trigger baseline
+            # to its Best Offer at adjustment time (never mark/bid).
             other_leg.trigger_baseline_premium = float(other_premium)
             other_leg.trigger_premium = float(other_premium)
             # Do NOT modify other_leg.initial_premium
+            logger.info(
+                "[BASELINE_RESET] Trade %s "
+                "untouched_%s.trigger_baseline: %s → %s (best_offer)",
+                trade.id,
+                other_leg.leg_type,
+                other_old_baseline,
+                other_premium,
+            )
 
             # Realized from TRUE fill premium of closed leg (not trigger baseline)
             # USD = (entry - exit) * qty * contract_value  (matches Delta scale)
@@ -283,9 +313,10 @@ class AdjustmentExecutor:
             trade_row.realized_pnl = prior_realized + leg_realized
 
             hours_left = get_hours_to_expiry(trade.expiry_date)
+            # Ratio of exit vs trigger baseline (NOT exit/entry — that misreads as ~96%)
             trigger_pct = (
-                (old_exit_premium / old_entry_fill) * 100.0
-                if old_entry_fill > 0
+                (old_exit_premium / triggered_baseline) * 100.0
+                if triggered_baseline > 0
                 else 0.0
             )
             adjustment = Adjustment(
@@ -303,11 +334,22 @@ class AdjustmentExecutor:
             )
             db_session.add(adjustment)
             db_session.commit()
+            db_session.refresh(new_leg)
 
             # With bracket SLs attached to entry orders, there is nothing to
             # "refresh" as part of adjustment. The new leg's bracket SL was
             # attached at order placement time above.
 
+            logger.info(
+                "Adjustment DB committed: new_leg_id=%s symbol=%s "
+                "product_id=%s status=%s entry=%s baseline=%s",
+                new_leg.id,
+                new_leg.symbol,
+                new_leg.product_id,
+                new_leg.status,
+                new_leg.initial_premium,
+                new_leg.trigger_baseline_premium,
+            )
             logger.info(
                 "Adjustment baseline reset: "
                 "triggered_leg entry=%s baseline=%s "
@@ -320,6 +362,7 @@ class AdjustmentExecutor:
             logger.info(
                 "Adjustment success trade=%s %s %s→%s premium_collected=%s "
                 "delta_order_id=%s baselines reset triggered=%s other=%s "
+                "trigger_pct_reached=%.2f (vs baseline %.2f) "
                 "leg_realized=%s trade_realized_pnl=%s",
                 trade.id,
                 triggered_leg_type,
@@ -329,6 +372,8 @@ class AdjustmentExecutor:
                 new_leg.delta_order_id,
                 new_entry_premium,
                 other_premium,
+                trigger_pct,
+                triggered_baseline,
                 leg_realized,
                 trade_row.realized_pnl,
             )
@@ -422,13 +467,53 @@ class AdjustmentExecutor:
         exit_result: OrderResult,
         db_session: Any,
     ) -> None:
-        """Persist partial state: old leg closed, new leg not opened."""
-        triggered_leg.exit_premium = float(exit_result.filled_price or 0.0)
+        """
+        Persist partial state: old leg closed, new leg not opened.
+
+        Trade stays ACTIVE with the remaining open leg. Caller must sync
+        position_tracker so integrity checks do NOT emergency-close.
+        """
+        from backend.models import Trade as TradeModel
+
+        exit_px = float(exit_result.filled_price or 0.0)
+        entry_px = float(triggered_leg.initial_premium or 0.0)
+        triggered_leg.exit_premium = exit_px
         triggered_leg.exit_time = datetime.now(timezone.utc)
         triggered_leg.status = "closed"
+        if exit_result.order_id is not None:
+            triggered_leg.exit_order_id = str(exit_result.order_id)
+        if exit_result.commission is not None:
+            triggered_leg.exit_fee_usd = abs(float(exit_result.commission))
+
+        leg_realized = short_leg_realized_pnl(
+            entry_fill=entry_px,
+            exit_fill=exit_px,
+            quantity=int(triggered_leg.quantity or 0),
+        )
+        triggered_leg.realized_pnl = leg_realized
+        trade_row = (
+            db_session.query(TradeModel)
+            .filter(TradeModel.id == triggered_leg.trade_id)
+            .first()
+        )
+        if trade_row is not None:
+            # Keep trade ACTIVE — one-legged until user closes remaining
+            prior = float(trade_row.realized_pnl or 0.0)
+            trade_row.realized_pnl = prior + leg_realized
+            if str(trade_row.status).lower() == "closed":
+                logger.critical(
+                    "Partial adjustment: trade %s was CLOSED — forcing ACTIVE "
+                    "so remaining leg stays monitored",
+                    trade_row.id,
+                )
+                trade_row.status = "active"
+                trade_row.exit_reason = None
+                trade_row.exit_time = None
+
         db_session.commit()
         logger.critical(
-            "Partial adjustment DB updated: leg_id=%s marked closed (one-legged)",
+            "Partial adjustment DB updated: leg_id=%s marked closed "
+            "(one-legged). Trade stays ACTIVE for manual close of remaining leg.",
             triggered_leg.id,
         )
 

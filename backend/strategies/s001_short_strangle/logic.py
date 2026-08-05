@@ -390,10 +390,40 @@ class ShortStrangleStrategy(BaseStrategy):
         call_open = str(getattr(call_leg, "status", "open")).lower() == "open"
         put_open = str(getattr(put_leg, "status", "open")).lower() == "open"
 
+        call_baseline = _trigger_baseline(call_leg) if call_open else 0.0
+        put_baseline = _trigger_baseline(put_leg) if put_open else 0.0
+        call_trigger_price = (
+            call_baseline * (call_trigger_pct / 100.0) if call_baseline > 0 else 0.0
+        )
+        put_trigger_price = (
+            put_baseline * (put_trigger_pct / 100.0) if put_baseline > 0 else 0.0
+        )
+        call_ratio = (
+            (call_premium / call_baseline * 100.0) if call_baseline > 0 else 0.0
+        )
+        put_ratio = (
+            (put_premium / put_baseline * 100.0) if put_baseline > 0 else 0.0
+        )
+        logger.info(
+            "[TRIGGER_CHECK] Trade %s "
+            "call: current=%.2f baseline=%.2f trigger_at=%.2f "
+            "trigger_pct=%.1f ratio=%.1f%% "
+            "| put: current=%.2f baseline=%.2f trigger_at=%.2f "
+            "trigger_pct=%.1f ratio=%.1f%%",
+            getattr(trade, "id", "?"),
+            call_premium,
+            call_baseline,
+            call_trigger_price,
+            call_trigger_pct,
+            call_ratio,
+            put_premium,
+            put_baseline,
+            put_trigger_price,
+            put_trigger_pct,
+            put_ratio,
+        )
+
         if call_open:
-            call_trigger_price = _trigger_baseline(call_leg) * (
-                call_trigger_pct / 100.0
-            )
             if call_premium >= call_trigger_price:
                 if mode == "premium":
                     logger.info(
@@ -439,9 +469,6 @@ class ShortStrangleStrategy(BaseStrategy):
                 )
 
         if put_open:
-            put_trigger_price = _trigger_baseline(put_leg) * (
-                put_trigger_pct / 100.0
-            )
             if put_premium >= put_trigger_price:
                 if mode == "premium":
                     logger.info(
