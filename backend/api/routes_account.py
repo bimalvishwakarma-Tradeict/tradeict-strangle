@@ -64,11 +64,14 @@ async def cleanup_orphan_sl_orders(db: Session) -> dict[str, Any]:
     try:
         orders = await client.get_open_stop_orders()
         cancelled = 0
+        already_gone = 0
         kept = 0
+        errors = 0
 
         for order in orders:
             product_id = order.get("product_id")
             order_id = order.get("id") or order.get("order_id")
+            symbol = order.get("product_symbol", "")
             try:
                 pid = int(product_id) if product_id is not None else 0
             except (TypeError, ValueError):
@@ -78,16 +81,56 @@ async def cleanup_orphan_sl_orders(db: Session) -> dict[str, Any]:
                 continue
 
             if pid not in active_product_ids:
-                await client.cancel_order(int(order_id))
-                cancelled += 1
+                try:
+                    order_id_int = int(order_id)
+                    await client.cancel_order(order_id_int)
+                    cancelled += 1
+                    logger.info(
+                        "Cancelled orphan SL: %s order=%s",
+                        symbol,
+                        order_id_int,
+                    )
+                except DeltaAPIError as e:
+                    status_code = int(getattr(e, "status_code", 0) or 0)
+                    if status_code == 404:
+                        already_gone += 1
+                        logger.info(
+                            "SL already gone: %s order=%s",
+                            symbol,
+                            order_id,
+                        )
+                    else:
+                        errors += 1
+                        logger.warning(
+                            "Could not cancel %s order=%s: status=%s msg=%s",
+                            symbol,
+                            order_id,
+                            status_code,
+                            str(e),
+                        )
+                except Exception as exc:
+                    errors += 1
+                    logger.warning(
+                        "Cancel error %s order=%s: %s",
+                        symbol,
+                        order_id,
+                        exc,
+                    )
             else:
                 kept += 1
+                logger.info(
+                    "Keeping active SL: %s order=%s",
+                    symbol,
+                    order_id,
+                )
 
         return {
             "success": True,
             "skipped": False,
             "cancelled": cancelled,
+            "already_gone": already_gone,
             "kept": kept,
+            "errors": errors,
             "active_product_count": len(active_product_ids),
         }
     finally:
