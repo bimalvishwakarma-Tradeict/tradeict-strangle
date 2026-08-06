@@ -585,12 +585,36 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         call_curr = float(getattr(state, "last_call_premium", 0) or 0)
         put_curr = float(getattr(state, "last_put_premium", 0) or 0)
         gross_mtm = float(getattr(state, "last_pnl", 0) or 0)
-        net_mtm = float(
-            getattr(state, "last_net_mtm", None)
-            or getattr(state, "last_delta_mtm", None)
-            or gross_mtm
-            or 0
-        )
+        _raw_net = getattr(state, "last_net_mtm", None)
+        if _raw_net is not None and _raw_net != 0.0:
+            net_mtm = float(_raw_net)
+        else:
+            # last_net_mtm not yet populated — compute it inline from gross
+            # using same formula as bot_engine so overview is always correct
+            from backend.core.fees import compute_net_mtm as _compute_net
+            from backend.core.fees import basket_fees_paid_from_legs as _fees_from_legs
+            from backend.models import Leg as _Leg
+            _slip_pct = float(getattr(state.trade, "slippage_pct", None) or 2.0)
+            _legs = db.query(_Leg).filter(
+                _Leg.trade_id == state.trade_id,
+                _Leg.is_bot_managed.is_(True),
+            ).all()
+            _fees_paid = _fees_from_legs(_legs)
+            # estimate exit fees: taker fee 0.05% on current offer prices
+            _FEE_RATE = 0.0005
+            _open_legs = [l for l in _legs if str(getattr(l, "status", "")).lower() == "open"]
+            _est_exit = sum(
+                float(call_curr if l.leg_type == "call" else put_curr)
+                * int(getattr(l, "quantity", 1) or 1) * 0.001 * _FEE_RATE
+                for l in _open_legs
+            )
+            _fields = _compute_net(
+                gross_mtm=gross_mtm,
+                fees_paid=_fees_paid,
+                est_exit_fees=_est_exit,
+                slippage_pct=_slip_pct,
+            )
+            net_mtm = float(_fields["net_mtm"])
         master_trade_data = {
             "trade_id": state.trade_id,
             "underlying": getattr(state.trade, "underlying", None),
@@ -788,7 +812,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
     for s in slaves_data:
         st = s.get("active_slave_trade")
         if st:
-            combined_mtm += float(st.get("last_mtm") or 0)
+            combined_mtm += float(st.get("net_mtm") or 0)
 
     master_active_count = 0
     if master_account is not None:
