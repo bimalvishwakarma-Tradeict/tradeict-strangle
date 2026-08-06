@@ -589,32 +589,8 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         if _raw_net is not None and _raw_net != 0.0:
             net_mtm = float(_raw_net)
         else:
-            # last_net_mtm not yet populated — compute it inline from gross
-            # using same formula as bot_engine so overview is always correct
-            from backend.core.fees import compute_net_mtm as _compute_net
-            from backend.core.fees import basket_fees_paid_from_legs as _fees_from_legs
-            from backend.models import Leg as _Leg
-            _slip_pct = float(getattr(state.trade, "slippage_pct", None) or 2.0)
-            _legs = db.query(_Leg).filter(
-                _Leg.trade_id == state.trade_id,
-                _Leg.is_bot_managed.is_(True),
-            ).all()
-            _fees_paid = _fees_from_legs(_legs)
-            # estimate exit fees: taker fee 0.05% on current offer prices
-            _FEE_RATE = 0.0005
-            _open_legs = [l for l in _legs if str(getattr(l, "status", "")).lower() == "open"]
-            _est_exit = sum(
-                float(call_curr if l.leg_type == "call" else put_curr)
-                * int(getattr(l, "quantity", 1) or 1) * 0.001 * _FEE_RATE
-                for l in _open_legs
-            )
-            _fields = _compute_net(
-                gross_mtm=gross_mtm,
-                fees_paid=_fees_paid,
-                est_exit_fees=_est_exit,
-                slippage_pct=_slip_pct,
-            )
-            net_mtm = float(_fields["net_mtm"])
+            # last_net_mtm not yet populated (first tick) — use gross as temp
+            net_mtm = gross_mtm
         master_trade_data = {
             "trade_id": state.trade_id,
             "underlying": getattr(state.trade, "underlying", None),
@@ -725,29 +701,50 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             except Exception as exc:
                 logger.warning("Slave %s MTM fetch failed: %s", slave.name, exc)
 
-            # Apply fees + slippage to get net MTM
+            # Net MTM calculation for slave:
+            # Strategy: derive deduction ratio from master's known gross vs net.
+            # This is proportionally accurate because fees scale with notional,
+            # and slippage % is same. Slave qty is already reflected in gross_mtm.
+
             slave_slip_pct = float(
                 getattr(master_row, "slippage_pct", None) or 2.0
             ) if master_row else 2.0
-            slave_call_fill = float(active_st.call_fill_price or 0.0)
-            slave_put_fill = float(active_st.put_fill_price or 0.0)
-            slave_qty = int(active_st.actual_quantity or 1)
-            FEE_RATE = 0.0005
-            slave_fees_paid = round(
-                (slave_call_fill + slave_put_fill) * slave_qty * 0.001 * FEE_RATE * 2, 4
-            )
-            master_call_curr = float(master_trade_data["call_premium"]) if master_trade_data else 0.0
-            master_put_curr = float(master_trade_data["put_premium"]) if master_trade_data else 0.0
-            slave_est_exit = round(
-                (master_call_curr + master_put_curr) * slave_qty * 0.001 * FEE_RATE * 2, 4
-            )
-            slave_net_fields = compute_net_mtm(
-                gross_mtm=gross_mtm,
-                fees_paid=slave_fees_paid,
-                est_exit_fees=slave_est_exit,
-                slippage_pct=slave_slip_pct,
-            )
-            slave_net_mtm = float(slave_net_fields["net_mtm"])
+
+            master_gross = float(getattr(state, "last_pnl", 0) or 0) if master_states else 0.0
+            master_net = float(getattr(state, "last_net_mtm", None) or 0) if master_states else 0.0
+
+            # Check if master has valid populated net_mtm (not default 0.0)
+            master_has_net = master_states and (master_net != 0.0 or master_gross == 0.0)
+
+            if master_has_net and abs(master_gross) > 0.01:
+                # Use master's actual deduction ratio — most accurate
+                # deduction_ratio = how much was deducted as fraction of gross
+                master_deduction = master_gross - master_net
+                deduction_ratio = master_deduction / master_gross
+                slave_deduction = gross_mtm * deduction_ratio
+                slave_net_mtm = round(gross_mtm - slave_deduction, 4)
+            else:
+                # Fallback: apply slippage + fixed fee estimate
+                # This runs only on first tick before master net_mtm is populated
+                _FEE_RATE = 0.0005
+                slave_call_fill = float(active_st.call_fill_price or 0.0)
+                slave_put_fill = float(active_st.put_fill_price or 0.0)
+                slave_qty = int(active_st.actual_quantity or 1)
+                slave_fees_paid = round(
+                    (slave_call_fill + slave_put_fill) * slave_qty * 0.001 * _FEE_RATE * 2, 4
+                )
+                master_call_curr = float(master_trade_data["call_premium"]) if master_trade_data else 0.0
+                master_put_curr = float(master_trade_data["put_premium"]) if master_trade_data else 0.0
+                slave_est_exit = round(
+                    (master_call_curr + master_put_curr) * slave_qty * 0.001 * _FEE_RATE * 2, 4
+                )
+                slave_net_fields = compute_net_mtm(
+                    gross_mtm=gross_mtm,
+                    fees_paid=slave_fees_paid,
+                    est_exit_fees=slave_est_exit,
+                    slippage_pct=slave_slip_pct,
+                )
+                slave_net_mtm = float(slave_net_fields["net_mtm"])
 
             mult = float(slave.qty_multiplier or 1.0)
             last_updated_iso = _iso(active_st.last_updated)
