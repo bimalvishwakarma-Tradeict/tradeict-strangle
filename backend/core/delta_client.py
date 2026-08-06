@@ -1622,7 +1622,143 @@ class DeltaClient:
             "premium_diff_pct": float(best_diff),
             "expiry_date": expiry_date,
             "underlying": underlying.upper().strip(),
+            "trade_type": "straddle",
             # Backward compatibility — primary display strike
+            "strike": call_strike,
+        }
+
+    async def find_strangle_by_premium(
+        self,
+        underlying: str,
+        expiry_date: str,
+        target_premium: float,
+    ) -> dict[str, Any]:
+        """
+        Find OTM Call + OTM Put strikes where each premium is closest
+        to target_premium. Call and Put are chosen independently.
+        """
+        price_map = {"BTC": "BTCUSD", "ETH": "ETHUSD", "XAU": "XAUUSD"}
+        key = underlying.upper().strip()
+        price_symbol = price_map.get(
+            key, key if key.endswith("USD") else f"{key}USD"
+        )
+
+        spot = await self.get_underlying_price(price_symbol)
+        if not spot or spot <= 0:
+            raise DeltaAPIError(
+                502, f"Could not get spot price for {underlying} ({price_symbol})"
+            )
+
+        chain = await self.get_option_chain(underlying, expiry_date)
+        if not chain:
+            raise DeltaAPIError(
+                404,
+                f"No option chain available for {underlying} {expiry_date}. "
+                "Market may be closed or expiry unavailable.",
+            )
+
+        target = float(target_premium)
+        logger.info(
+            "Finding strangle: %s spot=%.2f target_premium=%.2f expiry=%s",
+            underlying,
+            spot,
+            target,
+            expiry_date,
+        )
+
+        otm_calls = [
+            row
+            for row in chain
+            if _safe_float(row.get("strike")) > float(spot)
+            and _safe_float(row.get("call_mark_price")) > 0
+        ]
+        otm_puts = [
+            row
+            for row in chain
+            if _safe_float(row.get("strike")) < float(spot)
+            and _safe_float(row.get("put_mark_price")) > 0
+        ]
+
+        atm_row = min(
+            chain,
+            key=lambda r: abs(_safe_float(r.get("strike")) - float(spot)),
+        )
+        if (
+            atm_row not in otm_calls
+            and _safe_float(atm_row.get("call_mark_price")) > 0
+        ):
+            otm_calls.append(atm_row)
+        if (
+            atm_row not in otm_puts
+            and _safe_float(atm_row.get("put_mark_price")) > 0
+        ):
+            otm_puts.append(atm_row)
+
+        if not otm_calls:
+            raise DeltaAPIError(
+                404, f"No OTM call strikes found for {underlying}"
+            )
+        if not otm_puts:
+            raise DeltaAPIError(
+                404, f"No OTM put strikes found for {underlying}"
+            )
+
+        best_call = min(
+            otm_calls,
+            key=lambda r: abs(
+                _safe_float(r.get("call_mark_price")) - target
+            ),
+        )
+        best_put = min(
+            otm_puts,
+            key=lambda r: abs(
+                _safe_float(r.get("put_mark_price")) - target
+            ),
+        )
+
+        call_prem = _safe_float(best_call.get("call_mark_price"))
+        put_prem = _safe_float(best_put.get("put_mark_price"))
+        call_diff = abs(call_prem - target)
+        put_diff = abs(put_prem - target)
+        call_strike = _safe_float(best_call.get("strike"))
+        put_strike = _safe_float(best_put.get("strike"))
+
+        logger.info(
+            "Strangle found: CALL %s @ %.2f (diff $%.2f from target $%.2f) | "
+            "PUT %s @ %.2f (diff $%.2f from target $%.2f) | spot=%.2f",
+            call_strike,
+            call_prem,
+            call_diff,
+            target,
+            put_strike,
+            put_prem,
+            put_diff,
+            target,
+            spot,
+        )
+
+        return {
+            "call_strike": call_strike,
+            "call_symbol": str(best_call.get("call_symbol") or ""),
+            "call_product_id": int(best_call.get("call_product_id") or 0),
+            "call_premium": call_prem,
+            "call_bid": _safe_float(best_call.get("call_bid")),
+            "call_ask": _safe_float(best_call.get("call_ask")),
+            "call_delta": _safe_float(best_call.get("call_delta")),
+            "put_strike": put_strike,
+            "put_symbol": str(best_put.get("put_symbol") or ""),
+            "put_product_id": int(best_put.get("put_product_id") or 0),
+            "put_premium": put_prem,
+            "put_bid": _safe_float(best_put.get("put_bid")),
+            "put_ask": _safe_float(best_put.get("put_ask")),
+            "put_delta": _safe_float(best_put.get("put_delta")),
+            "spot_price": float(spot),
+            "target_premium": target,
+            "call_premium_diff": round(call_diff, 2),
+            "put_premium_diff": round(put_diff, 2),
+            "expiry_date": expiry_date,
+            "underlying": underlying.upper().strip(),
+            "trade_type": "strangle",
             "strike": call_strike,
         }
 

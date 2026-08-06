@@ -389,16 +389,34 @@ class AutoTradeEngine:
             expiry_str = expiry_date.isoformat()
             logger.info("Auto trade: expiry=%s", expiry_str)
 
-            straddle = await client.find_atm_straddle(
-                str(settings.underlying), expiry_str
-            )
+            trade_type = str(
+                getattr(settings, "trade_type", None) or "straddle"
+            ).lower().strip()
+            if trade_type == "strangle":
+                target_prem = float(
+                    getattr(settings, "target_premium_per_side", None) or 150.0
+                )
+                logger.info(
+                    "Auto trade: STRANGLE mode target_premium=$%.2f",
+                    target_prem,
+                )
+                straddle = await client.find_strangle_by_premium(
+                    underlying=str(settings.underlying),
+                    expiry_date=expiry_str,
+                    target_premium=target_prem,
+                )
+            else:
+                logger.info("Auto trade: STRADDLE mode (ATM)")
+                straddle = await client.find_atm_straddle(
+                    str(settings.underlying), expiry_str
+                )
             logger.info(
-                "Straddle: call_strike=%s put_strike=%s call=%.2f put=%.2f diff=%.1f%%",
+                "%s: call_strike=%s put_strike=%s call=%.2f put=%.2f",
+                trade_type.upper(),
                 straddle.get("call_strike", straddle.get("strike")),
                 straddle.get("put_strike", straddle.get("strike")),
                 straddle["call_premium"],
                 straddle["put_premium"],
-                straddle.get("premium_diff_pct") or 0,
             )
 
             qty = max(1, int(settings.quantity))

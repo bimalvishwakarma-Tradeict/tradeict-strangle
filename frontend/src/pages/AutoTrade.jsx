@@ -35,6 +35,8 @@ function applyStatusToForm(data, setters) {
   setters.setSlPct(String(data.sl_pct ?? 100))
   setters.setUniversalSlPct(String(data.universal_sl_pct ?? 200))
   setters.setSlippagePct(String(data.slippage_pct ?? 2))
+  setters.setTradeType(data.trade_type || 'straddle')
+  setters.setTargetPremium(Number(data.target_premium_per_side ?? 150))
   setters.setIsEnabled(Boolean(data.is_enabled))
   setters.setLastError(data.last_error || null)
   setters.setLastTradeId(data.last_trade_id ?? null)
@@ -80,6 +82,8 @@ export default function AutoTrade() {
   const [slPct, setSlPct] = useState('100')
   const [universalSlPct, setUniversalSlPct] = useState('200')
   const [slippagePct, setSlippagePct] = useState('2')
+  const [tradeType, setTradeType] = useState('straddle')
+  const [targetPremium, setTargetPremium] = useState(150)
   const [slabs, setSlabs] = useState(null)
   const [slabsInitial, setSlabsInitial] = useState(null)
   const [slabsKey, setSlabsKey] = useState(0)
@@ -98,6 +102,8 @@ export default function AutoTrade() {
       setSlPct,
       setUniversalSlPct,
       setSlippagePct,
+      setTradeType,
+      setTargetPremium,
       setIsEnabled,
       setLastError,
       setLastTradeId,
@@ -236,6 +242,9 @@ export default function AutoTrade() {
       premium_slab_200: Number(s.premium_slab_200) || 160,
       premium_slab_100: Number(s.premium_slab_100) || 180,
       premium_slab_lt100: Number(s.premium_slab_lt100) || 200,
+      trade_type: tradeType,
+      target_premium_per_side:
+        tradeType === 'strangle' ? Number(targetPremium) || 150 : 150.0,
     }
   }
 
@@ -306,6 +315,11 @@ export default function AutoTrade() {
     return n != null ? n : null
   }, [activeTrade, lastTradeId])
 
+  const tradeTypeLabel =
+    tradeType === 'strangle'
+      ? `STRANGLE $${Number(targetPremium) || 150}/side`
+      : 'STRADDLE ATM'
+
   const statusView = useMemo(() => {
     if (!isEnabled) {
       return {
@@ -318,7 +332,7 @@ export default function AutoTrade() {
       return {
         color: 'text-green-400',
         bg: 'border-green-700/50 bg-green-950/30',
-        text: `🟢 Active — monitoring trade #${tradeLabel}`,
+        text: `🟢 Active — ${tradeTypeLabel} — monitoring trade #${tradeLabel}`,
       }
     }
     if (lastError) {
@@ -336,15 +350,22 @@ export default function AutoTrade() {
       return {
         color: 'text-yellow-300',
         bg: 'border-yellow-700/50 bg-yellow-950/20',
-        text: `🟡 Waiting — next entry in ${secondsUntilEntry}s`,
+        text: `🔄 Auto Trade ON · ${tradeTypeLabel} · Next entry in ${secondsUntilEntry}s`,
       }
     }
     return {
       color: 'text-blue-300',
       bg: 'border-blue-700/50 bg-blue-950/30',
-      text: '🔵 Ready to enter…',
+      text: `🔄 Auto Trade ON · ${tradeTypeLabel} · Ready to enter…`,
     }
-  }, [isEnabled, activeTrade, tradeLabel, lastError, secondsUntilEntry])
+  }, [
+    isEnabled,
+    activeTrade,
+    tradeLabel,
+    lastError,
+    secondsUntilEntry,
+    tradeTypeLabel,
+  ])
 
   if (loading) {
     return (
@@ -429,6 +450,64 @@ export default function AutoTrade() {
             className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
           />
         </label>
+
+        <div>
+          <div className="mb-2 text-sm text-gray-300">Trade Type</div>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setTradeType('straddle')}
+              className={`rounded-lg border p-3 text-left transition-all ${
+                tradeType === 'straddle'
+                  ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                  : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              <div className="font-medium">Short Straddle</div>
+              <div className="mt-1 text-xs opacity-70">
+                ATM strike, same for Call & Put
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setTradeType('strangle')}
+              className={`rounded-lg border p-3 text-left transition-all ${
+                tradeType === 'strangle'
+                  ? 'border-purple-500 bg-purple-500/10 text-purple-400'
+                  : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              <div className="font-medium">Short Strangle</div>
+              <div className="mt-1 text-xs opacity-70">
+                OTM strikes, premium matching
+              </div>
+            </button>
+          </div>
+        </div>
+
+        {tradeType === 'strangle' && (
+          <div className="rounded-lg border border-purple-500/30 bg-gray-800 p-4">
+            <label className="mb-2 block text-sm text-gray-400">
+              Target Premium per Side ($)
+            </label>
+            <input
+              type="number"
+              value={targetPremium}
+              onChange={(e) =>
+                setTargetPremium(parseFloat(e.target.value) || 0)
+              }
+              className="w-full rounded bg-gray-700 px-3 py-2 text-white"
+              placeholder="e.g. 150"
+              min={1}
+              max={10000}
+            />
+            <p className="mt-2 text-xs text-gray-500">
+              Bot finds OTM Call & Put where premium ≈ ${targetPremium}
+              <br />
+              Strikes may be different for Call and Put
+            </p>
+          </div>
+        )}
 
         <label className="block text-sm text-gray-300">
           Re-entry delay

@@ -241,6 +241,41 @@ def _migrate_schema() -> None:
                         "WHERE usd_inr_rate IS NULL"
                     )
                 )
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "trade_type" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN trade_type VARCHAR DEFAULT 'straddle'"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE auto_trade_settings SET trade_type = 'straddle' "
+                        "WHERE trade_type IS NULL"
+                    )
+                )
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "target_premium_per_side" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN target_premium_per_side FLOAT DEFAULT 150.0"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE auto_trade_settings "
+                        "SET target_premium_per_side = 150.0 "
+                        "WHERE target_premium_per_side IS NULL"
+                    )
+                )
 
 
 def get_usd_inr_rate(db: Session) -> float:

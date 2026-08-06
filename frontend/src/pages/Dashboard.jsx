@@ -507,6 +507,10 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
   const delayMin = Number(status.re_entry_delay_minutes ?? 1)
   const hasActive = Boolean(activeTrade)
   const hasError = Boolean(status.last_error)
+  const tradeTypeLabel =
+    status.trade_type === 'strangle'
+      ? `Strangle $${status.target_premium_per_side ?? 150}/side`
+      : 'Straddle (ATM)'
 
   const handleEnterNow = async () => {
     setEntering(true)
@@ -522,7 +526,7 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
       <div className="mb-4 rounded-xl border border-green-700/60 bg-green-950/40 px-4 py-3 text-sm text-green-100">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="font-medium">
-            🔄 Auto Trade ON · Monitoring trade #
+            🔄 Auto Trade ON · {tradeTypeLabel} · Monitoring trade #
             {tradeLabel != null ? tradeLabel : '—'}
           </div>
           <Link
@@ -543,7 +547,7 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
     return (
       <div className="mb-4 rounded-xl border border-red-700/60 bg-red-950/40 px-4 py-3 text-sm text-red-100">
         <div className="font-medium">
-          ⚠️ Auto Trade ON ·{' '}
+          ⚠️ Auto Trade ON · {tradeTypeLabel} ·{' '}
           {secondsLeft != null && secondsLeft > 0
             ? `Retry in ${secondsLeft}s`
             : 'Retrying…'}
@@ -567,7 +571,7 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
     <div className="mb-4 rounded-xl border border-amber-600/60 bg-amber-950/40 px-4 py-3 text-sm text-amber-100">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="font-medium">
-          🔄 Auto Trade ON ·{' '}
+          🔄 Auto Trade ON · {tradeTypeLabel} ·{' '}
           {secondsLeft != null && secondsLeft > 0
             ? `Next entry in ${secondsLeft}s ⏱`
             : 'Ready to enter…'}

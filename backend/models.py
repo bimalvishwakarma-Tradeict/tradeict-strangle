@@ -201,6 +201,15 @@ class AutoTradeSettings(Base):
         Float, nullable=False, default=200.0
     )
 
+    # Trade structure: 'straddle' (ATM) or 'strangle' (OTM premium match)
+    trade_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="straddle"
+    )
+    # Used only when trade_type = 'strangle'
+    target_premium_per_side: Mapped[float] = mapped_column(
+        Float, nullable=False, default=150.0
+    )
+
     # Status tracking
     last_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_exit_time: Mapped[datetime | None] = mapped_column(

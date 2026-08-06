@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from backend.config import IST
@@ -44,6 +44,25 @@ class AutoTradeSettingsSchema(BaseModel):
     premium_slab_200: float = Field(default=160.0, ge=100, le=500)
     premium_slab_100: float = Field(default=180.0, ge=100, le=500)
     premium_slab_lt100: float = Field(default=200.0, ge=100, le=500)
+
+    # Trade structure
+    trade_type: str = "straddle"  # 'straddle' or 'strangle'
+    target_premium_per_side: float = Field(default=150.0, gt=0, le=10000)
+
+    @field_validator("trade_type")
+    @classmethod
+    def validate_trade_type(cls, v: str) -> str:
+        normalized = str(v or "straddle").lower().strip()
+        if normalized not in {"straddle", "strangle"}:
+            raise ValueError("trade_type must be 'straddle' or 'strangle'")
+        return normalized
+
+    @field_validator("target_premium_per_side")
+    @classmethod
+    def validate_premium(cls, v: float) -> float:
+        if v <= 0 or v > 10000:
+            raise ValueError("target_premium must be between 1 and 10000")
+        return float(v)
 
 
 def _as_ist(dt: datetime | None) -> datetime | None:
@@ -82,6 +101,10 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "premium_slab_200": float(s.premium_slab_200),
         "premium_slab_100": float(s.premium_slab_100),
         "premium_slab_lt100": float(s.premium_slab_lt100),
+        "trade_type": getattr(s, "trade_type", None) or "straddle",
+        "target_premium_per_side": float(
+            getattr(s, "target_premium_per_side", None) or 150.0
+        ),
         "last_trade_id": s.last_trade_id,
         "last_exit_time": last_exit.isoformat() if last_exit else None,
         "next_entry_time": next_entry.isoformat() if next_entry else None,
@@ -142,15 +165,18 @@ async def update_auto_trade_settings(
     settings.premium_slab_200 = float(payload.premium_slab_200)
     settings.premium_slab_100 = float(payload.premium_slab_100)
     settings.premium_slab_lt100 = float(payload.premium_slab_lt100)
+    settings.trade_type = payload.trade_type.lower().strip()
+    settings.target_premium_per_side = float(payload.target_premium_per_side)
     settings.updated_at = get_ist_now()
     # Do NOT change is_enabled here
 
     db.commit()
     db.refresh(settings)
     logger.info(
-        "Auto trade settings updated: underlying=%s dte=%s",
+        "Auto trade settings updated: underlying=%s dte=%s type=%s",
         settings.underlying,
         settings.expiry_dte,
+        settings.trade_type,
     )
     return settings_to_dict(settings)
 
