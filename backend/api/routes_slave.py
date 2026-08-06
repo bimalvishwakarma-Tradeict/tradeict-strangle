@@ -10,9 +10,10 @@ from sqlalchemy.orm import Session
 
 from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt, encrypt
+from backend.core.fees import basket_fees_paid_from_legs, compute_net_mtm
 from backend.core.time_utils import get_ist_now
 from backend.database import get_db, get_or_create_auto_settings, get_usd_inr_rate
-from backend.models import Account, SlaveAccount, SlaveTrade, Trade
+from backend.models import Account, Leg, SlaveAccount, SlaveTrade, Trade
 from backend.schemas import (
     SlaveAccountCreate,
     SlaveAccountResponse,
@@ -583,9 +584,11 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         put_entry = float(getattr(put_leg, "initial_premium", 0) or 0)
         call_curr = float(getattr(state, "last_call_premium", 0) or 0)
         put_curr = float(getattr(state, "last_put_premium", 0) or 0)
+        gross_mtm = float(getattr(state, "last_pnl", 0) or 0)
         net_mtm = float(
-            getattr(state, "last_delta_mtm", None)
-            or getattr(state, "last_pnl", 0)
+            getattr(state, "last_net_mtm", None)
+            or getattr(state, "last_delta_mtm", None)
+            or gross_mtm
             or 0
         )
         master_trade_data = {
@@ -593,7 +596,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             "underlying": getattr(state.trade, "underlying", None),
             "basket_number": getattr(state.trade, "basket_number", None),
             "net_mtm": net_mtm,
-            "gross_mtm": float(getattr(state, "last_pnl", 0) or net_mtm),
+            "gross_mtm": gross_mtm,
             "realized_pnl": float(getattr(state.trade, "realized_pnl", 0) or 0),
             "profit_target_usd": float(
                 getattr(state.trade, "profit_target_usd", 0) or 0
@@ -607,6 +610,10 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             "put_premium": put_curr,
             "call_quantity": int(getattr(call_leg, "quantity", 1) or 1),
             "put_quantity": int(getattr(put_leg, "quantity", 1) or 1),
+            "call_status": str(getattr(call_leg, "status", "open") or "open"),
+            "put_status": str(getattr(put_leg, "status", "open") or "open"),
+            "expiry_date": str(getattr(state.trade, "expiry_date", "") or ""),
+            "slippage_pct": float(getattr(state.trade, "slippage_pct", 2) or 2),
             "status": "live",
         }
 
@@ -664,7 +671,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             master_row = (
                 db.query(Trade).filter(Trade.id == active_st.master_trade_id).first()
             )
-            last_mtm = float(active_st.last_mtm or 0.0)
+            gross_mtm = float(active_st.last_mtm or 0.0)
 
             # Best-effort live MTM from slave positions.
             # NEVER use API unrealized_pnl — it's entry cashflow on Delta India.
@@ -685,14 +692,38 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                         if size == 0:
                             continue
                         total_mtm += float(row.get("upnl") or 0.0)
-                    last_mtm = round(total_mtm, 4)
-                    active_st.last_mtm = last_mtm
+                    gross_mtm = round(total_mtm, 4)
+                    active_st.last_mtm = gross_mtm
                     active_st.last_updated = get_ist_now()
                     db.commit()
                 finally:
                     await client.close()
             except Exception as exc:
                 logger.warning("Slave %s MTM fetch failed: %s", slave.name, exc)
+
+            # Apply fees + slippage to get net MTM
+            slave_slip_pct = float(
+                getattr(master_row, "slippage_pct", None) or 2.0
+            ) if master_row else 2.0
+            slave_call_fill = float(active_st.call_fill_price or 0.0)
+            slave_put_fill = float(active_st.put_fill_price or 0.0)
+            slave_qty = int(active_st.actual_quantity or 1)
+            FEE_RATE = 0.0005
+            slave_fees_paid = round(
+                (slave_call_fill + slave_put_fill) * slave_qty * 0.001 * FEE_RATE * 2, 4
+            )
+            master_call_curr = float(master_trade_data["call_premium"]) if master_trade_data else 0.0
+            master_put_curr = float(master_trade_data["put_premium"]) if master_trade_data else 0.0
+            slave_est_exit = round(
+                (master_call_curr + master_put_curr) * slave_qty * 0.001 * FEE_RATE * 2, 4
+            )
+            slave_net_fields = compute_net_mtm(
+                gross_mtm=gross_mtm,
+                fees_paid=slave_fees_paid,
+                est_exit_fees=slave_est_exit,
+                slippage_pct=slave_slip_pct,
+            )
+            slave_net_mtm = float(slave_net_fields["net_mtm"])
 
             mult = float(slave.qty_multiplier or 1.0)
             last_updated_iso = _iso(active_st.last_updated)
@@ -703,8 +734,9 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "call_fill_price": active_st.call_fill_price,
                 "put_fill_price": active_st.put_fill_price,
                 "status": active_st.status,
-                "last_mtm": last_mtm,
-                "net_mtm": last_mtm,  # real Delta UPNL — not master × multiplier
+                "gross_mtm": gross_mtm,
+                "last_mtm": slave_net_mtm,
+                "net_mtm": slave_net_mtm,
                 "last_updated": last_updated_iso,
                 "last_mtm_updated": last_updated_iso,
                 "net_mtm_updated": last_updated_iso,
@@ -722,6 +754,9 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                     if master_trade_data
                     else None
                 ),
+                "call_premium": float(master_trade_data["call_premium"]) if master_trade_data else None,
+                "put_premium": float(master_trade_data["put_premium"]) if master_trade_data else None,
+                "expiry_date": str(getattr(master_row, "expiry_date", "") or "") if master_row else "",
                 "underlying": master_row.underlying if master_row else None,
                 "basket_number": (
                     getattr(master_row, "basket_number", None) if master_row else None

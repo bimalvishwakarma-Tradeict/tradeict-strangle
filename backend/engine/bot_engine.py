@@ -1396,6 +1396,7 @@ class BotEngine:
             total_pnl,
         )
         self.position_tracker.update_delta_mtm(trade_id, delta_upnl)
+        self.position_tracker.update_net_mtm(trade_id, net_mtm_val)
 
         call_repl, put_repl = await self._estimate_replacements(
             trade_state, call_premium, put_premium

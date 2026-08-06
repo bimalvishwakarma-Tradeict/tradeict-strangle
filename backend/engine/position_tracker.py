@@ -34,8 +34,9 @@ class TradeState:
     put_leg: Any  # Leg ORM model (open preferred; may be closed)
     last_call_premium: float = 0.0
     last_put_premium: float = 0.0
-    last_pnl: float = 0.0  # calculated PnL (logic only)
-    last_delta_mtm: float = 0.0  # Delta official MTM (frontend display)
+    last_pnl: float = 0.0  # calculated PnL / gross MTM (logic only)
+    last_delta_mtm: float = 0.0  # Delta official gross UPNL (frontend display)
+    last_net_mtm: float = 0.0   # Net MTM after fees + slippage (overview display)
     last_updated: datetime | None = None
     is_adjusting: bool = False  # lock — monitoring loop must skip when True
 
@@ -166,12 +167,21 @@ class PositionTracker:
         state.last_updated = datetime.now(timezone.utc)
 
     def update_delta_mtm(self, trade_id: int, delta_mtm: float) -> None:
-        """Store Delta Exchange official MTM for frontend display."""
+        """Store Delta Exchange official gross UPNL for frontend display."""
         state = self._positions.get(trade_id)
         if state is None:
             logger.warning("update_delta_mtm: trade_id=%s not in tracker", trade_id)
             return
         state.last_delta_mtm = delta_mtm
+        state.last_updated = datetime.now(timezone.utc)
+
+    def update_net_mtm(self, trade_id: int, net_mtm: float) -> None:
+        """Store Net MTM (after fees + slippage) for overview display."""
+        state = self._positions.get(trade_id)
+        if state is None:
+            logger.warning("update_net_mtm: trade_id=%s not in tracker", trade_id)
+            return
+        state.last_net_mtm = net_mtm
         state.last_updated = datetime.now(timezone.utc)
 
     def mark_closed(self, trade_id: int) -> None:

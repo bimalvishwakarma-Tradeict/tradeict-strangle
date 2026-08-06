@@ -277,28 +277,31 @@ function MultiAccountOverview({ overview }) {
     masterStatus = 'ready'
   }
 
-  // Prefer live net_mtm from dashboard trades when available via expand only —
-  // overview already carries tracker MTM.
   const masterExpand = masterTrade ? (
-    <div className="space-y-1 font-mono">
-      <div>
-        CALL ${fmtStrike(masterTrade.call_strike)} @ $
-        {fmtMoney(masterTrade.call_entry)} | Current $
-        {fmtMoney(masterTrade.call_premium)}
+    <div className="space-y-1.5 text-xs">
+      <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px] text-gray-400 pb-0.5 border-b border-gray-700">
+        <span>LEG</span><span>STRIKE</span><span>QTY</span><span>ENTRY $</span><span>OFFER $</span>
       </div>
-      <div>
-        PUT ${fmtStrike(masterTrade.put_strike)} @ $
-        {fmtMoney(masterTrade.put_entry)} | Current $
-        {fmtMoney(masterTrade.put_premium)}
+      <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px]">
+        <span className={masterTrade.call_status === 'closed' ? 'text-gray-500 line-through' : 'text-red-300'}>CALL</span>
+        <span className="text-white">${fmtStrike(masterTrade.call_strike)}</span>
+        <span className="text-gray-300">{masterTrade.call_quantity ?? '—'}</span>
+        <span className="text-gray-300">${fmtMoney(masterTrade.call_entry)}</span>
+        <span className={pnlColor(masterTrade.call_entry - masterTrade.call_premium)}>${fmtMoney(masterTrade.call_premium)}</span>
       </div>
-      <div className="pt-1 text-gray-400">
-        Net MTM:{' '}
-        <span className={mtmClass(masterTrade.net_mtm)}>
-          {formatSignedMoney(masterTrade.net_mtm)}
-        </span>
-        {' · '}
-        Target: ${fmtMoney(masterTrade.profit_target_usd)} · SL: $
-        {fmtMoney(masterTrade.stoploss_usd)}
+      <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px]">
+        <span className={masterTrade.put_status === 'closed' ? 'text-gray-500 line-through' : 'text-blue-300'}>PUT</span>
+        <span className="text-white">${fmtStrike(masterTrade.put_strike)}</span>
+        <span className="text-gray-300">{masterTrade.put_quantity ?? '—'}</span>
+        <span className="text-gray-300">${fmtMoney(masterTrade.put_entry)}</span>
+        <span className={pnlColor(masterTrade.put_entry - masterTrade.put_premium)}>${fmtMoney(masterTrade.put_premium)}</span>
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-0.5 pt-1 text-[11px] text-gray-400">
+        <span>Gross MTM: <span className={mtmClass(masterTrade.gross_mtm)}>{formatSignedMoney(masterTrade.gross_mtm)}</span></span>
+        <span>Net MTM: <span className={mtmClass(masterTrade.net_mtm)}>{formatSignedMoney(masterTrade.net_mtm)}</span></span>
+        <span>Target: ${fmtMoney(masterTrade.profit_target_usd)}</span>
+        <span>SL: ${fmtMoney(masterTrade.stoploss_usd)}</span>
+        {masterTrade.expiry_date && <span>Expiry: {masterTrade.expiry_date}</span>}
       </div>
     </div>
   ) : (
@@ -321,7 +324,7 @@ function MultiAccountOverview({ overview }) {
               <th className="px-3 py-2">Status</th>
               <th className="px-3 py-2">Capital</th>
               <th className="px-3 py-2">Avail.</th>
-              <th className="px-3 py-2">Net MTM</th>
+              <th className="px-3 py-2" title="Net MTM = Gross UPNL − Fees − Slippage">Net MTM ↓</th>
               <th className="px-3 py-2">Target</th>
             </tr>
           </thead>
@@ -370,40 +373,38 @@ function MultiAccountOverview({ overview }) {
               const syncStale = syncSecs != null && syncSecs > 60
 
               const expand = st ? (
-                <div className="space-y-1 font-mono">
-                  <div>
-                    CALL ${fmtStrike(st.call_strike)} qty={st.actual_quantity}{' '}
-                    | Fill ${fmtMoney(st.call_fill_price)}
+                <div className="space-y-1.5 text-xs">
+                  <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px] text-gray-400 pb-0.5 border-b border-gray-700">
+                    <span>LEG</span><span>STRIKE</span><span>QTY</span><span>FILL $</span><span>OFFER $</span>
                   </div>
-                  <div>
-                    PUT ${fmtStrike(st.put_strike)} qty={st.actual_quantity}{' '}
-                    | Fill ${fmtMoney(st.put_fill_price)}
-                  </div>
-                  <div className="pt-1 text-gray-400">
-                    Net MTM (Delta):{' '}
-                    <span className={mtmClass(slaveMtm)}>
-                      {formatSignedMoney(slaveMtm)}
+                  <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px]">
+                    <span className="text-red-300">CALL</span>
+                    <span className="text-white">${fmtStrike(st.call_strike)}</span>
+                    <span className="text-gray-300">{st.actual_quantity}</span>
+                    <span className="text-gray-300">${fmtMoney(st.call_fill_price)}</span>
+                    <span className={st.call_premium != null ? pnlColor(st.call_fill_price - st.call_premium) : 'text-gray-500'}>
+                      {st.call_premium != null ? `$${fmtMoney(st.call_premium)}` : '—'}
                     </span>
-                    {syncAge ? (
-                      <span
-                        className={
-                          syncStale ? ' text-yellow-300' : ' text-gray-500'
-                        }
-                      >
-                        {' '}
-                        (last sync: {syncAge}
-                        {syncStale ? ' ⚠️' : ''})
-                      </span>
-                    ) : null}
-                    {' · '}
-                    Status: {st.status}
+                  </div>
+                  <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px]">
+                    <span className="text-blue-300">PUT</span>
+                    <span className="text-white">${fmtStrike(st.put_strike)}</span>
+                    <span className="text-gray-300">{st.actual_quantity}</span>
+                    <span className="text-gray-300">${fmtMoney(st.put_fill_price)}</span>
+                    <span className={st.put_premium != null ? pnlColor(st.put_fill_price - st.put_premium) : 'text-gray-500'}>
+                      {st.put_premium != null ? `$${fmtMoney(st.put_premium)}` : '—'}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-0.5 pt-1 text-[11px] text-gray-400">
+                    <span>Gross MTM: <span className={mtmClass(st.gross_mtm)}>{formatSignedMoney(st.gross_mtm)}</span></span>
+                    <span>Net MTM: <span className={mtmClass(slaveMtm)}>{formatSignedMoney(slaveMtm)}</span></span>
+                    {syncAge && <span className={syncStale ? 'text-yellow-300' : 'text-gray-500'}>sync: {syncAge}{syncStale ? ' ⚠️' : ''}</span>}
+                    {st.expiry_date && <span>Expiry: {st.expiry_date}</span>}
                   </div>
                 </div>
               ) : (
                 <span className="text-gray-500">
-                  {slave.is_active
-                    ? 'No active mirrored trade'
-                    : 'Account paused — not mirroring'}
+                  {slave.is_active ? 'No active mirrored trade' : 'Account paused — not mirroring'}
                 </span>
               )
 
@@ -448,7 +449,7 @@ function MultiAccountOverview({ overview }) {
                 colSpan={5}
                 className="px-3 py-3 text-right text-sm font-semibold text-gray-300"
               >
-                Combined MTM:
+                <span title="Sum of Net MTM across all accounts (fees + slippage deducted)">Combined Net MTM:</span>
               </td>
               <td
                 colSpan={2}
