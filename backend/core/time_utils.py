@@ -162,68 +162,73 @@ def premium_slab_band_label(current_premium: float) -> str:
     return f"${px:.0f} < $100"
 
 
-def get_expiry_label(
-    expiry_date: date, all_expiry_dates: list[date] | None = None
+def get_dte_label(
+    expiry_date: date, all_expiry_dates: list | None = None
 ) -> str:
     """
-    Human-readable expiry label for Delta India.
+    Return a stable, human-readable expiry label.
 
-    - 0/1/2 DTE: daily labels with date
-    - Non-Friday: DTE + date (event expiries)
-    - Friday (not last of month): Week 1/2/3 among upcoming weeklies
-    - Last Friday of month: Month 1/2/3 among upcoming monthlies
+    Rules (Delta Exchange India pattern):
+    - 0/1/2 days away  →  0DTE (08 Aug), 1DTE (09 Aug), 2DTE (10 Aug)
+    - Friday but NOT last Friday of month  →  Week 1 (14 Aug), Week 2 (21 Aug)
+    - Last Friday of calendar month  →  Month 1 (Aug 2026), Month 2 (Sep 2026)
+    - Any other day >2 DTE (event expiry etc)  →  6DTE (14 Aug)
+
+    all_expiry_dates: full list of upcoming expiry date objects so that
+    Week 1 / Week 2 position can be computed correctly. If None, this
+    expiry is treated as Week 1 / Month 1.
     """
     today = date.today()
     days = (expiry_date - today).days
 
-    # 0, 1, 2 DTE: daily labels (these always exist on Delta India)
+    # Daily expiries: 0, 1, 2 days out
     if days <= 2:
         return f"{days}DTE ({expiry_date.strftime('%d %b')})"
 
-    # Non-Friday mid-week expiry (event-based like US PPI)
-    if expiry_date.weekday() != 4:  # 4 = Friday
-        return f"{days}DTE ({expiry_date.strftime('%d %b')})"
-
-    def last_friday_of_month(d: date) -> date:
+    # Helper: last Friday of a given month
+    def _last_friday(d: date) -> date:
         if d.month == 12:
             last_day = date(d.year + 1, 1, 1) - timedelta(days=1)
         else:
             last_day = date(d.year, d.month + 1, 1) - timedelta(days=1)
-        days_back = (last_day.weekday() - 4) % 7
+        days_back = (last_day.weekday() - 4) % 7  # 4 = Friday
         return last_day - timedelta(days=days_back)
 
-    is_monthly = expiry_date == last_friday_of_month(expiry_date)
+    is_friday = expiry_date.weekday() == 4
+    is_monthly = is_friday and expiry_date == _last_friday(expiry_date)
 
-    if all_expiry_dates:
-        sorted_dates = sorted(all_expiry_dates)
-    else:
-        sorted_dates = [expiry_date]
+    # Build sorted reference list for position counting
+    ref = sorted(set(all_expiry_dates)) if all_expiry_dates else [expiry_date]
 
     if is_monthly:
-        month_num = 1
-        for d in sorted_dates:
-            if (
-                d.weekday() == 4
-                and d == last_friday_of_month(d)
-                and d < expiry_date
-            ):
-                month_num += 1
+        month_num = sum(
+            1
+            for d in ref
+            if d.weekday() == 4
+            and d == _last_friday(d)
+            and d < expiry_date
+        ) + 1
         return f"Month {month_num} ({expiry_date.strftime('%b %Y')})"
 
-    week_num = 1
-    for d in sorted_dates:
-        if (
-            d.weekday() == 4
-            and d != last_friday_of_month(d)
+    if is_friday:
+        week_num = sum(
+            1
+            for d in ref
+            if d.weekday() == 4
+            and d != _last_friday(d)
             and d < expiry_date
-        ):
-            week_num += 1
-    return f"Week {week_num} ({expiry_date.strftime('%d %b')})"
+        ) + 1
+        return f"Week {week_num} ({expiry_date.strftime('%d %b')})"
+
+    # Non-Friday mid-week (event expiry like US PPI)
+    return f"{days}DTE ({expiry_date.strftime('%d %b')})"
 
 
-def get_dte_label(expiry_date: date) -> str:
-    """Backward-compatible alias — no peer context, so Week/Month = 1."""
-    return get_expiry_label(expiry_date, None)
+def get_expiry_label(
+    expiry_date: date, all_expiry_dates: list[date] | None = None
+) -> str:
+    """Alias for get_dte_label — kept for any prior call sites."""
+    return get_dte_label(expiry_date, all_expiry_dates)
 
 
 def get_expiry_date_for_dte(dte: int) -> date:
@@ -282,8 +287,8 @@ if __name__ == "__main__":
     assert get_premium_trigger_pct(50, prem) == 200
     assert "$50 < $100" in premium_slab_band_label(50)
 
-    assert get_dte_label(tomorrow) == "1DTE"
-    assert get_dte_label(date.today() + timedelta(days=2)) == "2DTE"
+    assert get_dte_label(tomorrow).startswith("1DTE (")
+    assert get_dte_label(date.today() + timedelta(days=2)).startswith("2DTE (")
 
     # After-cutoff: 0DTE and 1DTE both = tomorrow; 2DTE = day after
     fake_after = IST.localize(datetime(2026, 8, 5, 18, 0, 0))

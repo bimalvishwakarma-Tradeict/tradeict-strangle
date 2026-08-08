@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/auto-trade", tags=["auto-trade"])
 class AutoTradeSettingsSchema(BaseModel):
     underlying: str = "BTC"
     expiry_dte: int = Field(default=1, ge=0, le=30)
+    expiry_date_override: str | None = None
     quantity: int = Field(default=1, ge=1, le=1000)
     re_entry_delay_minutes: int = Field(default=1, ge=0, le=1440)
 
@@ -89,6 +90,7 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "is_enabled": bool(s.is_enabled),
         "underlying": s.underlying,
         "expiry_dte": int(s.expiry_dte),
+        "expiry_date_override": getattr(s, "expiry_date_override", None),
         "quantity": int(s.quantity),
         "re_entry_delay_minutes": int(s.re_entry_delay_minutes),
         "tp_pct": float(s.tp_pct),
@@ -159,6 +161,11 @@ async def update_auto_trade_settings(
 
     settings.underlying = payload.underlying.upper().strip()
     settings.expiry_dte = int(payload.expiry_dte)
+    if hasattr(payload, "expiry_date_override"):
+        override = payload.expiry_date_override
+        settings.expiry_date_override = (
+            str(override).strip()[:10] if override else None
+        )
     settings.quantity = int(payload.quantity)
     settings.re_entry_delay_minutes = int(payload.re_entry_delay_minutes)
     settings.tp_pct = float(payload.tp_pct)

@@ -314,6 +314,17 @@ def _migrate_schema() -> None:
                         "WHERE adj_low_premium_min_usd IS NULL"
                     )
                 )
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "expiry_date_override" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN expiry_date_override VARCHAR(10) DEFAULT NULL"
+                    )
+                )
 
 
 def get_usd_inr_rate(db: Session) -> float:

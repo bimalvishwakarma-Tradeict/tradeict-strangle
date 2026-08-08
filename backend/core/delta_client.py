@@ -21,7 +21,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.config import DELTA_EXCHANGE_BASE_URL, IST
-from backend.core.time_utils import get_expiry_label, get_ist_now
+from backend.core.time_utils import get_dte_label, get_ist_now
 
 logger = logging.getLogger(__name__)
 
@@ -1285,11 +1285,11 @@ class DeltaClient:
                 by_date[exp_date] = ts
 
         sorted_dates = sorted(by_date.keys())[:MAX_EXPIRIES_RETURNED]
-        date_list = list(sorted_dates)  # already sorted list of date objects
+        date_list = list(sorted_dates)
         return [
             {
                 "date": d.isoformat(),
-                "label": get_expiry_label(d, date_list),
+                "label": get_dte_label(d, date_list),
                 "timestamp": by_date[d],
             }
             for d in date_list

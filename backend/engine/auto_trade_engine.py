@@ -344,7 +344,21 @@ class AutoTradeEngine:
                 return
 
         # Guard: expiry not too close (before any order)
-        expiry_date = get_expiry_date_for_dte(int(settings.expiry_dte))
+        from datetime import date as _dt_date
+
+        _override = getattr(settings, "expiry_date_override", None)
+        if _override:
+            try:
+                _parsed = _dt_date.fromisoformat(str(_override))
+                expiry_date = (
+                    _parsed
+                    if _parsed >= _dt_date.today()
+                    else get_expiry_date_for_dte(1)
+                )
+            except (ValueError, TypeError):
+                expiry_date = get_expiry_date_for_dte(int(settings.expiry_dte))
+        else:
+            expiry_date = get_expiry_date_for_dte(int(settings.expiry_dte))
         hours_to_expiry = float(get_hours_to_expiry(expiry_date))
         if hours_to_expiry < 1.0:
             logger.warning(

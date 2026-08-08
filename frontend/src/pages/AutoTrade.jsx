@@ -10,6 +10,7 @@ import {
   getActiveTrades,
   getAutoTradeSettings,
   getAutoTradeStatus,
+  getExpiries,
   saveAutoTradeSettings,
 } from '../services/api'
 
@@ -17,18 +18,13 @@ const WS_URL = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/trade
 const STATUS_POLL_MS = 5000
 const UNDERLYINGS = ['BTC', 'ETH', 'XAU']
 
-const EXPIRY_OPTIONS = [
-  { value: 0, label: '0DTE (Today)' },
-  { value: 1, label: '1DTE (Tomorrow)' },
-  { value: 2, label: '2DTE' },
-  { value: 7, label: '7DTE' },
-  { value: 30, label: '30DTE' },
-]
-
 function applyStatusToForm(data, setters) {
   if (!data) return
   setters.setUnderlying(data.underlying || 'BTC')
   setters.setExpiryDte(Number(data.expiry_dte ?? 1))
+  if (data.expiry_date_override) {
+    setters.setSelectedExpiryDate(data.expiry_date_override)
+  }
   setters.setQuantity(Number(data.quantity ?? 1))
   setters.setReEntryDelay(Number(data.re_entry_delay_minutes ?? 1))
   setters.setTpPct(String(data.tp_pct ?? 50))
@@ -80,6 +76,11 @@ export default function AutoTrade() {
 
   const [underlying, setUnderlying] = useState('BTC')
   const [expiryDte, setExpiryDte] = useState(1)
+  const [expiryOptions, setExpiryOptions] = useState([])
+  const [expiryLoading, setExpiryLoading] = useState(false)
+  const [expiryError, setExpiryError] = useState(null)
+  const [selectedExpiryDate, setSelectedExpiryDate] = useState(null)
+  const [expiriesReady, setExpiriesReady] = useState(false)
   const [quantity, setQuantity] = useState(1)
   const [reEntryDelay, setReEntryDelay] = useState(1)
   const [tpPct, setTpPct] = useState('50')
@@ -103,6 +104,7 @@ export default function AutoTrade() {
     () => ({
       setUnderlying,
       setExpiryDte,
+      setSelectedExpiryDate,
       setQuantity,
       setReEntryDelay,
       setTpPct,
@@ -150,6 +152,31 @@ export default function AutoTrade() {
     }
   }, [underlying])
 
+  const fetchExpiries = useCallback(async (und, preferredDate = null) => {
+    const u = und || 'BTC'
+    setExpiryLoading(true)
+    setExpiryError(null)
+    try {
+      const data = await getExpiries(u)
+      const rows = Array.isArray(data) ? data : []
+      setExpiryOptions(rows)
+      setSelectedExpiryDate((prev) => {
+        const saved = preferredDate || prev
+        if (saved && rows.find((e) => e.date === saved)) {
+          return saved
+        }
+        if (rows.length > 0) {
+          return rows[0].date
+        }
+        return null
+      })
+    } catch {
+      setExpiryError('Could not load expiries from Delta Exchange')
+    } finally {
+      setExpiryLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     async function load() {
@@ -159,10 +186,12 @@ export default function AutoTrade() {
         if (cancelled) return
         applyStatusToForm(data, formSetters)
         setSlabsKey((k) => k + 1)
+        const und = data?.underlying || 'BTC'
+        await fetchExpiries(und, data?.expiry_date_override || null)
+        if (cancelled) return
         const activeRes = await getActiveTrades().catch(() => ({ trades: [] }))
         if (cancelled) return
         const trades = activeRes?.trades || []
-        const und = data?.underlying || 'BTC'
         setActiveTrade(
           trades.find((t) => String(t.underlying || '').toUpperCase() === und) ||
             trades[0] ||
@@ -183,7 +212,17 @@ export default function AutoTrade() {
     return () => {
       cancelled = true
     }
-  }, [formSetters])
+  }, [formSetters, fetchExpiries])
+
+  // Refetch when underlying changes (skip until after first load finishes)
+  useEffect(() => {
+    if (loading) return
+    if (!expiriesReady) {
+      setExpiriesReady(true)
+      return
+    }
+    fetchExpiries(underlying)
+  }, [underlying, loading, expiriesReady, fetchExpiries])
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -232,9 +271,24 @@ export default function AutoTrade() {
 
   const buildPayload = () => {
     const s = slabs || slabsInitial || {}
+    let dteFallback = Number(expiryDte) || 1
+    if (selectedExpiryDate) {
+      try {
+        const today = new Date()
+        today.setHours(0, 0, 0, 0)
+        const exp = new Date(`${selectedExpiryDate}T00:00:00`)
+        const diff = Math.round((exp - today) / 86400000)
+        if (Number.isFinite(diff) && diff >= 0) {
+          dteFallback = Math.min(30, diff)
+        }
+      } catch {
+        dteFallback = 1
+      }
+    }
     return {
       underlying,
-      expiry_dte: Number(expiryDte),
+      expiry_dte: dteFallback,
+      expiry_date_override: selectedExpiryDate || null,
       quantity: Math.max(1, Number(quantity) || 1),
       re_entry_delay_minutes: Math.max(0, Number(reEntryDelay) || 0),
       tp_pct: Number(tpPct) || 50,
@@ -438,20 +492,43 @@ export default function AutoTrade() {
           </div>
         </div>
 
-        <label className="block text-sm text-gray-300">
-          Expiry
-          <select
-            value={expiryDte}
-            onChange={(e) => setExpiryDte(Number(e.target.value))}
-            className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-          >
-            {EXPIRY_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div>
+          <div className="mb-2 text-sm text-gray-300">Expiry</div>
+          <div className="flex max-w-xs items-center gap-2">
+            <select
+              value={selectedExpiryDate || ''}
+              onChange={(e) => setSelectedExpiryDate(e.target.value || null)}
+              disabled={expiryLoading}
+              className="mt-0 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+            >
+              {expiryLoading && (
+                <option value="">Loading expiries...</option>
+              )}
+              {!expiryLoading && expiryOptions.length === 0 && (
+                <option value="">No expiries available</option>
+              )}
+              {expiryOptions.map((opt) => (
+                <option key={opt.date} value={opt.date}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => fetchExpiries(underlying, selectedExpiryDate)}
+              title="Refresh expiries"
+              className="shrink-0 px-2 text-sm text-gray-400 hover:text-white"
+            >
+              ↻
+            </button>
+          </div>
+          {expiryError && (
+            <p className="mt-1 text-xs text-red-400">{expiryError}</p>
+          )}
+          {!expiryLoading && !expiryError && (
+            <p className="mt-1 text-xs text-gray-500">Live from Delta Exchange</p>
+          )}
+        </div>
 
         <label className="block text-sm text-gray-300">
           Quantity
