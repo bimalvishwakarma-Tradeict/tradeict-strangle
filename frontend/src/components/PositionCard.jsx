@@ -374,7 +374,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const computedNet = grossMtm - feesPaid - estExitFees - slippageAmount
   const netMtm =
     trade.net_mtm != null && trade.net_mtm !== '' ? n(trade.net_mtm) : computedNet
-  const totalMtm = grossMtm
+  const totalMtm = netMtm
   const lastMtmUpdate = trade.last_mtm_update || null
   const target = n(trade.profit_target_usd)
   const stoploss = n(trade.stoploss_usd)
@@ -927,42 +927,191 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
           />
         </div>
 
-        <div className="mt-3 space-y-2 rounded-lg border border-gray-700 bg-gray-900/40 p-3 text-xs text-gray-300">
-          <div>
-            <span className="font-semibold text-gray-200">If CALL triggers:</span>
-            <div className="mt-0.5 text-gray-400">
-              Bot will buy back CALL @ ~${fmtMoney(callTrigger)}
-            </div>
-            <div className="text-gray-400">
-              Sell new CALL near PUT premium (~${fmtMoney(put.current_premium)})
-            </div>
-            {callRepl ? (
-              <div className="text-green-300/90">
-                Nearest match: {callRepl.symbol} @ ${fmtMoney(callRepl.premium)}{' '}
-                (est.)
+        {trade.in_conversion_mode ? (
+          <div className="mt-3 space-y-3">
+            <div className="rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <span className="text-lg text-yellow-400">⚡</span>
+                <span className="text-sm font-bold uppercase tracking-wide text-yellow-300">
+                  Conversion Mode Active
+                </span>
+                <span className="ml-auto rounded-full bg-yellow-500/20 px-2 py-0.5 text-xs text-yellow-500">
+                  Normal adjustment suspended
+                </span>
               </div>
-            ) : (
-              <div className="text-gray-500">Nearest match: estimating…</div>
-            )}
-          </div>
-          <div className="border-t border-gray-700 pt-2">
-            <span className="font-semibold text-gray-200">If PUT triggers:</span>
-            <div className="mt-0.5 text-gray-400">
-              Bot will buy back PUT @ ~${fmtMoney(putTrigger)}
-            </div>
-            <div className="text-gray-400">
-              Sell new PUT near CALL premium (~${fmtMoney(call.current_premium)})
-            </div>
-            {putRepl ? (
-              <div className="text-green-300/90">
-                Nearest match: {putRepl.symbol} @ ${fmtMoney(putRepl.premium)}{' '}
-                (est.)
+
+              <div className="mb-3 grid grid-cols-2 gap-3 text-xs">
+                <div className="rounded bg-black/20 p-2">
+                  <div className="mb-1 text-gray-400">Triggered leg</div>
+                  <div className="font-mono font-bold uppercase text-white">
+                    {trade.conversion_triggered_leg || '—'}
+                  </div>
+                </div>
+                <div className="rounded bg-black/20 p-2">
+                  <div className="mb-1 text-gray-400">Hedge leg (Long)</div>
+                  <div className="font-mono text-xs text-green-300">
+                    {trade.conversion_hedge_symbol || '—'}
+                  </div>
+                  <div className="mt-0.5 text-gray-300">
+                    Entry: $
+                    {fmtMoney(trade.conversion_hedge_entry_price || 0)}
+                  </div>
+                </div>
               </div>
-            ) : (
-              <div className="text-gray-500">Nearest match: estimating…</div>
-            )}
+
+              <div className="space-y-2 rounded bg-black/20 p-3">
+                <div className="mb-2 text-xs font-medium text-gray-400">
+                  🎯 Reversal Detection — Hedge closes when:
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-400">Short CALL premium</span>
+                  <span className="font-mono font-bold text-red-300">
+                    ${fmtMoney(callOfferLive)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-gray-400">Short PUT premium</span>
+                  <span className="font-mono font-bold text-blue-300">
+                    ${fmtMoney(putOfferLive)}
+                  </span>
+                </div>
+                {(() => {
+                  const callP = callOfferLive
+                  const putP = putOfferLive
+                  const maxP = Math.max(callP, putP)
+                  const diffPct =
+                    maxP > 0 ? (Math.abs(callP - putP) / maxP) * 100 : 0
+                  const eqThreshold = Number(
+                    trade.conversion_equality_pct ?? 10,
+                  )
+                  const higherLeg = callP >= putP ? 'CALL' : 'PUT'
+                  const targetLower =
+                    maxP > 0 ? maxP * (1 - eqThreshold / 100) : 0
+                  const minP = Math.min(callP, putP)
+                  const targetHigher =
+                    minP > 0 && eqThreshold < 100
+                      ? minP / (1 - eqThreshold / 100)
+                      : 0
+                  const convergePct = Math.max(
+                    5,
+                    Math.min(
+                      100,
+                      eqThreshold > 0
+                        ? Math.min(100, (eqThreshold / Math.max(diffPct, 0.01)) * 100)
+                        : 5,
+                    ),
+                  )
+
+                  return (
+                    <div className="space-y-2 border-t border-gray-700 pt-1">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-400">Current difference</span>
+                        <span
+                          className={
+                            diffPct <= eqThreshold
+                              ? 'font-bold text-green-400'
+                              : 'text-yellow-300'
+                          }
+                        >
+                          {diffPct.toFixed(1)}%
+                          {diffPct <= eqThreshold ? ' ← CLOSE NOW!' : ''}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-400">Equality threshold</span>
+                        <span className="text-white">
+                          within {eqThreshold}%
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-xs">
+                        <span className="text-gray-400">
+                          {higherLeg} needs to reach
+                        </span>
+                        <span className="font-mono text-orange-300">
+                          ~${fmtMoney(targetLower)} – ${fmtMoney(targetHigher)}
+                        </span>
+                      </div>
+                      <div className="mt-2">
+                        <div className="mb-1 flex justify-between text-xs text-gray-500">
+                          <span>Far apart</span>
+                          <span>Equal ✓</span>
+                        </div>
+                        <div className="h-2 w-full rounded-full bg-gray-700">
+                          <div
+                            className={`h-2 rounded-full transition-all ${
+                              diffPct <= eqThreshold
+                                ? 'bg-green-500'
+                                : diffPct <= eqThreshold * 3
+                                  ? 'bg-yellow-500'
+                                  : 'bg-red-500'
+                            }`}
+                            style={{ width: `${convergePct}%` }}
+                          />
+                        </div>
+                        <div className="mt-1 text-center text-xs text-gray-500">
+                          {diffPct <= eqThreshold
+                            ? '✅ Hedge closing...'
+                            : `${(diffPct - eqThreshold).toFixed(1)}% more to converge`}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
+              </div>
+
+              <div className="mt-3 border-t border-gray-700 pt-3 text-xs text-gray-400">
+                <span className="font-medium text-gray-300">
+                  When equality reached:{' '}
+                </span>
+                Hedge ({trade.conversion_hedge_symbol || '—'}) closes → Normal
+                150% adjustment monitoring resumes on both short legs
+              </div>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="mt-3 space-y-2 rounded-lg border border-gray-700 bg-gray-900/40 p-3 text-xs text-gray-300">
+            <div>
+              <span className="font-semibold text-gray-200">
+                If CALL triggers:
+              </span>
+              <div className="mt-0.5 text-gray-400">
+                Bot will buy back CALL @ ~${fmtMoney(callTrigger)}
+              </div>
+              <div className="text-gray-400">
+                Sell new CALL near PUT premium (~$
+                {fmtMoney(put.current_premium)})
+              </div>
+              {callRepl ? (
+                <div className="text-green-300/90">
+                  Nearest match: {callRepl.symbol} @ $
+                  {fmtMoney(callRepl.premium)} (est.)
+                </div>
+              ) : (
+                <div className="text-gray-500">Nearest match: estimating…</div>
+              )}
+            </div>
+            <div className="border-t border-gray-700 pt-2">
+              <span className="font-semibold text-gray-200">
+                If PUT triggers:
+              </span>
+              <div className="mt-0.5 text-gray-400">
+                Bot will buy back PUT @ ~${fmtMoney(putTrigger)}
+              </div>
+              <div className="text-gray-400">
+                Sell new PUT near CALL premium (~$
+                {fmtMoney(call.current_premium)})
+              </div>
+              {putRepl ? (
+                <div className="text-green-300/90">
+                  Nearest match: {putRepl.symbol} @ $
+                  {fmtMoney(putRepl.premium)} (est.)
+                </div>
+              ) : (
+                <div className="text-gray-500">Nearest match: estimating…</div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Adjustment history */}
