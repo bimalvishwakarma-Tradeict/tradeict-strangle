@@ -218,6 +218,45 @@ class AdjustmentExecutor:
                     error_message=msg,
                 )
 
+            # --- LOW PREMIUM EXIT CHECK ---
+            # If replacement leg's expected premium (= other_leg current offer)
+            # is below the configured minimum, close basket instead of adjusting.
+            # other_premium is the untouched leg's current offer = target for
+            # the replacement leg. Check happens BEFORE any order is touched.
+            try:
+                from backend.database import get_or_create_auto_settings, SessionLocal
+                with SessionLocal() as _settings_db:
+                    _settings = get_or_create_auto_settings(_settings_db)
+                    _low_exit_enabled = bool(
+                        getattr(_settings, "adj_low_premium_exit_enabled", False)
+                    )
+                    _low_exit_min = float(
+                        getattr(_settings, "adj_low_premium_min_usd", 150.0) or 150.0
+                    )
+            except Exception:
+                _low_exit_enabled = False
+                _low_exit_min = 150.0
+
+            if _low_exit_enabled and other_premium < _low_exit_min:
+                msg = (
+                    f"ADJ_LOW_PREMIUM_EXIT: replacement premium ${other_premium:.2f} "
+                    f"is below minimum ${_low_exit_min:.2f} — closing basket "
+                    f"instead of adjusting"
+                )
+                logger.warning(
+                    "[ADJ_LOW_PREMIUM_EXIT] Trade %s: other_leg_offer=%.2f "
+                    "min_threshold=%.2f — triggering basket close",
+                    trade.id,
+                    other_premium,
+                    _low_exit_min,
+                )
+                return AdjustmentResult(
+                    success=False,
+                    old_strike=float(triggered_leg.strike),
+                    close_basket=True,
+                    error_message=msg,
+                )
+
             # --- AUDIT: verify triggered leg still on Delta before close ---
             logger.info(
                 "[AUDIT] Verifying triggered leg on Delta before close..."

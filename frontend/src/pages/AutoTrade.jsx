@@ -37,6 +37,10 @@ function applyStatusToForm(data, setters) {
   setters.setSlippagePct(String(data.slippage_pct ?? 2))
   setters.setTradeType(data.trade_type || 'straddle')
   setters.setTargetPremium(Number(data.target_premium_per_side ?? 150))
+  setters.setAdjLowPremiumExitEnabled(
+    Boolean(data.adj_low_premium_exit_enabled),
+  )
+  setters.setAdjLowPremiumMinUsd(Number(data.adj_low_premium_min_usd ?? 150))
   setters.setIsEnabled(Boolean(data.is_enabled))
   setters.setLastError(data.last_error || null)
   setters.setLastTradeId(data.last_trade_id ?? null)
@@ -84,6 +88,9 @@ export default function AutoTrade() {
   const [slippagePct, setSlippagePct] = useState('2')
   const [tradeType, setTradeType] = useState('straddle')
   const [targetPremium, setTargetPremium] = useState(150)
+  const [adjLowPremiumExitEnabled, setAdjLowPremiumExitEnabled] =
+    useState(false)
+  const [adjLowPremiumMinUsd, setAdjLowPremiumMinUsd] = useState(150)
   const [slabs, setSlabs] = useState(null)
   const [slabsInitial, setSlabsInitial] = useState(null)
   const [slabsKey, setSlabsKey] = useState(0)
@@ -104,6 +111,8 @@ export default function AutoTrade() {
       setSlippagePct,
       setTradeType,
       setTargetPremium,
+      setAdjLowPremiumExitEnabled,
+      setAdjLowPremiumMinUsd,
       setIsEnabled,
       setLastError,
       setLastTradeId,
@@ -245,6 +254,11 @@ export default function AutoTrade() {
       trade_type: tradeType,
       target_premium_per_side:
         tradeType === 'strangle' ? Number(targetPremium) || 150 : 150.0,
+      adj_low_premium_exit_enabled: Boolean(adjLowPremiumExitEnabled),
+      adj_low_premium_min_usd: Math.min(
+        500,
+        Math.max(10, Number(adjLowPremiumMinUsd) || 150),
+      ),
     }
   }
 
@@ -594,6 +608,46 @@ export default function AutoTrade() {
           initialValues={slabsInitial}
         />
       )}
+
+      {/* Low-premium adjustment exit */}
+      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">
+          Adjustment Exit on Low Premium
+        </h2>
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            checked={adjLowPremiumExitEnabled}
+            onChange={(e) => setAdjLowPremiumExitEnabled(e.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
+          />
+          <span className="text-sm text-gray-300">
+            Close basket if replacement premium is too low
+          </span>
+        </label>
+        {adjLowPremiumExitEnabled && (
+          <div className="rounded-lg border border-amber-500/30 bg-gray-900/60 p-4">
+            <label className="mb-2 block text-sm text-gray-400">
+              Minimum replacement premium ($)
+            </label>
+            <input
+              type="number"
+              min={10}
+              max={500}
+              step={10}
+              value={adjLowPremiumMinUsd}
+              onChange={(e) =>
+                setAdjLowPremiumMinUsd(Number(e.target.value) || 150)
+              }
+              className="w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+            />
+            <p className="mt-2 text-xs text-gray-500">
+              If an adjustment would require shorting a new leg below $
+              {adjLowPremiumMinUsd}, the entire basket will be closed instead.
+            </p>
+          </div>
+        )}
+      </section>
 
       {/* Actions */}
       <div className="flex flex-wrap gap-3">

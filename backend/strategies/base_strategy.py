@@ -58,6 +58,7 @@ class AdjustmentResult:
     premium_collected: float | None = None
     error_message: str | None = None
     is_partial: bool = False  # True if exit succeeded but entry failed
+    close_basket: bool = False  # True = close entire trade instead of adjusting
 
 
 class BaseStrategy(ABC):

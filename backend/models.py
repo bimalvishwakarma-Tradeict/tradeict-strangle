@@ -210,6 +210,15 @@ class AutoTradeSettings(Base):
         Float, nullable=False, default=150.0
     )
 
+    # Low-premium adjustment exit: if replacement leg premium would be below
+    # this threshold, close the basket instead of adjusting.
+    adj_low_premium_exit_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    adj_low_premium_min_usd: Mapped[float] = mapped_column(
+        Float, nullable=False, default=150.0
+    )
+
     # Status tracking
     last_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_exit_time: Mapped[datetime | None] = mapped_column(

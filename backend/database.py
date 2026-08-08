@@ -276,6 +276,44 @@ def _migrate_schema() -> None:
                         "WHERE target_premium_per_side IS NULL"
                     )
                 )
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "adj_low_premium_exit_enabled" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN adj_low_premium_exit_enabled "
+                        "BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE auto_trade_settings "
+                        "SET adj_low_premium_exit_enabled = 0 "
+                        "WHERE adj_low_premium_exit_enabled IS NULL"
+                    )
+                )
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "adj_low_premium_min_usd" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN adj_low_premium_min_usd "
+                        "FLOAT NOT NULL DEFAULT 150.0"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE auto_trade_settings "
+                        "SET adj_low_premium_min_usd = 150.0 "
+                        "WHERE adj_low_premium_min_usd IS NULL"
+                    )
+                )
 
 
 def get_usd_inr_rate(db: Session) -> float:

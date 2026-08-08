@@ -1960,6 +1960,27 @@ class BotEngine:
                 )
                 await self._push_adjustment(trade_state, triggered_leg_type, result)
             else:
+                if result.close_basket:
+                    logger.warning(
+                        "[ADJ_LOW_PREMIUM_EXIT] Trade %s triggering basket close: %s",
+                        trade_id,
+                        result.error_message,
+                    )
+                    log_and_buffer(
+                        "ADJ_LOW_PREMIUM_EXIT",
+                        trade_id,
+                        {
+                            "leg": triggered,
+                            "old_strike": old_strike,
+                            "other_leg_offer": round(other_prem, 2),
+                            "reason": result.error_message,
+                        },
+                    )
+                    await self._exit_trade(
+                        trade_state,
+                        reason="ADJ_LOW_PREMIUM_EXIT",
+                    )
+                    return
                 err = result.error_message or "Adjustment failed"
                 is_hold = "ADJUSTMENT_HOLD" in err and "no other" in err.lower()
                 if is_hold:

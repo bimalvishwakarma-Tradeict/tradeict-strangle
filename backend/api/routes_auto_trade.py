@@ -49,6 +49,10 @@ class AutoTradeSettingsSchema(BaseModel):
     trade_type: str = "straddle"  # 'straddle' or 'strangle'
     target_premium_per_side: float = Field(default=150.0, gt=0, le=10000)
 
+    # Low-premium adjustment exit
+    adj_low_premium_exit_enabled: bool = False
+    adj_low_premium_min_usd: float = Field(default=150.0, ge=10, le=500)
+
     @field_validator("trade_type")
     @classmethod
     def validate_trade_type(cls, v: str) -> str:
@@ -104,6 +108,12 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "trade_type": getattr(s, "trade_type", None) or "straddle",
         "target_premium_per_side": float(
             getattr(s, "target_premium_per_side", None) or 150.0
+        ),
+        "adj_low_premium_exit_enabled": bool(
+            getattr(s, "adj_low_premium_exit_enabled", False)
+        ),
+        "adj_low_premium_min_usd": float(
+            getattr(s, "adj_low_premium_min_usd", None) or 150.0
         ),
         "last_trade_id": s.last_trade_id,
         "last_exit_time": last_exit.isoformat() if last_exit else None,
@@ -167,6 +177,10 @@ async def update_auto_trade_settings(
     settings.premium_slab_lt100 = float(payload.premium_slab_lt100)
     settings.trade_type = payload.trade_type.lower().strip()
     settings.target_premium_per_side = float(payload.target_premium_per_side)
+    settings.adj_low_premium_exit_enabled = bool(
+        payload.adj_low_premium_exit_enabled
+    )
+    settings.adj_low_premium_min_usd = float(payload.adj_low_premium_min_usd)
     settings.updated_at = get_ist_now()
     # Do NOT change is_enabled here
 
