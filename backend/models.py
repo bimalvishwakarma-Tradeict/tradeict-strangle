@@ -71,6 +71,32 @@ class Trade(Base):
     # Human-facing basket id (sequential per account); clubs all legs/adjustments
     basket_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # --- Conversion Mode State ---
+    # True when bot has entered conversion mode (hedge leg is active)
+    in_conversion_mode: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    # product_id of the hedge leg bought during conversion
+    conversion_hedge_product_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    # order_id of the hedge leg on Delta Exchange
+    conversion_hedge_order_id: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    # Entry price paid for the hedge leg
+    conversion_hedge_entry_price: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    # Symbol of the hedge leg (e.g. "C-BTC-64800-080826")
+    conversion_hedge_symbol: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    # Which leg was triggered when conversion started ("call" or "put")
+    conversion_triggered_leg: Mapped[str | None] = mapped_column(
+        String(10), nullable=True
+    )
+
     account: Mapped[Account] = relationship("Account", back_populates="trades")
     legs: Mapped[list[Leg]] = relationship("Leg", back_populates="trade")
     adjustments: Mapped[list[Adjustment]] = relationship(
@@ -214,13 +240,17 @@ class AutoTradeSettings(Base):
         Float, nullable=False, default=150.0
     )
 
-    # Low-premium adjustment exit: if replacement leg premium would be below
-    # this threshold, close the basket instead of adjusting.
+    # Conversion Mode settings (low replacement premium → hedge instead of close)
+    # When replacement premium < this, enter conversion mode instead of closing
     adj_low_premium_exit_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
     adj_low_premium_min_usd: Mapped[float] = mapped_column(
         Float, nullable=False, default=150.0
+    )
+    # Conversion mode reversal detection: close hedge when premiums within X%
+    conversion_equality_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, default=10.0
     )
 
     # Status tracking

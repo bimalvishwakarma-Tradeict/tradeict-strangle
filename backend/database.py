@@ -214,6 +214,31 @@ def _migrate_schema() -> None:
                         "WHERE universal_sl_pct IS NULL"
                     )
                 )
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        for col_name in [
+            "in_conversion_mode",
+            "conversion_hedge_product_id",
+            "conversion_hedge_order_id",
+            "conversion_hedge_entry_price",
+            "conversion_hedge_symbol",
+            "conversion_triggered_leg",
+        ]:
+            if col_name not in trade_cols:
+                if col_name == "in_conversion_mode":
+                    col_type = "BOOLEAN NOT NULL DEFAULT 0"
+                elif "price" in col_name:
+                    col_type = "FLOAT"
+                elif "product_id" in col_name:
+                    col_type = "INTEGER"
+                else:
+                    col_type = "VARCHAR(100)"
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}"
+                        )
+                    )
+                trade_cols.add(col_name)
     if "adjustments" in tables:
         adj_cols = {col["name"] for col in inspector.get_columns("adjustments")}
         if "decision_type" not in adj_cols:
@@ -323,6 +348,25 @@ def _migrate_schema() -> None:
                     text(
                         "ALTER TABLE auto_trade_settings "
                         "ADD COLUMN expiry_date_override VARCHAR(10) DEFAULT NULL"
+                    )
+                )
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "conversion_equality_pct" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN conversion_equality_pct "
+                        "FLOAT NOT NULL DEFAULT 10.0"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE auto_trade_settings "
+                        "SET conversion_equality_pct = 10.0 "
+                        "WHERE conversion_equality_pct IS NULL"
                     )
                 )
 

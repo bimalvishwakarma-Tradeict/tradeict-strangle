@@ -117,6 +117,31 @@ class OrderExecutor:
             bracket_stop_loss_limit_price=sl_limit_px,
         )
 
+    async def buy_option(
+        self,
+        product_id: int,
+        quantity: int,
+        delta_client: Any,
+        symbol_for_fallback: str | None = None,
+    ) -> OrderResult:
+        """
+        Place a BUY market IOC order (e.g. conversion-mode hedge).
+
+        No bracket SL — long hedge is closed manually when premiums equalize.
+        """
+        logger.info(
+            "Buying option product_id=%s, qty=%s",
+            product_id,
+            quantity,
+        )
+        return await self._execute_with_retry(
+            delta_client=delta_client,
+            product_id=int(product_id),
+            size=int(quantity),
+            side="buy",
+            symbol_for_fallback=symbol_for_fallback,
+        )
+
     async def _execute_with_retry(
         self,
         delta_client: Any,

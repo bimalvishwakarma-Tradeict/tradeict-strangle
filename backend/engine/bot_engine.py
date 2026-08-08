@@ -1402,6 +1402,24 @@ class BotEngine:
             trade_state, call_premium, put_premium
         )
 
+        # --- CONVERSION MODE MONITORING ---
+        # If in conversion mode, check for reversal before normal adjustment logic
+        conversion_active = bool(
+            getattr(trade_state.trade, "in_conversion_mode", False)
+        )
+        if conversion_active:
+            reversed_ok = await self._check_conversion_mode_exit(
+                trade_state, call_premium, put_premium
+            )
+            if reversed_ok:
+                logger.info(
+                    "[CONVERSION_REVERSAL] Trade %s resumed normal mode",
+                    trade_state.trade_id,
+                )
+                conversion_active = False
+            # While still converting (or just reversed this tick), skip adjust.
+            # Exit (TP/SL) still runs below when should_exit.
+
         if action.should_exit:
             exit_pnl = float(getattr(action, "current_pnl", net_mtm_val) or net_mtm_val)
             await self._exit_trade(
@@ -1414,6 +1432,41 @@ class BotEngine:
                 slippage_amount=slippage_amount,
                 net_mtm=net_mtm_val,
             )
+        elif conversion_active:
+            # Stay in conversion — push live premiums, do not adjust
+            await self._push_update(
+                trade_state,
+                call_premium,
+                put_premium,
+                total_pnl,
+                delta_upnl,
+                call_mtm,
+                put_mtm,
+                trigger_pct=trigger_for_plan,
+                call_replacement=call_repl,
+                put_replacement=put_repl,
+                call_trigger_pct=call_trig_pct,
+                put_trigger_pct=put_trig_pct,
+                premium_slabs=premium_slabs,
+            )
+            try:
+                import backend.engine.mirror_engine as mirror_mod
+
+                if (
+                    mirror_mod.mirror_engine is not None
+                    and hasattr(mirror_mod.mirror_engine, "update_all_slave_mtm")
+                ):
+                    asyncio.create_task(
+                        mirror_mod.mirror_engine.update_all_slave_mtm(
+                            trade_state.trade_id
+                        )
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Slave MTM update queue failed trade=%s: %s",
+                    trade_state.trade_id,
+                    exc,
+                )
         elif action.should_adjust and action.adjust_leg:
             await self._adjust_trade(trade_state, action.adjust_leg)
         else:
@@ -1898,6 +1951,186 @@ class BotEngine:
             final_pnl,
         )
 
+    async def _check_conversion_mode_exit(
+        self,
+        trade_state: TradeState,
+        call_premium: float,
+        put_premium: float,
+    ) -> bool:
+        """
+        Check if conversion mode reversal condition is met.
+        Returns True if hedge was closed and normal mode resumed.
+
+        Reversal condition: both short leg premiums within equality_pct% of each other.
+        """
+        trade = trade_state.trade
+        trade_id = int(trade.id)
+
+        if not bool(getattr(trade, "in_conversion_mode", False)):
+            return False
+
+        # Get equality threshold from settings
+        try:
+            with self.db_factory() as _db:
+                from backend.database import get_or_create_auto_settings
+
+                _cfg = get_or_create_auto_settings(_db)
+                equality_pct = float(
+                    getattr(_cfg, "conversion_equality_pct", 10.0) or 10.0
+                )
+        except Exception:
+            equality_pct = 10.0
+
+        # Check equality condition
+        max_prem = max(call_premium, put_premium)
+        if max_prem <= 0:
+            return False
+        diff_pct = abs(call_premium - put_premium) / max_prem * 100.0
+
+        logger.debug(
+            "[CONVERSION_MONITOR] Trade %s: call=%.2f put=%.2f "
+            "diff=%.1f%% threshold=%.1f%%",
+            trade_id,
+            call_premium,
+            put_premium,
+            diff_pct,
+            equality_pct,
+        )
+
+        if diff_pct > equality_pct:
+            return False  # Not equal yet, stay in conversion mode
+
+        # REVERSAL DETECTED — close hedge and resume normal mode
+        logger.info(
+            "[CONVERSION_REVERSAL] Trade %s: premiums equal (call=%.2f put=%.2f "
+            "diff=%.1f%%) — closing hedge and resuming normal mode",
+            trade_id,
+            call_premium,
+            put_premium,
+            diff_pct,
+        )
+
+        hedge_symbol = str(getattr(trade, "conversion_hedge_symbol", "") or "")
+        hedge_product_id = getattr(trade, "conversion_hedge_product_id", None)
+        hedge_entry_price = float(
+            getattr(trade, "conversion_hedge_entry_price", 0) or 0
+        )
+
+        # Close hedge position on Delta
+        hedge_close_success = False
+        hedge_close_price = 0.0
+        if hedge_product_id:
+            try:
+                qty = int(
+                    getattr(trade_state.call_leg, "quantity", None)
+                    or getattr(trade_state.put_leg, "quantity", None)
+                    or 1
+                )
+
+                class _HedgeLeg:
+                    product_id = int(hedge_product_id)
+                    symbol = hedge_symbol
+                    quantity = qty
+                    leg_type = "hedge"
+                    status = "open"
+                    is_bot_managed = True
+                    delta_sl_order_id = None
+                    delta_order_id = None
+                    exit_premium = None
+
+                close_res = await self.order_executor.close_leg(
+                    _HedgeLeg(), self.delta_client
+                )
+                if close_res.success:
+                    hedge_close_success = True
+                    hedge_close_price = float(close_res.filled_price or 0)
+                    logger.info(
+                        "[CONVERSION_REVERSAL] Hedge closed: symbol=%s fill=%.2f",
+                        hedge_symbol,
+                        hedge_close_price,
+                    )
+                else:
+                    logger.error(
+                        "[CONVERSION_REVERSAL] Hedge close FAILED for trade %s: %s",
+                        trade_id,
+                        close_res.error,
+                    )
+            except Exception as exc:
+                logger.error(
+                    "[CONVERSION_REVERSAL] Hedge close error trade %s: %s",
+                    trade_id,
+                    exc,
+                )
+
+        # Update DB: clear conversion mode, reset baselines
+        with self.db_factory() as db:
+            t = db.query(Trade).filter(Trade.id == trade_id).first()
+            if t:
+                t.in_conversion_mode = False
+                t.conversion_hedge_product_id = None
+                t.conversion_hedge_order_id = None
+                t.conversion_hedge_entry_price = None
+                t.conversion_hedge_symbol = None
+                t.conversion_triggered_leg = None
+
+            # Reset both open legs' baselines to current offer prices
+            open_legs = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_id,
+                    Leg.status == "open",
+                )
+                .all()
+            )
+            for leg in open_legs:
+                try:
+                    if self.delta_client is None:
+                        continue
+                    new_baseline = await self.delta_client.get_short_exit_price(
+                        str(leg.symbol)
+                    )
+                    if float(new_baseline or 0) > 0:
+                        leg.trigger_baseline_premium = float(new_baseline)
+                        leg.trigger_premium = float(new_baseline)
+                        logger.info(
+                            "[CONVERSION_REVERSAL] Reset baseline %s → %.2f",
+                            leg.leg_type,
+                            new_baseline,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[CONVERSION_REVERSAL] Could not reset baseline for %s: %s",
+                        leg.leg_type,
+                        exc,
+                    )
+            db.commit()
+
+        # Sync in-memory trade flags
+        trade.in_conversion_mode = False
+        trade.conversion_hedge_product_id = None
+        trade.conversion_hedge_order_id = None
+        trade.conversion_hedge_entry_price = None
+        trade.conversion_hedge_symbol = None
+        trade.conversion_triggered_leg = None
+
+        log_and_buffer(
+            "CONVERSION_REVERSAL",
+            trade_id,
+            {
+                "call_premium": round(call_premium, 2),
+                "put_premium": round(put_premium, 2),
+                "diff_pct": round(diff_pct, 2),
+                "hedge_symbol": hedge_symbol,
+                "hedge_entry_price": round(hedge_entry_price, 2),
+                "hedge_close_price": round(hedge_close_price, 2),
+                "hedge_closed": hedge_close_success,
+            },
+        )
+
+        # Reload legs in tracker so normal mode works with fresh state
+        self._reload_legs(trade_state)
+        return True
+
     async def _adjust_trade(
         self, trade_state: TradeState, triggered_leg_type: str
     ) -> None:
@@ -1958,6 +2191,42 @@ class BotEngine:
                         "cooldown_minutes": ADJUSTMENT_COOLDOWN_MINUTES,
                     },
                 )
+                if getattr(result, "conversion_mode", False):
+                    logger.info(
+                        "[CONVERSION_MODE] Trade %s entered conversion mode. "
+                        "Hedge: %s @ %.2f. Normal adjustment suspended until reversal.",
+                        trade_id,
+                        result.hedge_symbol,
+                        result.hedge_entry_price or 0,
+                    )
+                    log_and_buffer(
+                        "CONVERSION_MODE_ACTIVE",
+                        trade_id,
+                        {
+                            "hedge_symbol": result.hedge_symbol,
+                            "hedge_fill": round(
+                                float(result.hedge_entry_price or 0), 2
+                            ),
+                            "new_strike": float(result.new_strike or 0),
+                            "premium_collected": round(
+                                float(result.premium_collected or 0), 2
+                            ),
+                        },
+                    )
+                    # Sync conversion flags onto in-memory trade
+                    trade_state.trade.in_conversion_mode = True
+                    trade_state.trade.conversion_hedge_symbol = result.hedge_symbol
+                    trade_state.trade.conversion_hedge_product_id = (
+                        result.hedge_product_id
+                    )
+                    trade_state.trade.conversion_hedge_entry_price = (
+                        result.hedge_entry_price
+                    )
+                    trade_state.trade.conversion_hedge_order_id = (
+                        result.hedge_order_id
+                    )
+                    # Reload legs again to pick up new other leg from DB
+                    self._reload_legs(trade_state)
                 await self._push_adjustment(trade_state, triggered_leg_type, result)
             else:
                 if result.close_basket:

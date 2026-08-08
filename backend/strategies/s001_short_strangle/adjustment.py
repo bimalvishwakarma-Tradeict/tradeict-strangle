@@ -218,43 +218,272 @@ class AdjustmentExecutor:
                     error_message=msg,
                 )
 
-            # --- LOW PREMIUM EXIT CHECK ---
-            # If replacement leg's expected premium (= other_leg current offer)
-            # is below the configured minimum, close basket instead of adjusting.
-            # other_premium is the untouched leg's current offer = target for
-            # the replacement leg. Check happens BEFORE any order is touched.
+            # --- CONVERSION MODE CHECK ---
+            # If replacement premium < configured minimum, enter conversion mode
+            # instead of normal adjustment or closing the basket.
             try:
                 from backend.database import get_or_create_auto_settings, SessionLocal
-                with SessionLocal() as _settings_db:
-                    _settings = get_or_create_auto_settings(_settings_db)
-                    _low_exit_enabled = bool(
-                        getattr(_settings, "adj_low_premium_exit_enabled", False)
+                with SessionLocal() as _sdb:
+                    _cfg = get_or_create_auto_settings(_sdb)
+                    _conv_enabled = bool(
+                        getattr(_cfg, "adj_low_premium_exit_enabled", False)
                     )
-                    _low_exit_min = float(
-                        getattr(_settings, "adj_low_premium_min_usd", 150.0) or 150.0
+                    _conv_min = float(
+                        getattr(_cfg, "adj_low_premium_min_usd", 150.0) or 150.0
                     )
             except Exception:
-                _low_exit_enabled = False
-                _low_exit_min = 150.0
+                _conv_enabled = False
+                _conv_min = 150.0
 
-            if _low_exit_enabled and other_premium < _low_exit_min:
-                msg = (
-                    f"ADJ_LOW_PREMIUM_EXIT: replacement premium ${other_premium:.2f} "
-                    f"is below minimum ${_low_exit_min:.2f} — closing basket "
-                    f"instead of adjusting"
-                )
+            if _conv_enabled and other_premium < _conv_min:
                 logger.warning(
-                    "[ADJ_LOW_PREMIUM_EXIT] Trade %s: other_leg_offer=%.2f "
-                    "min_threshold=%.2f — triggering basket close",
+                    "[CONVERSION_MODE] Trade %s: other_premium=%.2f < min=%.2f "
+                    "— entering conversion mode instead of adjusting",
                     trade.id,
                     other_premium,
-                    _low_exit_min,
+                    _conv_min,
                 )
+                # Find hedge leg: one strike inside triggered leg (toward ATM)
+                # For triggered call: buy call at strike BELOW current call strike
+                # For triggered put:  buy put at strike ABOVE current put strike
+                try:
+                    hedge_plan = await strategy.find_adjustment_strike(
+                        delta_client,
+                        trade,
+                        triggered_leg_type,  # same leg type as triggered
+                        float(
+                            triggered_leg.trigger_baseline_premium
+                            or triggered_leg.initial_premium
+                        ),
+                        current_strike=float(triggered_leg.strike),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[CONVERSION_MODE] Could not find hedge strike for trade %s: %s",
+                        trade.id,
+                        exc,
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        old_strike=float(triggered_leg.strike),
+                        error_message=(
+                            f"CONVERSION_MODE_FAILED: no hedge strike — {exc}"
+                        ),
+                    )
+
+                # Place BUY order for hedge leg
+                try:
+                    hedge_result = await order_executor.buy_option(
+                        product_id=int(hedge_plan.new_product_id),
+                        quantity=int(triggered_leg.quantity),
+                        delta_client=delta_client,
+                        symbol_for_fallback=str(hedge_plan.new_symbol),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[CONVERSION_MODE] Hedge buy failed for trade %s: %s",
+                        trade.id,
+                        exc,
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        old_strike=float(triggered_leg.strike),
+                        error_message=(
+                            f"CONVERSION_MODE_FAILED: hedge buy error — {exc}"
+                        ),
+                    )
+
+                if not hedge_result.success:
+                    logger.error(
+                        "[CONVERSION_MODE] Hedge buy order failed trade %s: %s",
+                        trade.id,
+                        hedge_result.error,
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        old_strike=float(triggered_leg.strike),
+                        error_message=(
+                            "CONVERSION_MODE_FAILED: hedge buy order rejected"
+                        ),
+                    )
+
+                hedge_fill = float(
+                    hedge_result.filled_price or hedge_plan.target_premium or 0.0
+                )
+                logger.info(
+                    "[CONVERSION_MODE] Hedge bought: symbol=%s fill=%.2f",
+                    hedge_plan.new_symbol,
+                    hedge_fill,
+                )
+
+                # Replace the other (untouched) leg with better premium
+                # Target = triggered leg's CURRENT premium / 2
+                triggered_current_premium = float(
+                    await _resolve_offer_price(
+                        delta_client, str(triggered_leg.symbol)
+                    )
+                    or triggered_leg.trigger_baseline_premium
+                    or triggered_leg.initial_premium
+                    or 0.0
+                )
+                new_other_target = triggered_current_premium / 2.0
+                logger.info(
+                    "[CONVERSION_MODE] Replacing other leg %s: "
+                    "current_premium=%.2f target_new_premium=%.2f",
+                    other_leg.leg_type,
+                    other_premium,
+                    new_other_target,
+                )
+
+                # Close existing other leg
+                other_close_result = await order_executor.close_leg(
+                    other_leg, delta_client
+                )
+                if not other_close_result.success:
+                    # Hedge already placed — critical partial state
+                    logger.critical(
+                        "[CONVERSION_MODE] PARTIAL: hedge placed but other leg "
+                        "close failed for trade %s",
+                        trade.id,
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        conversion_mode=True,
+                        hedge_order_id=str(hedge_result.order_id or ""),
+                        hedge_product_id=int(hedge_plan.new_product_id),
+                        hedge_entry_price=hedge_fill,
+                        hedge_symbol=str(hedge_plan.new_symbol),
+                        error_message=(
+                            "CONVERSION_MODE_PARTIAL: hedge ok but other close failed"
+                        ),
+                    )
+
+                # Find new other leg at target_premium
+                try:
+                    new_other_plan = await strategy.find_adjustment_strike(
+                        delta_client,
+                        trade,
+                        other_leg.leg_type,
+                        new_other_target,
+                        current_strike=float(other_leg.strike),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[CONVERSION_MODE] Could not find new other strike: %s",
+                        exc,
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        conversion_mode=True,
+                        hedge_order_id=str(hedge_result.order_id or ""),
+                        hedge_product_id=int(hedge_plan.new_product_id),
+                        hedge_entry_price=hedge_fill,
+                        hedge_symbol=str(hedge_plan.new_symbol),
+                        error_message=(
+                            "CONVERSION_MODE_PARTIAL: other close ok but new "
+                            f"strike not found — {exc}"
+                        ),
+                    )
+
+                # Short new other leg
+                new_other_result = await order_executor.sell_option(
+                    product_id=int(new_other_plan.new_product_id),
+                    quantity=int(other_leg.quantity),
+                    delta_client=delta_client,
+                    symbol_for_fallback=str(new_other_plan.new_symbol),
+                )
+                if not new_other_result.success:
+                    logger.critical(
+                        "[CONVERSION_MODE] PARTIAL: other closed but new short "
+                        "failed for trade %s",
+                        trade.id,
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        conversion_mode=True,
+                        hedge_order_id=str(hedge_result.order_id or ""),
+                        hedge_product_id=int(hedge_plan.new_product_id),
+                        hedge_entry_price=hedge_fill,
+                        hedge_symbol=str(hedge_plan.new_symbol),
+                        error_message=(
+                            "CONVERSION_MODE_PARTIAL: new short leg failed"
+                        ),
+                    )
+
+                new_other_fill = float(
+                    new_other_result.filled_price
+                    or new_other_plan.target_premium
+                    or 0.0
+                )
+
+                now_utc = datetime.now(timezone.utc)
+
+                # Close old other leg in DB
+                other_leg.status = "closed"
+                other_leg.exit_time = now_utc
+                other_leg.exit_premium = float(
+                    other_close_result.filled_price or other_premium
+                )
+                other_leg.exit_order_id = str(other_close_result.order_id or "")
+                other_leg.realized_pnl = short_leg_realized_pnl(
+                    float(other_leg.initial_premium),
+                    float(other_leg.exit_premium),
+                    int(other_leg.quantity),
+                )
+
+                # Create new other leg in DB
+                new_other_leg = Leg(
+                    trade_id=int(trade.id),
+                    leg_type=str(other_leg.leg_type),
+                    strike=float(new_other_plan.new_strike),
+                    symbol=str(new_other_plan.new_symbol),
+                    product_id=int(new_other_plan.new_product_id),
+                    initial_premium=new_other_fill,
+                    trigger_baseline_premium=new_other_fill,
+                    trigger_premium=new_other_fill,
+                    quantity=int(other_leg.quantity),
+                    entry_time=now_utc,
+                    status="open",
+                    is_bot_managed=True,
+                    delta_order_id=str(new_other_result.order_id or ""),
+                )
+                db_session.add(new_other_leg)
+
+                # Save conversion state to Trade
+                trade.in_conversion_mode = True
+                trade.conversion_hedge_product_id = int(hedge_plan.new_product_id)
+                trade.conversion_hedge_order_id = str(hedge_result.order_id or "")
+                trade.conversion_hedge_entry_price = hedge_fill
+                trade.conversion_hedge_symbol = str(hedge_plan.new_symbol)
+                trade.conversion_triggered_leg = triggered_leg_type
+
+                db_session.commit()
+
+                log_and_buffer(
+                    "CONVERSION_MODE_ENTERED",
+                    int(trade.id),
+                    {
+                        "triggered_leg": triggered_leg_type,
+                        "hedge_symbol": hedge_plan.new_symbol,
+                        "hedge_fill": round(hedge_fill, 2),
+                        "old_other_leg": other_leg.leg_type,
+                        "old_other_premium": round(other_premium, 2),
+                        "new_other_symbol": new_other_plan.new_symbol,
+                        "new_other_fill": round(new_other_fill, 2),
+                        "target_new_other_premium": round(new_other_target, 2),
+                    },
+                )
+
                 return AdjustmentResult(
-                    success=False,
+                    success=True,
+                    conversion_mode=True,
                     old_strike=float(triggered_leg.strike),
-                    close_basket=True,
-                    error_message=msg,
+                    new_strike=float(new_other_plan.new_strike),
+                    premium_collected=new_other_fill,
+                    hedge_order_id=str(hedge_result.order_id or ""),
+                    hedge_product_id=int(hedge_plan.new_product_id),
+                    hedge_entry_price=hedge_fill,
+                    hedge_symbol=str(hedge_plan.new_symbol),
                 )
 
             # --- AUDIT: verify triggered leg still on Delta before close ---
