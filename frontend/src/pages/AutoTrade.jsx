@@ -152,30 +152,49 @@ export default function AutoTrade() {
     }
   }, [underlying])
 
-  const fetchExpiries = useCallback(async (und, preferredDate = null) => {
-    const u = und || 'BTC'
-    setExpiryLoading(true)
-    setExpiryError(null)
-    try {
-      const data = await getExpiries(u)
-      const rows = Array.isArray(data) ? data : []
-      setExpiryOptions(rows)
-      setSelectedExpiryDate((prev) => {
-        const saved = preferredDate || prev
-        if (saved && rows.find((e) => e.date === saved)) {
-          return saved
-        }
-        if (rows.length > 0) {
-          return rows[0].date
-        }
-        return null
-      })
-    } catch {
-      setExpiryError('Could not load expiries from Delta Exchange')
-    } finally {
-      setExpiryLoading(false)
-    }
-  }, [])
+  const fetchExpiries = useCallback(
+    async (und, preferredDate = null, preferredDte = null) => {
+      const u = und || 'BTC'
+      setExpiryLoading(true)
+      setExpiryError(null)
+      try {
+        const data = await getExpiries(u)
+        const rows = Array.isArray(data) ? data : []
+        setExpiryOptions(rows)
+        setSelectedExpiryDate((prev) => {
+          const saved = preferredDate || prev
+          if (saved && rows.find((e) => e.date === saved)) {
+            return saved
+          }
+          // Daily DTE settings have no date override — match by days-to-expiry
+          if (
+            preferredDte != null &&
+            Number.isFinite(Number(preferredDte)) &&
+            Number(preferredDte) <= 2
+          ) {
+            const today = new Date()
+            today.setHours(0, 0, 0, 0)
+            const match = rows.find((e) => {
+              const exp = new Date(`${e.date}T00:00:00`)
+              exp.setHours(0, 0, 0, 0)
+              const d = Math.round((exp - today) / (1000 * 60 * 60 * 24))
+              return d === Number(preferredDte)
+            })
+            if (match) return match.date
+          }
+          if (rows.length > 0) {
+            return rows[0].date
+          }
+          return null
+        })
+      } catch {
+        setExpiryError('Could not load expiries from Delta Exchange')
+      } finally {
+        setExpiryLoading(false)
+      }
+    },
+    [],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -187,7 +206,11 @@ export default function AutoTrade() {
         applyStatusToForm(data, formSetters)
         setSlabsKey((k) => k + 1)
         const und = data?.underlying || 'BTC'
-        await fetchExpiries(und, data?.expiry_date_override || null)
+        await fetchExpiries(
+          und,
+          data?.expiry_date_override || null,
+          data?.expiry_dte ?? null,
+        )
         if (cancelled) return
         const activeRes = await getActiveTrades().catch(() => ({ trades: [] }))
         if (cancelled) return
@@ -271,24 +294,33 @@ export default function AutoTrade() {
 
   const buildPayload = () => {
     const s = slabs || slabsInitial || {}
-    let dteFallback = Number(expiryDte) || 1
+    let dteDays = Number(expiryDte) || 1
     if (selectedExpiryDate) {
       try {
         const today = new Date()
         today.setHours(0, 0, 0, 0)
-        const exp = new Date(`${selectedExpiryDate}T00:00:00`)
-        const diff = Math.round((exp - today) / 86400000)
+        const expDate = new Date(`${selectedExpiryDate}T00:00:00`)
+        expDate.setHours(0, 0, 0, 0)
+        const diff = Math.round((expDate - today) / (1000 * 60 * 60 * 24))
         if (Number.isFinite(diff) && diff >= 0) {
-          dteFallback = Math.min(30, diff)
+          dteDays = Math.min(90, diff)
         }
       } catch {
-        dteFallback = 1
+        dteDays = 1
       }
     }
+    // Daily (0/1/2DTE): store integer only — always relative to NOW at entry.
+    // Weekly/Monthly: keep exact date override (user chose that week/month).
+    const payloadExpiry =
+      dteDays <= 2
+        ? { expiry_dte: dteDays, expiry_date_override: null }
+        : {
+            expiry_dte: dteDays,
+            expiry_date_override: selectedExpiryDate || null,
+          }
     return {
       underlying,
-      expiry_dte: dteFallback,
-      expiry_date_override: selectedExpiryDate || null,
+      ...payloadExpiry,
       quantity: Math.max(1, Number(quantity) || 1),
       re_entry_delay_minutes: Math.max(0, Number(reEntryDelay) || 0),
       tp_pct: Number(tpPct) || 50,

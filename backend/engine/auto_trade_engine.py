@@ -437,18 +437,36 @@ class AutoTradeEngine:
         from datetime import date as _dt_date
 
         _override = getattr(settings, "expiry_date_override", None)
-        if _override:
+        _dte = int(settings.expiry_dte or 1)
+
+        if _override and _dte > 2:
+            # Weekly/Monthly: user explicitly chose a specific week/month.
+            # Use exact date but validate it's still in the future.
             try:
                 _parsed = _dt_date.fromisoformat(str(_override))
-                expiry_date = (
-                    _parsed
-                    if _parsed >= _dt_date.today()
-                    else get_expiry_date_for_dte(1)
+                ist_now = get_ist_now()
+                cutoff = ist_now.replace(
+                    hour=17, minute=15, second=0, microsecond=0
                 )
+
+                if ist_now > cutoff:
+                    if _parsed > ist_now.date():
+                        expiry_date = _parsed
+                    else:
+                        # Override date passed — compute from DTE
+                        expiry_date = get_expiry_date_for_dte(_dte)
+                else:
+                    expiry_date = (
+                        _parsed
+                        if _parsed >= ist_now.date()
+                        else get_expiry_date_for_dte(_dte)
+                    )
             except (ValueError, TypeError):
-                expiry_date = get_expiry_date_for_dte(int(settings.expiry_dte))
+                expiry_date = get_expiry_date_for_dte(_dte)
         else:
-            expiry_date = get_expiry_date_for_dte(int(settings.expiry_dte))
+            # 0DTE/1DTE/2DTE: always compute fresh from integer.
+            # get_expiry_date_for_dte already handles 5:15 PM cutoff.
+            expiry_date = get_expiry_date_for_dte(_dte)
         hours_to_expiry = float(get_hours_to_expiry(expiry_date))
         if hours_to_expiry < 1.0:
             logger.warning(

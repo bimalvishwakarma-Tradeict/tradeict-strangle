@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/auto-trade", tags=["auto-trade"])
 
 class AutoTradeSettingsSchema(BaseModel):
     underlying: str = "BTC"
-    expiry_dte: int = Field(default=1, ge=0, le=30)
+    expiry_dte: int = Field(default=1, ge=0, le=90)
     expiry_date_override: str | None = None
     quantity: int = Field(default=1, ge=1, le=1000)
     re_entry_delay_minutes: int = Field(default=1, ge=0, le=1440)
@@ -160,12 +160,28 @@ async def update_auto_trade_settings(
     settings = get_or_create_auto_settings(db)
 
     settings.underlying = payload.underlying.upper().strip()
-    settings.expiry_dte = int(payload.expiry_dte)
+    settings.expiry_dte = max(0, min(int(payload.expiry_dte), 90))
     if hasattr(payload, "expiry_date_override"):
         override = payload.expiry_date_override
-        settings.expiry_date_override = (
-            str(override).strip()[:10] if override else None
-        )
+        if override:
+            # Derive DTE from selected calendar date; pin override only for
+            # weekly/monthly (DTE > 2). Daily 0/1/2DTE stays relative to NOW.
+            from datetime import date as _date
+
+            try:
+                selected_date = _date.fromisoformat(str(override).strip()[:10])
+                today_ist = get_ist_now().date()
+                dte_value = (selected_date - today_ist).days
+                dte_value = max(0, min(dte_value, 90))
+                settings.expiry_dte = dte_value
+                if dte_value <= 2:
+                    settings.expiry_date_override = None
+                else:
+                    settings.expiry_date_override = str(override).strip()[:10]
+            except (ValueError, TypeError):
+                pass  # keep existing expiry_dte / override
+        else:
+            settings.expiry_date_override = None
     settings.quantity = int(payload.quantity)
     settings.re_entry_delay_minutes = int(payload.re_entry_delay_minutes)
     settings.tp_pct = float(payload.tp_pct)
