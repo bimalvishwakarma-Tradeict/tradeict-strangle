@@ -2443,34 +2443,36 @@ class BotEngine:
         self, trade_state: TradeState, triggered_leg_type: str
     ) -> None:
         trade_id = trade_state.trade_id
-        triggered = triggered_leg_type.lower()
-        old_leg = (
-            trade_state.call_leg if triggered == "call" else trade_state.put_leg
-        )
-        other_leg = (
-            trade_state.put_leg if triggered == "call" else trade_state.call_leg
-        )
-        old_strike = float(old_leg.strike)
-        old_premium = float(old_leg.initial_premium)
-        other_prem = float(
-            getattr(trade_state, "last_put_premium", 0)
-            if triggered == "call"
-            else getattr(trade_state, "last_call_premium", 0)
-        ) or float(other_leg.initial_premium)
-
-        logger.info("Adjusting trade %s, leg: %s", trade_id, triggered_leg_type)
-        log_and_buffer(
-            "ADJUSTMENT_START",
-            trade_id,
-            {
-                "triggered_leg": triggered,
-                "old_strike": old_strike,
-                "old_premium": round(old_premium, 2),
-                "target_new_premium": round(other_prem, 2),
-            },
-        )
+        # Lock FIRST — before any async work — so integrity monitor cannot
+        # emergency-close a mid-adjustment naked leg (INTEGRITY_NAKED race).
         self.position_tracker.set_adjusting(trade_id, True)
         try:
+            triggered = triggered_leg_type.lower()
+            old_leg = (
+                trade_state.call_leg if triggered == "call" else trade_state.put_leg
+            )
+            other_leg = (
+                trade_state.put_leg if triggered == "call" else trade_state.call_leg
+            )
+            old_strike = float(old_leg.strike)
+            old_premium = float(old_leg.initial_premium)
+            other_prem = float(
+                getattr(trade_state, "last_put_premium", 0)
+                if triggered == "call"
+                else getattr(trade_state, "last_call_premium", 0)
+            ) or float(other_leg.initial_premium)
+
+            logger.info("Adjusting trade %s, leg: %s", trade_id, triggered_leg_type)
+            log_and_buffer(
+                "ADJUSTMENT_START",
+                trade_id,
+                {
+                    "triggered_leg": triggered,
+                    "old_strike": old_strike,
+                    "old_premium": round(old_premium, 2),
+                    "target_new_premium": round(other_prem, 2),
+                },
+            )
             with self.db_factory() as db:
                 result = await self.adjustment_executor.execute(
                     trade_state.trade,

@@ -130,6 +130,23 @@ class AdjustmentExecutor:
         # abort mid-adjustment (naked position → emergency integrity close).
         db_session.expire_on_commit = False
         try:
+            # Trade arrives from an outside session (position_tracker cache).
+            # Merge it into THIS session so commit/refresh never detach it.
+            trade_id_lookup = int(getattr(trade, "id", 0) or 0)
+            try:
+                trade = db_session.merge(trade)
+            except Exception:
+                trade = (
+                    db_session.query(Trade)
+                    .filter(Trade.id == trade_id_lookup)
+                    .first()
+                )
+                if trade is None:
+                    return AdjustmentResult(
+                        success=False,
+                        error_message="Trade not found in DB",
+                    )
+
             call_leg, put_leg = self._get_legs(trade, db_session)
             triggered_leg, other_leg = self._resolve_legs(
                 triggered_leg_type, call_leg, put_leg
@@ -570,11 +587,14 @@ class AdjustmentExecutor:
                 trade.conversion_triggered_leg = triggered_leg_type
 
                 db_session.commit()
-                db_session.refresh(hedge_leg_row)
-                db_session.refresh(new_other_leg)
-                db_session.refresh(other_leg)
-                db_session.refresh(triggered_leg)
                 db_session.refresh(trade)
+                db_session.refresh(triggered_leg)
+                db_session.refresh(other_leg)
+                try:
+                    db_session.refresh(hedge_leg_row)
+                    db_session.refresh(new_other_leg)
+                except Exception:
+                    pass
 
                 log_and_buffer(
                     "CONVERSION_MODE_ENTERED",
@@ -940,9 +960,13 @@ class AdjustmentExecutor:
             )
             db_session.add(adjustment)
             db_session.commit()
+            db_session.refresh(trade)
             db_session.refresh(new_leg)
-            db_session.refresh(triggered_leg)
-            db_session.refresh(other_leg)
+            try:
+                db_session.refresh(triggered_leg)
+                db_session.refresh(other_leg)
+            except Exception:
+                pass
 
             # With bracket SLs attached to entry orders, there is nothing to
             # "refresh" as part of adjustment. The new leg's bracket SL was
