@@ -1507,13 +1507,15 @@ class BotEngine:
                 trade_state, call_premium, put_premium
             )
             if reversed_ok:
+                conversion_active = False
                 logger.info(
-                    "[CONVERSION_REVERSAL] Trade %s resumed normal mode",
+                    "[CONVERSION_REVERSAL] Trade %s normal mode resumed "
+                    "— adjustment monitoring active from next tick",
                     trade_state.trade_id,
                 )
-                conversion_active = False
-            # While still converting (or just reversed this tick), skip adjust.
-            # Exit (TP/SL) still runs below when should_exit.
+                # Fall through to normal push_update / exit checks.
+                # Next tick will run full trigger check.
+            # else: stay in conversion mode (hedge still open)
 
         if action.should_exit:
             exit_pnl = float(getattr(action, "current_pnl", net_mtm_val) or net_mtm_val)
@@ -2338,8 +2340,8 @@ class BotEngine:
                         exc,
                     )
 
-            # AUDIT-7: mirror hedge close to slaves
-            if hedge_product_id:
+            # AUDIT-7: mirror hedge close to slaves (only if closed)
+            if hedge_close_success and hedge_product_id:
                 try:
                     import backend.engine.mirror_engine as mirror_module
 
@@ -2354,6 +2356,16 @@ class BotEngine:
                     logger.warning(
                         "Mirror hedge close queue failed (non-fatal): %s", exc
                     )
+
+            # Only clear conversion mode if hedge close succeeded.
+            # If close failed, keep conversion mode and retry next tick.
+            if not hedge_close_success:
+                logger.warning(
+                    "[CONVERSION_REVERSAL] Hedge close failed — "
+                    "staying in conversion mode, will retry next tick"
+                )
+                db.commit()
+                return False
 
             t = db.query(Trade).filter(Trade.id == trade_id).first()
             if t:
@@ -2397,7 +2409,10 @@ class BotEngine:
                     )
             db.commit()
 
-        # Sync in-memory trade flags
+        if not hedge_close_success:
+            return False
+
+        # Sync in-memory trade flags only if hedge actually closed
         trade.in_conversion_mode = False
         trade.conversion_hedge_product_id = None
         trade.conversion_hedge_order_id = None

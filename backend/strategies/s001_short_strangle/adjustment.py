@@ -18,7 +18,12 @@ from backend.core.bot_logger import log_and_buffer
 from backend.core.time_utils import get_hours_to_expiry
 from backend.core.delta_client import short_leg_realized_pnl
 from backend.models import Adjustment, Leg, Trade
-from backend.strategies.base_strategy import AdjustmentResult, OrderResult
+from backend.strategies.base_strategy import (
+    AdjustmentPlan,
+    AdjustmentResult,
+    OrderResult,
+)
+from backend.strategies.s001_short_strangle.config import UNDERLYING_SYMBOLS
 
 logger = logging.getLogger(__name__)
 
@@ -247,19 +252,92 @@ class AdjustmentExecutor:
                     other_premium,
                     _conv_min,
                 )
-                # Find hedge leg: one strike inside triggered leg (toward ATM)
-                # For triggered call: buy call at strike BELOW current call strike
-                # For triggered put:  buy put at strike ABOVE current put strike
+                # Find hedge leg: one strike INSIDE triggered leg (toward ATM)
+                # PUT: toward ATM = higher strike (+$200)
+                # CALL: toward ATM = lower strike (-$200)
                 try:
-                    hedge_plan = await strategy.find_adjustment_strike(
-                        delta_client,
-                        trade,
-                        triggered_leg_type,  # same leg type as triggered
-                        float(
+                    _STRIKE_INCREMENT = 200.0
+                    triggered_strike = float(triggered_leg.strike)
+                    leg_lower = str(triggered_leg_type).lower()
+                    if leg_lower == "put":
+                        hedge_target_strike = (
+                            triggered_strike + _STRIKE_INCREMENT
+                        )
+                    else:
+                        hedge_target_strike = (
+                            triggered_strike - _STRIKE_INCREMENT
+                        )
+
+                    expiry_date = trade.expiry_date
+                    if hasattr(expiry_date, "isoformat"):
+                        expiry_str = expiry_date.isoformat()
+                    else:
+                        expiry_str = str(expiry_date)
+
+                    underlying_key = str(trade.underlying).upper()
+                    underlying_symbol = UNDERLYING_SYMBOLS.get(
+                        underlying_key, underlying_key
+                    )
+
+                    chain = await delta_client.get_option_chain(
+                        underlying=underlying_symbol,
+                        expiry_date=expiry_str,
+                    )
+                    hedge_chain_row = None
+                    for row in chain:
+                        if (
+                            abs(
+                                float(row.get("strike", 0))
+                                - hedge_target_strike
+                            )
+                            < 0.01
+                        ):
+                            hedge_chain_row = row
+                            break
+
+                    if hedge_chain_row is None:
+                        raise ValueError(
+                            f"Hedge strike {hedge_target_strike} not found "
+                            f"on chain (triggered={triggered_strike})"
+                        )
+
+                    hedge_symbol_key = f"{leg_lower}_symbol"
+                    hedge_pid_key = f"{leg_lower}_product_id"
+                    hedge_pid = int(hedge_chain_row.get(hedge_pid_key) or 0)
+                    hedge_sym = str(
+                        hedge_chain_row.get(hedge_symbol_key) or ""
+                    )
+                    if hedge_pid <= 0 or not hedge_sym:
+                        raise ValueError(
+                            f"Hedge strike {hedge_target_strike} missing "
+                            f"product_id/symbol on chain"
+                        )
+
+                    hedge_plan = AdjustmentPlan(
+                        exit_leg_type=leg_lower,
+                        exit_leg_symbol="",
+                        new_strike=hedge_target_strike,
+                        new_product_id=hedge_pid,
+                        new_symbol=hedge_sym,
+                        target_premium=float(
+                            hedge_chain_row.get(f"{leg_lower}_mark_price")
+                            or hedge_chain_row.get(f"{leg_lower}_ask")
+                            or 0
+                        ),
+                        other_leg_premium=float(
                             triggered_leg.trigger_baseline_premium
                             or triggered_leg.initial_premium
+                            or 0
                         ),
-                        current_strike=float(triggered_leg.strike),
+                    )
+                    logger.info(
+                        "[CONVERSION_MODE] Hedge strike: %s → %s "
+                        "(toward ATM %s) symbol=%s product_id=%s",
+                        triggered_strike,
+                        hedge_target_strike,
+                        "+200" if leg_lower == "put" else "-200",
+                        hedge_sym,
+                        hedge_pid,
                     )
                 except Exception as exc:
                     logger.error(
