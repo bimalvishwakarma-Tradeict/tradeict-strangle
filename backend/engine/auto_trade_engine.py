@@ -270,7 +270,7 @@ class AutoTradeEngine:
             )
             return
 
-        # Guard 3: Delta positions (STRICT)
+        # Guard 3: Delta positions — block only bot-tracked; auto-close orphans
         delta_option_positions = await client.get_option_positions()
         underlying_positions = [
             p
@@ -278,17 +278,91 @@ class AutoTradeEngine:
             if underlying
             in str(p.get("product_symbol") or p.get("symbol") or "").upper()
         ]
-        if underlying_positions:
-            symbols = [
-                p.get("product_symbol") or p.get("symbol")
-                for p in underlying_positions
-            ]
+        tracked_legs = (
+            db.query(Leg)
+            .filter(
+                Leg.status == "open",
+                Leg.is_bot_managed.is_(True),
+            )
+            .all()
+        )
+        tracked_symbols = {
+            str(leg.symbol or "").upper()
+            for leg in tracked_legs
+            if leg.symbol
+        }
+
+        blocking_symbols: list[str] = []
+        for pos in underlying_positions:
+            symbol = str(
+                pos.get("product_symbol") or pos.get("symbol") or ""
+            )
+            try:
+                size = int(float(pos.get("size") or 0))
+            except (TypeError, ValueError):
+                size = 0
+            if size == 0:
+                continue
+            try:
+                product_id = int(
+                    pos.get("product_id")
+                    or (pos.get("product") or {}).get("id")
+                    or 0
+                )
+            except (TypeError, ValueError, AttributeError):
+                product_id = 0
+
+            if symbol.upper() in tracked_symbols:
+                # Bot's own open position — block entry
+                blocking_symbols.append(symbol)
+                continue
+
+            # Orphan / manual position — auto-close, do not block
+            log_and_buffer(
+                "ORPHAN_DETECTED",
+                0,
+                {
+                    "symbol": symbol,
+                    "size": size,
+                    "action": "auto_close",
+                    "underlying": underlying,
+                },
+            )
             logger.warning(
-                "Auto trade BLOCKED: Delta has %s open %s option positions: %s. "
-                "Will retry after positions are cleared.",
-                len(underlying_positions),
+                "ORPHAN_DETECTED: %s size=%s — auto-closing",
+                symbol,
+                size,
+            )
+            close_result: dict[str, Any] | str
+            try:
+                if product_id <= 0:
+                    raise ValueError(f"missing product_id for {symbol}")
+                close_result = await client.close_position(
+                    product_id=product_id,
+                    size=abs(size),
+                    is_long=(size > 0),
+                )
+            except Exception as exc:
+                close_result = f"failed: {exc}"
+                logger.error(
+                    "ORPHAN_AUTO_CLOSED failed for %s: %s", symbol, exc
+                )
+            log_and_buffer(
+                "ORPHAN_AUTO_CLOSED",
+                0,
+                {"symbol": symbol, "close_result": close_result},
+            )
+            logger.info(
+                "ORPHAN_AUTO_CLOSED: %s result=%s", symbol, close_result
+            )
+
+        if blocking_symbols:
+            logger.warning(
+                "Auto trade BLOCKED: Delta has %s bot-tracked %s option "
+                "positions: %s. Will retry after positions are cleared.",
+                len(blocking_symbols),
                 underlying,
-                symbols,
+                blocking_symbols,
             )
             log_and_buffer(
                 "ENTRY_GUARD_BLOCK",
@@ -297,13 +371,29 @@ class AutoTradeEngine:
                     "source": "auto",
                     "guard": "delta",
                     "underlying": underlying,
-                    "symbols": symbols,
+                    "symbols": blocking_symbols,
                 },
             )
             settings.next_entry_time = get_ist_now() + timedelta(minutes=2)
-            settings.last_error = f"Delta has open positions: {symbols}"[:500]
+            settings.last_error = (
+                f"Delta has bot-tracked positions: {blocking_symbols}"[:500]
+            )
             db.commit()
             return
+
+        log_and_buffer(
+            "ENTRY_GUARD_PASS",
+            0,
+            {
+                "source": "auto",
+                "guard": "delta",
+                "underlying": underlying,
+                "message": "all orphans cleared, proceeding",
+            },
+        )
+        logger.info(
+            "ENTRY_GUARD_PASS: delta guard — all orphans cleared, proceeding"
+        )
 
         # Guard 4 (place-level): settling active trade
         now_check = get_ist_now()
