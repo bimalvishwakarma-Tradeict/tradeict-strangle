@@ -327,10 +327,10 @@ class ShortStrangleStrategy(BaseStrategy):
                 slippage_pct=slippage_pct,
             )
 
-        # b. Profit target
+        # b. Profit target (Net MTM — fees/slippage deducted)
         should_exit_profit = decision_pnl >= float(trade.profit_target_usd)
-        # c. Stop loss
-        should_exit_sl = decision_pnl <= -float(trade.stoploss_usd)
+        # c. Stop loss (Gross MTM — fees must not shrink SL breathing room)
+        should_exit_sl = total_pnl <= -float(trade.stoploss_usd)
 
         if should_exit_profit:
             logger.info(
@@ -352,11 +352,9 @@ class ShortStrangleStrategy(BaseStrategy):
 
         if should_exit_sl:
             logger.info(
-                "Trade %s decision: realized=%.2f + upnl=%.2f = gross=%.2f | "
-                "net_mtm=%.2f | target=%s | sl=%s | action=EXIT STOPLOSS",
+                "Trade %s: gross_mtm=%.2f net_mtm=%.2f | "
+                "target=%s | sl=%s | action=EXIT STOPLOSS (gross_mtm<=stoploss)",
                 getattr(trade, "id", "?"),
-                float(realized_pnl or 0.0),
-                float(delta_mtm if delta_mtm is not None else 0.0),
                 total_pnl,
                 decision_pnl,
                 trade.profit_target_usd,

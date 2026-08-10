@@ -196,7 +196,7 @@ class AutoTradeSettings(Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     underlying: Mapped[str] = mapped_column(String(20), nullable=False, default="BTC")
     expiry_dte: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    # Exact calendar date (YYYY-MM-DD) from live Delta expiry picker; overrides expiry_dte
+    # Weekly/monthly only (DTE>2). Daily 0/1/2DTE uses expiry_dte relative to NOW.
     expiry_date_override: Mapped[str | None] = mapped_column(
         String(10), nullable=True, default=None
     )

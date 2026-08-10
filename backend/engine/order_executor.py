@@ -66,6 +66,7 @@ class OrderExecutor:
             size=int(leg.quantity),
             side="buy",
             symbol_for_fallback=str(leg.symbol),
+            reduce_only=True,  # CRITICAL: prevents position flip on exit
         )
 
     async def sell_option(
@@ -202,6 +203,7 @@ class OrderExecutor:
         symbol_for_fallback: str | None = None,
         bracket_stop_loss_price: float | None = None,
         bracket_stop_loss_limit_price: float | None = None,
+        reduce_only: bool = False,
     ) -> OrderResult:
         """
         Attempt order once; on DeltaAPIError wait 2s and retry once only.
@@ -211,12 +213,14 @@ class OrderExecutor:
 
         for attempt in range(1, max_attempts + 1):
             logger.info(
-                "Attempt %s/%s: placing order side=%s product_id=%s size=%s",
+                "Attempt %s/%s: placing order side=%s product_id=%s size=%s "
+                "reduce_only=%s",
                 attempt,
                 max_attempts,
                 side,
                 product_id,
                 size,
+                reduce_only,
             )
             try:
                 result = await delta_client.place_order(
@@ -227,6 +231,7 @@ class OrderExecutor:
                     time_in_force="ioc",
                     bracket_stop_loss_price=bracket_stop_loss_price,
                     bracket_stop_loss_limit_price=bracket_stop_loss_limit_price,
+                    reduce_only=reduce_only,
                 )
                 filled_price = await delta_client.resolve_fill_price(
                     result,

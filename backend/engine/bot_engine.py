@@ -479,6 +479,14 @@ class BotEngine:
         """
         trade_id = trade_state.trade_id
 
+        # Skip integrity during conversion mode — position structure changes
+        if bool(getattr(trade_state.trade, "in_conversion_mode", False)):
+            logger.debug(
+                "Trade %s: skipping integrity check (in conversion mode)",
+                trade_id,
+            )
+            return "ok"
+
         if getattr(trade_state, "is_adjusting", False):
             logger.debug(
                 "Trade %s: skipping integrity (adjusting)", trade_id
@@ -1359,7 +1367,7 @@ class BotEngine:
             "pnl_pct": round(pnl_pct, 1),
             "will_exit_profit": net_mtm_val >= target if target else False,
             "will_exit_stoploss": (
-                net_mtm_val <= -stoploss if stoploss else False
+                total_pnl <= -stoploss if stoploss else False
             ),
             "mtm_source": "delta_position" if mtm_available else "computed_fallback",
             "contract_value": OPTIONS_CONTRACT_VALUE,
@@ -1521,6 +1529,18 @@ class BotEngine:
             )
         elif conversion_active:
             # Stay in conversion — push live premiums, do not adjust
+            if action.should_adjust and action.adjust_leg:
+                logger.info(
+                    "[CONVERSION_HOLD] Trade %s: %s trigger suppressed "
+                    "(conversion mode active — waiting for reversal)",
+                    trade_state.trade_id,
+                    action.adjust_leg,
+                )
+                log_and_buffer(
+                    "CONVERSION_HOLD",
+                    trade_state.trade_id,
+                    {"suppressed_leg": action.adjust_leg},
+                )
             await self._push_update(
                 trade_state,
                 call_premium,
@@ -2107,6 +2127,60 @@ class BotEngine:
         if not bool(getattr(trade, "in_conversion_mode", False)):
             return False
 
+        # Always read hedge from Leg table (authoritative) — in-memory
+        # conversion_hedge_* fields can be stale after restart.
+        with self.db_factory() as _db_hedge:
+            hedge_leg_db = (
+                _db_hedge.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_id,
+                    Leg.is_long.is_(True),
+                    Leg.status == "open",
+                )
+                .first()
+            )
+            if hedge_leg_db is None:
+                hedge_leg_db = (
+                    _db_hedge.query(Leg)
+                    .filter(
+                        Leg.trade_id == trade_id,
+                        Leg.status == "open",
+                        Leg.leg_type.in_(("hedge_call", "hedge_put")),
+                    )
+                    .first()
+                )
+            if hedge_leg_db is None:
+                logger.warning(
+                    "[CONVERSION_REVERSAL] Trade %s: in_conversion_mode but "
+                    "no open hedge leg in DB — clearing conversion flag",
+                    trade_id,
+                )
+                trade_state.trade.in_conversion_mode = False
+                try:
+                    t_row = (
+                        _db_hedge.query(Trade)
+                        .filter(Trade.id == trade_id)
+                        .first()
+                    )
+                    if t_row is not None:
+                        t_row.in_conversion_mode = False
+                        t_row.conversion_hedge_product_id = None
+                        t_row.conversion_hedge_order_id = None
+                        t_row.conversion_hedge_entry_price = None
+                        t_row.conversion_hedge_symbol = None
+                        t_row.conversion_triggered_leg = None
+                        _db_hedge.commit()
+                except Exception as clear_exc:
+                    logger.warning(
+                        "Could not clear stale conversion flag: %s", clear_exc
+                    )
+                return False
+
+            hedge_entry_price = float(hedge_leg_db.initial_premium or 0)
+            hedge_product_id = int(hedge_leg_db.product_id or 0)
+            hedge_symbol = str(hedge_leg_db.symbol or "")
+            _db_hedge.expunge(hedge_leg_db)
+
         # Get equality threshold from settings
         try:
             with self.db_factory() as _db:
@@ -2127,12 +2201,13 @@ class BotEngine:
 
         logger.debug(
             "[CONVERSION_MONITOR] Trade %s: call=%.2f put=%.2f "
-            "diff=%.1f%% threshold=%.1f%%",
+            "diff=%.1f%% threshold=%.1f%% hedge=%s",
             trade_id,
             call_premium,
             put_premium,
             diff_pct,
             equality_pct,
+            hedge_symbol,
         )
 
         if diff_pct > equality_pct:
@@ -2150,11 +2225,6 @@ class BotEngine:
 
         hedge_close_success = False
         hedge_close_price = 0.0
-        hedge_symbol = str(getattr(trade, "conversion_hedge_symbol", "") or "")
-        hedge_entry_price = float(
-            getattr(trade, "conversion_hedge_entry_price", 0) or 0
-        )
-        hedge_product_id = getattr(trade, "conversion_hedge_product_id", None)
 
         with self.db_factory() as db:
             hedge_leg = (
@@ -2167,7 +2237,6 @@ class BotEngine:
                 .first()
             )
             if hedge_leg is None:
-                # Fallback: leg_type hedge_* without is_long (pre-migration rows)
                 hedge_leg = (
                     db.query(Leg)
                     .filter(

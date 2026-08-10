@@ -597,6 +597,17 @@ class AutoTradeEngine:
             logger.info(
                 "Call filled @ %s order_id=%s", call_fill, call_order_id
             )
+            # Bracket SL was set from mark (must attach at order time).
+            # Warn if fill drifted >10% from mark — SL may fire early/late.
+            if call_mark > 0 and abs(call_fill - call_mark) / call_mark > 0.10:
+                logger.warning(
+                    "Call fill %.2f deviated >10%% from mark %.2f. "
+                    "Bracket SL trigger %.2f may not match 220%% of fill %.2f",
+                    call_fill,
+                    call_mark,
+                    call_sl_trigger_price,
+                    call_fill * universal_sl_pct / 100.0,
+                )
 
             # --- Place PUT ---
             logger.info("Placing PUT: %s qty=%s", straddle["put_symbol"], qty)
@@ -621,6 +632,15 @@ class AutoTradeEngine:
                 put_fill = put_mark
                 logger.warning(
                     "Put fill unavailable, using mark: %.4f", put_fill
+                )
+            if put_mark > 0 and abs(put_fill - put_mark) / put_mark > 0.10:
+                logger.warning(
+                    "Put fill %.2f deviated >10%% from mark %.2f. "
+                    "Bracket SL trigger %.2f may not match 220%% of fill %.2f",
+                    put_fill,
+                    put_mark,
+                    put_sl_trigger_price,
+                    put_fill * universal_sl_pct / 100.0,
                 )
             put_order_id = (
                 str(put_result.order_id)
@@ -901,6 +921,52 @@ class AutoTradeEngine:
 
         except Exception as exc:
             logger.error("Auto trade placement failed: %s", exc, exc_info=True)
+
+            # CRITICAL: If call was placed but put failed, close the call
+            # to avoid naked exposure on Delta
+            if (
+                "call_result" in locals()
+                and call_result.success
+                and "straddle" in locals()
+                and client is not None
+            ):
+                if "put_result" not in locals() or not put_result.success:
+                    logger.critical(
+                        "PARTIAL ENTRY: Call placed but Put failed. "
+                        "Attempting to close call order to avoid naked exposure."
+                    )
+                    try:
+                        call_pid = int(straddle["call_product_id"])
+                        call_qty = max(1, int(settings.quantity))
+                        close_res = await client.close_position(
+                            product_id=call_pid,
+                            size=call_qty,
+                            is_long=False,  # we sold it (short), close = buy
+                        )
+                        logger.info("Partial entry cleanup: %s", close_res)
+                        log_and_buffer(
+                            "PARTIAL_ENTRY_CLEANUP",
+                            0,
+                            {
+                                "symbol": straddle.get("call_symbol"),
+                                "result": str(close_res),
+                            },
+                        )
+                    except Exception as cleanup_exc:
+                        logger.critical(
+                            "PARTIAL ENTRY CLEANUP FAILED: %s. "
+                            "Manual intervention required!",
+                            cleanup_exc,
+                        )
+                        log_and_buffer(
+                            "PARTIAL_ENTRY_CLEANUP_FAILED",
+                            0,
+                            {
+                                "symbol": straddle.get("call_symbol", "?"),
+                                "error": str(cleanup_exc),
+                            },
+                        )
+
             try:
                 db.rollback()
             except Exception:

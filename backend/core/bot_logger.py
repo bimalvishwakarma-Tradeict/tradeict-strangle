@@ -45,6 +45,11 @@ _IMPORTANT_EVENTS = frozenset(
         "TP_SL_LOCKED",
         "ENTRY_GUARD_PASS",
         "ENTRY_GUARD_BLOCK",
+        "ORPHAN_DETECTED",
+        "ORPHAN_AUTO_CLOSED",
+        "PARTIAL_ENTRY_CLEANUP",
+        "PARTIAL_ENTRY_CLEANUP_FAILED",
+        "CONVERSION_HOLD",
         "POSITION_VERIFIED",
         "POSITION_WARNING",
     }
@@ -170,6 +175,9 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "BASELINE_RESET",
         "EXIT_CLEANUP",
         "INTEGRITY_MANUAL_CLOSE",
+        "ORPHAN_DETECTED",
+        "CONVERSION_HOLD",
+        "PARTIAL_ENTRY_CLEANUP_FAILED",
     ):
         bot_log.warning(msg)
     elif event_type in (
@@ -183,6 +191,8 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ENTRY_GUARD_PASS",
         "POSITION_VERIFIED",
         "ADJUSTMENT_DELTA_VERIFY",
+        "ORPHAN_AUTO_CLOSED",
+        "PARTIAL_ENTRY_CLEANUP",
     ):
         bot_log.info(msg)
     else:

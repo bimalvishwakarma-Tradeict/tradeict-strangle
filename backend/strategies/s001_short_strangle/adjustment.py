@@ -120,6 +120,10 @@ class AdjustmentExecutor:
         adjustments do NOT affect TP/SL
         (only leg baselines + trade.realized_pnl change).
         """
+        # BUG-1: Keep ORM objects usable after commit() — without this,
+        # post-commit attribute access raises DetachedInstanceError and can
+        # abort mid-adjustment (naked position → emergency integrity close).
+        db_session.expire_on_commit = False
         try:
             call_leg, put_leg = self._get_legs(trade, db_session)
             triggered_leg, other_leg = self._resolve_legs(
@@ -488,6 +492,11 @@ class AdjustmentExecutor:
                 trade.conversion_triggered_leg = triggered_leg_type
 
                 db_session.commit()
+                db_session.refresh(hedge_leg_row)
+                db_session.refresh(new_other_leg)
+                db_session.refresh(other_leg)
+                db_session.refresh(triggered_leg)
+                db_session.refresh(trade)
 
                 log_and_buffer(
                     "CONVERSION_MODE_ENTERED",
@@ -854,6 +863,8 @@ class AdjustmentExecutor:
             db_session.add(adjustment)
             db_session.commit()
             db_session.refresh(new_leg)
+            db_session.refresh(triggered_leg)
+            db_session.refresh(other_leg)
 
             # With bracket SLs attached to entry orders, there is nothing to
             # "refresh" as part of adjustment. The new leg's bracket SL was
