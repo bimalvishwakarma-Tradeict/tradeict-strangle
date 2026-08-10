@@ -727,6 +727,7 @@ class DeltaClient:
         time_in_force: str = "ioc",
         bracket_stop_loss_price: float | None = None,
         bracket_stop_loss_limit_price: float | None = None,
+        reduce_only: bool = False,
     ) -> dict[str, Any]:
         """
         POST /v2/orders — place an order (10s timeout).
@@ -741,6 +742,8 @@ class DeltaClient:
             "order_type": order_type,
             "time_in_force": time_in_force,
         }
+        if reduce_only:
+            body["reduce_only"] = True
 
         # Delta "bracket" stop-loss: attach stop-loss directly to entry order.
         # Bracket SL confirmed working on Delta Exchange India
@@ -1762,6 +1765,26 @@ class DeltaClient:
             "trade_type": "strangle",
             "strike": call_strike,
         }
+
+    async def close_position(
+        self,
+        product_id: int,
+        size: int,
+        is_long: bool,
+    ) -> dict[str, Any]:
+        """
+        Close any position safely with reduce_only=True.
+        is_long=True  → SELL to close long
+        is_long=False → BUY to close short
+        """
+        return await self.place_order(
+            product_id=product_id,
+            size=abs(size),
+            side="sell" if is_long else "buy",
+            order_type="market_order",
+            time_in_force="ioc",
+            reduce_only=True,
+        )
 
     async def close(self) -> None:
         """Close the underlying httpx client."""

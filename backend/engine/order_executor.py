@@ -160,13 +160,38 @@ class OrderExecutor:
             product_id,
             quantity,
         )
-        return await self._execute_with_retry(
-            delta_client=delta_client,
-            product_id=int(product_id),
-            size=int(quantity),
-            side="sell",
-            symbol_for_fallback=symbol_for_fallback,
-        )
+        try:
+            result = await delta_client.place_order(
+                product_id=int(product_id),
+                size=int(quantity),
+                side="sell",
+                order_type="market_order",
+                time_in_force="ioc",
+                reduce_only=True,  # CRITICAL: prevents position flip
+            )
+            fill = float(result.get("avg_fill_price") or 0)
+            if fill <= 0 and symbol_for_fallback:
+                try:
+                    fill = float(
+                        await delta_client.resolve_fill_price(
+                            result, symbol_for_fallback=symbol_for_fallback
+                        )
+                        or 0
+                    )
+                except Exception:
+                    pass
+            status = str(result.get("status") or "").lower()
+            oid = result.get("order_id")
+            return OrderResult(
+                success=(
+                    status in ("closed", "filled", "open") or oid is not None
+                ),
+                filled_price=fill if fill > 0 else None,
+                order_id=int(oid) if oid is not None else None,
+            )
+        except Exception as exc:
+            logger.error("close_long_position failed: %s", exc)
+            return OrderResult(success=False, error=str(exc))
 
     async def _execute_with_retry(
         self,
