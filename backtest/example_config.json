@@ -1,0 +1,17 @@
+{
+  "data_dir": "backtest/data",
+  "trade_type": "strangle",
+  "expiry_type": "1DTE",
+  "entry_hour_ist": 17,
+  "entry_minute_ist": 32,
+  "target_premium_per_side": 250.0,
+  "trigger_pct": 160.0,
+  "profit_target_pct": 25.0,
+  "stoploss_pct": 50.0,
+  "min_replacement_premium": 150.0,
+  "conversion_equality_pct": 10.0,
+  "quantity": 100,
+  "fee_per_leg_usd": 0.75,
+  "slippage_pct": 2.0,
+  "mode": "continuous"
+}

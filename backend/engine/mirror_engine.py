@@ -528,16 +528,207 @@ class MirrorEngine:
         finally:
             await client.close()
 
+    async def mirror_conversion(
+        self,
+        master_trade_id: int,
+        hedge_product_id: int,
+        hedge_symbol: str,
+        old_other_product_id: int,
+        new_other_product_id: int,
+        new_other_symbol: str,
+        new_other_strike: float,
+        other_leg_type: str,
+        master_qty: int,
+    ) -> None:
+        """
+        AUDIT-7: Mirror conversion-mode entry to slaves.
+
+        1) BUY long hedge (no bracket SL)
+        2) Close old other short + open new other short
+        """
+        with self.db_factory() as db:
+            slave_trades = (
+                db.query(SlaveTrade)
+                .filter(
+                    SlaveTrade.master_trade_id == master_trade_id,
+                    SlaveTrade.status == "active",
+                )
+                .all()
+            )
+            if not slave_trades:
+                logger.info(
+                    "No active slave trades for conversion mirror master=%s",
+                    master_trade_id,
+                )
+                return
+
+            logger.info(
+                "Mirroring conversion to %s slaves: hedge=%s other=%s→%s",
+                len(slave_trades),
+                hedge_symbol,
+                old_other_product_id,
+                new_other_product_id,
+            )
+
+            for slave_trade in slave_trades:
+                slave = (
+                    db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == slave_trade.slave_account_id)
+                    .first()
+                )
+                if not slave or not slave.is_active:
+                    continue
+
+                client = self._get_slave_client(slave)
+                qty = max(1, int(slave_trade.actual_quantity or 1))
+                leg = str(other_leg_type).lower()
+                try:
+                    # 1) Buy hedge — long, no bracket SL
+                    hedge_order = await client.place_order(
+                        product_id=int(hedge_product_id),
+                        size=qty,
+                        side="buy",
+                    )
+                    logger.info(
+                        "Slave '%s' hedge bought: product=%s order=%s",
+                        slave.name,
+                        hedge_product_id,
+                        self._order_id(hedge_order),
+                    )
+
+                    # 2) Close old other short
+                    await client.place_order(
+                        product_id=int(old_other_product_id),
+                        size=qty,
+                        side="buy",
+                    )
+
+                    # 3) Open new other short (with bracket SL like normal adj)
+                    expected_fill = 0.0
+                    try:
+                        expected_fill = float(
+                            await client.get_mark_price(new_other_symbol)
+                        )
+                    except Exception:
+                        expected_fill = 0.0
+                    new_sl = (
+                        round(expected_fill * 2.0, 2) if expected_fill > 0 else None
+                    )
+                    new_order = await client.place_order(
+                        product_id=int(new_other_product_id),
+                        size=qty,
+                        side="sell",
+                        bracket_stop_loss_price=new_sl,
+                        bracket_stop_loss_limit_price=(
+                            round(new_sl * 1.05, 2) if new_sl else None
+                        ),
+                    )
+                    new_fill = float(
+                        await client.resolve_fill_price(
+                            new_order, symbol_for_fallback=new_other_symbol
+                        )
+                        or 0.0
+                    )
+                    new_order_id = self._order_id(new_order)
+                    if leg == "call":
+                        slave_trade.call_order_id = new_order_id or None
+                        slave_trade.call_sl_order_id = None
+                        if new_fill > 0:
+                            slave_trade.call_fill_price = new_fill
+                    else:
+                        slave_trade.put_order_id = new_order_id or None
+                        slave_trade.put_sl_order_id = None
+                        if new_fill > 0:
+                            slave_trade.put_fill_price = new_fill
+
+                    slave.last_error = None
+                    slave.connection_status = "connected"
+                    slave.last_connected_at = get_ist_now()
+                    db.commit()
+                    logger.info(
+                        "✅ Slave '%s' conversion mirrored (hedge + %s replace)",
+                        slave.name,
+                        leg,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "❌ Slave '%s' conversion FAILED: %s", slave.name, exc
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    slave_trade.last_error = str(exc)[:500]
+                    slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+                    db.commit()
+                finally:
+                    await client.close()
+
+    async def mirror_hedge_close(
+        self,
+        master_trade_id: int,
+        hedge_product_id: int,
+    ) -> None:
+        """AUDIT-7: SELL-close long hedge on all active slaves (reversal)."""
+        if not hedge_product_id:
+            return
+        with self.db_factory() as db:
+            slave_trades = (
+                db.query(SlaveTrade)
+                .filter(
+                    SlaveTrade.master_trade_id == master_trade_id,
+                    SlaveTrade.status == "active",
+                )
+                .all()
+            )
+            for slave_trade in slave_trades:
+                slave = (
+                    db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == slave_trade.slave_account_id)
+                    .first()
+                )
+                if not slave or not slave.is_active:
+                    continue
+                client = self._get_slave_client(slave)
+                qty = max(1, int(slave_trade.actual_quantity or 1))
+                try:
+                    exists = await client.verify_position_exists(
+                        int(hedge_product_id)
+                    )
+                    if exists:
+                        await client.place_order(
+                            product_id=int(hedge_product_id),
+                            size=qty,
+                            side="sell",
+                        )
+                        logger.info(
+                            "Slave '%s' hedge closed (sell) product=%s",
+                            slave.name,
+                            hedge_product_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Slave '%s' hedge not on Delta — skip close",
+                            slave.name,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "Slave '%s' hedge close FAILED: %s", slave.name, exc
+                    )
+                finally:
+                    await client.close()
+
     async def mirror_exit(
         self,
         master_trade_id: int,
         call_product_id: int,
         put_product_id: int,
         reason: str,
+        hedge_product_id: int | None = None,
     ) -> None:
         """
         Mirror trade exit on all slaves.
-        Cancel SL orders + close both legs at market.
+        Cancel SL orders + close both shorts (+ long hedge if present) at market.
         """
         with self.db_factory() as db:
             slave_trades = (
@@ -553,9 +744,10 @@ class MirrorEngine:
                 return
 
             logger.info(
-                "Mirroring exit to %s slaves: reason=%s",
+                "Mirroring exit to %s slaves: reason=%s hedge=%s",
                 len(slave_trades),
                 reason,
+                hedge_product_id,
             )
 
             for slave_trade in slave_trades:
@@ -574,6 +766,7 @@ class MirrorEngine:
                     put_product_id=put_product_id,
                     reason=reason,
                     db=db,
+                    hedge_product_id=hedge_product_id,
                 )
 
     async def _mirror_exit_to_slave(
@@ -584,6 +777,7 @@ class MirrorEngine:
         put_product_id: int,
         reason: str,
         db: Any,
+        hedge_product_id: int | None = None,
     ) -> None:
         client = self._get_slave_client(slave)
         qty = max(1, int(slave_trade.actual_quantity or 1))
@@ -642,6 +836,26 @@ class MirrorEngine:
                     "Slave '%s' put not on Delta, skipping close",
                     slave.name,
                 )
+
+            # Close long hedge with SELL (not buy)
+            if hedge_product_id:
+                try:
+                    hedge_on_slave = await client.verify_position_exists(
+                        int(hedge_product_id)
+                    )
+                except Exception:
+                    hedge_on_slave = True
+                if hedge_on_slave:
+                    await client.place_order(
+                        product_id=int(hedge_product_id),
+                        size=qty,
+                        side="sell",
+                    )
+                    logger.info(
+                        "Slave '%s' hedge closed (sell) product=%s",
+                        slave.name,
+                        hedge_product_id,
+                    )
 
             # Always mark closed in DB (positions may already be gone)
             slave_trade.status = "closed"

@@ -29,7 +29,7 @@ from backend.core.time_utils import (
     settling_ends_at_after_place,
 )
 from backend.core.ws_manager import ws_manager
-from backend.database import get_db
+from backend.database import get_db, get_or_create_auto_settings
 from backend.engine.bot_engine import bot_engine
 from backend.engine.trade_reconcile import (
     book_leg_close,
@@ -1255,6 +1255,10 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
 
     _sync_tracker_from_db(db)
     trades_out: list[dict[str, Any]] = []
+    auto_settings = get_or_create_auto_settings(db)
+    conversion_equality_pct = float(
+        getattr(auto_settings, "conversion_equality_pct", 10.0) or 10.0
+    )
 
     try:
         await bot_engine._refresh_btc_spot()
@@ -1509,6 +1513,19 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "settling_ends_at": settling["settling_ends_at"],
             "settling_minutes_left": settling["settling_minutes_left"],
             "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
+            "in_conversion_mode": bool(
+                getattr(state.trade, "in_conversion_mode", False)
+            ),
+            "conversion_hedge_symbol": getattr(
+                state.trade, "conversion_hedge_symbol", None
+            ),
+            "conversion_hedge_entry_price": float(
+                getattr(state.trade, "conversion_hedge_entry_price", 0) or 0
+            ),
+            "conversion_triggered_leg": getattr(
+                state.trade, "conversion_triggered_leg", None
+            ),
+            "conversion_equality_pct": conversion_equality_pct,
             **plan,
             # Always last — never overwritten by plan
             "slippage_pct": float(slip_fields["slippage_pct"]),
@@ -1779,21 +1796,48 @@ async def exit_trade(
             )
             .first()
         )
-        # Allow one-legged emergency exit
+        # Allow one-legged emergency exit (may still have open hedge)
         if call_leg is None and put_leg is None:
-            # Close any orphan open legs + mark trade closed
-            orphans = (
+            leftovers = (
                 db.query(Leg)
                 .filter(Leg.trade_id == trade_id, Leg.status == "open")
                 .all()
             )
-            for orphan in orphans:
-                orphan.status = "closed"
-                orphan.exit_time = get_ist_now()
-                orphan.exit_premium = float(orphan.exit_premium or 0.0)
+            for leftover in leftovers:
+                is_long = bool(getattr(leftover, "is_long", False)) or str(
+                    leftover.leg_type or ""
+                ).startswith("hedge")
+                exit_px = float(leftover.exit_premium or 0.0)
+                try:
+                    if is_long:
+                        res = await bot_engine.order_executor.close_long_position(
+                            product_id=int(leftover.product_id),
+                            quantity=int(leftover.quantity),
+                            delta_client=client,
+                            symbol_for_fallback=str(leftover.symbol),
+                        )
+                    else:
+                        res = await bot_engine.order_executor.close_leg(
+                            leftover, client
+                        )
+                    if res.success:
+                        exit_px = float(res.filled_price or 0)
+                except Exception as exc:
+                    logger.warning(
+                        "Emergency leftover close failed %s: %s",
+                        leftover.symbol,
+                        exc,
+                    )
+                leftover.status = "closed"
+                leftover.exit_time = get_ist_now()
+                leftover.exit_premium = exit_px
             trade.status = TradeStatus.EMERGENCY_CLOSED.value
             trade.exit_time = get_ist_now()
             trade.exit_reason = reason
+            trade.in_conversion_mode = False
+            trade.conversion_hedge_symbol = None
+            trade.conversion_hedge_product_id = None
+            trade.conversion_hedge_entry_price = None
             db.commit()
             bot_engine.position_tracker.mark_closed(trade_id)
             return {
@@ -1801,7 +1845,7 @@ async def exit_trade(
                 "final_pnl": trade.realized_pnl,
                 "call_closed_at": None,
                 "put_closed_at": None,
-                "message": "No open legs — trade marked closed",
+                "message": "No open short legs — leftovers closed",
             }
 
         call_exists = False
@@ -1816,6 +1860,22 @@ async def exit_trade(
             trade_id,
             call_exists,
             put_exists,
+        )
+
+        hedge_leg = (
+            db.query(Leg)
+            .filter(
+                Leg.trade_id == trade_id,
+                Leg.status == "open",
+                Leg.is_bot_managed.is_(True),
+                Leg.is_long.is_(True),
+            )
+            .first()
+        )
+        hedge_pid = (
+            int(hedge_leg.product_id)
+            if hedge_leg is not None
+            else getattr(trade, "conversion_hedge_product_id", None)
         )
 
         # Mirror exit to slaves before closing master legs (need product_ids)
@@ -1833,6 +1893,9 @@ async def exit_trade(
                             (put_leg.product_id if put_leg else 0) or 0
                         ),
                         reason=reason,
+                        hedge_product_id=(
+                            int(hedge_pid) if hedge_pid else None
+                        ),
                     )
                 )
                 logger.info("Mirror exit queued for trade %s (fallback path)", trade_id)
@@ -1859,6 +1922,35 @@ async def exit_trade(
         elif put_leg is not None:
             logger.warning("Emergency exit: put not on Delta, skipping close")
 
+        # Close tracked long hedge with SELL
+        if hedge_leg is not None:
+            try:
+                hedge_exists = await client.verify_position_exists(
+                    int(hedge_leg.product_id)
+                )
+            except Exception:
+                hedge_exists = True
+            if hedge_exists:
+                hedge_close = await bot_engine.order_executor.close_long_position(
+                    product_id=int(hedge_leg.product_id),
+                    quantity=int(hedge_leg.quantity),
+                    delta_client=client,
+                    symbol_for_fallback=str(hedge_leg.symbol),
+                )
+                if hedge_close.success:
+                    hedge_leg.status = "closed"
+                    hedge_leg.exit_time = datetime.now(timezone.utc)
+                    hedge_leg.exit_premium = float(hedge_close.filled_price or 0)
+                else:
+                    logger.critical(
+                        "Exit hedge failed trade=%s: %s",
+                        trade_id,
+                        hedge_close.error,
+                    )
+            else:
+                hedge_leg.status = "closed"
+                hedge_leg.exit_time = get_ist_now()
+
         now_utc = datetime.now(timezone.utc)
         if call_leg is not None:
             call_leg.status = "closed"
@@ -1884,20 +1976,29 @@ async def exit_trade(
             elif not put_exists:
                 put_leg.exit_premium = float(put_leg.exit_premium or 0.0)
 
-        # Close ALL remaining open legs (orphans)
+        # True orphans only — hedge_call/hedge_put are tracked basket legs
+        tracked_types = {"call", "put", "hedge_call", "hedge_put"}
         remaining = (
             db.query(Leg)
             .filter(Leg.trade_id == trade_id, Leg.status == "open")
             .all()
         )
-        for orphan in remaining:
-            logger.warning(
-                "[EXIT_CLEANUP] Closing orphan leg %s on emergency exit",
-                orphan.symbol,
-            )
-            orphan.status = "closed"
-            orphan.exit_time = get_ist_now()
-            orphan.exit_premium = float(orphan.exit_premium or 0.0)
+        for leftover in remaining:
+            lt = str(leftover.leg_type or "").lower()
+            if lt in tracked_types:
+                logger.info(
+                    "[EXIT_CLEANUP] Booking leftover tracked leg %s (%s)",
+                    leftover.symbol,
+                    leftover.leg_type,
+                )
+            else:
+                logger.warning(
+                    "[EXIT_CLEANUP] Closing untracked orphan leg %s",
+                    leftover.symbol,
+                )
+            leftover.status = "closed"
+            leftover.exit_time = get_ist_now()
+            leftover.exit_premium = float(leftover.exit_premium or 0.0)
 
         call_ok = (
             call_leg is None
@@ -1914,6 +2015,12 @@ async def exit_trade(
             trade.status = TradeStatus.EMERGENCY_CLOSED.value
             trade.exit_time = get_ist_now()
             trade.exit_reason = reason
+            trade.in_conversion_mode = False
+            trade.conversion_hedge_symbol = None
+            trade.conversion_hedge_product_id = None
+            trade.conversion_hedge_entry_price = None
+            trade.conversion_hedge_order_id = None
+            trade.conversion_triggered_leg = None
             if trade.realized_pnl is None:
                 trade.realized_pnl = 0.0
             db.commit()

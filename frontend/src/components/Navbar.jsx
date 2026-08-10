@@ -150,6 +150,13 @@ export default function Navbar() {
         Logs
       </NavLink>
       <NavLink
+        to="/backtest"
+        className={linkClass}
+        onClick={() => setMenuOpen(false)}
+      >
+        Backtest
+      </NavLink>
+      <NavLink
         to="/accounts"
         className={linkClass}
         onClick={() => setMenuOpen(false)}

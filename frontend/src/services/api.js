@@ -328,3 +328,101 @@ export const getSlaveOverview = async () => {
     throw new Error(extractError(err, 'Failed to fetch slave overview'))
   }
 }
+
+export const runBacktest = async (payload) => {
+  try {
+    const res = await api.post('/api/backtest/run', payload, {
+      timeout: 600000, // 10 min — large CSVs + multi-day sims
+    })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Backtest failed'))
+  }
+}
+
+/**
+ * Stream local-disk backtest progress (NDJSON).
+ * onEvent({type, ...}) called for each line; returns final {summary, days}.
+ */
+export const runBacktestLocal = async (payload, onEvent) => {
+  const base = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+  const res = await fetch(`${base}/api/backtest/run-local`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    let detail = `Backtest failed (${res.status})`
+    try {
+      const body = await res.json()
+      if (typeof body?.detail === 'string') detail = body.detail
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(detail)
+  }
+  if (!res.body) {
+    throw new Error('No response body from backtest server')
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finalResult = null
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let msg
+      try {
+        msg = JSON.parse(trimmed)
+      } catch {
+        continue
+      }
+      if (typeof onEvent === 'function') onEvent(msg)
+      if (msg.type === 'complete') {
+        finalResult = { summary: msg.summary, days: msg.days }
+      } else if (msg.type === 'error') {
+        throw new Error(msg.message || 'Backtest failed')
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    try {
+      const msg = JSON.parse(buffer.trim())
+      if (typeof onEvent === 'function') onEvent(msg)
+      if (msg.type === 'complete') {
+        finalResult = { summary: msg.summary, days: msg.days }
+      } else if (msg.type === 'error') {
+        throw new Error(msg.message || 'Backtest failed')
+      }
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        // ignore incomplete trailing junk
+      } else {
+        throw err
+      }
+    }
+  }
+
+  if (!finalResult) {
+    throw new Error('Backtest finished without results')
+  }
+  return finalResult
+}
+
+export const getBacktestStatus = async () => {
+  try {
+    const res = await api.get('/api/backtest/status')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch backtest status'))
+  }
+}

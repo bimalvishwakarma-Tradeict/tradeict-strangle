@@ -198,6 +198,15 @@ def _migrate_schema() -> None:
                 conn.execute(
                     text("ALTER TABLE legs ADD COLUMN sl_trigger_price FLOAT")
                 )
+        leg_cols = {col["name"] for col in inspector.get_columns("legs")}
+        if "is_long" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE legs ADD COLUMN "
+                        "is_long BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
     if "trades" in tables:
         trade_cols = {col["name"] for col in inspector.get_columns("trades")}
         if "universal_sl_pct" not in trade_cols:

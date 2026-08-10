@@ -54,15 +54,22 @@ def book_leg_close(
     exit_order_id: str | None = None,
 ) -> float:
     """Mark leg closed and add realized USD to leg + trade. Returns leg realized."""
+    from backend.config import OPTIONS_CONTRACT_VALUE
+
     now = exit_time or datetime.now(timezone.utc)
     exit_px = float(exit_premium or 0.0)
     entry_px = float(leg.initial_premium or 0.0)
-    qty = int(leg.quantity or 0)
-    realized = short_leg_realized_pnl(
-        entry_fill=entry_px,
-        exit_fill=exit_px,
-        quantity=qty,
-    )
+    qty = abs(int(leg.quantity or 0))
+    cv = float(OPTIONS_CONTRACT_VALUE)
+    if bool(getattr(leg, "is_long", False)):
+        # Long hedge: profit = (sell_exit - buy_entry) * qty * cv
+        realized = (exit_px - entry_px) * qty * cv
+    else:
+        realized = short_leg_realized_pnl(
+            entry_fill=entry_px,
+            exit_fill=exit_px,
+            quantity=qty,
+        )
     leg.status = "closed"
     leg.exit_time = now
     leg.exit_premium = exit_px
@@ -232,10 +239,18 @@ async def reconcile_open_legs_with_delta(
         if not flat_legs:
             continue
 
-        # Two open in DB, exactly one flat on Delta → naked risk (do not leave half-open)
-        if len(open_legs) >= 2 and len(flat_legs) == 1 and len(live_legs) == 1:
-            missing = flat_legs[0]
-            remaining = live_legs[0]
+        # AUDIT-6: naked-risk uses short call/put only — hedge_* is an extra long
+        def _is_short_leg(leg: Any) -> bool:
+            return str(getattr(leg, "leg_type", "") or "").lower() in ("call", "put")
+
+        short_open = [leg for leg in open_legs if _is_short_leg(leg)]
+        short_flat = [leg for leg in flat_legs if _is_short_leg(leg)]
+        short_live = [leg for leg in live_legs if _is_short_leg(leg)]
+
+        # Two open shorts in DB, exactly one flat on Delta → naked risk
+        if len(short_open) >= 2 and len(short_flat) == 1 and len(short_live) == 1:
+            missing = short_flat[0]
+            remaining = short_live[0]
             naked_risk.append(
                 {
                     "trade_id": int(trade.id),
@@ -251,7 +266,7 @@ async def reconcile_open_legs_with_delta(
             )
             continue
 
-        # All open legs flat (or single remaining open leg flat) → book closes + cancel SLs
+        # All flat tracked legs (shorts + hedge) → book closes + cancel SLs
         changed = False
         for leg in flat_legs:
             pid = int(leg.product_id or 0)

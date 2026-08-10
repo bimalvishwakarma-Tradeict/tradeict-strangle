@@ -6,6 +6,7 @@ import Toast from './components/ui/Toast'
 import { useWebSocket } from './hooks/useWebSocket'
 import AutoTrade from './pages/AutoTrade'
 import Accounts from './pages/Accounts'
+import Backtest from './pages/Backtest'
 import Dashboard from './pages/Dashboard'
 import Logs from './pages/Logs'
 import TradeInitiator from './pages/TradeInitiator'
@@ -67,6 +68,7 @@ export default function App() {
             <Route path="/new-trade" element={<TradeInitiator />} />
             <Route path="/auto-trade" element={<AutoTrade />} />
             <Route path="/logs" element={<Logs />} />
+            <Route path="/backtest" element={<Backtest />} />
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/" replace />} />

@@ -110,7 +110,8 @@ class Leg(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(Integer, ForeignKey("trades.id"), nullable=False)
-    leg_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    # 'call' | 'put' | 'hedge_call' | 'hedge_put'
+    leg_type: Mapped[str] = mapped_column(String(20), nullable=False)
     strike: Mapped[float] = mapped_column(Float, nullable=False)
     symbol: Mapped[str] = mapped_column(String(100), nullable=False)
     product_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -142,6 +143,9 @@ class Leg(Base):
     exit_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # BOT TRADE ISOLATION: True = bot-placed; never manage manual account positions
     is_bot_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # True = we BOUGHT this leg (hedge); False = we SOLD (normal short option)
+    # leg_type: 'call' | 'put' | 'hedge_call' | 'hedge_put'
+    is_long: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     trade: Mapped[Trade] = relationship("Trade", back_populates="legs")
 

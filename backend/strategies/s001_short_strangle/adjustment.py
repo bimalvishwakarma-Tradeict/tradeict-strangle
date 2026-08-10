@@ -445,11 +445,41 @@ class AdjustmentExecutor:
                     entry_time=now_utc,
                     status="open",
                     is_bot_managed=True,
+                    is_long=False,
                     delta_order_id=str(new_other_result.order_id or ""),
                 )
                 db_session.add(new_other_leg)
 
-                # Save conversion state to Trade
+                # Hedge is a first-class basket leg (long) — store in Leg table
+                hedge_leg_type = (
+                    "hedge_put"
+                    if str(triggered_leg_type).lower() == "put"
+                    else "hedge_call"
+                )
+                hedge_leg_row = Leg(
+                    trade_id=int(trade.id),
+                    leg_type=hedge_leg_type,
+                    strike=float(hedge_plan.new_strike),
+                    symbol=str(hedge_plan.new_symbol),
+                    product_id=int(hedge_plan.new_product_id),
+                    initial_premium=hedge_fill,
+                    trigger_baseline_premium=hedge_fill,
+                    trigger_premium=hedge_fill,
+                    quantity=int(triggered_leg.quantity),
+                    entry_time=now_utc,
+                    status="open",
+                    is_bot_managed=True,
+                    is_long=True,
+                    delta_order_id=str(hedge_result.order_id or ""),
+                    entry_fee_usd=(
+                        abs(float(hedge_result.commission))
+                        if getattr(hedge_result, "commission", None) is not None
+                        else None
+                    ),
+                )
+                db_session.add(hedge_leg_row)
+
+                # Conversion fields kept for backward compat + quick lookup
                 trade.in_conversion_mode = True
                 trade.conversion_hedge_product_id = int(hedge_plan.new_product_id)
                 trade.conversion_hedge_order_id = str(hedge_result.order_id or "")
@@ -466,6 +496,8 @@ class AdjustmentExecutor:
                         "triggered_leg": triggered_leg_type,
                         "hedge_symbol": hedge_plan.new_symbol,
                         "hedge_fill": round(hedge_fill, 2),
+                        "hedge_leg_id": int(hedge_leg_row.id),
+                        "hedge_leg_type": hedge_leg_type,
                         "old_other_leg": other_leg.leg_type,
                         "old_other_premium": round(other_premium, 2),
                         "new_other_symbol": new_other_plan.new_symbol,
@@ -473,6 +505,31 @@ class AdjustmentExecutor:
                         "target_new_other_premium": round(new_other_target, 2),
                     },
                 )
+
+                # AUDIT-7: mirror hedge buy + other-leg replace to slaves
+                try:
+                    import backend.engine.mirror_engine as mirror_module
+
+                    if mirror_module.mirror_engine is not None:
+                        asyncio.create_task(
+                            mirror_module.mirror_engine.mirror_conversion(
+                                master_trade_id=int(trade.id),
+                                hedge_product_id=int(hedge_plan.new_product_id),
+                                hedge_symbol=str(hedge_plan.new_symbol),
+                                old_other_product_id=int(other_leg.product_id),
+                                new_other_product_id=int(
+                                    new_other_plan.new_product_id
+                                ),
+                                new_other_symbol=str(new_other_plan.new_symbol),
+                                new_other_strike=float(new_other_plan.new_strike),
+                                other_leg_type=str(other_leg.leg_type),
+                                master_qty=int(triggered_leg.quantity),
+                            )
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Mirror conversion queue failed (non-fatal): %s", exc
+                    )
 
                 return AdjustmentResult(
                     success=True,

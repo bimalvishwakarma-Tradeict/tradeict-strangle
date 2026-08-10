@@ -28,7 +28,7 @@ from backend.config import (
     TradeStatus,
 )
 from backend.core.bot_logger import log_and_buffer
-from backend.core.delta_client import DeltaClient, compute_signed_upnl
+from backend.core.delta_client import DeltaClient
 from backend.core.delta_ws import DeltaWebSocket
 from backend.core.encryption import decrypt
 from backend.core.time_utils import (
@@ -485,6 +485,7 @@ class BotEngine:
             )
             return "ok"
 
+        # AUDIT-6: only short call/put count toward integrity (ignore hedge_*)
         with self.db_factory() as db:
             open_leg_count = (
                 db.query(Leg)
@@ -492,13 +493,14 @@ class BotEngine:
                     Leg.trade_id == trade_id,
                     Leg.status == "open",
                     Leg.is_bot_managed.is_(True),
+                    Leg.leg_type.in_(("call", "put")),
                 )
                 .count()
             )
 
         if open_leg_count < 2:
             logger.warning(
-                "Trade %s has only %s open leg(s) in DB. "
+                "Trade %s has only %s open short leg(s) in DB. "
                 "Partial adjustment state — skipping integrity check.",
                 trade_id,
                 open_leg_count,
@@ -926,23 +928,49 @@ class BotEngine:
                         remaining_leg.exit_time = now_utc
                         remaining_leg.exit_premium = 0.0
 
-            # Close any other orphan open legs
+            # Close any other open legs (incl. tracked hedge — not treated as orphan)
             other_open = (
                 db.query(Leg)
                 .filter(Leg.trade_id == trade_id, Leg.status == "open")
                 .all()
             )
-            for orphan in other_open:
+            for leftover in other_open:
+                is_long = bool(getattr(leftover, "is_long", False)) or str(
+                    getattr(leftover, "leg_type", "")
+                ).startswith("hedge")
+                exit_px = 0.0
+                if self.delta_client is not None:
+                    try:
+                        if is_long:
+                            close_res = await self.order_executor.close_long_position(
+                                product_id=int(leftover.product_id),
+                                quantity=int(leftover.quantity),
+                                delta_client=self.delta_client,
+                                symbol_for_fallback=str(leftover.symbol),
+                            )
+                        else:
+                            close_res = await self.order_executor.close_leg(
+                                leftover, self.delta_client
+                            )
+                        if close_res.success:
+                            exit_px = float(close_res.filled_price or 0)
+                    except Exception as exc:
+                        logger.warning(
+                            "Emergency leftover close failed %s: %s",
+                            leftover.symbol,
+                            exc,
+                        )
                 if trade is not None:
                     book_leg_close(
-                        leg=orphan,
+                        leg=leftover,
                         trade=trade,
-                        exit_premium=0.0,
+                        exit_premium=exit_px,
                         exit_time=now_utc,
                     )
                 else:
-                    orphan.status = "closed"
-                    orphan.exit_time = get_ist_now()
+                    leftover.status = "closed"
+                    leftover.exit_time = get_ist_now()
+                    leftover.exit_premium = exit_px
 
             if trade is not None:
                 trade.status = TradeStatus.CLOSED.value
@@ -1111,54 +1139,80 @@ class BotEngine:
             },
         )
 
-        # Step 1–2: Delta UPL @offer (never API unrealized_pnl — that field is wrong)
+        # Step 1–2: Delta UPL @offer for ALL open legs (shorts + long hedge)
         call_mtm = 0.0
         put_mtm = 0.0
+        hedge_upnl = 0.0
         delta_upnl = 0.0
         mtm_available = False
         realized = float(getattr(trade, "realized_pnl", None) or 0.0)
         call_offer = call_premium
         put_offer = put_premium
+
+        with self.db_factory() as _db_legs:
+            all_open_legs = (
+                _db_legs.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_id,
+                    Leg.status == "open",
+                    Leg.is_bot_managed.is_(True),
+                )
+                .all()
+            )
+            # Detach so objects remain usable after session closes
+            for _leg in all_open_legs:
+                _db_legs.expunge(_leg)
+
         try:
-            pids: list[int] = []
-            if call_open and int(call_leg.product_id) > 0:
-                pids.append(int(call_leg.product_id))
-            if put_open and int(put_leg.product_id) > 0:
-                pids.append(int(put_leg.product_id))
+            pids: list[int] = [
+                int(leg.product_id)
+                for leg in all_open_legs
+                if int(getattr(leg, "product_id", 0) or 0) > 0
+            ]
             if pids:
                 upnl_data = await self.delta_client.get_positions_upnl(pids)
-                call_pid = int(call_leg.product_id)
-                put_pid = int(put_leg.product_id)
-                call_row = upnl_data.get(call_pid) or {}
-                put_row = upnl_data.get(put_pid) or {}
-                if call_open and call_row:
-                    call_mtm = float(call_row.get("upnl") or 0.0)
-                    if float(call_row.get("best_offer") or 0) > 0:
-                        call_offer = float(call_row["best_offer"])
-                        call_premium = call_offer
-                if put_open and put_row:
-                    put_mtm = float(put_row.get("upnl") or 0.0)
-                    if float(put_row.get("best_offer") or 0) > 0:
-                        put_offer = float(put_row["best_offer"])
-                        put_premium = put_offer
-                if (call_open and call_pid in upnl_data) or (
-                    put_open and put_pid in upnl_data
-                ):
-                    delta_upnl = call_mtm + put_mtm
+                any_hit = False
+                for leg in all_open_legs:
+                    pid = int(leg.product_id)
+                    row = upnl_data.get(pid) or {}
+                    if pid not in upnl_data:
+                        continue
+                    any_hit = True
+                    leg_upnl = float(row.get("upnl") or 0.0)
+                    delta_upnl += leg_upnl
+                    lt = str(leg.leg_type or "").lower()
+                    best = float(row.get("best_offer") or 0)
+                    if lt == "call":
+                        call_mtm = leg_upnl
+                        if best > 0:
+                            call_offer = best
+                            call_premium = call_offer
+                            self._live_prices[str(leg.symbol)] = call_premium
+                    elif lt == "put":
+                        put_mtm = leg_upnl
+                        if best > 0:
+                            put_offer = best
+                            put_premium = put_offer
+                            self._live_prices[str(leg.symbol)] = put_premium
+                    elif bool(getattr(leg, "is_long", False)) or lt.startswith(
+                        "hedge"
+                    ):
+                        hedge_upnl = leg_upnl
+                        if best > 0:
+                            self._live_prices[str(leg.symbol)] = best
+
+                if any_hit:
                     self.position_tracker.update_delta_mtm(trade_id, delta_upnl)
-                    # Keep live cache on Best Offer (not mark)
-                    if call_open:
-                        self._live_prices[str(call_leg.symbol)] = call_premium
-                    if put_open:
-                        self._live_prices[str(put_leg.symbol)] = put_premium
                     mtm_available = True
                     logger.info(
                         "Trade %s P&L: call_upnl=%.4f put_upnl=%.4f "
-                        "delta_upnl=%.4f realized=%.4f total=%.4f "
-                        "call_offer=%.2f put_offer=%.2f target=%s sl=%s",
+                        "hedge_upnl=%.4f delta_upnl=%.4f realized=%.4f "
+                        "total=%.4f call_offer=%.2f put_offer=%.2f "
+                        "target=%s sl=%s",
                         trade_id,
                         call_mtm,
                         put_mtm,
+                        hedge_upnl,
                         delta_upnl,
                         realized,
                         realized + delta_upnl,
@@ -1185,23 +1239,51 @@ class BotEngine:
                 {"stage": "mtm_fetch", "error": str(exc)},
             )
 
-        # Fallback unrealized = UPL @ our Best Offer premiums
+        # Fallback: compute UPNL for every open leg (short vs long)
         if not mtm_available:
-            if call_open:
-                call_mtm = compute_signed_upnl(
-                    float(call_leg.initial_premium),
-                    call_premium,
-                    size=-abs(int(call_leg.quantity)),
-                    contract_value=OPTIONS_CONTRACT_VALUE,
+            delta_upnl = 0.0
+            hedge_upnl = 0.0
+            call_mtm = 0.0
+            put_mtm = 0.0
+            for leg in all_open_legs:
+                lt = str(leg.leg_type or "").lower()
+                is_long = bool(getattr(leg, "is_long", False)) or lt.startswith(
+                    "hedge"
                 )
-            if put_open:
-                put_mtm = compute_signed_upnl(
-                    float(put_leg.initial_premium),
-                    put_premium,
-                    size=-abs(int(put_leg.quantity)),
-                    contract_value=OPTIONS_CONTRACT_VALUE,
-                )
-            delta_upnl = call_mtm + put_mtm
+                try:
+                    if is_long:
+                        px = float(
+                            await self.delta_client.get_long_exit_price(
+                                str(leg.symbol)
+                            )
+                            or 0
+                        )
+                    else:
+                        px = float(
+                            await self.delta_client.get_short_exit_price(
+                                str(leg.symbol)
+                            )
+                            or 0
+                        )
+                except Exception:
+                    px = 0.0
+                if px <= 0:
+                    px = float(leg.initial_premium or 0)
+                entry = float(leg.initial_premium or 0)
+                qty = abs(int(leg.quantity or 0))
+                if is_long:
+                    leg_upnl = (px - entry) * qty * float(OPTIONS_CONTRACT_VALUE)
+                else:
+                    leg_upnl = (entry - px) * qty * float(OPTIONS_CONTRACT_VALUE)
+                delta_upnl += leg_upnl
+                if lt == "call":
+                    call_mtm = leg_upnl
+                    call_premium = px
+                elif lt == "put":
+                    put_mtm = leg_upnl
+                    put_premium = px
+                elif is_long:
+                    hedge_upnl = leg_upnl
 
         total_pnl = realized + delta_upnl
         target = float(getattr(trade, "profit_target_usd", 0) or 0)
@@ -1233,11 +1315,17 @@ class BotEngine:
             for leg in legs:
                 if str(getattr(leg, "status", "") or "").lower() != "open":
                     continue
-                offer = (
-                    float(call_premium)
-                    if str(leg.leg_type).lower() == "call"
-                    else float(put_premium)
-                )
+                lt = str(leg.leg_type or "").lower()
+                if lt == "call":
+                    offer = float(call_premium)
+                elif lt == "put":
+                    offer = float(put_premium)
+                else:
+                    offer = float(
+                        self._live_prices.get(str(leg.symbol), 0)
+                        or leg.initial_premium
+                        or 0
+                    )
                 if offer > 0 and btc > 0:
                     est_exit += estimate_option_trading_fee(
                         option_price=offer,
@@ -1254,32 +1342,31 @@ class BotEngine:
         net_mtm_val = float(slip_fields["net_mtm"])
         slippage_amount = float(slip_fields["slippage_amount"])
 
-        log_and_buffer(
-            "PNL_CHECK",
-            trade_id,
-            {
-                "realized_pnl": round(realized, 4),
-                "delta_upnl": round(delta_upnl, 4),
-                "call_upnl": round(call_mtm, 4),
-                "put_upnl": round(put_mtm, 4),
-                "gross_mtm": round(total_pnl, 4),
-                "fees_paid": round(fees_paid, 4),
-                "est_exit_fees": round(est_exit, 4),
-                "slippage_pct": slip_pct,
-                "slippage_amount": round(slippage_amount, 4),
-                "net_mtm": round(net_mtm_val, 4),
-                "total_pnl": round(total_pnl, 4),
-                "profit_target": target,
-                "stoploss": stoploss,
-                "pnl_pct": round(pnl_pct, 1),
-                "will_exit_profit": net_mtm_val >= target if target else False,
-                "will_exit_stoploss": (
-                    net_mtm_val <= -stoploss if stoploss else False
-                ),
-                "mtm_source": "delta_position" if mtm_available else "computed_fallback",
-                "contract_value": OPTIONS_CONTRACT_VALUE,
-            },
-        )
+        pnl_log: dict[str, Any] = {
+            "realized_pnl": round(realized, 4),
+            "delta_upnl": round(delta_upnl, 4),
+            "call_upnl": round(call_mtm, 4),
+            "put_upnl": round(put_mtm, 4),
+            "gross_mtm": round(total_pnl, 4),
+            "fees_paid": round(fees_paid, 4),
+            "est_exit_fees": round(est_exit, 4),
+            "slippage_pct": slip_pct,
+            "slippage_amount": round(slippage_amount, 4),
+            "net_mtm": round(net_mtm_val, 4),
+            "total_pnl": round(total_pnl, 4),
+            "profit_target": target,
+            "stoploss": stoploss,
+            "pnl_pct": round(pnl_pct, 1),
+            "will_exit_profit": net_mtm_val >= target if target else False,
+            "will_exit_stoploss": (
+                net_mtm_val <= -stoploss if stoploss else False
+            ),
+            "mtm_source": "delta_position" if mtm_available else "computed_fallback",
+            "contract_value": OPTIONS_CONTRACT_VALUE,
+        }
+        if bool(getattr(trade, "in_conversion_mode", False)):
+            pnl_log["hedge_upnl"] = round(hedge_upnl, 4)
+        log_and_buffer("PNL_CHECK", trade_id, pnl_log)
 
         with self.db_factory() as db:
             call_trig_pct = float(
@@ -1560,45 +1647,81 @@ class BotEngine:
             )
         assert self.delta_client is not None
 
-        call_open = str(getattr(call_leg_mem, "status", "open")).lower() == "open"
-        put_open = str(getattr(put_leg_mem, "status", "open")).lower() == "open"
+        from backend.core.delta_sl import cancel_leg_sl_order
+        from backend.engine.trade_reconcile import book_leg_close
 
-        # Step 1: Verify positions on Delta BEFORE closing
-        call_exists = False
-        put_exists = False
-        if call_open and int(getattr(call_leg_mem, "product_id", 0) or 0) > 0:
-            call_exists = await self.delta_client.verify_position_exists(
-                int(call_leg_mem.product_id)
+        # Load ALL open bot-managed legs (call, put, AND hedge)
+        with self.db_factory() as db:
+            all_open_legs = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_id,
+                    Leg.status == "open",
+                    Leg.is_bot_managed.is_(True),
+                )
+                .all()
             )
-        if put_open and int(getattr(put_leg_mem, "product_id", 0) or 0) > 0:
-            put_exists = await self.delta_client.verify_position_exists(
-                int(put_leg_mem.product_id)
-            )
+            for leg in all_open_legs:
+                db.expunge(leg)
+
+        hedge_pid = None
+        for leg in all_open_legs:
+            if bool(getattr(leg, "is_long", False)) or str(
+                getattr(leg, "leg_type", "")
+            ).startswith("hedge"):
+                hedge_pid = int(leg.product_id or 0) or None
+                break
+        if hedge_pid is None:
+            hedge_pid = getattr(trade, "conversion_hedge_product_id", None)
+
+        # Step 1: Verify each open leg on Delta
+        exists_map: dict[int, bool] = {}
+        for leg in all_open_legs:
+            pid = int(getattr(leg, "product_id", 0) or 0)
+            if pid <= 0:
+                exists_map[int(leg.id)] = False
+                continue
+            try:
+                exists_map[int(leg.id)] = await self.delta_client.verify_position_exists(
+                    pid
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[EXIT_VERIFY] verify failed for %s: %s — assume exists",
+                    leg.symbol,
+                    exc,
+                )
+                exists_map[int(leg.id)] = True
+
         logger.info(
-            "[EXIT_VERIFY] Pre-exit Delta check: call_exists=%s put_exists=%s "
-            "(call_open=%s put_open=%s)",
-            call_exists,
-            put_exists,
-            call_open,
-            put_open,
+            "[EXIT_VERIFY] Pre-exit: %s",
+            {
+                str(leg.leg_type): exists_map.get(int(leg.id), False)
+                for leg in all_open_legs
+            },
         )
         log_and_buffer(
             "EXIT_VERIFY",
             trade_id,
             {
                 "stage": "pre_exit",
-                "call_exists": call_exists,
-                "put_exists": put_exists,
-                "call_open": call_open,
-                "put_open": put_open,
+                "legs": [
+                    {
+                        "leg": str(leg.leg_type),
+                        "symbol": str(leg.symbol),
+                        "is_long": bool(getattr(leg, "is_long", False)),
+                        "exists": exists_map.get(int(leg.id), False),
+                    }
+                    for leg in all_open_legs
+                ],
             },
         )
 
-        # Step 2: Cancel legacy separate SL orders
-        from backend.core.delta_sl import cancel_leg_sl_order
-
+        # Step 2: Cancel legacy separate SL orders on short legs
         with self.db_factory() as db:
-            for leg_mem in (call_leg_mem, put_leg_mem):
+            for leg_mem in all_open_legs:
+                if bool(getattr(leg_mem, "is_long", False)):
+                    continue
                 leg_db = db.query(Leg).filter(Leg.id == leg_mem.id).first()
                 if leg_db is None:
                     continue
@@ -1615,7 +1738,7 @@ class BotEngine:
                         logger.warning("SL cancel failed (non-fatal): %s", exc)
             db.commit()
 
-        # Step 3: Mirror exit to slaves BEFORE closing master
+        # Step 3: Mirror exit to slaves BEFORE closing master (incl. hedge)
         try:
             import backend.engine.mirror_engine as mirror_module
 
@@ -1626,142 +1749,130 @@ class BotEngine:
                         call_product_id=int(call_leg_mem.product_id or 0),
                         put_product_id=int(put_leg_mem.product_id or 0),
                         reason=reason,
+                        hedge_product_id=(
+                            int(hedge_pid) if hedge_pid else None
+                        ),
                     )
                 )
                 logger.info("Mirror exit queued for trade %s", trade_id)
         except Exception as exc:
             logger.warning("Mirror exit queue failed (non-fatal): %s", exc)
 
-        # Step 4: Close positions on Delta (only if present)
-        call_close = None
-        put_close = None
-        if call_open and call_exists:
-            call_close = await self.order_executor.close_leg(
-                call_leg_mem, self.delta_client
-            )
-            if call_close.success:
-                logger.info(
-                    "[EXIT_CLOSE] Call closed @ %s",
-                    call_close.filled_price,
+        # Step 4: Close ALL open legs on Delta (short=BUY, long hedge=SELL)
+        close_results: dict[int, Any] = {}
+        hard_fail = False
+        for leg in all_open_legs:
+            leg_id = int(leg.id)
+            is_long = bool(getattr(leg, "is_long", False)) or str(
+                getattr(leg, "leg_type", "")
+            ).startswith("hedge")
+            fill_label = "hedge" if is_long else str(leg.leg_type)
+            on_delta = exists_map.get(leg_id, False)
+
+            if not on_delta:
+                logger.warning(
+                    "[EXIT_CLOSE] %s not on Delta — skipping close", fill_label
                 )
                 log_and_buffer(
                     "EXIT_CLOSE",
                     trade_id,
                     {
-                        "leg": "call",
+                        "leg": fill_label,
                         "ok": True,
-                        "fill": float(call_close.filled_price or 0),
+                        "skipped": "not_on_delta",
+                        "is_long": is_long,
                     },
                 )
-            else:
-                logger.error(
-                    "[EXIT_CLOSE] Call close FAILED: %s", call_close.error
-                )
-                log_and_buffer(
-                    "EXIT_CLOSE",
-                    trade_id,
-                    {"leg": "call", "ok": False, "error": call_close.error},
-                )
-        elif call_open:
-            logger.warning(
-                "[EXIT_CLOSE] Call position not on Delta — skipping close"
-            )
-            log_and_buffer(
-                "EXIT_CLOSE",
-                trade_id,
-                {"leg": "call", "ok": True, "skipped": "not_on_delta"},
-            )
+                continue
 
-        if put_open and put_exists:
-            put_close = await self.order_executor.close_leg(
-                put_leg_mem, self.delta_client
-            )
-            if put_close.success:
+            if is_long:
+                close_result = await self.order_executor.close_long_position(
+                    product_id=int(leg.product_id),
+                    quantity=int(leg.quantity),
+                    delta_client=self.delta_client,
+                    symbol_for_fallback=str(leg.symbol),
+                )
+            else:
+                close_result = await self.order_executor.close_leg(
+                    leg, self.delta_client
+                )
+            close_results[leg_id] = close_result
+
+            if close_result.success:
                 logger.info(
-                    "[EXIT_CLOSE] Put closed @ %s",
-                    put_close.filled_price,
+                    "EXIT_CLOSE %s @ %.2f",
+                    fill_label,
+                    float(close_result.filled_price or 0),
                 )
                 log_and_buffer(
                     "EXIT_CLOSE",
                     trade_id,
                     {
-                        "leg": "put",
+                        "leg": fill_label,
                         "ok": True,
-                        "fill": float(put_close.filled_price or 0),
+                        "fill": float(close_result.filled_price or 0),
+                        "is_long": is_long,
                     },
                 )
             else:
                 logger.error(
-                    "[EXIT_CLOSE] Put close FAILED: %s", put_close.error
+                    "EXIT_CLOSE FAILED for %s: %s",
+                    leg.symbol,
+                    close_result.error,
                 )
                 log_and_buffer(
                     "EXIT_CLOSE",
                     trade_id,
-                    {"leg": "put", "ok": False, "error": put_close.error},
+                    {
+                        "leg": fill_label,
+                        "ok": False,
+                        "error": close_result.error,
+                        "is_long": is_long,
+                    },
                 )
-        elif put_open:
-            logger.warning(
-                "[EXIT_CLOSE] Put position not on Delta — skipping close"
-            )
-            log_and_buffer(
-                "EXIT_CLOSE",
-                trade_id,
-                {"leg": "put", "ok": True, "skipped": "not_on_delta"},
-            )
 
-        # Hard fail only if a close was attempted and failed AND position still open
-        call_fail = (
-            call_open
-            and call_exists
-            and call_close is not None
-            and not call_close.success
-        )
-        put_fail = (
-            put_open
-            and put_exists
-            and put_close is not None
-            and not put_close.success
-        )
-
-        # Step 5: Wait and verify positions are gone
+        # Step 5: Wait and verify closes
         await asyncio.sleep(2)
-        call_still = False
-        put_still = False
-        if call_open and call_exists:
-            call_still = await self.delta_client.verify_position_exists(
-                int(call_leg_mem.product_id)
-            )
-            if call_still:
-                logger.warning(
-                    "[EXIT_VERIFY] Call still visible on Delta after close!"
+        still_map: dict[str, bool] = {}
+        for leg in all_open_legs:
+            leg_id = int(leg.id)
+            if not exists_map.get(leg_id, False):
+                continue
+            res = close_results.get(leg_id)
+            if res is not None and not res.success:
+                still = await self.delta_client.verify_position_exists(
+                    int(leg.product_id)
                 )
-            else:
-                logger.info("[EXIT_VERIFY] Call position gone from Delta")
-        if put_open and put_exists:
-            put_still = await self.delta_client.verify_position_exists(
-                int(put_leg_mem.product_id)
-            )
-            if put_still:
-                logger.warning(
-                    "[EXIT_VERIFY] Put still visible on Delta after close!"
+                label = (
+                    "hedge"
+                    if bool(getattr(leg, "is_long", False))
+                    else str(leg.leg_type)
                 )
+                still_map[label] = still
+                if still:
+                    hard_fail = True
+                    logger.warning(
+                        "[EXIT_VERIFY] %s still visible on Delta after close!",
+                        label,
+                    )
             else:
-                logger.info("[EXIT_VERIFY] Put position gone from Delta")
+                label = (
+                    "hedge"
+                    if bool(getattr(leg, "is_long", False))
+                    else str(leg.leg_type)
+                )
+                still_map[label] = False
+
         log_and_buffer(
             "EXIT_VERIFY",
             trade_id,
-            {
-                "stage": "post_exit",
-                "call_still_open": call_still,
-                "put_still_open": put_still,
-            },
+            {"stage": "post_exit", "still_open": still_map},
         )
 
-        if (call_fail and call_still) or (put_fail and put_still):
+        if hard_fail:
             msg = (
                 f"Exit order failure trade={trade_id} "
-                f"call_fail={call_fail} put_fail={put_fail} "
-                f"call_still={call_still} put_still={put_still}"
+                f"still_open={still_map}"
             )
             logger.critical(msg)
             log_and_buffer(
@@ -1772,25 +1883,17 @@ class BotEngine:
             await self._push_error(trade_id, msg, requires_manual_action=True)
             return
 
-        # Step 6: Update DB — mark ALL legs closed, catch orphans
+        # Step 6: Update DB — book closes for all tracked legs
         status = self._status_for_reason(reason)
         now_utc = datetime.now(timezone.utc)
-        call_fill = float(
-            (call_close.filled_price if call_close and call_close.success else 0.0)
-            or 0.0
-        )
-        put_fill = float(
-            (put_close.filled_price if put_close and put_close.success else 0.0)
-            or 0.0
-        )
+        call_fill = 0.0
+        put_fill = 0.0
+        call_close = None
+        put_close = None
         final_pnl = pnl_now
 
         with self.db_factory() as db:
-            from backend.engine.trade_reconcile import book_leg_close
-
             trade_row = db.query(Trade).filter(Trade.id == trade_id).first()
-            call_leg = db.query(Leg).filter(Leg.id == call_leg_mem.id).first()
-            put_leg = db.query(Leg).filter(Leg.id == put_leg_mem.id).first()
             if trade_row is None:
                 logger.error("Exit DB trade row missing for trade %s", trade_id)
                 log_and_buffer(
@@ -1800,75 +1903,108 @@ class BotEngine:
                 )
                 return
 
-            if call_leg is not None and str(call_leg.status).lower() == "open":
-                exit_px = call_fill if (call_close and call_close.success) else 0.0
+            booked_ids: set[int] = set()
+            for leg_mem in all_open_legs:
+                leg_db = db.query(Leg).filter(Leg.id == leg_mem.id).first()
+                if leg_db is None or str(leg_db.status).lower() != "open":
+                    continue
+                res = close_results.get(int(leg_mem.id))
+                exit_px = float(
+                    (res.filled_price if res is not None and res.success else 0.0)
+                    or 0.0
+                )
                 book_leg_close(
-                    leg=call_leg,
+                    leg=leg_db,
                     trade=trade_row,
                     exit_premium=exit_px,
                     exit_time=now_utc,
                     exit_fee_usd=(
-                        float(call_close.commission)
-                        if call_close is not None and call_close.commission is not None
+                        float(res.commission)
+                        if res is not None and res.commission is not None
                         else None
                     ),
                     exit_order_id=(
-                        str(call_close.order_id)
-                        if call_close is not None and call_close.order_id is not None
+                        str(res.order_id)
+                        if res is not None and res.order_id is not None
                         else None
                     ),
                 )
-            if put_leg is not None and str(put_leg.status).lower() == "open":
-                exit_px = put_fill if (put_close and put_close.success) else 0.0
-                book_leg_close(
-                    leg=put_leg,
-                    trade=trade_row,
-                    exit_premium=exit_px,
-                    exit_time=now_utc,
-                    exit_fee_usd=(
-                        float(put_close.commission)
-                        if put_close is not None and put_close.commission is not None
-                        else None
-                    ),
-                    exit_order_id=(
-                        str(put_close.order_id)
-                        if put_close is not None and put_close.order_id is not None
-                        else None
-                    ),
-                )
+                booked_ids.add(int(leg_db.id))
+                lt = str(leg_db.leg_type or "").lower()
+                if lt == "call":
+                    call_fill = exit_px
+                    call_close = res
+                elif lt == "put":
+                    put_fill = exit_px
+                    put_close = res
 
+            # True orphans only — hedge_call/hedge_put are tracked, not orphans
+            tracked_types = {"call", "put", "hedge_call", "hedge_put"}
             remaining_open = (
                 db.query(Leg)
                 .filter(Leg.trade_id == trade_id, Leg.status == "open")
                 .all()
             )
-            if remaining_open:
+            true_orphans = [
+                leg
+                for leg in remaining_open
+                if int(leg.id) not in booked_ids
+                and str(leg.leg_type or "").lower() not in tracked_types
+            ]
+            # Any remaining tracked legs that failed to book (edge) — still close in DB
+            leftover_tracked = [
+                leg
+                for leg in remaining_open
+                if int(leg.id) not in booked_ids
+                and str(leg.leg_type or "").lower() in tracked_types
+            ]
+            if true_orphans:
                 logger.warning(
-                    "[EXIT_CLEANUP] Found %s additional open legs for "
-                    "trade %s. Closing them.",
-                    len(remaining_open),
+                    "[EXIT_CLEANUP] Found %s untracked orphan legs for "
+                    "trade %s: %s",
+                    len(true_orphans),
                     trade_id,
+                    [leg.symbol for leg in true_orphans],
                 )
                 log_and_buffer(
                     "EXIT_CLEANUP",
                     trade_id,
                     {
-                        "orphan_count": len(remaining_open),
-                        "symbols": [leg.symbol for leg in remaining_open],
+                        "orphan_count": len(true_orphans),
+                        "symbols": [leg.symbol for leg in true_orphans],
                     },
                 )
-                for orphan in remaining_open:
+                for orphan in true_orphans:
                     book_leg_close(
                         leg=orphan,
                         trade=trade_row,
                         exit_premium=float(orphan.exit_premium or 0.0),
                         exit_time=now_utc,
                     )
+            for leftover in leftover_tracked:
+                logger.info(
+                    "[EXIT_CLEANUP] Booking leftover tracked leg %s (%s)",
+                    leftover.symbol,
+                    leftover.leg_type,
+                )
+                book_leg_close(
+                    leg=leftover,
+                    trade=trade_row,
+                    exit_premium=float(leftover.exit_premium or 0.0),
+                    exit_time=now_utc,
+                )
+
+            # Clear conversion mode
+            trade_row.in_conversion_mode = False
+            trade_row.conversion_hedge_symbol = None
+            trade_row.conversion_hedge_product_id = None
+            trade_row.conversion_hedge_entry_price = None
+            trade_row.conversion_hedge_order_id = None
+            trade_row.conversion_triggered_leg = None
 
             trade_row.status = status
             trade_row.exit_time = get_ist_now()
             trade_row.exit_reason = reason
-            # Booked realized from fills is canonical; fall back to monitor total
             final_pnl = float(
                 trade_row.realized_pnl
                 if trade_row.realized_pnl is not None
@@ -1894,6 +2030,8 @@ class BotEngine:
                     "[EXIT_VERIFY] All legs closed in DB for trade %s",
                     trade_id,
                 )
+
+        trade_state.hedge_leg = None
 
         # Step 7: Remove from tracker
         self.position_tracker.mark_closed(trade_id)
@@ -2000,7 +2138,7 @@ class BotEngine:
         if diff_pct > equality_pct:
             return False  # Not equal yet, stay in conversion mode
 
-        # REVERSAL DETECTED — close hedge and resume normal mode
+        # REVERSAL DETECTED — close hedge leg and resume normal mode
         logger.info(
             "[CONVERSION_REVERSAL] Trade %s: premiums equal (call=%.2f put=%.2f "
             "diff=%.1f%%) — closing hedge and resuming normal mode",
@@ -2010,60 +2148,144 @@ class BotEngine:
             diff_pct,
         )
 
+        hedge_close_success = False
+        hedge_close_price = 0.0
         hedge_symbol = str(getattr(trade, "conversion_hedge_symbol", "") or "")
-        hedge_product_id = getattr(trade, "conversion_hedge_product_id", None)
         hedge_entry_price = float(
             getattr(trade, "conversion_hedge_entry_price", 0) or 0
         )
+        hedge_product_id = getattr(trade, "conversion_hedge_product_id", None)
 
-        # Close hedge position on Delta
-        hedge_close_success = False
-        hedge_close_price = 0.0
-        if hedge_product_id:
-            try:
-                qty = int(
-                    getattr(trade_state.call_leg, "quantity", None)
-                    or getattr(trade_state.put_leg, "quantity", None)
-                    or 1
-                )
-
-                class _HedgeLeg:
-                    product_id = int(hedge_product_id)
-                    symbol = hedge_symbol
-                    quantity = qty
-                    leg_type = "hedge"
-                    status = "open"
-                    is_bot_managed = True
-                    delta_sl_order_id = None
-                    delta_order_id = None
-                    exit_premium = None
-
-                close_res = await self.order_executor.close_leg(
-                    _HedgeLeg(), self.delta_client
-                )
-                if close_res.success:
-                    hedge_close_success = True
-                    hedge_close_price = float(close_res.filled_price or 0)
-                    logger.info(
-                        "[CONVERSION_REVERSAL] Hedge closed: symbol=%s fill=%.2f",
-                        hedge_symbol,
-                        hedge_close_price,
-                    )
-                else:
-                    logger.error(
-                        "[CONVERSION_REVERSAL] Hedge close FAILED for trade %s: %s",
-                        trade_id,
-                        close_res.error,
-                    )
-            except Exception as exc:
-                logger.error(
-                    "[CONVERSION_REVERSAL] Hedge close error trade %s: %s",
-                    trade_id,
-                    exc,
-                )
-
-        # Update DB: clear conversion mode, reset baselines
         with self.db_factory() as db:
+            hedge_leg = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_id,
+                    Leg.status == "open",
+                    Leg.is_long.is_(True),
+                )
+                .first()
+            )
+            if hedge_leg is None:
+                # Fallback: leg_type hedge_* without is_long (pre-migration rows)
+                hedge_leg = (
+                    db.query(Leg)
+                    .filter(
+                        Leg.trade_id == trade_id,
+                        Leg.status == "open",
+                        Leg.leg_type.in_(("hedge_call", "hedge_put")),
+                    )
+                    .first()
+                )
+
+            if hedge_leg is not None:
+                hedge_symbol = str(hedge_leg.symbol or hedge_symbol)
+                hedge_entry_price = float(
+                    hedge_leg.initial_premium or hedge_entry_price
+                )
+                hedge_product_id = int(hedge_leg.product_id)
+                try:
+                    close_res = await self.order_executor.close_long_position(
+                        product_id=int(hedge_leg.product_id),
+                        quantity=int(hedge_leg.quantity),
+                        delta_client=self.delta_client,
+                        symbol_for_fallback=str(hedge_leg.symbol),
+                    )
+                    if close_res.success:
+                        hedge_close_success = True
+                        hedge_close_price = float(close_res.filled_price or 0)
+                        hedge_leg.status = "closed"
+                        hedge_leg.exit_time = datetime.now(timezone.utc)
+                        hedge_leg.exit_premium = hedge_close_price
+                        if close_res.order_id is not None:
+                            hedge_leg.exit_order_id = str(close_res.order_id)
+                        if close_res.commission is not None:
+                            hedge_leg.exit_fee_usd = abs(
+                                float(close_res.commission)
+                            )
+                        # Long P&L: sell_exit - buy_entry
+                        hedge_pnl = (
+                            (
+                                hedge_close_price
+                                - float(hedge_leg.initial_premium or 0)
+                            )
+                            * int(hedge_leg.quantity)
+                            * float(OPTIONS_CONTRACT_VALUE)
+                        )
+                        hedge_leg.realized_pnl = hedge_pnl
+                        t_row = (
+                            db.query(Trade).filter(Trade.id == trade_id).first()
+                        )
+                        if t_row is not None:
+                            t_row.realized_pnl = (
+                                float(t_row.realized_pnl or 0) + hedge_pnl
+                            )
+                        logger.info(
+                            "[CONVERSION_REVERSAL] Hedge closed: "
+                            "symbol=%s fill=%.2f pnl=%.4f",
+                            hedge_symbol,
+                            hedge_close_price,
+                            hedge_pnl,
+                        )
+                    else:
+                        logger.error(
+                            "[CONVERSION_REVERSAL] Hedge close FAILED "
+                            "for trade %s: %s",
+                            trade_id,
+                            close_res.error,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "[CONVERSION_REVERSAL] Hedge close error trade %s: %s",
+                        trade_id,
+                        exc,
+                    )
+            elif hedge_product_id:
+                # Legacy fallback: conversion fields only, no Leg row
+                try:
+                    qty = int(
+                        getattr(trade_state.call_leg, "quantity", None)
+                        or getattr(trade_state.put_leg, "quantity", None)
+                        or 1
+                    )
+                    close_res = await self.order_executor.close_long_position(
+                        product_id=int(hedge_product_id),
+                        quantity=qty,
+                        delta_client=self.delta_client,
+                        symbol_for_fallback=hedge_symbol or None,
+                    )
+                    if close_res.success:
+                        hedge_close_success = True
+                        hedge_close_price = float(close_res.filled_price or 0)
+                        logger.info(
+                            "[CONVERSION_REVERSAL] Legacy hedge closed: "
+                            "symbol=%s fill=%.2f",
+                            hedge_symbol,
+                            hedge_close_price,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "[CONVERSION_REVERSAL] Legacy hedge close error: %s",
+                        exc,
+                    )
+
+            # AUDIT-7: mirror hedge close to slaves
+            if hedge_product_id:
+                try:
+                    import backend.engine.mirror_engine as mirror_module
+
+                    if mirror_module.mirror_engine is not None:
+                        asyncio.create_task(
+                            mirror_module.mirror_engine.mirror_hedge_close(
+                                master_trade_id=trade_id,
+                                hedge_product_id=int(hedge_product_id),
+                            )
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Mirror hedge close queue failed (non-fatal): %s", exc
+                    )
+
             t = db.query(Trade).filter(Trade.id == trade_id).first()
             if t:
                 t.in_conversion_mode = False
@@ -2073,12 +2295,13 @@ class BotEngine:
                 t.conversion_hedge_symbol = None
                 t.conversion_triggered_leg = None
 
-            # Reset both open legs' baselines to current offer prices
+            # Reset short-leg baselines only (not hedge)
             open_legs = (
                 db.query(Leg)
                 .filter(
                     Leg.trade_id == trade_id,
                     Leg.status == "open",
+                    Leg.leg_type.in_(("call", "put")),
                 )
                 .all()
             )
@@ -2112,6 +2335,7 @@ class BotEngine:
         trade.conversion_hedge_entry_price = None
         trade.conversion_hedge_symbol = None
         trade.conversion_triggered_leg = None
+        trade_state.hedge_leg = None
 
         log_and_buffer(
             "CONVERSION_REVERSAL",
@@ -2225,7 +2449,7 @@ class BotEngine:
                     trade_state.trade.conversion_hedge_order_id = (
                         result.hedge_order_id
                     )
-                    # Reload legs again to pick up new other leg from DB
+                    # Reload legs again to pick up new other leg + hedge from DB
                     self._reload_legs(trade_state)
                 await self._push_adjustment(trade_state, triggered_leg_type, result)
             else:
@@ -2356,7 +2580,7 @@ class BotEngine:
 
         CRITICAL: Must re-query BOTH legs so updated trigger baselines
         (triggered = new fill, untouched = best offer at adjustment) are used
-        by the next on_tick() trigger check.
+        by the next on_tick() trigger check. Also loads hedge_leg if present.
         """
         with self.db_factory() as db:
             legs = (
@@ -2370,6 +2594,15 @@ class BotEngine:
             )
             call_leg = next((leg for leg in legs if leg.leg_type == "call"), None)
             put_leg = next((leg for leg in legs if leg.leg_type == "put"), None)
+            hedge_leg = next(
+                (
+                    leg
+                    for leg in legs
+                    if bool(getattr(leg, "is_long", False))
+                    or str(getattr(leg, "leg_type", "")).startswith("hedge")
+                ),
+                None,
+            )
             if call_leg is None or put_leg is None:
                 logger.error(
                     "After adjustment, open legs missing for trade %s "
@@ -2386,21 +2619,28 @@ class BotEngine:
             # Detach for in-memory use after session closes
             db.expunge(call_leg)
             db.expunge(put_leg)
+            if hedge_leg is not None:
+                db.expunge(hedge_leg)
             trade_state.call_leg = call_leg
             trade_state.put_leg = put_leg
+            trade_state.hedge_leg = hedge_leg
             if trade_row is not None:
                 # Keep in-memory trade.realized_pnl in sync for next on_tick
                 trade_state.trade.realized_pnl = float(trade_row.realized_pnl or 0.0)
+                trade_state.trade.in_conversion_mode = bool(
+                    getattr(trade_row, "in_conversion_mode", False)
+                )
             logger.info(
                 "Legs reloaded after adjustment: "
                 "call entry=%s baseline=%s put entry=%s baseline=%s "
-                "trade=%s realized_pnl=%s",
+                "hedge=%s trade=%s realized_pnl=%s",
                 call_leg.initial_premium,
                 getattr(call_leg, "trigger_baseline_premium", None)
                 or getattr(call_leg, "trigger_premium", None),
                 put_leg.initial_premium,
                 getattr(put_leg, "trigger_baseline_premium", None)
                 or getattr(put_leg, "trigger_premium", None),
+                getattr(hedge_leg, "symbol", None),
                 trade_state.trade_id,
                 getattr(trade_state.trade, "realized_pnl", 0.0),
             )
@@ -2755,7 +2995,18 @@ class BotEngine:
 
         fees_paid = 0.0
         est_exit = 0.0
+        conversion_equality_pct = 10.0
         with self.db_factory() as db:
+            from backend.database import get_or_create_auto_settings
+
+            try:
+                _cfg = get_or_create_auto_settings(db)
+                conversion_equality_pct = float(
+                    getattr(_cfg, "conversion_equality_pct", 10.0) or 10.0
+                )
+            except Exception:
+                conversion_equality_pct = 10.0
+
             legs = (
                 db.query(LegModel)
                 .filter(
@@ -2839,6 +3090,19 @@ class BotEngine:
             "slippage_amount": slip_amt,
             "total_deductions": total_deductions,
             "net_mtm": net_mtm_out,
+            "in_conversion_mode": bool(
+                getattr(trade_state.trade, "in_conversion_mode", False)
+            ),
+            "conversion_hedge_symbol": getattr(
+                trade_state.trade, "conversion_hedge_symbol", None
+            ),
+            "conversion_hedge_entry_price": float(
+                getattr(trade_state.trade, "conversion_hedge_entry_price", 0) or 0
+            ),
+            "conversion_triggered_leg": getattr(
+                trade_state.trade, "conversion_triggered_leg", None
+            ),
+            "conversion_equality_pct": conversion_equality_pct,
         }
         logger.info(
             "TRADE_UPDATE slippage: trade=%s pct=%s amount=%s net=%s "

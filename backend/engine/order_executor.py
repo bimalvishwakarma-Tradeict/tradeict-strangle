@@ -142,6 +142,32 @@ class OrderExecutor:
             symbol_for_fallback=symbol_for_fallback,
         )
 
+    async def close_long_position(
+        self,
+        product_id: int,
+        quantity: int,
+        delta_client: Any,
+        symbol_for_fallback: str | None = None,
+    ) -> OrderResult:
+        """
+        Close a long option (hedge) with a SELL market IOC order.
+
+        No bracket_stop_loss — hedge is a long buy; SL brackets apply only
+        to short sells.
+        """
+        logger.info(
+            "Closing long position product_id=%s qty=%s",
+            product_id,
+            quantity,
+        )
+        return await self._execute_with_retry(
+            delta_client=delta_client,
+            product_id=int(product_id),
+            size=int(quantity),
+            side="sell",
+            symbol_for_fallback=symbol_for_fallback,
+        )
+
     async def _execute_with_retry(
         self,
         delta_client: Any,
