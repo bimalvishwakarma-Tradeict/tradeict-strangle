@@ -610,10 +610,10 @@ class ShortStrangleStrategy(BaseStrategy):
         other_leg_current_premium: float,
         current_strike: float | None = None,
     ) -> AdjustmentPlan:
-        """Find replacement strike by matching the other leg's current mark premium.
+        """Find replacement strike with premium >= other leg's current offer.
 
-        Never returns the same strike as current_strike — same-strike adjust
-        only burns brokerage/slippage.
+        Prefers lowest premium at-or-above the other leg offer. Falls back to
+        nearest if none qualify. Never returns the same strike as current_strike.
         """
         leg = triggered_leg_type.lower().strip()
         underlying_key = str(trade.underlying).upper()
@@ -625,7 +625,8 @@ class ShortStrangleStrategy(BaseStrategy):
         else:
             expiry_str = str(expiry)
 
-        # Core rule: nearest premium to other-leg — NOT forced farther OTM
+        # Prefer premium >= other-leg offer (closest from above); never below
+        # unless no such strike exists (then nearest fallback inside client).
         row = await delta_client.find_strike_by_premium(
             underlying=underlying_symbol,
             expiry_date=expiry_str,
@@ -636,6 +637,14 @@ class ShortStrangleStrategy(BaseStrategy):
         )
 
         new_strike = float(row.get("strike") or 0)
+        mark_key = "call_mark_price" if leg == "call" else "put_mark_price"
+        new_premium = float(row.get(mark_key) or 0)
+        logger.info(
+            "NEW_STRIKE_SELECTED | premium=%.1f >= other_leg_offer=%.1f | strike=%s",
+            new_premium,
+            float(other_leg_current_premium),
+            new_strike,
+        )
         if current_strike is not None and abs(new_strike - float(current_strike)) < 0.01:
             raise ValueError(
                 f"SAME_STRIKE_HOLD: nearest match is still {new_strike} "

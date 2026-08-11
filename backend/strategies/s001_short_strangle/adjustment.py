@@ -416,16 +416,14 @@ class AdjustmentExecutor:
                 )
 
                 # Replace the other (untouched) leg with better premium
-                # Target = triggered leg's CURRENT premium / 2
-                triggered_current_premium = float(
-                    await _resolve_offer_price(
-                        delta_client, str(triggered_leg.symbol)
-                    )
-                    or triggered_leg.trigger_baseline_premium
-                    or triggered_leg.initial_premium
-                    or 0.0
+                # Target = hedge fill / 2 (not triggered current / 2)
+                new_other_target = float(hedge_fill) / 2.0
+                logger.info(
+                    "CONVERSION_OTHER_TARGET | hedge_fill=%.1f | target=%.1f "
+                    "(hedge/2, was triggered/2)",
+                    hedge_fill,
+                    new_other_target,
                 )
-                new_other_target = triggered_current_premium / 2.0
                 logger.info(
                     "[CONVERSION_MODE] Replacing other leg %s: "
                     "current_premium=%.2f target_new_premium=%.2f",

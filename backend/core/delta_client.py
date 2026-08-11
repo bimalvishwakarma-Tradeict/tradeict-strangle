@@ -1415,11 +1415,13 @@ class DeltaClient:
         """
         CORE ADJUSTMENT RULE (mandatory once trigger fires):
 
-        Exit triggered leg and sell the strike whose mark is NEAREST to the
-        other open leg's premium (e.g. put@$110 → new call ≈ $110).
+        Exit triggered leg and sell the strike whose premium is >= the
+        other open leg's offer, choosing the LOWEST such premium
+        (closest from above). If none exist, fall back to nearest mark.
 
         - Exclude current strike (same-strike adjust = fees only)
-        - Primary sort: abs(mark - target_premium)
+        - Primary: mark >= target_premium, then lowest mark
+        - Fallback: abs(mark - target_premium) nearest
         - Tie-break: prefer farther OTM (call higher / put lower)
         - Always returns a strike if any other exists — never HOLD for imperfect match
         """
@@ -1467,7 +1469,7 @@ class DeltaClient:
                 ),
             )
 
-        def _sort_key(row: dict[str, Any]) -> tuple[float, float]:
+        def _nearest_key(row: dict[str, Any]) -> tuple[float, float]:
             strike = _safe_float(row.get("strike"))
             mark = _safe_float(row.get(mark_key))
             prem_diff = abs(mark - target)
@@ -1475,18 +1477,38 @@ class DeltaClient:
             otm_rank = -strike if leg == "call" else strike
             return (prem_diff, otm_rank)
 
-        best = min(pool, key=_sort_key)
+        def _at_or_above_key(row: dict[str, Any]) -> tuple[float, float]:
+            # Lowest premium among those >= target (closest from above)
+            strike = _safe_float(row.get("strike"))
+            mark = _safe_float(row.get(mark_key))
+            otm_rank = -strike if leg == "call" else strike
+            return (mark, otm_rank)
+
+        at_or_above = [
+            row
+            for row in pool
+            if _safe_float(row.get(mark_key)) >= target
+        ]
+        if at_or_above:
+            best = min(at_or_above, key=_at_or_above_key)
+            match_mode = "at_or_above"
+        else:
+            # Fallback: no strike >= target — keep prior nearest behavior
+            best = min(pool, key=_nearest_key)
+            match_mode = "nearest_fallback"
+
         best_mark = _safe_float(best.get(mark_key))
         best_strike = _safe_float(best.get("strike"))
         logger.info(
             "Premium match (mandatory adjust): %s strike=%s mark=%.2f "
-            "target=%.2f diff=%.2f exclude=%s",
+            "target=%.2f diff=%.2f exclude=%s mode=%s",
             leg,
             best_strike,
             best_mark,
             target,
             abs(best_mark - target),
             excl,
+            match_mode,
         )
         return best
 
