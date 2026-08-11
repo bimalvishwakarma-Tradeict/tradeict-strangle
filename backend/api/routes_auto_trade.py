@@ -53,6 +53,9 @@ class AutoTradeSettingsSchema(BaseModel):
     # Low-premium adjustment exit
     adj_low_premium_exit_enabled: bool = False
     adj_low_premium_min_usd: float = Field(default=150.0, ge=10, le=500)
+    # Conversion mode + adjustment limit
+    conversion_mode_enabled: bool = True
+    max_adjustments_per_basket: int | None = Field(default=None, ge=1, le=50)
 
     @field_validator("trade_type")
     @classmethod
@@ -116,6 +119,14 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         ),
         "adj_low_premium_min_usd": float(
             getattr(s, "adj_low_premium_min_usd", None) or 150.0
+        ),
+        "conversion_mode_enabled": bool(
+            getattr(s, "conversion_mode_enabled", True)
+        ),
+        "max_adjustments_per_basket": (
+            int(s.max_adjustments_per_basket)
+            if getattr(s, "max_adjustments_per_basket", None) is not None
+            else None
         ),
         "last_trade_id": s.last_trade_id,
         "last_exit_time": last_exit.isoformat() if last_exit else None,
@@ -204,6 +215,16 @@ async def update_auto_trade_settings(
         payload.adj_low_premium_exit_enabled
     )
     settings.adj_low_premium_min_usd = float(payload.adj_low_premium_min_usd)
+    settings.conversion_mode_enabled = bool(payload.conversion_mode_enabled)
+    if settings.conversion_mode_enabled:
+        # Limit only applies when conversion is OFF
+        settings.max_adjustments_per_basket = None
+    else:
+        settings.max_adjustments_per_basket = (
+            int(payload.max_adjustments_per_basket)
+            if payload.max_adjustments_per_basket is not None
+            else None
+        )
     settings.updated_at = get_ist_now()
     # Do NOT change is_enabled here
 

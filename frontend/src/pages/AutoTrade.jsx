@@ -37,6 +37,16 @@ function applyStatusToForm(data, setters) {
     Boolean(data.adj_low_premium_exit_enabled),
   )
   setters.setAdjLowPremiumMinUsd(Number(data.adj_low_premium_min_usd ?? 150))
+  setters.setConversionModeEnabled(
+    data.conversion_mode_enabled == null
+      ? true
+      : Boolean(data.conversion_mode_enabled),
+  )
+  setters.setMaxAdjustmentsPerBasket(
+    data.max_adjustments_per_basket == null || data.max_adjustments_per_basket === ''
+      ? ''
+      : String(data.max_adjustments_per_basket),
+  )
   setters.setIsEnabled(Boolean(data.is_enabled))
   setters.setLastError(data.last_error || null)
   setters.setLastTradeId(data.last_trade_id ?? null)
@@ -92,6 +102,8 @@ export default function AutoTrade() {
   const [adjLowPremiumExitEnabled, setAdjLowPremiumExitEnabled] =
     useState(false)
   const [adjLowPremiumMinUsd, setAdjLowPremiumMinUsd] = useState(150)
+  const [conversionModeEnabled, setConversionModeEnabled] = useState(true)
+  const [maxAdjustmentsPerBasket, setMaxAdjustmentsPerBasket] = useState('')
   const [slabs, setSlabs] = useState(null)
   const [slabsInitial, setSlabsInitial] = useState(null)
   const [slabsKey, setSlabsKey] = useState(0)
@@ -115,6 +127,8 @@ export default function AutoTrade() {
       setTargetPremium,
       setAdjLowPremiumExitEnabled,
       setAdjLowPremiumMinUsd,
+      setConversionModeEnabled,
+      setMaxAdjustmentsPerBasket,
       setIsEnabled,
       setLastError,
       setLastTradeId,
@@ -345,6 +359,12 @@ export default function AutoTrade() {
         500,
         Math.max(10, Number(adjLowPremiumMinUsd) || 150),
       ),
+      conversion_mode_enabled: Boolean(conversionModeEnabled),
+      max_adjustments_per_basket: conversionModeEnabled
+        ? null
+        : maxAdjustmentsPerBasket === '' || maxAdjustmentsPerBasket == null
+          ? null
+          : Math.max(1, Math.min(50, Number(maxAdjustmentsPerBasket) || 1)),
     }
   }
 
@@ -752,7 +772,59 @@ export default function AutoTrade() {
             />
             <p className="mt-2 text-xs text-gray-500">
               If an adjustment would require shorting a new leg below $
-              {adjLowPremiumMinUsd}, the entire basket will be closed instead.
+              {adjLowPremiumMinUsd}, special handling applies (conversion or
+              exit — see Conversion Mode below).
+            </p>
+          </div>
+        )}
+      </section>
+
+      {/* Conversion Mode + Max Adjustments */}
+      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">Conversion Mode</h2>
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            checked={conversionModeEnabled}
+            onChange={(e) => {
+              const on = e.target.checked
+              setConversionModeEnabled(on)
+              if (on) setMaxAdjustmentsPerBasket('')
+            }}
+            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
+          />
+          <span className="text-sm text-gray-300">
+            Conversion Mode{' '}
+            <span className="text-gray-500">
+              ({conversionModeEnabled ? 'ON' : 'OFF'})
+            </span>
+          </span>
+        </label>
+        <p className="text-xs text-gray-500">
+          When ON: bot buys a hedge and restructures basket if replacement
+          premium is too low. When OFF: bot exits the basket instead.
+        </p>
+        {!conversionModeEnabled && (
+          <div className="rounded-lg border border-orange-500/30 bg-gray-900/60 p-4">
+            <label className="mb-2 block text-sm text-gray-400">
+              Max Adjustments Per Basket
+            </label>
+            <select
+              value={maxAdjustmentsPerBasket === '' ? 'unlimited' : maxAdjustmentsPerBasket}
+              onChange={(e) => {
+                const v = e.target.value
+                setMaxAdjustmentsPerBasket(v === 'unlimited' ? '' : v)
+              }}
+              className="w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+            >
+              <option value="unlimited">Unlimited</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+            </select>
+            <p className="mt-2 text-xs text-gray-500">
+              Bot will exit the basket after this many adjustments instead of
+              adjusting again. Only active when Conversion Mode is OFF.
             </p>
           </div>
         )}

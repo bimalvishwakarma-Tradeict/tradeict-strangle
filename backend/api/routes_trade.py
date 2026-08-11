@@ -1302,6 +1302,17 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
     )
     conversion_enabled = bool(
         getattr(auto_settings, "adj_low_premium_exit_enabled", False)
+    ) and bool(getattr(auto_settings, "conversion_mode_enabled", True))
+    max_adjustments_per_basket = getattr(
+        auto_settings, "max_adjustments_per_basket", None
+    )
+    if max_adjustments_per_basket is not None:
+        try:
+            max_adjustments_per_basket = int(max_adjustments_per_basket)
+        except (TypeError, ValueError):
+            max_adjustments_per_basket = None
+    conversion_mode_enabled = bool(
+        getattr(auto_settings, "conversion_mode_enabled", True)
     )
 
     try:
@@ -1586,7 +1597,31 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "sl_pct": float(getattr(state.trade, "sl_pct", None) or 100.0),
             "pnl_pct_of_target": round(pnl_pct, 2),
             "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
-            "adjustment_count": adj_count,
+            "adjustment_count": int(
+                getattr(state.trade, "adjustment_count", None) or adj_count or 0
+            ),
+            "max_adjustments_per_basket": (
+                max_adjustments_per_basket
+                if not conversion_mode_enabled
+                else None
+            ),
+            "adjustments_remaining": (
+                max(
+                    0,
+                    int(max_adjustments_per_basket)
+                    - int(
+                        getattr(state.trade, "adjustment_count", None)
+                        or adj_count
+                        or 0
+                    ),
+                )
+                if (
+                    not conversion_mode_enabled
+                    and max_adjustments_per_basket is not None
+                )
+                else None
+            ),
+            "conversion_mode_enabled": conversion_mode_enabled,
             "last_adjustment": last_adjustment,
             "is_settling": settling["is_settling"],
             "settling_ends_at": settling["settling_ends_at"],

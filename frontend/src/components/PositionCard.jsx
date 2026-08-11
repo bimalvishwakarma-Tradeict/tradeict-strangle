@@ -661,6 +661,28 @@ function BotNextActionPlan({ trade, call, put }) {
             Exit conditions: TP at +${fmtMoney(tpUsd)} ({pctTp.toFixed(1)}% reached) |
             SL at -${fmtMoney(slUsd)} ({pctSl.toFixed(1)}% used)
           </div>
+          {(() => {
+            const used = Number(trade.adjustment_count ?? 0)
+            const max =
+              trade.max_adjustments_per_basket == null ||
+              trade.max_adjustments_per_basket === ''
+                ? null
+                : Number(trade.max_adjustments_per_basket)
+            const maxLabel = max == null || !Number.isFinite(max) ? '∞' : String(max)
+            let color = 'text-gray-400'
+            if (max != null && Number.isFinite(max)) {
+              if (used >= max) color = 'text-red-400 font-semibold'
+              else if (used >= max - 1) color = 'text-orange-300 font-medium'
+            }
+            return (
+              <div className={`text-xs ${color}`}>
+                Adjustments: {used} used / {maxLabel} allowed
+                {trade.adjustments_remaining != null
+                  ? ` (${trade.adjustments_remaining} remaining)`
+                  : ''}
+              </div>
+            )
+          })()}
         </div>
       )}
     </div>

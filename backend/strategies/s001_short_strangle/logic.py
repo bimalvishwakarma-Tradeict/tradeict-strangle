@@ -518,6 +518,16 @@ class ShortStrangleStrategy(BaseStrategy):
                         call_trigger_pct=call_trigger_pct,
                         put_trigger_pct=put_trigger_pct,
                     )
+                # Max-adjustments gate (only when conversion mode is OFF)
+                max_exit = self._check_max_adjustments_exit(
+                    trade, db_session, triggered_leg="call",
+                    trigger_pct=call_trigger_pct,
+                    net_for_decision=net_for_decision,
+                    call_trigger_pct=call_trigger_pct,
+                    put_trigger_pct=put_trigger_pct,
+                )
+                if max_exit is not None:
+                    return max_exit
                 logger.info(
                     "DECISION: Net MTM negative at trigger — adjusting | "
                     "Trade %s CALL hit %.1f%% and Net MTM=%.2f is NEGATIVE",
@@ -563,6 +573,15 @@ class ShortStrangleStrategy(BaseStrategy):
                         call_trigger_pct=call_trigger_pct,
                         put_trigger_pct=put_trigger_pct,
                     )
+                max_exit = self._check_max_adjustments_exit(
+                    trade, db_session, triggered_leg="put",
+                    trigger_pct=put_trigger_pct,
+                    net_for_decision=net_for_decision,
+                    call_trigger_pct=call_trigger_pct,
+                    put_trigger_pct=put_trigger_pct,
+                )
+                if max_exit is not None:
+                    return max_exit
                 logger.info(
                     "DECISION: Net MTM negative at trigger — adjusting | "
                     "Trade %s PUT hit %.1f%% and Net MTM=%.2f is NEGATIVE",
@@ -601,6 +620,74 @@ class ShortStrangleStrategy(BaseStrategy):
             call_trigger_pct=call_trigger_pct,
             put_trigger_pct=put_trigger_pct,
         )
+
+    def _check_max_adjustments_exit(
+        self,
+        trade: Any,
+        db_session: Any,
+        *,
+        triggered_leg: str,
+        trigger_pct: float,
+        net_for_decision: float,
+        call_trigger_pct: float,
+        put_trigger_pct: float,
+    ) -> TradeAction | None:
+        """
+        When conversion_mode_enabled=False and adjustment_count >= max,
+        exit basket instead of adjusting. Returns TradeAction or None.
+        """
+        if db_session is None:
+            return None
+        try:
+            from backend.database import get_or_create_auto_settings
+            from backend.core.bot_logger import log_and_buffer
+
+            cfg = get_or_create_auto_settings(db_session)
+            conv_on = bool(getattr(cfg, "conversion_mode_enabled", True))
+            if conv_on:
+                return None
+            raw_max = getattr(cfg, "max_adjustments_per_basket", None)
+            if raw_max is None:
+                return None
+            max_allowed = int(raw_max)
+            try:
+                count = int(getattr(trade, "adjustment_count", 0) or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count < max_allowed:
+                return None
+            logger.warning(
+                "MAX_ADJUSTMENTS_REACHED | trade_id=%s | adjustment_count=%s | "
+                "max_allowed=%s — exiting basket instead of adjusting",
+                getattr(trade, "id", "?"),
+                count,
+                max_allowed,
+            )
+            try:
+                log_and_buffer(
+                    "MAX_ADJUSTMENTS_REACHED",
+                    int(getattr(trade, "id", 0) or 0),
+                    {
+                        "adjustment_count": count,
+                        "max_allowed": max_allowed,
+                        "triggered_leg": triggered_leg,
+                    },
+                )
+            except Exception:
+                pass
+            return TradeAction(
+                should_exit=True,
+                exit_reason="MAX_ADJUSTMENTS_REACHED",
+                current_pnl=net_for_decision,
+                triggered_leg=triggered_leg,
+                trigger_pct_hit=trigger_pct,
+                trigger_pct_used=trigger_pct,
+                call_trigger_pct=call_trigger_pct,
+                put_trigger_pct=put_trigger_pct,
+            )
+        except Exception as exc:
+            logger.warning("max-adjustments check failed: %s", exc)
+            return None
 
     async def find_adjustment_strike(
         self,

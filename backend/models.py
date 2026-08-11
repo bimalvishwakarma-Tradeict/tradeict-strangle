@@ -75,6 +75,8 @@ class Trade(Base):
     )
     # Human-facing basket id (sequential per account); clubs all legs/adjustments
     basket_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Incremented on each successful normal adjustment
+    adjustment_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # --- Conversion Mode State ---
     # True when bot has entered conversion mode (hedge leg is active)
@@ -263,6 +265,15 @@ class AutoTradeSettings(Base):
     # Conversion mode reversal detection: close hedge when premiums within X%
     conversion_equality_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=10.0
+    )
+    # True = conversion allowed when other leg too cheap; False = exit basket instead
+    conversion_mode_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    # Max normal adjustments per basket when conversion_mode_enabled=False
+    # None = unlimited. Ignored entirely when conversion_mode_enabled=True.
+    max_adjustments_per_basket: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
     )
 
     # Status tracking

@@ -404,6 +404,50 @@ def _migrate_schema() -> None:
                         "WHERE conversion_equality_pct IS NULL"
                     )
                 )
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "conversion_mode_enabled" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN conversion_mode_enabled "
+                        "BOOLEAN NOT NULL DEFAULT 1"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE auto_trade_settings "
+                        "SET conversion_mode_enabled = 1 "
+                        "WHERE conversion_mode_enabled IS NULL"
+                    )
+                )
+        if "max_adjustments_per_basket" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN max_adjustments_per_basket "
+                        "INTEGER DEFAULT NULL"
+                    )
+                )
+    if "trades" in tables:
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "adjustment_count" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN "
+                        "adjustment_count INTEGER DEFAULT 0"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE trades SET adjustment_count = 0 "
+                        "WHERE adjustment_count IS NULL"
+                    )
+                )
 
 
 def get_usd_inr_rate(db: Session) -> float:

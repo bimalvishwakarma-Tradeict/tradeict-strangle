@@ -380,6 +380,22 @@ export function useTrades() {
             msg.bot_put_pct_to_trigger != null
               ? Number(msg.bot_put_pct_to_trigger)
               : existing.bot_put_pct_to_trigger,
+          adjustment_count:
+            msg.adjustment_count != null
+              ? Number(msg.adjustment_count)
+              : existing.adjustment_count,
+          max_adjustments_per_basket:
+            msg.max_adjustments_per_basket !== undefined
+              ? msg.max_adjustments_per_basket
+              : existing.max_adjustments_per_basket,
+          adjustments_remaining:
+            msg.adjustments_remaining !== undefined
+              ? msg.adjustments_remaining
+              : existing.adjustments_remaining,
+          conversion_mode_enabled:
+            msg.conversion_mode_enabled != null
+              ? Boolean(msg.conversion_mode_enabled)
+              : existing.conversion_mode_enabled,
         })
         return next
       })

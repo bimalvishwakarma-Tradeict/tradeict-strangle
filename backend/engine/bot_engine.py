@@ -2559,13 +2559,18 @@ class BotEngine:
                 await self._push_adjustment(trade_state, triggered_leg_type, result)
             else:
                 if result.close_basket:
+                    exit_reason = "ADJ_LOW_PREMIUM_EXIT"
+                    err_msg = str(result.error_message or "")
+                    if "CONVERSION_DISABLED" in err_msg.upper():
+                        exit_reason = "CONVERSION_DISABLED_EXIT"
                     logger.warning(
-                        "[ADJ_LOW_PREMIUM_EXIT] Trade %s triggering basket close: %s",
+                        "[%s] Trade %s triggering basket close: %s",
+                        exit_reason,
                         trade_id,
                         result.error_message,
                     )
                     log_and_buffer(
-                        "ADJ_LOW_PREMIUM_EXIT",
+                        exit_reason,
                         trade_id,
                         {
                             "leg": triggered,
@@ -2576,7 +2581,7 @@ class BotEngine:
                     )
                     await self._exit_trade(
                         trade_state,
-                        reason="ADJ_LOW_PREMIUM_EXIT",
+                        reason=exit_reason,
                     )
                     return
                 err = result.error_message or "Adjustment failed"
@@ -3303,6 +3308,8 @@ class BotEngine:
         conversion_equality_pct = 10.0
         conversion_min_premium = 150.0
         conversion_enabled = False
+        max_adjustments_per_basket = None
+        conversion_mode_enabled_flag = True
         with self.db_factory() as db:
             from backend.database import get_or_create_auto_settings
 
@@ -3316,11 +3323,21 @@ class BotEngine:
                 )
                 conversion_enabled = bool(
                     getattr(_cfg, "adj_low_premium_exit_enabled", False)
+                ) and bool(getattr(_cfg, "conversion_mode_enabled", True))
+                max_adjustments_per_basket = getattr(
+                    _cfg, "max_adjustments_per_basket", None
+                )
+                if max_adjustments_per_basket is not None:
+                    max_adjustments_per_basket = int(max_adjustments_per_basket)
+                conversion_mode_enabled_flag = bool(
+                    getattr(_cfg, "conversion_mode_enabled", True)
                 )
             except Exception:
                 conversion_equality_pct = 10.0
                 conversion_min_premium = 150.0
                 conversion_enabled = False
+                max_adjustments_per_basket = None
+                conversion_mode_enabled_flag = True
 
             legs = (
                 db.query(LegModel)
@@ -3455,6 +3472,29 @@ class BotEngine:
                 trade_state.trade, "conversion_triggered_leg", None
             ),
             "conversion_equality_pct": conversion_equality_pct,
+            "conversion_mode_enabled": conversion_mode_enabled_flag,
+            "adjustment_count": int(
+                getattr(trade_state.trade, "adjustment_count", 0) or 0
+            ),
+            "max_adjustments_per_basket": (
+                max_adjustments_per_basket
+                if not conversion_mode_enabled_flag
+                else None
+            ),
+            "adjustments_remaining": (
+                max(
+                    0,
+                    int(max_adjustments_per_basket)
+                    - int(
+                        getattr(trade_state.trade, "adjustment_count", 0) or 0
+                    ),
+                )
+                if (
+                    not conversion_mode_enabled_flag
+                    and max_adjustments_per_basket is not None
+                )
+                else None
+            ),
         }
         if bool(getattr(trade_state.trade, "in_conversion_mode", False)):
             # Hedge UPNL if available on trade_state

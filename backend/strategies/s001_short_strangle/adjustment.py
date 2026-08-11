@@ -251,17 +251,50 @@ class AdjustmentExecutor:
                 from backend.database import get_or_create_auto_settings, SessionLocal
                 with SessionLocal() as _sdb:
                     _cfg = get_or_create_auto_settings(_sdb)
-                    _conv_enabled = bool(
+                    _conv_feature = bool(
                         getattr(_cfg, "adj_low_premium_exit_enabled", False)
                     )
                     _conv_min = float(
                         getattr(_cfg, "adj_low_premium_min_usd", 150.0) or 150.0
                     )
+                    _conversion_mode_enabled = bool(
+                        getattr(_cfg, "conversion_mode_enabled", True)
+                    )
             except Exception:
-                _conv_enabled = False
+                _conv_feature = False
                 _conv_min = 150.0
+                _conversion_mode_enabled = True
 
-            if _conv_enabled and other_premium < _conv_min:
+            if _conv_feature and other_premium < _conv_min:
+                if not _conversion_mode_enabled:
+                    logger.warning(
+                        "[CONVERSION_DISABLED_EXIT] Trade %s: other_premium=%.2f "
+                        "< min=%.2f — conversion_mode_enabled=False, exiting basket",
+                        trade.id,
+                        other_premium,
+                        _conv_min,
+                    )
+                    log_and_buffer(
+                        "CONVERSION_DISABLED_EXIT",
+                        int(trade.id),
+                        {
+                            "reason": (
+                                "conversion_mode_enabled=False, "
+                                "exiting basket instead"
+                            ),
+                            "other_leg_offer": round(float(other_premium), 2),
+                            "conversion_min": round(float(_conv_min), 2),
+                        },
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        close_basket=True,
+                        old_strike=float(triggered_leg.strike),
+                        error_message=(
+                            "CONVERSION_DISABLED_EXIT: conversion mode off, "
+                            f"other leg offer {other_premium:.2f} < min {_conv_min:.2f}"
+                        ),
+                    )
                 logger.warning(
                     "[CONVERSION_MODE] Trade %s: other_premium=%.2f < min=%.2f "
                     "— entering conversion mode instead of adjusting",
@@ -1019,6 +1052,38 @@ class AdjustmentExecutor:
                 decision_type="ADJUSTED",
             )
             db_session.add(adjustment)
+
+            # Increment per-trade adjustment counter
+            try:
+                prior_count = int(getattr(trade, "adjustment_count", 0) or 0)
+            except (TypeError, ValueError):
+                prior_count = 0
+            trade.adjustment_count = prior_count + 1
+            max_allowed = None
+            try:
+                from backend.database import get_or_create_auto_settings
+
+                _lim = get_or_create_auto_settings(db_session)
+                raw_max = getattr(_lim, "max_adjustments_per_basket", None)
+                if raw_max is not None:
+                    max_allowed = int(raw_max)
+            except Exception:
+                max_allowed = None
+            log_and_buffer(
+                "ADJUSTMENT_COUNT_UPDATED",
+                int(trade.id),
+                {
+                    "new_count": int(trade.adjustment_count),
+                    "max_allowed": max_allowed,
+                },
+            )
+            logger.info(
+                "ADJUSTMENT_COUNT_UPDATED | trade_id=%s | new_count=%s | max_allowed=%s",
+                trade.id,
+                trade.adjustment_count,
+                max_allowed,
+            )
+
             db_session.commit()
             db_session.refresh(trade)
             db_session.refresh(new_leg)
