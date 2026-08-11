@@ -652,7 +652,17 @@ function BasketHistoryCard({ basket }) {
           <div className="text-xs text-gray-400">
             Entry {formatAdjTime(basket.entry_time)}
             {basket.exit_time ? ` · Exit ${formatAdjTime(basket.exit_time)}` : ''}
-            {basket.exit_reason ? ` · ${basket.exit_reason}` : ''}
+            {basket.exit_reason
+              ? ` · ${
+                  String(basket.exit_reason).includes('NO_STRIKE_AVAILABLE')
+                    ? '❌ No Strike Available — Basket Exited'
+                    : String(basket.exit_reason).includes('NO_HEDGE_STRIKE')
+                      ? '❌ No Hedge Strike — Basket Exited'
+                      : String(basket.exit_reason).includes('NO_OTHER_STRIKE')
+                        ? '❌ Conversion Strike Missing — Basket Exited'
+                        : basket.exit_reason
+                }`
+              : ''}
           </div>
           <div className="grid gap-2 rounded-lg border border-gray-700 bg-gray-900/40 px-3 py-2 text-xs text-gray-300 sm:grid-cols-3">
             <div>

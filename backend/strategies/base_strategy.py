@@ -59,6 +59,8 @@ class AdjustmentResult:
     error_message: str | None = None
     is_partial: bool = False  # True if exit succeeded but entry failed
     close_basket: bool = False  # True = close entire trade instead of adjusting
+    requires_basket_exit: bool = False  # True = no strike available → force exit
+    exit_reason: str | None = None
     conversion_mode: bool = False  # True = entered conversion mode
     hedge_order_id: str | None = None
     hedge_product_id: int | None = None

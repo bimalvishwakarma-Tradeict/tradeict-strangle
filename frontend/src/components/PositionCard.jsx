@@ -754,17 +754,31 @@ function BasketStory({ trade, call, put, mergedAdj }) {
         put.exit_time ||
         (legHistory.find((l) => l.exit_time) || {}).exit_time
       let why = reason
-      if (reason.includes('STOP')) {
+      if (reason.includes('NO_STRIKE_AVAILABLE')) {
+        why = '❌ No Strike Available — Basket Exited'
+      } else if (reason.includes('NO_HEDGE_STRIKE')) {
+        why = '❌ No Hedge Strike — Basket Exited'
+      } else if (reason.includes('NO_OTHER_STRIKE')) {
+        why = '❌ Conversion Strike Missing — Basket Exited'
+      } else if (reason.includes('STOP')) {
         why = `STOPLOSS: Gross MTM ${fmtSignedMoney(trade.gross_mtm ?? trade.total_pnl)} exceeded -$${fmtMoney(trade.stoploss_usd)}`
       } else if (reason.includes('PROFIT')) {
         why = `PROFIT_TARGET: Net MTM ${fmtSignedMoney(trade.net_mtm)} reached +$${fmtMoney(trade.profit_target_usd)}`
       }
+      const exitLabel =
+        reason.includes('NO_STRIKE_AVAILABLE')
+          ? '❌ No Strike Available — Basket Exited'
+          : reason.includes('NO_HEDGE_STRIKE')
+            ? '❌ No Hedge Strike — Basket Exited'
+            : reason.includes('NO_OTHER_STRIKE')
+              ? '❌ Conversion Strike Missing — Basket Exited'
+              : reason
       rows.push({
         key: 'exit',
         time: exitTime || new Date().toISOString(),
         icon: '✅',
         type: 'Exit',
-        what: `Basket closed — ${reason}`,
+        what: `Basket closed — ${exitLabel}`,
         why,
         pnl: trade.realized_pnl ?? trade.net_mtm ?? null,
       })

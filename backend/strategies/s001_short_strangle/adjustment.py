@@ -208,19 +208,41 @@ class AdjustmentExecutor:
                 )
             except Exception as exc:
                 msg = str(exc)
-                # Only HOLD when literally no other strike exists on the chain.
-                # Trigger = must adjust; never skip for "imperfect" premium.
-                if "SAME_STRIKE_HOLD" in msg and "no other" in msg.lower():
-                    logger.warning(
-                        "Adjustment HOLD trade=%s leg=%s — %s",
+                # No alternate strike on chain → EXIT basket (do not HOLD)
+                if "SAME_STRIKE_HOLD" in msg and (
+                    "no other" in msg.lower() or "no alternate" in msg.lower()
+                ):
+                    logger.critical(
+                        "[NO_STRIKE_AVAILABLE] Trade %s leg=%s — no farther OTM "
+                        "strike on chain. EXITING BASKET. triggered_strike=%s",
                         trade.id,
                         triggered_leg_type,
-                        msg,
+                        triggered_leg.strike,
+                    )
+                    log_and_buffer(
+                        "NO_STRIKE_AVAILABLE",
+                        int(trade.id),
+                        {
+                            "triggered_leg": triggered_leg_type,
+                            "triggered_strike": float(triggered_leg.strike),
+                            "reason": (
+                                "no farther OTM strike exists on "
+                                "Delta Exchange chain"
+                            ),
+                            "action": "EXIT_BASKET",
+                        },
                     )
                     return AdjustmentResult(
                         success=False,
+                        requires_basket_exit=True,
+                        close_basket=True,
+                        exit_reason="NO_STRIKE_AVAILABLE",
                         old_strike=float(triggered_leg.strike),
-                        error_message=f"ADJUSTMENT_HOLD: {msg}",
+                        error_message=(
+                            f"NO_STRIKE_AVAILABLE: no farther OTM "
+                            f"{triggered_leg_type} strike on Delta chain "
+                            f"— exiting basket"
+                        ),
                     )
                 raise
 
@@ -231,17 +253,38 @@ class AdjustmentExecutor:
                 abs(float(plan.new_strike) - float(triggered_leg.strike)) < 0.01
                 or int(plan.new_product_id) == int(triggered_leg.product_id)
             ):
-                msg = (
-                    f"SAME_STRIKE_HOLD: replacement {plan.new_strike} "
-                    f"equals current {triggered_leg.strike} — skipping to avoid "
-                    f"brokerage/slippage with no strike change"
+                logger.critical(
+                    "[NO_STRIKE_AVAILABLE] Trade %s leg=%s — replacement equals "
+                    "current strike. EXITING BASKET. triggered_strike=%s",
+                    trade.id,
+                    triggered_leg_type,
+                    triggered_leg.strike,
                 )
-                logger.warning("Adjustment HOLD trade=%s — %s", trade.id, msg)
+                log_and_buffer(
+                    "NO_STRIKE_AVAILABLE",
+                    int(trade.id),
+                    {
+                        "triggered_leg": triggered_leg_type,
+                        "triggered_strike": float(triggered_leg.strike),
+                        "reason": (
+                            "replacement strike equals current — "
+                            "no usable farther OTM strike"
+                        ),
+                        "action": "EXIT_BASKET",
+                    },
+                )
                 return AdjustmentResult(
                     success=False,
+                    requires_basket_exit=True,
+                    close_basket=True,
+                    exit_reason="NO_STRIKE_AVAILABLE",
                     old_strike=float(triggered_leg.strike),
                     new_strike=float(plan.new_strike),
-                    error_message=msg,
+                    error_message=(
+                        f"NO_STRIKE_AVAILABLE: no farther OTM "
+                        f"{triggered_leg_type} strike on Delta chain "
+                        f"— exiting basket"
+                    ),
                 )
 
             # --- CONVERSION MODE CHECK ---
@@ -390,16 +433,32 @@ class AdjustmentExecutor:
                         hedge_pid,
                     )
                 except Exception as exc:
-                    logger.error(
-                        "[CONVERSION_MODE] Could not find hedge strike for trade %s: %s",
+                    logger.critical(
+                        "[NO_HEDGE_STRIKE_AVAILABLE] Trade %s — no hedge strike "
+                        "on chain. EXITING BASKET. triggered_strike=%s err=%s",
                         trade.id,
+                        triggered_leg.strike,
                         exc,
+                    )
+                    log_and_buffer(
+                        "NO_HEDGE_STRIKE_AVAILABLE",
+                        int(trade.id),
+                        {
+                            "triggered_leg": triggered_leg_type,
+                            "triggered_strike": float(triggered_leg.strike),
+                            "reason": f"no hedge strike on chain — {exc}",
+                            "action": "EXIT_BASKET",
+                        },
                     )
                     return AdjustmentResult(
                         success=False,
+                        requires_basket_exit=True,
+                        close_basket=True,
+                        exit_reason="NO_HEDGE_STRIKE_AVAILABLE",
                         old_strike=float(triggered_leg.strike),
                         error_message=(
-                            f"CONVERSION_MODE_FAILED: no hedge strike — {exc}"
+                            "NO_HEDGE_STRIKE_AVAILABLE: no hedge strike on "
+                            f"Delta chain — exiting basket ({exc})"
                         ),
                     )
 
@@ -517,20 +576,36 @@ class AdjustmentExecutor:
                         current_strike=float(other_leg.strike),
                     )
                 except Exception as exc:
-                    logger.error(
-                        "[CONVERSION_MODE] Could not find new other strike: %s",
+                    logger.critical(
+                        "[NO_OTHER_STRIKE_IN_CONVERSION] Trade %s — no new other "
+                        "strike. EXITING BASKET. err=%s",
+                        trade.id,
                         exc,
+                    )
+                    log_and_buffer(
+                        "NO_OTHER_STRIKE_IN_CONVERSION",
+                        int(trade.id),
+                        {
+                            "triggered_leg": triggered_leg_type,
+                            "other_leg": str(other_leg.leg_type),
+                            "reason": f"new other strike not found — {exc}",
+                            "action": "EXIT_BASKET",
+                            "hedge_symbol": str(hedge_plan.new_symbol),
+                        },
                     )
                     return AdjustmentResult(
                         success=False,
+                        requires_basket_exit=True,
+                        close_basket=True,
+                        exit_reason="NO_OTHER_STRIKE_IN_CONVERSION",
                         conversion_mode=True,
                         hedge_order_id=str(hedge_result.order_id or ""),
                         hedge_product_id=int(hedge_plan.new_product_id),
                         hedge_entry_price=hedge_fill,
                         hedge_symbol=str(hedge_plan.new_symbol),
                         error_message=(
-                            "CONVERSION_MODE_PARTIAL: other close ok but new "
-                            f"strike not found — {exc}"
+                            "NO_OTHER_STRIKE_IN_CONVERSION: new other strike "
+                            f"not found — exiting basket ({exc})"
                         ),
                     )
 

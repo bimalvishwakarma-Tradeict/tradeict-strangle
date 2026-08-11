@@ -2558,15 +2558,26 @@ class BotEngine:
                     self._reload_legs(trade_state)
                 await self._push_adjustment(trade_state, triggered_leg_type, result)
             else:
-                if result.close_basket:
-                    exit_reason = "ADJ_LOW_PREMIUM_EXIT"
+                if getattr(result, "requires_basket_exit", False) or result.close_basket:
+                    exit_reason = (
+                        getattr(result, "exit_reason", None)
+                        or "ADJ_LOW_PREMIUM_EXIT"
+                    )
                     err_msg = str(result.error_message or "")
-                    if "CONVERSION_DISABLED" in err_msg.upper():
-                        exit_reason = "CONVERSION_DISABLED_EXIT"
-                    logger.warning(
-                        "[%s] Trade %s triggering basket close: %s",
+                    if not getattr(result, "exit_reason", None):
+                        if "CONVERSION_DISABLED" in err_msg.upper():
+                            exit_reason = "CONVERSION_DISABLED_EXIT"
+                        elif "NO_STRIKE_AVAILABLE" in err_msg.upper():
+                            exit_reason = "NO_STRIKE_AVAILABLE"
+                        elif "NO_HEDGE_STRIKE" in err_msg.upper():
+                            exit_reason = "NO_HEDGE_STRIKE_AVAILABLE"
+                        elif "NO_OTHER_STRIKE" in err_msg.upper():
+                            exit_reason = "NO_OTHER_STRIKE_IN_CONVERSION"
+                    logger.critical(
+                        "[%s] Triggering basket exit for trade %s reason=%s — %s",
                         exit_reason,
                         trade_id,
+                        exit_reason,
                         result.error_message,
                     )
                     log_and_buffer(
@@ -2577,6 +2588,7 @@ class BotEngine:
                             "old_strike": old_strike,
                             "other_leg_offer": round(other_prem, 2),
                             "reason": result.error_message,
+                            "action": "EXIT_BASKET",
                         },
                     )
                     await self._exit_trade(
@@ -2585,7 +2597,11 @@ class BotEngine:
                     )
                     return
                 err = result.error_message or "Adjustment failed"
-                is_hold = "ADJUSTMENT_HOLD" in err and "no other" in err.lower()
+                is_hold = (
+                    "ADJUSTMENT_HOLD" in err
+                    and "no other" in err.lower()
+                    and "NO_STRIKE_AVAILABLE" not in err.upper()
+                )
                 if is_hold:
                     log_and_buffer(
                         "ADJUSTMENT_HOLD",
