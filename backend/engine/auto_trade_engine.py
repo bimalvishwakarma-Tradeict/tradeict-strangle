@@ -688,6 +688,7 @@ class AutoTradeEngine:
                 slippage_pct=float(settings.slippage_pct or 2.0),
                 basket_number=basket_no,
                 notes="auto_trade",
+                cumulative_entry_spread_usd=0.0,
             )
             db.add(trade)
             db.flush()
@@ -701,6 +702,24 @@ class AutoTradeEngine:
                 stoploss_usd=stoploss_usd,
                 tp_pct=tp_pct,
                 sl_pct=sl_pct,
+            )
+
+            from backend.core.fees import (
+                accumulate_entry_spread_on_trade,
+                compute_entry_spread_usd,
+            )
+
+            call_entry_spread = compute_entry_spread_usd(
+                sent_price=call_mark,
+                fill_price=call_fill,
+                quantity=qty,
+                is_long=False,
+            )
+            put_entry_spread = compute_entry_spread_usd(
+                sent_price=put_mark,
+                fill_price=put_fill,
+                quantity=qty,
+                is_long=False,
             )
 
             call_leg = Leg(
@@ -719,6 +738,8 @@ class AutoTradeEngine:
                 delta_order_id=call_order_id,
                 delta_at_entry=float(straddle.get("call_delta") or 0),
                 entry_fee_usd=call_fee,
+                order_sent_price=call_mark,
+                entry_spread_usd=call_entry_spread,
                 sl_trigger_price=float(call_sl_trigger_price)
                 if call_sl_trigger_price and call_sl_trigger_price > 0
                 else None,
@@ -740,11 +761,15 @@ class AutoTradeEngine:
                 delta_order_id=put_order_id,
                 delta_at_entry=float(straddle.get("put_delta") or 0),
                 entry_fee_usd=put_fee,
+                order_sent_price=put_mark,
+                entry_spread_usd=put_entry_spread,
                 sl_trigger_price=float(put_sl_trigger_price)
                 if put_sl_trigger_price and put_sl_trigger_price > 0
                 else None,
                 delta_sl_order_id=None,  # bracket has no separate stop-order ID
             )
+            accumulate_entry_spread_on_trade(trade, call_entry_spread)
+            accumulate_entry_spread_on_trade(trade, put_entry_spread)
             db.add(call_leg)
             db.add(put_leg)
 

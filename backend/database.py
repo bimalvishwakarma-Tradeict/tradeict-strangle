@@ -103,6 +103,21 @@ def _migrate_schema() -> None:
                         "UPDATE trades SET slippage_pct = 2.0 WHERE slippage_pct IS NULL"
                     )
                 )
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "cumulative_entry_spread_usd" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN "
+                        "cumulative_entry_spread_usd REAL DEFAULT 0.0"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE trades SET cumulative_entry_spread_usd = 0.0 "
+                        "WHERE cumulative_entry_spread_usd IS NULL"
+                    )
+                )
         # Preserve existing TP/SL $: backfill max from target / (tp_pct/100)
         with engine.begin() as conn:
             conn.execute(
@@ -174,6 +189,17 @@ def _migrate_schema() -> None:
             with engine.begin() as conn:
                 conn.execute(
                     text("ALTER TABLE legs ADD COLUMN entry_fee_usd FLOAT")
+                )
+        leg_cols = {col["name"] for col in inspector.get_columns("legs")}
+        if "order_sent_price" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE legs ADD COLUMN order_sent_price REAL")
+                )
+        if "entry_spread_usd" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE legs ADD COLUMN entry_spread_usd REAL")
                 )
         if "exit_fee_usd" not in leg_cols:
             with engine.begin() as conn:

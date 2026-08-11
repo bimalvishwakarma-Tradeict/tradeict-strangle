@@ -71,29 +71,78 @@ def compute_slippage_amount(gross_mtm: float, slippage_pct: float | None) -> flo
     return abs(float(gross_mtm or 0.0)) * pct / 100.0
 
 
+def compute_entry_spread_usd(
+    *,
+    sent_price: float,
+    fill_price: float,
+    quantity: int,
+    is_long: bool = False,
+    contract_value: float | None = None,
+) -> float:
+    """
+    Entry execution spread in USD.
+
+    Short: (sent − fill) × qty × CV  (fill cheaper → positive)
+    Long:  (fill − sent) × qty × CV  (fill higher → positive cost as negative PnL)
+    """
+    cv = float(OPTIONS_CONTRACT_VALUE if contract_value is None else contract_value)
+    qty = abs(int(quantity or 0))
+    sent = float(sent_price or 0.0)
+    fill = float(fill_price or 0.0)
+    if is_long:
+        return (fill - sent) * qty * cv
+    return (sent - fill) * qty * cv
+
+
+def accumulate_entry_spread_on_trade(trade: Any, entry_spread_usd: float | None) -> None:
+    """Add abs(leg entry spread) into trade.cumulative_entry_spread_usd."""
+    prior = float(getattr(trade, "cumulative_entry_spread_usd", 0.0) or 0.0)
+    trade.cumulative_entry_spread_usd = prior + abs(float(entry_spread_usd or 0.0))
+
+
+def estimate_expected_exit_spread_usd(
+    *,
+    offer_price: float,
+    quantity: int,
+    contract_value: float | None = None,
+    spread_factor: float = 0.005,
+) -> float:
+    """Conservative exit-spread proxy: offer × qty × CV × 0.5%."""
+    cv = float(OPTIONS_CONTRACT_VALUE if contract_value is None else contract_value)
+    offer = float(offer_price or 0.0)
+    qty = abs(int(quantity or 0))
+    if offer <= 0 or qty <= 0:
+        return 0.0
+    return offer * qty * cv * float(spread_factor)
+
+
 def compute_net_mtm(
     *,
     gross_mtm: float,
     fees_paid: float = 0.0,
     est_exit_fees: float = 0.0,
     slippage_pct: float | None = 2.0,
+    expected_exit_spread_usd: float = 0.0,
 ) -> dict[str, float]:
     """
-    Net MTM = Gross − Fees Paid − Est Exit Fees − Slippage.
+    Net MTM = Gross − Fees Paid − Est Exit Fees − Slippage − Expected Exit Spread.
 
-    Returns slippage_pct, slippage_amount, net_mtm, total_deductions.
+    Returns slippage_pct, slippage_amount, expected_exit_spread_usd,
+    net_mtm, total_deductions.
     """
     slip_pct = float(slippage_pct if slippage_pct is not None else 2.0)
     if slip_pct < 0:
         slip_pct = 0.0
     fees = max(0.0, float(fees_paid or 0.0))
     est_exit = max(0.0, float(est_exit_fees or 0.0))
+    exit_spread = max(0.0, float(expected_exit_spread_usd or 0.0))
     slip = compute_slippage_amount(gross_mtm, slip_pct)
-    deductions = fees + est_exit + slip
+    deductions = fees + est_exit + slip + exit_spread
     net = float(gross_mtm or 0.0) - deductions
     return {
         "slippage_pct": slip_pct,
         "slippage_amount": round(slip, 4),
+        "expected_exit_spread_usd": round(exit_spread, 4),
         "total_deductions": round(deductions, 4),
         "net_mtm": round(net, 4),
     }

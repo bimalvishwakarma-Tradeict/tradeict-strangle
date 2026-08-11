@@ -536,6 +536,8 @@ async def _persist_strangle_trade(
     monitoring_starts: datetime,
     call_entry_fee: float | None = None,
     put_entry_fee: float | None = None,
+    call_sent_price: float | None = None,
+    put_sent_price: float | None = None,
 ) -> tuple[Trade, Leg, Leg]:
     now_utc = datetime.now(timezone.utc)
     qty = int(payload.quantity)
@@ -576,11 +578,16 @@ async def _persist_strangle_trade(
         realized_pnl=0.0,
         monitoring_starts_at=monitoring_starts,
         basket_number=basket_no,
+        cumulative_entry_spread_usd=0.0,
     )
     db.add(trade)
     db.flush()
 
     from backend.core.bot_logger import log_tp_sl_locked
+    from backend.core.fees import (
+        accumulate_entry_spread_on_trade,
+        compute_entry_spread_usd,
+    )
 
     log_tp_sl_locked(
         trade_id=int(trade.id),
@@ -589,6 +596,29 @@ async def _persist_strangle_trade(
         stoploss_usd=stoploss_usd,
         tp_pct=tp_pct,
         sl_pct=sl_pct,
+    )
+
+    call_sent = float(
+        call_sent_price
+        if call_sent_price is not None and float(call_sent_price) > 0
+        else call_fill_price
+    )
+    put_sent = float(
+        put_sent_price
+        if put_sent_price is not None and float(put_sent_price) > 0
+        else put_fill_price
+    )
+    call_entry_spread = compute_entry_spread_usd(
+        sent_price=call_sent,
+        fill_price=float(call_fill_price),
+        quantity=qty,
+        is_long=False,
+    )
+    put_entry_spread = compute_entry_spread_usd(
+        sent_price=put_sent,
+        fill_price=float(put_fill_price),
+        quantity=qty,
+        is_long=False,
     )
 
     call_leg = Leg(
@@ -615,6 +645,8 @@ async def _persist_strangle_trade(
         entry_fee_usd=(
             abs(float(call_entry_fee)) if call_entry_fee is not None else None
         ),
+        order_sent_price=call_sent,
+        entry_spread_usd=call_entry_spread,
     )
     put_leg = Leg(
         trade_id=trade.id,
@@ -640,7 +672,11 @@ async def _persist_strangle_trade(
         entry_fee_usd=(
             abs(float(put_entry_fee)) if put_entry_fee is not None else None
         ),
+        order_sent_price=put_sent,
+        entry_spread_usd=put_entry_spread,
     )
+    accumulate_entry_spread_on_trade(trade, call_entry_spread)
+    accumulate_entry_spread_on_trade(trade, put_entry_spread)
     db.add(call_leg)
     db.add(put_leg)
 
@@ -854,6 +890,8 @@ async def initiate_trade(
                     if put_result.commission is not None
                     else None
                 ),
+                call_sent_price=call_baseline_for_sl,
+                put_sent_price=put_baseline_for_sl,
             )
             logger.info("Step 8: Trade saved, id=%s", trade.id)
         except Exception as exc:
@@ -1443,13 +1481,39 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
         fees_paid = float(fee_fields["fees_paid"])
         est_exit = float(fee_fields["est_exit_fees"])
         total_fees = float(fee_fields["total_expected_fees"])
-        from backend.core.fees import compute_net_mtm
+        from backend.core.fees import (
+            compute_net_mtm,
+            estimate_expected_exit_spread_usd,
+        )
+
+        expected_exit_spread = 0.0
+        for leg in all_legs:
+            if str(getattr(leg, "status", "") or "").lower() != "open":
+                continue
+            lt = str(leg.leg_type or "").lower()
+            if lt == "call":
+                offer = float(call_prem)
+            elif lt == "put":
+                offer = float(put_prem)
+            else:
+                offer = float(getattr(leg, "initial_premium", 0) or 0)
+            if offer > 0:
+                expected_exit_spread += estimate_expected_exit_spread_usd(
+                    offer_price=offer,
+                    quantity=int(leg.quantity or 0),
+                )
+
+        cumulative_entry_spread = float(
+            getattr(state.trade, "cumulative_entry_spread_usd", 0.0) or 0.0
+        )
+        gross_mtm_for_stoploss = float(gross_mtm) + cumulative_entry_spread
 
         slip_fields = compute_net_mtm(
             gross_mtm=gross_mtm,
             fees_paid=fees_paid,
             est_exit_fees=est_exit,
             slippage_pct=getattr(state.trade, "slippage_pct", None) or 2.0,
+            expected_exit_spread_usd=expected_exit_spread,
         )
         net_mtm = float(slip_fields["net_mtm"])
 
@@ -1485,6 +1549,9 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "unrealized_pnl": delta_mtm,
             "total_pnl": display_total,
             "gross_mtm": gross_mtm,
+            "gross_mtm_for_stoploss": round(gross_mtm_for_stoploss, 4),
+            "cumulative_entry_spread": round(cumulative_entry_spread, 4),
+            "expected_exit_spread_usd": round(expected_exit_spread, 4),
             "fees_paid": fees_paid,
             "est_exit_fees": est_exit,
             "total_expected_fees": total_fees,

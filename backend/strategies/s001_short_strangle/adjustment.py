@@ -531,6 +531,20 @@ class AdjustmentExecutor:
                 )
 
                 # Create new other leg in DB
+                from backend.core.fees import (
+                    accumulate_entry_spread_on_trade,
+                    compute_entry_spread_usd,
+                )
+
+                new_other_sent = float(
+                    getattr(new_other_plan, "target_premium", 0) or new_other_fill
+                )
+                new_other_spread = compute_entry_spread_usd(
+                    sent_price=new_other_sent,
+                    fill_price=new_other_fill,
+                    quantity=int(other_leg.quantity),
+                    is_long=False,
+                )
                 new_other_leg = Leg(
                     trade_id=int(trade.id),
                     leg_type=str(other_leg.leg_type),
@@ -546,14 +560,26 @@ class AdjustmentExecutor:
                     is_bot_managed=True,
                     is_long=False,
                     delta_order_id=str(new_other_result.order_id or ""),
+                    order_sent_price=new_other_sent,
+                    entry_spread_usd=new_other_spread,
                 )
                 db_session.add(new_other_leg)
+                accumulate_entry_spread_on_trade(trade, new_other_spread)
 
                 # Hedge is a first-class basket leg (long) — store in Leg table
                 hedge_leg_type = (
                     "hedge_put"
                     if str(triggered_leg_type).lower() == "put"
                     else "hedge_call"
+                )
+                hedge_sent = float(
+                    getattr(hedge_plan, "target_premium", 0) or hedge_fill
+                )
+                hedge_spread = compute_entry_spread_usd(
+                    sent_price=hedge_sent,
+                    fill_price=hedge_fill,
+                    quantity=int(triggered_leg.quantity),
+                    is_long=True,
                 )
                 hedge_leg_row = Leg(
                     trade_id=int(trade.id),
@@ -575,8 +601,11 @@ class AdjustmentExecutor:
                         if getattr(hedge_result, "commission", None) is not None
                         else None
                     ),
+                    order_sent_price=hedge_sent,
+                    entry_spread_usd=hedge_spread,
                 )
                 db_session.add(hedge_leg_row)
+                accumulate_entry_spread_on_trade(trade, hedge_spread)
 
                 # Conversion fields kept for backward compat + quick lookup
                 trade.in_conversion_mode = True
@@ -857,6 +886,17 @@ class AdjustmentExecutor:
                 triggered_leg.exit_fee_usd = abs(float(exit_result.commission))
 
             # New leg: entry fill stays forever; baseline starts at fill
+            from backend.core.fees import (
+                accumulate_entry_spread_on_trade,
+                compute_entry_spread_usd,
+            )
+
+            new_leg_spread = compute_entry_spread_usd(
+                sent_price=float(expected_new_entry),
+                fill_price=new_entry_premium,
+                quantity=int(triggered_leg.quantity),
+                is_long=False,
+            )
             new_leg = Leg(
                 trade_id=trade.id,
                 leg_type=triggered_leg.leg_type,
@@ -875,6 +915,8 @@ class AdjustmentExecutor:
                     if entry_result.commission is not None
                     else None
                 ),
+                order_sent_price=float(expected_new_entry),
+                entry_spread_usd=new_leg_spread,
                 delta_order_id=(
                     str(entry_result.order_id)
                     if entry_result.order_id is not None
@@ -885,6 +927,7 @@ class AdjustmentExecutor:
                 is_bot_managed=True,
             )
             db_session.add(new_leg)
+            accumulate_entry_spread_on_trade(trade, new_leg_spread)
 
             # Untouched leg: KEEP original entry; ONLY reset trigger baseline
             # to Best Offer (ask). Soft fallback: mid, then keep existing.

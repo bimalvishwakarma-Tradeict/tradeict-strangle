@@ -1303,12 +1303,14 @@ class BotEngine:
         from backend.core.fees import (
             basket_fees_paid_from_legs,
             compute_net_mtm,
+            estimate_expected_exit_spread_usd,
             estimate_option_trading_fee,
         )
         from backend.models import Leg as LegModel
 
         fees_paid = 0.0
         est_exit = 0.0
+        expected_exit_spread = 0.0
         with self.db_factory() as db:
             legs = (
                 db.query(LegModel)
@@ -1340,12 +1342,25 @@ class BotEngine:
                         quantity_lots=int(leg.quantity or 0),
                         btc_index_price=btc,
                     )
+                if offer > 0:
+                    expected_exit_spread += estimate_expected_exit_spread_usd(
+                        offer_price=offer,
+                        quantity=int(leg.quantity or 0),
+                    )
+
+        # Gross MTM for stoploss: add back entry spread so SL breathing room
+        # is not eaten by execution spread
+        cumulative_entry_spread = float(
+            getattr(trade, "cumulative_entry_spread_usd", 0.0) or 0.0
+        )
+        gross_mtm_for_stoploss = total_pnl + cumulative_entry_spread
 
         slip_fields = compute_net_mtm(
             gross_mtm=total_pnl,
             fees_paid=fees_paid,
             est_exit_fees=est_exit,
             slippage_pct=slip_pct,
+            expected_exit_spread_usd=expected_exit_spread,
         )
         net_mtm_val = float(slip_fields["net_mtm"])
         slippage_amount = float(slip_fields["slippage_amount"])
@@ -1356,8 +1371,11 @@ class BotEngine:
             "call_upnl": round(call_mtm, 4),
             "put_upnl": round(put_mtm, 4),
             "gross_mtm": round(total_pnl, 4),
+            "gross_mtm_for_stoploss": round(gross_mtm_for_stoploss, 4),
+            "cumulative_entry_spread": round(cumulative_entry_spread, 4),
             "fees_paid": round(fees_paid, 4),
             "est_exit_fees": round(est_exit, 4),
+            "expected_exit_spread_usd": round(expected_exit_spread, 4),
             "slippage_pct": slip_pct,
             "slippage_amount": round(slippage_amount, 4),
             "net_mtm": round(net_mtm_val, 4),
@@ -1367,7 +1385,7 @@ class BotEngine:
             "pnl_pct": round(pnl_pct, 1),
             "will_exit_profit": net_mtm_val >= target if target else False,
             "will_exit_stoploss": (
-                total_pnl <= -stoploss if stoploss else False
+                gross_mtm_for_stoploss <= -stoploss if stoploss else False
             ),
             "mtm_source": "delta_position" if mtm_available else "computed_fallback",
             "contract_value": OPTIONS_CONTRACT_VALUE,
@@ -1398,6 +1416,7 @@ class BotEngine:
                 delta_mtm=delta_upnl,
                 net_mtm=net_mtm_val,
                 slippage_pct=slip_pct,
+                gross_mtm_for_sl=gross_mtm_for_stoploss,
             )
             if float(getattr(action, "call_trigger_pct", 0) or 0) > 0:
                 call_trig_pct = float(action.call_trigger_pct)
@@ -3075,12 +3094,14 @@ class BotEngine:
         from backend.core.fees import (
             basket_fees_paid_from_legs,
             compute_net_mtm,
+            estimate_expected_exit_spread_usd,
             estimate_option_trading_fee,
         )
         from backend.models import Leg as LegModel
 
         fees_paid = 0.0
         est_exit = 0.0
+        expected_exit_spread = 0.0
         conversion_equality_pct = 10.0
         with self.db_factory() as db:
             from backend.database import get_or_create_auto_settings
@@ -3106,23 +3127,40 @@ class BotEngine:
             for leg in legs:
                 if str(getattr(leg, "status", "") or "").lower() != "open":
                     continue
-                offer = (
-                    float(call_prem)
-                    if str(leg.leg_type).lower() == "call"
-                    else float(put_prem)
-                )
+                lt = str(leg.leg_type or "").lower()
+                if lt == "call":
+                    offer = float(call_prem)
+                elif lt == "put":
+                    offer = float(put_prem)
+                else:
+                    offer = float(
+                        self._live_prices.get(str(leg.symbol), 0)
+                        or leg.initial_premium
+                        or 0
+                    )
                 if offer > 0 and btc > 0:
                     est_exit += estimate_option_trading_fee(
                         option_price=offer,
                         quantity_lots=int(leg.quantity or 0),
                         btc_index_price=btc,
                     )
+                if offer > 0:
+                    expected_exit_spread += estimate_expected_exit_spread_usd(
+                        offer_price=offer,
+                        quantity=int(leg.quantity or 0),
+                    )
+
+        cumulative_entry_spread = float(
+            getattr(trade_state.trade, "cumulative_entry_spread_usd", 0.0) or 0.0
+        )
+        gross_mtm_for_stoploss = float(display_total) + cumulative_entry_spread
 
         slip_fields = compute_net_mtm(
             gross_mtm=display_total,
             fees_paid=fees_paid,
             est_exit_fees=est_exit,
             slippage_pct=getattr(trade_state.trade, "slippage_pct", None),
+            expected_exit_spread_usd=expected_exit_spread,
         )
         slip_pct = float(slip_fields["slippage_pct"])
         slip_amt = float(slip_fields["slippage_amount"])
@@ -3151,6 +3189,9 @@ class BotEngine:
             "put_offer": float(put_prem),
             "pnl": delta_mtm,
             "gross_mtm": display_total,
+            "gross_mtm_for_stoploss": round(gross_mtm_for_stoploss, 4),
+            "cumulative_entry_spread": round(cumulative_entry_spread, 4),
+            "expected_exit_spread_usd": round(expected_exit_spread, 4),
             "fees_paid": round(fees_paid, 6),
             "est_exit_fees": round(est_exit, 6),
             "total_expected_fees": round(fees_paid + est_exit, 6),
@@ -3190,6 +3231,24 @@ class BotEngine:
             ),
             "conversion_equality_pct": conversion_equality_pct,
         }
+        if bool(getattr(trade_state.trade, "in_conversion_mode", False)):
+            # Hedge UPNL if available on trade_state
+            hedge_leg = getattr(trade_state, "hedge_leg", None)
+            if hedge_leg is not None:
+                hedge_px = float(
+                    self._live_prices.get(str(hedge_leg.symbol), 0)
+                    or getattr(hedge_leg, "initial_premium", 0)
+                    or 0
+                )
+                hedge_entry = float(getattr(hedge_leg, "initial_premium", 0) or 0)
+                hedge_qty = abs(int(getattr(hedge_leg, "quantity", 0) or 0))
+                if hedge_px > 0 and hedge_entry > 0:
+                    payload["hedge_upnl"] = round(
+                        (hedge_px - hedge_entry)
+                        * hedge_qty
+                        * float(OPTIONS_CONTRACT_VALUE),
+                        4,
+                    )
         logger.info(
             "TRADE_UPDATE slippage: trade=%s pct=%s amount=%s net=%s "
             "gross=%s fees=%s exit_fees=%s keys=%s",

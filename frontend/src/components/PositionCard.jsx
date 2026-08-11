@@ -357,6 +357,24 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const feesPaid = n(trade.fees_paid)
   const estExitFees = n(trade.est_exit_fees)
   const grossMtm = n(trade.gross_mtm)
+  const cumulativeEntrySpread =
+    trade.cumulative_entry_spread != null && trade.cumulative_entry_spread !== ''
+      ? n(trade.cumulative_entry_spread)
+      : null
+  const grossMtmForSl =
+    trade.gross_mtm_for_stoploss != null && trade.gross_mtm_for_stoploss !== ''
+      ? n(trade.gross_mtm_for_stoploss)
+      : cumulativeEntrySpread != null
+        ? grossMtm + cumulativeEntrySpread
+        : null
+  const expectedExitSpread =
+    trade.expected_exit_spread_usd != null && trade.expected_exit_spread_usd !== ''
+      ? n(trade.expected_exit_spread_usd)
+      : null
+  const hedgeUpnl =
+    trade.hedge_upnl != null && trade.hedge_upnl !== ''
+      ? n(trade.hedge_upnl)
+      : null
   // Always show slippage row — default 2% if API omitted fields
   const slippagePct =
     trade.slippage_pct != null && trade.slippage_pct !== ''
@@ -370,14 +388,26 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const totalDeductions =
     trade.total_deductions != null && trade.total_deductions !== ''
       ? n(trade.total_deductions)
-      : feesPaid + estExitFees + slippageAmount
-  const computedNet = grossMtm - feesPaid - estExitFees - slippageAmount
+      : feesPaid +
+        estExitFees +
+        slippageAmount +
+        (expectedExitSpread != null ? expectedExitSpread : 0)
+  const computedNet =
+    grossMtm -
+    feesPaid -
+    estExitFees -
+    slippageAmount -
+    (expectedExitSpread != null ? expectedExitSpread : 0)
   const netMtm =
     trade.net_mtm != null && trade.net_mtm !== '' ? n(trade.net_mtm) : computedNet
   const totalMtm = netMtm
   const lastMtmUpdate = trade.last_mtm_update || null
   const target = n(trade.profit_target_usd)
   const stoploss = n(trade.stoploss_usd)
+  const nearSl =
+    grossMtmForSl != null &&
+    stoploss > 0 &&
+    grossMtmForSl <= -stoploss * 0.8
   const initialMax = n(trade.initial_max_profit)
   const tpPctLocked = n(trade.tp_pct || 50)
   const slPctLocked = n(trade.sl_pct || 100)
@@ -751,6 +781,14 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             <span>PUT UPL</span>
             <span className={pnlColor(putUpnl)}>{fmtSignedMoney(putUpnl)}</span>
           </div>
+          {trade.in_conversion_mode && (
+            <div className="flex justify-between">
+              <span>Hedge UPL</span>
+              <span className={hedgeUpnl == null ? 'text-gray-500' : pnlColor(hedgeUpnl)}>
+                {hedgeUpnl == null ? '--' : fmtSignedMoney(hedgeUpnl)}
+              </span>
+            </div>
+          )}
           <div className="flex justify-between">
             <span>Combined UPNL</span>
             <span className={pnlColor(unrealized)}>
@@ -766,6 +804,27 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             <span>Gross MTM</span>
             <span className={pnlColor(grossMtm)}>{fmtSignedMoney(grossMtm)}</span>
           </div>
+          <div className="flex justify-between text-yellow-300">
+            <span>Entry Spread Diff (cumulative)</span>
+            <span>
+              {cumulativeEntrySpread == null
+                ? '--'
+                : `-${fmtMoney(Math.abs(cumulativeEntrySpread))}`}
+            </span>
+          </div>
+          <div
+            className={`flex justify-between font-bold ${
+              nearSl ? 'text-red-400' : 'text-white'
+            }`}
+          >
+            <span>Gross MTM for SL</span>
+            <span>
+              {grossMtmForSl == null
+                ? '--'
+                : fmtSignedMoney(grossMtmForSl)}
+            </span>
+          </div>
+          <div className="my-1 border-t border-gray-600" />
           <div className="flex justify-between text-amber-200/90">
             <span>Fees Paid</span>
             <span>-${fmtMoney(feesPaid)}</span>
@@ -781,6 +840,14 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
           >
             <span>Slippage ({fmtMoney(slippagePct)}%)</span>
             <span>-${fmtMoney(slippageAmount)}</span>
+          </div>
+          <div className="flex justify-between text-yellow-300">
+            <span>Expected Exit Spread</span>
+            <span>
+              {expectedExitSpread == null
+                ? '--'
+                : `-$${fmtMoney(expectedExitSpread)}`}
+            </span>
           </div>
           <div className="my-1 border-t border-gray-600" />
           <div className="flex justify-between text-amber-100">

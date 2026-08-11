@@ -56,6 +56,11 @@ class Trade(Base):
     sl_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=100.0)
     # Est. execution slippage applied to Net MTM (and exit decisions)
     slippage_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=2.0)
+    # Cumulative entry spread across all legs (entry + adjustments)
+    # entry_spread_usd per leg summed here; updated on each leg entry
+    cumulative_entry_spread_usd: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=0.0
+    )
     # Delta Exchange per-leg stop-loss safety net (% of entry / baseline premium)
     universal_sl_pct: Mapped[float | None] = mapped_column(
         Float, nullable=True, default=200.0
@@ -132,6 +137,9 @@ class Leg(Base):
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Actual Delta trading fees (inc. GST) from fill/order commission — never estimated
     entry_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Price bot sent to Delta vs actual fill — captures entry execution spread
+    order_sent_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_spread_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     delta_at_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
     # BOT TRADE ISOLATION: order ID from Delta when bot placed this leg

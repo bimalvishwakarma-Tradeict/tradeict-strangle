@@ -276,18 +276,20 @@ class ShortStrangleStrategy(BaseStrategy):
         delta_mtm: float | None = None,
         net_mtm: float | None = None,
         slippage_pct: float | None = None,
+        gross_mtm_for_sl: float | None = None,
     ) -> TradeAction:
         """
         Evaluate exits then adjustment triggers (exact priority):
 
         a. settling → no action
         b. Net MTM >= profit_target → PROFIT_TARGET
-        c. Net MTM <= -stoploss → STOPLOSS
+        c. Gross MTM for SL <= -stoploss → STOPLOSS
+           (gross + cumulative entry spread so SL room is not eaten by fill spread)
         d. pre-expiry window → PRE_EXPIRY
         e. adjustment trigger + decision (Net MTM > 0 → close, else adjust)
         f. HOLD
 
-        When ``net_mtm`` is provided (from bot_engine), use it for b/c/e.
+        When ``net_mtm`` is provided (from bot_engine), use it for b/e.
         Otherwise compute via compute_net_mtm (gross − fees − slip).
         """
         calculated_pnl = self.calculate_pnl(
@@ -327,10 +329,22 @@ class ShortStrangleStrategy(BaseStrategy):
                 slippage_pct=slippage_pct,
             )
 
+        # Gross MTM for SL: add back cumulative entry spread
+        if gross_mtm_for_sl is not None:
+            sl_mtm = float(gross_mtm_for_sl)
+        else:
+            try:
+                cumulative_entry_spread = float(
+                    getattr(trade, "cumulative_entry_spread_usd", 0.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                cumulative_entry_spread = 0.0
+            sl_mtm = total_pnl + cumulative_entry_spread
+
         # b. Profit target (Net MTM — fees/slippage deducted)
         should_exit_profit = decision_pnl >= float(trade.profit_target_usd)
-        # c. Stop loss (Gross MTM — fees must not shrink SL breathing room)
-        should_exit_sl = total_pnl <= -float(trade.stoploss_usd)
+        # c. Stop loss (Gross MTM for SL — entry spread added back)
+        should_exit_sl = sl_mtm <= -float(trade.stoploss_usd)
 
         if should_exit_profit:
             logger.info(
@@ -352,10 +366,12 @@ class ShortStrangleStrategy(BaseStrategy):
 
         if should_exit_sl:
             logger.info(
-                "Trade %s: gross_mtm=%.2f net_mtm=%.2f | "
-                "target=%s | sl=%s | action=EXIT STOPLOSS (gross_mtm<=stoploss)",
+                "Trade %s: gross_mtm=%.2f gross_mtm_for_sl=%.2f net_mtm=%.2f | "
+                "target=%s | sl=%s | action=EXIT STOPLOSS "
+                "(gross_mtm_for_sl<=stoploss)",
                 getattr(trade, "id", "?"),
                 total_pnl,
+                sl_mtm,
                 decision_pnl,
                 trade.profit_target_usd,
                 trade.stoploss_usd,
