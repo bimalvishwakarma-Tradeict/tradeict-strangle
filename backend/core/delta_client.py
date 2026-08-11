@@ -1491,14 +1491,17 @@ class DeltaClient:
         ]
         if at_or_above:
             best = min(at_or_above, key=_at_or_above_key)
-            match_mode = "at_or_above"
+            match_mode = "above_offer"
         else:
             # Fallback: no strike >= target — keep prior nearest behavior
             best = min(pool, key=_nearest_key)
-            match_mode = "nearest_fallback"
+            match_mode = "fallback_nearest"
 
         best_mark = _safe_float(best.get(mark_key))
         best_strike = _safe_float(best.get("strike"))
+        # Copy so caller can read selection method without mutating chain cache
+        result = dict(best)
+        result["_match_method"] = match_mode
         logger.info(
             "Premium match (mandatory adjust): %s strike=%s mark=%.2f "
             "target=%.2f diff=%.2f exclude=%s mode=%s",
@@ -1510,7 +1513,7 @@ class DeltaClient:
             excl,
             match_mode,
         )
-        return best
+        return result
 
     async def find_atm_straddle(
         self,

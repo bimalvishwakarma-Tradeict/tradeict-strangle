@@ -639,12 +639,31 @@ class ShortStrangleStrategy(BaseStrategy):
         new_strike = float(row.get("strike") or 0)
         mark_key = "call_mark_price" if leg == "call" else "put_mark_price"
         new_premium = float(row.get(mark_key) or 0)
+        method = str(row.get("_match_method") or "above_offer")
+        other_offer = float(other_leg_current_premium)
         logger.info(
-            "NEW_STRIKE_SELECTED | premium=%.1f >= other_leg_offer=%.1f | strike=%s",
+            "NEW_STRIKE_SELECTED | selected_premium=%.1f | other_leg_offer=%.1f | "
+            "method=%s | selected_strike=%s",
             new_premium,
-            float(other_leg_current_premium),
+            other_offer,
+            method,
             new_strike,
         )
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "NEW_STRIKE_SELECTED",
+                int(getattr(trade, "id", 0) or 0),
+                {
+                    "selected_premium": round(new_premium, 4),
+                    "other_leg_offer": round(other_offer, 4),
+                    "method": method,
+                    "selected_strike": new_strike,
+                },
+            )
+        except Exception:
+            pass
         if current_strike is not None and abs(new_strike - float(current_strike)) < 0.01:
             raise ValueError(
                 f"SAME_STRIKE_HOLD: nearest match is still {new_strike} "
