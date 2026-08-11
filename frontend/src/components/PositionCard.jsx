@@ -489,9 +489,7 @@ function BotNextActionPlan({ trade, call, put }) {
             </div>
           )}
 
-          {(action === 'ADJUST_CALL' ||
-            action === 'ADJUST_PUT' ||
-            action === 'CONVERSION_LIKELY') && (
+          {(action === 'ADJUST_CALL' || action === 'ADJUST_PUT') && (
             <div className="space-y-1 rounded-lg border border-orange-800/50 bg-orange-950/20 px-3 py-2 text-xs text-gray-300">
               <div>
                 Triggered leg:{' '}
@@ -524,19 +522,93 @@ function BotNextActionPlan({ trade, call, put }) {
               </div>
               <div>
                 Adjustment type:{' '}
-                {plan.adjustment_type === 'conversion_likely' ? (
-                  <span className="text-red-300">
-                    ⚠️ Conversion Likely (other leg too cheap)
-                  </span>
-                ) : (
-                  <span className="text-green-300">Normal Roll</span>
-                )}
+                <span className="text-green-300">Normal Roll</span>
               </div>
               <div className="text-gray-400">
                 Other leg ${fmtMoney(otherOffer)} is{' '}
                 {otherOffer >= convMin ? 'above' : 'below'} conversion minimum $
                 {fmtMoney(convMin)}
               </div>
+            </div>
+          )}
+
+          {action === 'CONVERSION_LIKELY' && (
+            <div className="space-y-3 rounded-lg border border-red-700/50 bg-red-950/20 px-3 py-3 text-xs text-gray-300">
+              <div className="text-sm font-semibold text-red-300">
+                ⚠️ Conversion Mode Will Activate on Trigger
+              </div>
+              {(() => {
+                const cp = plan.conversion_plan
+                if (!cp) {
+                  return (
+                    <div className="text-gray-500">
+                      Conversion plan details: --
+                    </div>
+                  )
+                }
+                const trig = String(cp.triggered_leg || 'call').toUpperCase()
+                const otherSide = String(
+                  cp.new_other_leg_side || cp.close_other_leg || 'put',
+                ).toUpperCase()
+                const hedgeSide = String(cp.hedge_action || 'BUY')
+                  .replace('BUY ', '')
+                  .trim() || trig
+                return (
+                  <div className="space-y-2">
+                    <div className="rounded border border-amber-700/40 bg-amber-950/30 px-2.5 py-2">
+                      <div className="mb-0.5 font-semibold text-amber-300">
+                        STEP 1 — Buy Hedge
+                      </div>
+                      <div className="text-amber-100">
+                        BUY {hedgeSide} @ strike $
+                        {fmtStrike(cp.hedge_strike)}
+                      </div>
+                      <div className="text-[11px] text-amber-200/70">
+                        One strike toward ATM from triggered {trig} @ $
+                        {fmtStrike(cp.triggered_strike)}
+                        {cp.hedge_symbol_expected
+                          ? ` · ${cp.hedge_symbol_expected}`
+                          : ''}
+                      </div>
+                    </div>
+                    <div className="rounded border border-blue-700/40 bg-blue-950/30 px-2.5 py-2">
+                      <div className="mb-0.5 font-semibold text-blue-300">
+                        STEP 2 — Keep Triggered Short + Close Other
+                      </div>
+                      <div className="text-blue-200">
+                        KEEP short {trig} @ $
+                        {fmtStrike(cp.triggered_strike)} (stays open)
+                      </div>
+                      <div className="text-red-300">
+                        CLOSE short {otherSide} @ $
+                        {fmtStrike(cp.other_leg_strike)} (current offer: $
+                        {fmtMoney(cp.other_leg_current_offer)})
+                      </div>
+                    </div>
+                    <div className="rounded border border-green-700/40 bg-green-950/30 px-2.5 py-2">
+                      <div className="mb-0.5 font-semibold text-green-300">
+                        STEP 3 — Sell New {otherSide}
+                      </div>
+                      <div className="text-green-200">
+                        SELL new {otherSide} targeting ~$
+                        {fmtMoney(cp.new_other_target_premium)}
+                      </div>
+                      <div className="text-[11px] text-green-200/70">
+                        (estimated: triggered offer $
+                        {fmtMoney(cp.triggered_current_offer)} / 2 — actual will
+                        be hedge fill / 2)
+                      </div>
+                    </div>
+                    <div className="text-gray-300">
+                      Why conversion: {cp.why_conversion || '--'}
+                    </div>
+                    <div className="text-[11px] text-gray-500">
+                      After conversion: bot monitors for premium equality to
+                      close hedge
+                    </div>
+                  </div>
+                )
+              })()}
             </div>
           )}
 

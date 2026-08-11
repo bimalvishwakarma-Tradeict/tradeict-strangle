@@ -3098,6 +3098,72 @@ class BotEngine:
                 }
             )
 
+            if adj_type == "conversion_likely":
+                strike_increment = 200.0
+                triggered_leg_strike = float(
+                    trade_state.call_leg.strike
+                    if triggered == "call"
+                    else trade_state.put_leg.strike
+                )
+                other_leg_strike = float(
+                    trade_state.put_leg.strike
+                    if triggered == "call"
+                    else trade_state.call_leg.strike
+                )
+                if triggered == "call":
+                    hedge_strike = triggered_leg_strike - strike_increment
+                    hedge_type = "C"
+                    new_other_leg_side = "put"
+                else:
+                    hedge_strike = triggered_leg_strike + strike_increment
+                    hedge_type = "P"
+                    new_other_leg_side = "call"
+                triggered_leg_current_offer = float(
+                    call_prem if triggered == "call" else put_prem
+                )
+                # Parse expiry suffix from existing symbol (e.g. C-BTC-64400-110826)
+                sym_parts = str(
+                    getattr(trade_state.call_leg, "symbol", "") or ""
+                ).split("-")
+                expiry_code = sym_parts[-1] if len(sym_parts) >= 4 else ""
+                underlying_code = (
+                    str(getattr(trade, "underlying", "BTC") or "BTC").upper()
+                )
+                if expiry_code:
+                    hedge_symbol_expected = (
+                        f"{hedge_type}-{underlying_code}-"
+                        f"{int(hedge_strike)}-{expiry_code}"
+                    )
+                else:
+                    hedge_symbol_expected = (
+                        f"{hedge_type}-{underlying_code}-{int(hedge_strike)}"
+                    )
+                new_other_target = triggered_leg_current_offer / 2.0
+                next_plan["conversion_plan"] = {
+                    "triggered_leg": triggered,
+                    "triggered_strike": triggered_leg_strike,
+                    "triggered_current_offer": round(triggered_leg_current_offer, 2),
+                    "hedge_action": "BUY " + (
+                        "CALL" if triggered == "call" else "PUT"
+                    ),
+                    "hedge_strike": hedge_strike,
+                    "hedge_symbol_expected": hedge_symbol_expected,
+                    "keep_triggered_short": True,
+                    "close_other_leg": new_other_leg_side,
+                    "other_leg_strike": other_leg_strike,
+                    "new_other_leg_side": new_other_leg_side,
+                    "new_other_target_premium": round(new_other_target, 2),
+                    "new_other_target_note": (
+                        "estimated as triggered_offer/2; actual will be hedge_fill/2"
+                    ),
+                    "conversion_min_premium": conv_min,
+                    "other_leg_current_offer": round(other_offer, 2),
+                    "why_conversion": (
+                        f"Other leg offer ${round(other_offer, 2)} "
+                        f"< minimum ${round(conv_min, 2)}"
+                    ),
+                }
+
         if next_action in ("CONVERSION_ACTIVE", "REVERSAL_WATCH"):
             hedge_sym = str(getattr(trade, "conversion_hedge_symbol", "") or "")
             hedge_entry = float(
