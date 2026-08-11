@@ -1297,6 +1297,12 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
     conversion_equality_pct = float(
         getattr(auto_settings, "conversion_equality_pct", 10.0) or 10.0
     )
+    conversion_min_premium = float(
+        getattr(auto_settings, "adj_low_premium_min_usd", 150.0) or 150.0
+    )
+    conversion_enabled = bool(
+        getattr(auto_settings, "adj_low_premium_exit_enabled", False)
+    )
 
     try:
         await bot_engine._refresh_btc_spot()
@@ -1407,15 +1413,6 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 await bot_engine._estimate_replacements(state, call_prem, put_prem)
             except Exception:
                 pass
-        plan = bot_engine.build_bot_plan_fields(
-            state,
-            call_prem,
-            put_prem,
-            float(trigger_pct),
-            call_trigger_pct=float(call_trig_pct),
-            put_trigger_pct=float(put_trig_pct),
-            premium_slabs=premium_slabs,
-        )
 
         adj_count = (
             db.query(Adjustment).filter(Adjustment.trade_id == state.trade_id).count()
@@ -1516,6 +1513,21 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             expected_exit_spread_usd=expected_exit_spread,
         )
         net_mtm = float(slip_fields["net_mtm"])
+
+        plan = bot_engine.build_bot_plan_fields(
+            state,
+            call_prem,
+            put_prem,
+            float(trigger_pct),
+            call_trigger_pct=float(call_trig_pct),
+            put_trigger_pct=float(put_trig_pct),
+            premium_slabs=premium_slabs,
+            net_mtm=net_mtm,
+            gross_mtm_for_stoploss=gross_mtm_for_stoploss,
+            conversion_min_premium=conversion_min_premium,
+            conversion_equality_pct=conversion_equality_pct,
+            conversion_enabled=conversion_enabled,
+        )
 
         leg_history = _basket_leg_history(db, state.trade_id)
         open_count = sum(1 for x in (call_open, put_open) if x)

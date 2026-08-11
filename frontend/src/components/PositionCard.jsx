@@ -174,6 +174,8 @@ function normalizeLeg(trade, side) {
     est_exit_fee_usd: estExitFee,
     status,
     closed: status === 'closed',
+    entry_time: nested?.entry_time ?? null,
+    exit_time: nested?.exit_time ?? null,
   }
 }
 
@@ -331,6 +333,400 @@ function TriggerWatch({
   )
 }
 
+const NEXT_ACTION_BADGE = {
+  HOLD: {
+    label: 'Monitoring — No Action Needed',
+    className: 'bg-green-900/50 text-green-300 border-green-700',
+  },
+  ADJUST_CALL: {
+    label: 'Call Adjustment Expected',
+    className: 'bg-orange-900/50 text-orange-300 border-orange-700',
+  },
+  ADJUST_PUT: {
+    label: 'Put Adjustment Expected',
+    className: 'bg-orange-900/50 text-orange-300 border-orange-700',
+  },
+  CONVERSION_LIKELY: {
+    label: 'Conversion Mode Likely on Next Trigger',
+    className: 'bg-red-900/50 text-red-300 border-red-700',
+  },
+  CONVERSION_ACTIVE: {
+    label: 'Conversion Mode Active',
+    className: 'bg-purple-900/50 text-purple-300 border-purple-700',
+  },
+  REVERSAL_WATCH: {
+    label: 'Watching for Hedge Reversal',
+    className: 'bg-blue-900/50 text-blue-300 border-blue-700',
+  },
+  PROFIT_TARGET_NEAR: {
+    label: 'Near Profit Target',
+    className: 'bg-green-900/50 text-green-300 border-green-700',
+  },
+  STOPLOSS_NEAR: {
+    label: 'Near Stop Loss — Warning',
+    className: 'bg-red-900/50 text-red-300 border-red-700',
+  },
+}
+
+function BotNextActionPlan({ trade, call, put }) {
+  const [expanded, setExpanded] = useState(true)
+  const plan = trade.next_action_plan || {}
+  const action = String(trade.bot_next_action || plan.next_action || 'HOLD')
+  const badge = NEXT_ACTION_BADGE[action] || NEXT_ACTION_BADGE.HOLD
+  const exitWatch = plan.exit_conditions_watch || {}
+  const callTrigger = Number(trade.call_trigger_price || 0)
+  const putTrigger = Number(trade.put_trigger_price || 0)
+  const callOffer = Number(call.current_premium ?? trade.call_premium ?? 0)
+  const putOffer = Number(put.current_premium ?? trade.put_premium ?? 0)
+  const callPct = Number(
+    trade.bot_call_pct_to_trigger ?? plan.call_pct_to_trigger ?? 0,
+  )
+  const putPct = Number(
+    trade.bot_put_pct_to_trigger ?? plan.put_pct_to_trigger ?? 0,
+  )
+  const callBar = Math.min(100, Math.max(0, callPct))
+  const putBar = Math.min(100, Math.max(0, putPct))
+  const tpUsd = Number(exitWatch.profit_target_usd ?? trade.profit_target_usd ?? 0)
+  const slUsd = Number(exitWatch.stoploss_usd ?? trade.stoploss_usd ?? 0)
+  const netNow = Number(exitWatch.current_net_mtm ?? trade.net_mtm ?? 0)
+  const grossSl = Number(
+    exitWatch.current_gross_for_sl ?? trade.gross_mtm_for_stoploss ?? 0,
+  )
+  const pctTp = Number(exitWatch.pct_to_profit_target ?? 0)
+  const pctSl = Number(exitWatch.pct_to_stoploss ?? 0)
+  const convMin = Number(plan.conversion_min_premium ?? 150)
+  const otherOffer = Number(plan.other_leg_current_offer ?? 0)
+
+  return (
+    <div className="border-t border-gray-700 px-4 py-3">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="mb-2 flex w-full items-center justify-between text-left"
+      >
+        <div className="text-sm font-semibold text-white">
+          🤖 Bot&apos;s Next Action Plan
+        </div>
+        <span className="text-xs text-gray-400">
+          {expanded ? 'Collapse ▲' : 'Expand ▼'}
+        </span>
+      </button>
+      {!expanded ? null : (
+        <div className="space-y-3">
+          <div
+            className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${badge.className}`}
+          >
+            {badge.label}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <div className="mb-1 flex justify-between text-xs text-gray-400">
+                <span>CALL → trigger</span>
+                <span className={callPct >= 80 ? 'text-red-400' : 'text-gray-300'}>
+                  {callPct.toFixed(1)}%
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-gray-700">
+                <div
+                  className={`h-full ${callPct >= 80 ? 'bg-red-500' : 'bg-green-500'}`}
+                  style={{ width: `${callBar}%` }}
+                />
+              </div>
+              <div className="mt-0.5 text-[11px] text-gray-500">
+                ${fmtMoney(callOffer)} / ${fmtMoney(callTrigger)}
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 flex justify-between text-xs text-gray-400">
+                <span>PUT → trigger</span>
+                <span className={putPct >= 80 ? 'text-red-400' : 'text-gray-300'}>
+                  {putPct.toFixed(1)}%
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-gray-700">
+                <div
+                  className={`h-full ${putPct >= 80 ? 'bg-red-500' : 'bg-green-500'}`}
+                  style={{ width: `${putBar}%` }}
+                />
+              </div>
+              <div className="mt-0.5 text-[11px] text-gray-500">
+                ${fmtMoney(putOffer)} / ${fmtMoney(putTrigger)}
+              </div>
+            </div>
+          </div>
+
+          {action === 'HOLD' && (
+            <div className="space-y-1 rounded-lg border border-gray-700 bg-gray-900/40 px-3 py-2 text-xs text-gray-300">
+              <div className="flex justify-between">
+                <span>Call leg</span>
+                <span>
+                  current ${fmtMoney(callOffer)} → trigger ${fmtMoney(callTrigger)}{' '}
+                  ({Math.max(0, 100 - callPct).toFixed(1)}% away)
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Put leg</span>
+                <span>
+                  current ${fmtMoney(putOffer)} → trigger ${fmtMoney(putTrigger)}{' '}
+                  ({Math.max(0, 100 - putPct).toFixed(1)}% away)
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Profit target</span>
+                <span>
+                  Net MTM {fmtSignedMoney(netNow)} → Target ${fmtMoney(tpUsd)} (
+                  {pctTp.toFixed(1)}% reached)
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Stop loss</span>
+                <span>
+                  Gross for SL {fmtSignedMoney(grossSl)} → SL at -$
+                  {fmtMoney(slUsd)} ({pctSl.toFixed(1)}% used)
+                </span>
+              </div>
+            </div>
+          )}
+
+          {(action === 'ADJUST_CALL' ||
+            action === 'ADJUST_PUT' ||
+            action === 'CONVERSION_LIKELY') && (
+            <div className="space-y-1 rounded-lg border border-orange-800/50 bg-orange-950/20 px-3 py-2 text-xs text-gray-300">
+              <div>
+                Triggered leg:{' '}
+                <span className="font-semibold uppercase text-orange-300">
+                  {plan.triggered_leg || trade.bot_closer_leg || '—'}
+                </span>{' '}
+                @ current $
+                {fmtMoney(
+                  (plan.triggered_leg || trade.bot_closer_leg) === 'put'
+                    ? putOffer
+                    : callOffer,
+                )}{' '}
+                (trigger was $
+                {fmtMoney(
+                  (plan.triggered_leg || trade.bot_closer_leg) === 'put'
+                    ? putTrigger
+                    : callTrigger,
+                )}
+                )
+              </div>
+              <div>
+                Other leg current offer: ${fmtMoney(otherOffer)}
+              </div>
+              <div>
+                Expected new strike:{' '}
+                {plan.estimated_new_strike == null ||
+                plan.estimated_new_strike === 'calculating...'
+                  ? 'Calculating...'
+                  : `${fmtStrike(plan.estimated_new_strike)} @ ~$${fmtMoney(plan.estimated_new_premium)}`}
+              </div>
+              <div>
+                Adjustment type:{' '}
+                {plan.adjustment_type === 'conversion_likely' ? (
+                  <span className="text-red-300">
+                    ⚠️ Conversion Likely (other leg too cheap)
+                  </span>
+                ) : (
+                  <span className="text-green-300">Normal Roll</span>
+                )}
+              </div>
+              <div className="text-gray-400">
+                Other leg ${fmtMoney(otherOffer)} is{' '}
+                {otherOffer >= convMin ? 'above' : 'below'} conversion minimum $
+                {fmtMoney(convMin)}
+              </div>
+            </div>
+          )}
+
+          {(action === 'CONVERSION_ACTIVE' || action === 'REVERSAL_WATCH') && (
+            <div className="space-y-2 rounded-lg border border-purple-700/50 bg-purple-950/20 px-3 py-2 text-xs text-gray-300">
+              <div>
+                Hedge: {plan.hedge_symbol || trade.conversion_hedge_symbol || '—'}{' '}
+                bought at $
+                {fmtMoney(
+                  plan.hedge_entry_price ?? trade.conversion_hedge_entry_price,
+                )}
+              </div>
+              <div>
+                Short Call: ${fmtMoney(plan.short_call_premium ?? callOffer)} | Short
+                Put: ${fmtMoney(plan.short_put_premium ?? putOffer)}
+              </div>
+              <div>
+                Premium difference: {Number(plan.premium_equality_pct || 0).toFixed(1)}
+                % (target: ≤ {Number(plan.equality_threshold_pct || 10).toFixed(1)}%)
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-gray-700">
+                <div
+                  className={`h-full ${
+                    Number(plan.premium_equality_pct || 0) <=
+                    Number(plan.equality_threshold_pct || 10)
+                      ? 'bg-green-500'
+                      : 'bg-yellow-500'
+                  }`}
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.max(
+                        5,
+                        (Number(plan.equality_threshold_pct || 10) /
+                          Math.max(Number(plan.premium_equality_pct) || 0.01, 0.01)) *
+                          100,
+                      ),
+                    )}%`,
+                  }}
+                />
+              </div>
+              <div className="text-blue-300">
+                {plan.reversal_condition ||
+                  `Reversal will trigger when: |call - put| / avg ≤ ${Number(plan.equality_threshold_pct || 10).toFixed(1)}%`}
+              </div>
+            </div>
+          )}
+
+          <div className="rounded border border-gray-700 bg-gray-900/30 px-3 py-2 text-xs text-gray-400">
+            Exit conditions: TP at +${fmtMoney(tpUsd)} ({pctTp.toFixed(1)}% reached) |
+            SL at -${fmtMoney(slUsd)} ({pctSl.toFixed(1)}% used)
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BasketStory({ trade, call, put, mergedAdj }) {
+  const isClosed = String(trade.status || '').toLowerCase() !== 'active'
+  const [expanded, setExpanded] = useState(isClosed)
+  const legHistory = Array.isArray(trade.leg_history) ? trade.leg_history : []
+
+  const events = useMemo(() => {
+    const rows = []
+    const entryTime =
+      call.entry_time ||
+      put.entry_time ||
+      trade.entry_time ||
+      (legHistory[0] && legHistory[0].entry_time) ||
+      null
+    if (entryTime) {
+      rows.push({
+        key: 'entry',
+        time: entryTime,
+        icon: '📥',
+        type: 'Entry',
+        what: `Sold CALL@${fmtStrike(call.strike)} $${fmtMoney(call.initial_premium)} + PUT@${fmtStrike(put.strike)} $${fmtMoney(put.initial_premium)}`,
+        why: 'Basket initiated',
+        pnl: null,
+      })
+    }
+    for (const adj of mergedAdj || []) {
+      const isConv =
+        String(adj.decision_type || adj.slab_used || '')
+          .toLowerCase()
+          .includes('conversion') || Boolean(adj.conversion_mode)
+      rows.push({
+        key: `adj-${adj.timestamp}-${adj.leg_type}-${adj.old_strike}`,
+        time: adj.timestamp,
+        icon: isConv ? '🔀' : '🔄',
+        type: isConv ? 'Conversion' : 'Adjustment',
+        what: `${String(adj.leg_type || '').toUpperCase()} $${fmtStrike(adj.old_strike)} → $${fmtStrike(adj.new_strike)}`,
+        why: isConv
+          ? `Replacement premium below minimum → hedge bought`
+          : `${String(adj.leg_type || '').toUpperCase()} hit ${fmtMoney(adj.trigger_pct_reached ?? adj.trigger_pct ?? 0)}% of baseline (trigger was ${fmtMoney(adj.trigger_pct_reached ?? adj.trigger_pct ?? 0)}%)`,
+        pnl: adj.realized_pnl ?? null,
+      })
+    }
+    for (const leg of legHistory) {
+      if (String(leg.status || '').toLowerCase() !== 'closed') continue
+      if (!leg.exit_time) continue
+      const lt = String(leg.leg_type || '').toLowerCase()
+      if (lt.startsWith('hedge')) {
+        rows.push({
+          key: `hedge-exit-${leg.id}`,
+          time: leg.exit_time,
+          icon: '🔀',
+          type: 'Conversion',
+          what: `Closed hedge ${leg.symbol || ''} @ $${fmtMoney(leg.exit_premium)}`,
+          why: 'Hedge closed (reversal or exit)',
+          pnl: leg.realized_pnl,
+        })
+      }
+    }
+    if (isClosed) {
+      const reason = String(trade.exit_reason || 'EXIT').toUpperCase()
+      const exitTime =
+        trade.exit_time ||
+        call.exit_time ||
+        put.exit_time ||
+        (legHistory.find((l) => l.exit_time) || {}).exit_time
+      let why = reason
+      if (reason.includes('STOP')) {
+        why = `STOPLOSS: Gross MTM ${fmtSignedMoney(trade.gross_mtm ?? trade.total_pnl)} exceeded -$${fmtMoney(trade.stoploss_usd)}`
+      } else if (reason.includes('PROFIT')) {
+        why = `PROFIT_TARGET: Net MTM ${fmtSignedMoney(trade.net_mtm)} reached +$${fmtMoney(trade.profit_target_usd)}`
+      }
+      rows.push({
+        key: 'exit',
+        time: exitTime || new Date().toISOString(),
+        icon: '✅',
+        type: 'Exit',
+        what: `Basket closed — ${reason}`,
+        why,
+        pnl: trade.realized_pnl ?? trade.net_mtm ?? null,
+      })
+    }
+    return rows.sort((a, b) => {
+      const ta = new Date(a.time || 0).getTime()
+      const tb = new Date(b.time || 0).getTime()
+      return ta - tb
+    })
+  }, [trade, call, put, mergedAdj, legHistory, isClosed])
+
+  return (
+    <div className="border-t border-gray-700 px-4 py-2 text-xs text-gray-400">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center justify-between text-left"
+      >
+        <div className="text-sm font-semibold text-white">📋 Basket Story</div>
+        <span className="text-xs text-gray-400">
+          {expanded ? 'Collapse ▲' : 'Expand ▼'}
+        </span>
+      </button>
+      {expanded && (
+        <div className="mt-2 max-h-64 space-y-2 overflow-y-auto">
+          {events.length === 0 && (
+            <div className="text-gray-500">— no events yet —</div>
+          )}
+          {events.map((ev) => (
+            <div
+              key={ev.key}
+              className="rounded-lg border border-gray-700 bg-gray-900/40 px-3 py-2"
+            >
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium text-gray-200">
+                  {ev.icon} {ev.type}
+                </span>
+                <span className="text-[11px] text-gray-500">
+                  {formatAdjTime(ev.time)}
+                </span>
+              </div>
+              <div className="text-gray-300">{ev.what}</div>
+              <div className="mt-0.5 text-gray-500">{ev.why}</div>
+              {ev.pnl != null && Number.isFinite(Number(ev.pnl)) && (
+                <div className={`mt-0.5 ${pnlColor(ev.pnl)}`}>
+                  P&L {fmtSignedMoney(ev.pnl)}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /**
  * Props: { trade, recentAdjustments? }
  */
@@ -463,7 +859,6 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const [closingLeg, setClosingLeg] = useState(null)
   const [toast, setToast] = useState(null)
   const [adjHistory, setAdjHistory] = useState([])
-  const [showHistory, setShowHistory] = useState(false)
   const [editField, setEditField] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
@@ -508,8 +903,6 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
     }
     return unique
   }, [recentAdjustments, adjHistory, trade.trade_id])
-
-  const lastAdj = trade.last_adjustment || mergedAdj[0] || null
 
   const expiryLabel = trade.expiry_label
     ? `${trade.expiry_date || ''} (${trade.expiry_label})`.replace(/^\s/, '')
@@ -905,6 +1298,9 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
         </div>
       </div>
 
+      {/* Bot's Next Action Plan */}
+      <BotNextActionPlan trade={trade} call={call} put={put} />
+
       {/* Live payoff — same as Trade Initiator (hourly slider) */}
       {anyOpen && call.strike != null && put.strike != null && (
         <div className="border-t border-gray-700 px-4 py-3">
@@ -1181,45 +1577,13 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
         )}
       </div>
 
-      {/* Adjustment history */}
-      <div className="border-t border-gray-700 px-4 py-2 text-xs text-gray-400">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            Last adj:{' '}
-            {lastAdj ? (
-              <span className="text-gray-300">
-                {formatAdjTime(lastAdj.timestamp)} —{' '}
-                {(lastAdj.leg_type || '').toUpperCase()} $
-                {fmtStrike(lastAdj.old_strike)} → ${fmtStrike(lastAdj.new_strike)}
-              </span>
-            ) : (
-              <span>— (none yet)</span>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowHistory((v) => !v)}
-            className="rounded border border-gray-600 px-2 py-1 text-gray-300 hover:bg-gray-700"
-          >
-            {showHistory ? 'Hide History' : 'View Full History'}
-          </button>
-        </div>
-        {showHistory && (
-          <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto">
-            {mergedAdj.length === 0 && <li>— no adjustments —</li>}
-            {mergedAdj.map((row, i) => (
-              <li key={`${row.timestamp}-${i}`}>
-                • {formatAdjTime(row.timestamp)} —{' '}
-                {(row.leg_type || '').toUpperCase()} ${fmtStrike(row.old_strike)} → $
-                {fmtStrike(row.new_strike)}
-                {row.trigger_pct_reached != null
-                  ? ` (trigger: ${Number(row.trigger_pct_reached).toFixed(0)}%)`
-                  : ''}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      {/* Basket Story timeline */}
+      <BasketStory
+        trade={trade}
+        call={call}
+        put={put}
+        mergedAdj={mergedAdj}
+      />
 
       {/* Controls */}
       <div className="space-y-2 border-t border-gray-700 px-4 py-3">

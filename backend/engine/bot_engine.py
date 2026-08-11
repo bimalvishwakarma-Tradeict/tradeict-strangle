@@ -2934,6 +2934,11 @@ class BotEngine:
         call_trigger_pct: float | None = None,
         put_trigger_pct: float | None = None,
         premium_slabs: dict[str, float] | None = None,
+        net_mtm: float | None = None,
+        gross_mtm_for_stoploss: float | None = None,
+        conversion_min_premium: float | None = None,
+        conversion_equality_pct: float | None = None,
+        conversion_enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Shared monitoring-plan fields for WS and /api/trade/active.
 
@@ -2948,6 +2953,15 @@ class BotEngine:
                 if val is not None and float(val) > 0:
                     return float(val)
             return float(getattr(leg, "initial_premium", 0) or 0)
+
+        def _parse_strike_from_symbol(symbol: str | None) -> float | None:
+            parts = str(symbol or "").split("-")
+            if len(parts) >= 3:
+                try:
+                    return float(parts[2])
+                except (TypeError, ValueError):
+                    return None
+            return None
 
         call_entry = float(trade_state.call_leg.initial_premium or 0)
         put_entry = float(trade_state.put_leg.initial_premium or 0)
@@ -2987,6 +3001,130 @@ class BotEngine:
         if put_sl_px is None or float(put_sl_px or 0) <= 0:
             put_sl_px = round(put_base * (uni_sl / 100.0), 4) if put_base > 0 else None
 
+        trade = trade_state.trade
+        target_usd = float(getattr(trade, "profit_target_usd", 0) or 0)
+        stoploss_usd = float(getattr(trade, "stoploss_usd", 0) or 0)
+        net_now = float(net_mtm if net_mtm is not None else 0.0)
+        gross_sl_now = float(
+            gross_mtm_for_stoploss
+            if gross_mtm_for_stoploss is not None
+            else 0.0
+        )
+        conv_min = float(
+            conversion_min_premium
+            if conversion_min_premium is not None
+            else 150.0
+        )
+        eq_pct = float(
+            conversion_equality_pct
+            if conversion_equality_pct is not None
+            else float(getattr(trade, "conversion_equality_pct", None) or 10.0)
+        )
+        conv_on = bool(
+            conversion_enabled
+            if conversion_enabled is not None
+            else False
+        )
+        in_conversion = bool(getattr(trade, "in_conversion_mode", False))
+
+        closer_leg = "call" if call_pct_to >= put_pct_to else "put"
+        pct_to_tp = (net_now / target_usd * 100.0) if target_usd > 0 else 0.0
+        pct_to_sl = (
+            (abs(gross_sl_now) / stoploss_usd * 100.0) if stoploss_usd > 0 else 0.0
+        )
+
+        # Priority: conversion → near SL → near TP → adjust/conversion_likely → HOLD
+        if in_conversion:
+            hedge_sym = getattr(trade, "conversion_hedge_symbol", None)
+            next_action = "REVERSAL_WATCH" if hedge_sym else "CONVERSION_ACTIVE"
+        elif stoploss_usd > 0 and pct_to_sl >= 80.0 and gross_sl_now < 0:
+            next_action = "STOPLOSS_NEAR"
+        elif target_usd > 0 and pct_to_tp >= 80.0:
+            next_action = "PROFIT_TARGET_NEAR"
+        elif call_pct_to >= 80.0 or put_pct_to >= 80.0:
+            triggered = closer_leg
+            other_offer = float(put_prem if triggered == "call" else call_prem)
+            if conv_on and other_offer < conv_min:
+                next_action = "CONVERSION_LIKELY"
+            else:
+                next_action = (
+                    "ADJUST_CALL" if triggered == "call" else "ADJUST_PUT"
+                )
+        else:
+            next_action = "HOLD"
+
+        next_plan: dict[str, Any] = {
+            "next_action": next_action,
+            "closer_leg": closer_leg,
+            "call_pct_to_trigger": round(call_pct_to, 2),
+            "put_pct_to_trigger": round(put_pct_to, 2),
+            "exit_conditions_watch": {
+                "profit_target_usd": target_usd,
+                "stoploss_usd": stoploss_usd,
+                "current_net_mtm": round(net_now, 4),
+                "current_gross_for_sl": round(gross_sl_now, 4),
+                "pct_to_profit_target": round(pct_to_tp, 2),
+                "pct_to_stoploss": round(pct_to_sl, 2),
+            },
+        }
+
+        if next_action in ("ADJUST_CALL", "ADJUST_PUT", "CONVERSION_LIKELY"):
+            triggered = "call" if next_action == "ADJUST_CALL" else (
+                "put" if next_action == "ADJUST_PUT" else closer_leg
+            )
+            other_offer = float(put_prem if triggered == "call" else call_prem)
+            repl = call_replacement if triggered == "call" else put_replacement
+            adj_type = (
+                "conversion_likely"
+                if (conv_on and other_offer < conv_min)
+                else "normal"
+            )
+            next_plan.update(
+                {
+                    "triggered_leg": triggered,
+                    "other_leg_current_offer": round(other_offer, 4),
+                    "estimated_new_strike": (
+                        repl.get("strike")
+                        if isinstance(repl, dict) and repl.get("strike") is not None
+                        else "calculating..."
+                    ),
+                    "estimated_new_premium": (
+                        float(repl["premium"])
+                        if isinstance(repl, dict) and repl.get("premium") is not None
+                        else None
+                    ),
+                    "adjustment_type": adj_type,
+                    "conversion_min_premium": conv_min,
+                }
+            )
+
+        if next_action in ("CONVERSION_ACTIVE", "REVERSAL_WATCH"):
+            hedge_sym = str(getattr(trade, "conversion_hedge_symbol", "") or "")
+            hedge_entry = float(
+                getattr(trade, "conversion_hedge_entry_price", 0) or 0
+            )
+            avg_prem = (float(call_prem) + float(put_prem)) / 2.0
+            prem_eq = (
+                abs(float(call_prem) - float(put_prem)) / avg_prem * 100.0
+                if avg_prem > 0
+                else 0.0
+            )
+            next_plan.update(
+                {
+                    "hedge_symbol": hedge_sym or None,
+                    "hedge_entry_price": hedge_entry,
+                    "hedge_strike": _parse_strike_from_symbol(hedge_sym),
+                    "short_call_premium": round(float(call_prem), 4),
+                    "short_put_premium": round(float(put_prem), 4),
+                    "premium_equality_pct": round(prem_eq, 2),
+                    "equality_threshold_pct": eq_pct,
+                    "reversal_condition": (
+                        f"Waiting for |call-put|/avg <= {eq_pct:.1f}% "
+                        f"(now {prem_eq:.1f}%)"
+                    ),
+                }
+            )
+
         out: dict[str, Any] = {
             "call_entry_premium": call_entry,
             "put_entry_premium": put_entry,
@@ -3021,6 +3159,11 @@ class BotEngine:
             "put_sl_order_id": put_sl_id,
             # For bracket SLs, delta_sl_order_id may be None, but sl_trigger_price is present.
             "delta_sl_active": bool(call_sl_px and put_sl_px),
+            "next_action_plan": next_plan,
+            "bot_next_action": next_action,
+            "bot_closer_leg": closer_leg,
+            "bot_call_pct_to_trigger": round(call_pct_to, 2),
+            "bot_put_pct_to_trigger": round(put_pct_to, 2),
         }
         if premium_slabs:
             out.update(
@@ -3078,17 +3221,6 @@ class BotEngine:
         settling = get_settling_info(
             getattr(trade_state.trade, "monitoring_starts_at", None)
         )
-        plan = self.build_bot_plan_fields(
-            trade_state,
-            call_prem,
-            put_prem,
-            trigger_pct,
-            call_replacement,
-            put_replacement,
-            call_trigger_pct=call_trigger_pct,
-            put_trigger_pct=put_trigger_pct,
-            premium_slabs=premium_slabs,
-        )
 
         # Fees from DB legs + slippage for Net MTM on TRADE_UPDATE
         from backend.core.fees import (
@@ -3103,6 +3235,8 @@ class BotEngine:
         est_exit = 0.0
         expected_exit_spread = 0.0
         conversion_equality_pct = 10.0
+        conversion_min_premium = 150.0
+        conversion_enabled = False
         with self.db_factory() as db:
             from backend.database import get_or_create_auto_settings
 
@@ -3111,8 +3245,16 @@ class BotEngine:
                 conversion_equality_pct = float(
                     getattr(_cfg, "conversion_equality_pct", 10.0) or 10.0
                 )
+                conversion_min_premium = float(
+                    getattr(_cfg, "adj_low_premium_min_usd", 150.0) or 150.0
+                )
+                conversion_enabled = bool(
+                    getattr(_cfg, "adj_low_premium_exit_enabled", False)
+                )
             except Exception:
                 conversion_equality_pct = 10.0
+                conversion_min_premium = 150.0
+                conversion_enabled = False
 
             legs = (
                 db.query(LegModel)
@@ -3166,6 +3308,23 @@ class BotEngine:
         slip_amt = float(slip_fields["slippage_amount"])
         net_mtm_out = float(slip_fields["net_mtm"])
         total_deductions = float(slip_fields["total_deductions"])
+
+        plan = self.build_bot_plan_fields(
+            trade_state,
+            call_prem,
+            put_prem,
+            trigger_pct,
+            call_replacement,
+            put_replacement,
+            call_trigger_pct=call_trigger_pct,
+            put_trigger_pct=put_trigger_pct,
+            premium_slabs=premium_slabs,
+            net_mtm=net_mtm_out,
+            gross_mtm_for_stoploss=gross_mtm_for_stoploss,
+            conversion_min_premium=conversion_min_premium,
+            conversion_equality_pct=conversion_equality_pct,
+            conversion_enabled=conversion_enabled,
+        )
 
         payload: dict[str, Any] = {
             "type": "TRADE_UPDATE",
@@ -3394,6 +3553,8 @@ class BotEngine:
             call_trigger_pct=call_trig_pct,
             put_trigger_pct=put_trig_pct,
             premium_slabs=premium_slabs,
+            net_mtm=None,
+            gross_mtm_for_stoploss=None,
         )
 
         await ws_manager.broadcast(

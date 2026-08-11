@@ -369,6 +369,17 @@ export function useTrades() {
             msg.expected_exit_spread_usd != null
               ? Number(msg.expected_exit_spread_usd)
               : existing.expected_exit_spread_usd,
+          next_action_plan: msg.next_action_plan ?? existing.next_action_plan,
+          bot_next_action: msg.bot_next_action ?? existing.bot_next_action,
+          bot_closer_leg: msg.bot_closer_leg ?? existing.bot_closer_leg,
+          bot_call_pct_to_trigger:
+            msg.bot_call_pct_to_trigger != null
+              ? Number(msg.bot_call_pct_to_trigger)
+              : existing.bot_call_pct_to_trigger,
+          bot_put_pct_to_trigger:
+            msg.bot_put_pct_to_trigger != null
+              ? Number(msg.bot_put_pct_to_trigger)
+              : existing.bot_put_pct_to_trigger,
         })
         return next
       })
