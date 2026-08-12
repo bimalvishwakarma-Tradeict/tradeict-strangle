@@ -2130,6 +2130,55 @@ class BotEngine:
             final_pnl,
         )
 
+        # Notify Earner backend (fire-and-forget, non-fatal)
+        try:
+            from backend.core.earner_webhook import notify_earner_trade_closed
+            from backend.models import SlaveAccount, SlaveTrade
+
+            with self.db_factory() as webhook_db:
+                # Find all slave trades linked to this master trade
+                slave_trades = (
+                    webhook_db.query(SlaveTrade)
+                    .filter(
+                        SlaveTrade.master_trade_id == trade_id,
+                        SlaveTrade.status == "active",
+                    )
+                    .all()
+                )
+                slave_payloads = []
+                for st in slave_trades:
+                    slave_acc = (
+                        webhook_db.query(SlaveAccount)
+                        .filter(SlaveAccount.id == st.slave_account_id)
+                        .first()
+                    )
+                    if slave_acc and slave_acc.earner_user_id:
+                        slave_payloads.append({
+                            "earner_user_id": slave_acc.earner_user_id,
+                            "earner_subscription_id": (
+                                slave_acc.earner_subscription_id
+                            ),
+                            "actual_quantity": int(st.actual_quantity or 1),
+                            "call_fill_price": float(st.call_fill_price or 0),
+                            "put_fill_price": float(st.put_fill_price or 0),
+                            "slave_account_id": int(slave_acc.id),
+                            "slave_name": slave_acc.name,
+                        })
+
+                if slave_payloads:
+                    asyncio.ensure_future(
+                        notify_earner_trade_closed(
+                            master_trade_id=trade_id,
+                            exit_reason=str(reason),
+                            final_pnl=float(final_pnl),
+                            slave_accounts=slave_payloads,
+                        )
+                    )
+        except Exception as webhook_exc:
+            logger.warning(
+                "[EARNER_WEBHOOK] Setup failed: %s", webhook_exc
+            )
+
     async def _check_conversion_mode_exit(
         self,
         trade_state: TradeState,
