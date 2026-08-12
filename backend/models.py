@@ -275,6 +275,9 @@ class AutoTradeSettings(Base):
     max_adjustments_per_basket: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None
     )
+    premium_cover_loss_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
     # Status tracking
     last_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

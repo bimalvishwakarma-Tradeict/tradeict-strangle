@@ -47,6 +47,9 @@ function applyStatusToForm(data, setters) {
       ? ''
       : String(data.max_adjustments_per_basket),
   )
+  setters.setPremiumCoverLossEnabled(
+    Boolean(data.premium_cover_loss_enabled),
+  )
   setters.setIsEnabled(Boolean(data.is_enabled))
   setters.setLastError(data.last_error || null)
   setters.setLastTradeId(data.last_trade_id ?? null)
@@ -104,6 +107,7 @@ export default function AutoTrade() {
   const [adjLowPremiumMinUsd, setAdjLowPremiumMinUsd] = useState(150)
   const [conversionModeEnabled, setConversionModeEnabled] = useState(true)
   const [maxAdjustmentsPerBasket, setMaxAdjustmentsPerBasket] = useState('')
+  const [premiumCoverLossEnabled, setPremiumCoverLossEnabled] = useState(false)
   const [slabs, setSlabs] = useState(null)
   const [slabsInitial, setSlabsInitial] = useState(null)
   const [slabsKey, setSlabsKey] = useState(0)
@@ -129,6 +133,7 @@ export default function AutoTrade() {
       setAdjLowPremiumMinUsd,
       setConversionModeEnabled,
       setMaxAdjustmentsPerBasket,
+      setPremiumCoverLossEnabled,
       setIsEnabled,
       setLastError,
       setLastTradeId,
@@ -365,6 +370,7 @@ export default function AutoTrade() {
         : maxAdjustmentsPerBasket === '' || maxAdjustmentsPerBasket == null
           ? null
           : Math.max(1, Math.min(50, Number(maxAdjustmentsPerBasket) || 1)),
+      premium_cover_loss_enabled: Boolean(premiumCoverLossEnabled),
     }
   }
 
@@ -828,6 +834,25 @@ export default function AutoTrade() {
             </p>
           </div>
         )}
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            checked={premiumCoverLossEnabled}
+            onChange={(e) => setPremiumCoverLossEnabled(e.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
+          />
+          <span className="text-sm text-gray-300">
+            Premium Cover Loss{' '}
+            <span className="text-gray-500">
+              ({premiumCoverLossEnabled ? 'ON' : 'OFF'})
+            </span>
+          </span>
+        </label>
+        <p className="text-xs text-gray-500">
+          When ON: bot targets new strike premium equal to the realized loss on the
+          triggered leg. Helps recover the loss if both legs expire worthless, and gives
+          more breathing room before next trigger.
+        </p>
       </section>
 
       {/* Actions */}

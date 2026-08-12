@@ -696,11 +696,14 @@ class ShortStrangleStrategy(BaseStrategy):
         triggered_leg_type: str,
         other_leg_current_premium: float,
         current_strike: float | None = None,
+        target_premium_override: float | None = None,
     ) -> AdjustmentPlan:
         """Find replacement strike with premium >= other leg's current offer.
 
         Prefers lowest premium at-or-above the other leg offer. Falls back to
         nearest if none qualify. Never returns the same strike as current_strike.
+        When target_premium_override is set (premium cover loss), that target
+        is used instead of other_leg_current_premium.
         """
         leg = triggered_leg_type.lower().strip()
         underlying_key = str(trade.underlying).upper()
@@ -712,13 +715,35 @@ class ShortStrangleStrategy(BaseStrategy):
         else:
             expiry_str = str(expiry)
 
-        # Prefer premium >= other-leg offer (closest from above); never below
+        if target_premium_override is not None:
+            final_target = float(target_premium_override)
+        else:
+            final_target = float(other_leg_current_premium)
+
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "ADJUSTMENT_TARGET_PREMIUM",
+                int(getattr(trade, "id", 0) or 0),
+                {
+                    "final_target": round(final_target, 2),
+                    "override_used": target_premium_override is not None,
+                    "other_leg_offer": round(
+                        float(other_leg_current_premium), 2
+                    ),
+                },
+            )
+        except Exception:
+            pass
+
+        # Prefer premium >= target (closest from above); never below
         # unless no such strike exists (then nearest fallback inside client).
         row = await delta_client.find_strike_by_premium(
             underlying=underlying_symbol,
             expiry_date=expiry_str,
             leg_type=leg,
-            target_premium=float(other_leg_current_premium),
+            target_premium=float(final_target),
             exclude_strike=float(current_strike) if current_strike is not None else None,
             require_farther_otm=False,
         )

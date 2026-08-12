@@ -198,6 +198,78 @@ class AdjustmentExecutor:
                 other_premium,
                 other_old_baseline,
             )
+
+            # Load AutoTradeSettings early (conversion + premium cover loss)
+            try:
+                from backend.database import get_or_create_auto_settings, SessionLocal
+                with SessionLocal() as _sdb:
+                    _cfg = get_or_create_auto_settings(_sdb)
+                    _conv_feature = bool(
+                        getattr(_cfg, "adj_low_premium_exit_enabled", False)
+                    )
+                    _conv_min = float(
+                        getattr(_cfg, "adj_low_premium_min_usd", 150.0) or 150.0
+                    )
+                    _conversion_mode_enabled = bool(
+                        getattr(_cfg, "conversion_mode_enabled", True)
+                    )
+                    _premium_cover_loss = bool(
+                        getattr(_cfg, "premium_cover_loss_enabled", False)
+                    )
+            except Exception:
+                _conv_feature = False
+                _conv_min = 150.0
+                _conversion_mode_enabled = True
+                _premium_cover_loss = False
+
+            # Premium Cover Loss: target = realized loss on triggered leg
+            # (proxy exit fill = current offer; fallback = trigger baseline)
+            triggered_entry_price = float(triggered_leg.initial_premium or 0)
+            triggered_current_offer = await _resolve_offer_price(
+                delta_client,
+                str(triggered_leg.symbol),
+                keep_if_missing=None,
+            )
+            if triggered_current_offer <= 0:
+                triggered_current_offer = float(
+                    triggered_leg.trigger_baseline_premium
+                    or triggered_leg.initial_premium
+                    or 0
+                )
+            cover_target_premium = None  # default = standard other-leg match
+            if _premium_cover_loss and triggered_current_offer > triggered_entry_price:
+                realized_loss_premium = (
+                    triggered_current_offer - triggered_entry_price
+                )
+                # Never go below other_leg_offer (never worse than standard)
+                cover_target_premium = max(realized_loss_premium, other_premium)
+                log_and_buffer(
+                    "PREMIUM_COVER_LOSS_TARGET",
+                    trade.id,
+                    {
+                        "triggered_entry": round(triggered_entry_price, 2),
+                        "triggered_current_offer": round(
+                            triggered_current_offer, 2
+                        ),
+                        "realized_loss_premium": round(
+                            realized_loss_premium, 2
+                        ),
+                        "other_leg_offer": round(other_premium, 2),
+                        "cover_target": round(cover_target_premium, 2),
+                        "mode": "premium_cover_loss",
+                    },
+                )
+            elif _premium_cover_loss:
+                log_and_buffer(
+                    "PREMIUM_COVER_LOSS_TARGET",
+                    trade.id,
+                    {
+                        "other_leg_offer": round(other_premium, 2),
+                        "mode": "standard_fallback",
+                        "reason": "no realized loss on triggered leg",
+                    },
+                )
+
             try:
                 plan = await strategy.find_adjustment_strike(
                     delta_client,
@@ -205,6 +277,7 @@ class AdjustmentExecutor:
                     triggered_leg_type,
                     other_premium,
                     current_strike=float(triggered_leg.strike),
+                    target_premium_override=cover_target_premium,
                 )
             except Exception as exc:
                 msg = str(exc)
@@ -290,23 +363,8 @@ class AdjustmentExecutor:
             # --- CONVERSION MODE CHECK ---
             # If replacement premium < configured minimum, enter conversion mode
             # instead of normal adjustment or closing the basket.
-            try:
-                from backend.database import get_or_create_auto_settings, SessionLocal
-                with SessionLocal() as _sdb:
-                    _cfg = get_or_create_auto_settings(_sdb)
-                    _conv_feature = bool(
-                        getattr(_cfg, "adj_low_premium_exit_enabled", False)
-                    )
-                    _conv_min = float(
-                        getattr(_cfg, "adj_low_premium_min_usd", 150.0) or 150.0
-                    )
-                    _conversion_mode_enabled = bool(
-                        getattr(_cfg, "conversion_mode_enabled", True)
-                    )
-            except Exception:
-                _conv_feature = False
-                _conv_min = 150.0
-                _conversion_mode_enabled = True
+            # Settings already loaded above (_conv_feature / _conv_min /
+            # _conversion_mode_enabled).
 
             if _conv_feature and other_premium < _conv_min:
                 if not _conversion_mode_enabled:
