@@ -834,6 +834,11 @@ export default function AutoTrade() {
             </p>
           </div>
         )}
+      </section>
+
+      {/* Premium Cover Loss */}
+      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">Premium Cover Loss</h2>
         <label className="flex cursor-pointer items-start gap-3">
           <input
             type="checkbox"
@@ -849,9 +854,11 @@ export default function AutoTrade() {
           </span>
         </label>
         <p className="text-xs text-gray-500">
-          When ON: bot targets new strike premium equal to the realized loss on the
-          triggered leg. Helps recover the loss if both legs expire worthless, and gives
-          more breathing room before next trigger.
+          When ON: bot targets new strike premium equal to the realized loss
+          on the triggered leg (e.g. if CALL lost $150 in premium points,
+          bot finds new CALL with ~$150 premium). Helps recover the loss if
+          both legs expire worthless, and gives more breathing room before
+          next trigger.
         </p>
       </section>
 
