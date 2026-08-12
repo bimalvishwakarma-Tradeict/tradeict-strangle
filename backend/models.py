@@ -314,6 +314,19 @@ class SlaveAccount(Base):
     # Trading settings — 1.0 = same qty as master
     qty_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
 
+    # Capital-based qty mode (replaces fixed qty_multiplier when True)
+    # When True: qty is calculated dynamically from capital ratio, not qty_multiplier
+    capital_based_qty: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # User's allocated capital for this strategy (USD) — set by Earner on registration
+    user_allocated_capital: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Earner user identifier — links this slave to a Tradeict Earner user
+    earner_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Earner subscription identifier — for webhook callbacks
+    earner_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # True = mirror all trades; False = paused
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 

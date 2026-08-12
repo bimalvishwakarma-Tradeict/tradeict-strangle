@@ -54,6 +54,18 @@ def _to_response(slave: SlaveAccount, db: Session, rate: float) -> dict[str, Any
         "id": int(slave.id),
         "name": slave.name,
         "qty_multiplier": float(slave.qty_multiplier or 1.0),
+        "capital_based_qty": bool(
+            getattr(slave, "capital_based_qty", False)
+        ),
+        "user_allocated_capital": (
+            float(slave.user_allocated_capital)
+            if getattr(slave, "user_allocated_capital", None) is not None
+            else None
+        ),
+        "earner_user_id": getattr(slave, "earner_user_id", None),
+        "earner_subscription_id": getattr(
+            slave, "earner_subscription_id", None
+        ),
         "is_active": bool(slave.is_active),
         "connection_status": str(slave.connection_status or "unknown"),
         "balance_usd": bal_usd,
@@ -106,6 +118,10 @@ async def create_slave_account(
         api_key_encrypted=encrypt(payload.api_key.strip()),
         api_secret_encrypted=encrypt(payload.api_secret.strip()),
         qty_multiplier=float(payload.qty_multiplier),
+        capital_based_qty=bool(payload.capital_based_qty),
+        user_allocated_capital=payload.user_allocated_capital,
+        earner_user_id=payload.earner_user_id,
+        earner_subscription_id=payload.earner_subscription_id,
         is_active=bool(payload.is_active),
         connection_status="connected",
         last_connected_at=now,
@@ -201,6 +217,30 @@ async def update_slave_account(
 
     if "qty_multiplier" in updates and updates["qty_multiplier"] is not None:
         slave.qty_multiplier = float(updates["qty_multiplier"])
+
+    if "capital_based_qty" in updates and updates["capital_based_qty"] is not None:
+        slave.capital_based_qty = bool(updates["capital_based_qty"])
+
+    if "user_allocated_capital" in updates:
+        slave.user_allocated_capital = (
+            float(updates["user_allocated_capital"])
+            if updates["user_allocated_capital"] is not None
+            else None
+        )
+
+    if "earner_user_id" in updates:
+        slave.earner_user_id = (
+            str(updates["earner_user_id"]).strip()
+            if updates["earner_user_id"] is not None
+            else None
+        )
+
+    if "earner_subscription_id" in updates:
+        slave.earner_subscription_id = (
+            str(updates["earner_subscription_id"]).strip()
+            if updates["earner_subscription_id"] is not None
+            else None
+        )
 
     if "is_active" in updates and updates["is_active"] is not None:
         slave.is_active = bool(updates["is_active"])

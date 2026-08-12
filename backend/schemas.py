@@ -134,6 +134,10 @@ class SlaveAccountCreate(BaseModel):
     api_key: str = Field(..., min_length=1)
     api_secret: str = Field(..., min_length=1)
     qty_multiplier: float = Field(default=1.0, gt=0, le=100)
+    capital_based_qty: bool = False
+    user_allocated_capital: float | None = None
+    earner_user_id: str | None = None
+    earner_subscription_id: str | None = None
     is_active: bool = True
 
 
@@ -142,6 +146,10 @@ class SlaveAccountUpdate(BaseModel):
     api_key: str | None = None
     api_secret: str | None = None
     qty_multiplier: float | None = Field(default=None, gt=0, le=100)
+    capital_based_qty: bool | None = None
+    user_allocated_capital: float | None = None
+    earner_user_id: str | None = None
+    earner_subscription_id: str | None = None
     is_active: bool | None = None
 
 
@@ -149,6 +157,10 @@ class SlaveAccountResponse(BaseModel):
     id: int
     name: str
     qty_multiplier: float
+    capital_based_qty: bool = False
+    user_allocated_capital: float | None = None
+    earner_user_id: str | None = None
+    earner_subscription_id: str | None = None
     is_active: bool
     connection_status: str
     balance_usd: float

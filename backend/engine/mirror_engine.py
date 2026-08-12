@@ -16,7 +16,7 @@ from backend.core.delta_client import DeltaClient
 from backend.core.encryption import decrypt
 from backend.core.time_utils import get_ist_now
 from backend.database import SessionLocal, get_active_slave_accounts
-from backend.models import SlaveAccount, SlaveTrade
+from backend.models import SlaveAccount, SlaveTrade, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,74 @@ class MirrorEngine:
         api_secret = decrypt(slave.api_secret_encrypted)
         return DeltaClient(api_key, api_secret)
 
-    def _calc_qty(self, master_qty: int, multiplier: float) -> int:
-        """Calculate slave qty from master qty and multiplier (min 1)."""
+    def _calc_qty(
+        self,
+        master_qty: int,
+        multiplier: float,
+        slave: SlaveAccount | None = None,
+        master_margin_used_usd: float | None = None,
+        master_total_capital_usd: float | None = None,
+    ) -> int:
+        """
+        Calculate slave qty.
+
+        Two modes:
+        1. Fixed multiplier mode (capital_based_qty=False, default):
+           slave_qty = master_qty × qty_multiplier
+
+        2. Capital-based mode (capital_based_qty=True):
+           Formula:
+             master_free_ratio = master_margin_used / master_total_capital
+             user_free_capital = user_allocated_capital × master_free_ratio
+             multiplier = user_free_capital / master_margin_used
+             slave_qty = master_qty × multiplier
+
+           Example:
+             master_total=$300, master_margin_used=$100 → free_ratio=33.3%
+             user_allocated=$900 → user_free=$300 → multiplier=3.0 → slave_qty=3×master_qty
+
+           Falls back to fixed multiplier if capital data is unavailable.
+        """
+        if (
+            slave is not None
+            and bool(getattr(slave, "capital_based_qty", False))
+            and master_margin_used_usd is not None
+            and master_margin_used_usd > 0
+            and master_total_capital_usd is not None
+            and master_total_capital_usd > 0
+        ):
+            user_allocated = float(
+                getattr(slave, "user_allocated_capital", None) or 0
+            )
+            if user_allocated > 0:
+                master_free_ratio = (
+                    master_margin_used_usd / master_total_capital_usd
+                )
+                user_free_capital = user_allocated * master_free_ratio
+                capital_multiplier = (
+                    user_free_capital / master_margin_used_usd
+                )
+                # safety clamp
+                capital_multiplier = max(0.1, min(capital_multiplier, 100.0))
+                calculated_qty = max(
+                    1,
+                    int(round(float(master_qty) * capital_multiplier)),
+                )
+                logger.info(
+                    "Capital-based qty: master_capital=$%.2f master_margin=$%.2f "
+                    "free_ratio=%.3f user_allocated=$%.2f user_free=$%.2f "
+                    "multiplier=%.3f → slave_qty=%s",
+                    master_total_capital_usd,
+                    master_margin_used_usd,
+                    master_free_ratio,
+                    user_allocated,
+                    user_free_capital,
+                    capital_multiplier,
+                    calculated_qty,
+                )
+                return calculated_qty
+
+        # Fallback: fixed multiplier
         return max(1, int(round(float(master_qty) * float(multiplier))))
 
     @staticmethod
@@ -118,8 +184,51 @@ class MirrorEngine:
         underlying: str,
         db: Any,
     ) -> None:
-        # Use call qty as primary lot size (strangle/straddle qty is symmetric)
-        slave_qty = self._calc_qty(master_call_qty, float(slave.qty_multiplier or 1.0))
+        # Fetch master capital data for capital-based qty calculation
+        master_margin_used: float | None = None
+        master_total_capital: float | None = None
+        if bool(getattr(slave, "capital_based_qty", False)):
+            try:
+                with self.db_factory() as cap_db:
+                    from backend.models import Account
+
+                    master_acc = (
+                        cap_db.query(Account)
+                        .filter(Account.is_active.is_(True))
+                        .order_by(Account.id.asc())
+                        .first()
+                    )
+                    if master_acc:
+                        master_client = DeltaClient(
+                            decrypt(master_acc.api_key_encrypted),
+                            decrypt(master_acc.api_secret_encrypted),
+                        )
+                        try:
+                            wallet = await master_client.get_wallet_balance()
+                            master_total_capital = float(
+                                wallet.get("balance_usdt", 0) or 0
+                            )
+                            master_available = float(
+                                wallet.get("available_balance", 0) or 0
+                            )
+                            # margin_used = total_balance - available_balance
+                            master_margin_used = max(
+                                0.0, master_total_capital - master_available
+                            )
+                        finally:
+                            await master_client.close()
+            except Exception as cap_err:
+                logger.warning(
+                    "Capital fetch for slave qty failed: %s", cap_err
+                )
+
+        slave_qty = self._calc_qty(
+            master_call_qty,
+            float(slave.qty_multiplier or 1.0),
+            slave=slave,
+            master_margin_used_usd=master_margin_used,
+            master_total_capital_usd=master_total_capital,
+        )
 
         logger.info(
             "Mirroring to slave '%s': master_qty=%s × %s = slave_qty=%s "
