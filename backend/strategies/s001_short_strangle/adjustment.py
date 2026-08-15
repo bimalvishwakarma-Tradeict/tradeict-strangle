@@ -1270,6 +1270,7 @@ class AdjustmentExecutor:
             except (TypeError, ValueError):
                 prior_count = 0
             trade.adjustment_count = prior_count + 1
+            committed_adj_count = int(trade.adjustment_count)
             max_allowed = None
             try:
                 from backend.database import get_or_create_auto_settings
@@ -1284,66 +1285,249 @@ class AdjustmentExecutor:
                 "ADJUSTMENT_COUNT_UPDATED",
                 int(trade.id),
                 {
-                    "new_count": int(trade.adjustment_count),
+                    "new_count": committed_adj_count,
                     "max_allowed": max_allowed,
                 },
             )
             logger.info(
                 "ADJUSTMENT_COUNT_UPDATED | trade_id=%s | new_count=%s | max_allowed=%s",
                 trade.id,
-                trade.adjustment_count,
+                committed_adj_count,
                 max_allowed,
             )
 
-            db_session.commit()
-            db_session.refresh(trade)
-            db_session.refresh(new_leg)
+            # Capture scalars BEFORE commit — never rely on ORM attrs after
+            # commit if refresh fails (DetachedInstanceError → false FAIL).
+            committed_trade_id = int(trade.id)
+            committed_new_symbol = str(plan.new_symbol)
+            committed_new_product_id = int(plan.new_product_id)
+            committed_new_strike = float(plan.new_strike)
+            committed_new_entry = float(new_entry_premium)
+            committed_old_strike = float(old_strike)
+            committed_order_id = (
+                str(entry_result.order_id)
+                if entry_result.order_id is not None
+                else None
+            )
+            committed_leg_realized = float(leg_realized)
+            committed_trigger_pct = float(trigger_pct)
+            committed_other_premium = float(other_premium)
+            committed_trade_realized = float(
+                getattr(trade_row, "realized_pnl", None) or 0.0
+            )
+            committed_triggered_qty = int(triggered_leg.quantity)
+            committed_old_product_id = int(triggered_leg.product_id)
+
+            # Commit with one retry on session errors (new leg already on Delta)
+            def _commit_adjustment_db() -> None:
+                db_session.expire_on_commit = False
+                db_session.commit()
+                try:
+                    db_session.refresh(trade)
+                except Exception as refresh_exc:
+                    logger.warning(
+                        "refresh(trade) after adjust commit: %s — merge retry",
+                        refresh_exc,
+                    )
+                    try:
+                        merged = db_session.merge(trade)
+                        db_session.refresh(merged)
+                    except Exception:
+                        pass
+                try:
+                    db_session.refresh(new_leg)
+                except Exception as refresh_exc:
+                    logger.warning(
+                        "refresh(new_leg) after adjust commit: %s",
+                        refresh_exc,
+                    )
+                for _leg in (triggered_leg, other_leg):
+                    try:
+                        db_session.refresh(_leg)
+                    except Exception:
+                        pass
+
             try:
-                db_session.refresh(triggered_leg)
-                db_session.refresh(other_leg)
-            except Exception:
-                pass
+                _commit_adjustment_db()
+            except Exception as commit_exc:
+                logger.error(
+                    "Adjustment DB commit failed trade=%s (new leg already "
+                    "on Delta product=%s): %s — rollback + retry once",
+                    committed_trade_id,
+                    committed_new_product_id,
+                    commit_exc,
+                    exc_info=True,
+                )
+                try:
+                    db_session.rollback()
+                except Exception:
+                    logger.exception("Rollback failed before commit retry")
+                # Re-attach objects and retry persist once
+                try:
+                    db_session.expire_on_commit = False
+                    trade = db_session.merge(trade)
+                    triggered_leg = db_session.merge(triggered_leg)
+                    other_leg = db_session.merge(other_leg)
+                    # Re-apply closed state + new leg if rollback wiped them
+                    triggered_leg.exit_premium = old_exit_premium
+                    triggered_leg.exit_time = now_utc
+                    triggered_leg.status = "closed"
+                    if exit_result.order_id is not None:
+                        triggered_leg.exit_order_id = str(exit_result.order_id)
+                    if exit_result.commission is not None:
+                        triggered_leg.exit_fee_usd = abs(
+                            float(exit_result.commission)
+                        )
+                    triggered_leg.realized_pnl = leg_realized
+
+                    # Ensure new_leg is in this session
+                    existing_new = (
+                        db_session.query(Leg)
+                        .filter(
+                            Leg.trade_id == committed_trade_id,
+                            Leg.product_id == committed_new_product_id,
+                            Leg.status == "open",
+                            Leg.is_bot_managed.is_(True),
+                        )
+                        .first()
+                    )
+                    if existing_new is None:
+                        new_leg = Leg(
+                            trade_id=committed_trade_id,
+                            leg_type=triggered_leg.leg_type,
+                            strike=committed_new_strike,
+                            symbol=committed_new_symbol,
+                            product_id=committed_new_product_id,
+                            initial_premium=committed_new_entry,
+                            trigger_baseline_premium=committed_new_entry,
+                            trigger_premium=committed_new_entry,
+                            quantity=committed_triggered_qty,
+                            entry_time=now_utc,
+                            status="open",
+                            delta_at_entry=None,
+                            entry_fee_usd=(
+                                abs(float(entry_result.commission))
+                                if entry_result.commission is not None
+                                else None
+                            ),
+                            order_sent_price=float(expected_new_entry),
+                            entry_spread_usd=new_leg_spread,
+                            delta_order_id=committed_order_id,
+                            sl_trigger_price=(
+                                float(display_sl) if display_sl > 0 else None
+                            ),
+                            delta_sl_order_id=None,
+                            is_bot_managed=True,
+                        )
+                        db_session.add(new_leg)
+                    else:
+                        new_leg = existing_new
+
+                    trade_row = (
+                        db_session.query(Trade)
+                        .filter(Trade.id == committed_trade_id)
+                        .first()
+                    )
+                    if trade_row is not None:
+                        trade_row.realized_pnl = float(committed_trade_realized)
+
+                    other_leg.trigger_baseline_premium = committed_other_premium
+                    other_leg.trigger_premium = committed_other_premium
+                    trade.adjustment_count = committed_adj_count
+
+                    adj_exists = (
+                        db_session.query(Adjustment)
+                        .filter(
+                            Adjustment.trade_id == committed_trade_id,
+                            Adjustment.new_strike == committed_new_strike,
+                            Adjustment.old_strike == committed_old_strike,
+                        )
+                        .order_by(Adjustment.id.desc())
+                        .first()
+                    )
+                    if adj_exists is None:
+                        db_session.add(
+                            Adjustment(
+                                trade_id=committed_trade_id,
+                                leg_type=triggered_leg.leg_type,
+                                trigger_pct_reached=committed_trigger_pct,
+                                old_strike=committed_old_strike,
+                                old_exit_premium=old_exit_premium,
+                                new_strike=committed_new_strike,
+                                new_entry_premium=committed_new_entry,
+                                timestamp=now_utc,
+                                time_remaining_hours=hours_left,
+                                slab_used=self._slab_label(hours_left),
+                                decision_type="ADJUSTED",
+                            )
+                        )
+
+                    _commit_adjustment_db()
+                    logger.info(
+                        "Adjustment DB commit RETRY succeeded trade=%s",
+                        committed_trade_id,
+                    )
+                except Exception as retry_exc:
+                    logger.critical(
+                        "Adjustment DB commit RETRY failed trade=%s: %s. "
+                        "Delta has new leg product=%s — manual DB repair may "
+                        "be required.",
+                        committed_trade_id,
+                        retry_exc,
+                        committed_new_product_id,
+                        exc_info=True,
+                    )
+                    try:
+                        db_session.rollback()
+                    except Exception:
+                        pass
+                    return AdjustmentResult(
+                        success=False,
+                        error_message=(
+                            f"DB commit failed after new leg entry on Delta "
+                            f"(product={committed_new_product_id}): {retry_exc}"
+                        ),
+                    )
 
             # With bracket SLs attached to entry orders, there is nothing to
             # "refresh" as part of adjustment. The new leg's bracket SL was
             # attached at order placement time above.
 
+            new_leg_id = getattr(new_leg, "id", None)
             logger.info(
                 "Adjustment DB committed: new_leg_id=%s symbol=%s "
-                "product_id=%s status=%s entry=%s baseline=%s",
-                new_leg.id,
-                new_leg.symbol,
-                new_leg.product_id,
-                new_leg.status,
-                new_leg.initial_premium,
-                new_leg.trigger_baseline_premium,
+                "product_id=%s status=open entry=%s baseline=%s",
+                new_leg_id,
+                committed_new_symbol,
+                committed_new_product_id,
+                committed_new_entry,
+                committed_new_entry,
             )
             logger.info(
                 "Adjustment baseline reset: "
                 "triggered_leg entry=%s baseline=%s "
-                "other_leg entry(kept)=%s baseline=%s",
-                new_entry_premium,
-                new_entry_premium,
-                float(other_leg.initial_premium),
-                other_premium,
+                "other_leg entry(kept)=baseline reset to %s",
+                committed_new_entry,
+                committed_new_entry,
+                committed_other_premium,
             )
             logger.info(
                 "Adjustment success trade=%s %s %s→%s premium_collected=%s "
                 "delta_order_id=%s baselines reset triggered=%s other=%s "
                 "trigger_pct_reached=%.2f (vs baseline %.2f) "
                 "leg_realized=%s trade_realized_pnl=%s",
-                trade.id,
+                committed_trade_id,
                 triggered_leg_type,
-                old_strike,
-                plan.new_strike,
-                new_entry_premium,
-                new_leg.delta_order_id,
-                new_entry_premium,
-                other_premium,
-                trigger_pct,
+                committed_old_strike,
+                committed_new_strike,
+                committed_new_entry,
+                committed_order_id,
+                committed_new_entry,
+                committed_other_premium,
+                committed_trigger_pct,
                 triggered_baseline,
-                leg_realized,
-                trade_row.realized_pnl,
+                committed_leg_realized,
+                committed_trade_realized,
             )
 
             # Mirror adjustment to slave accounts (non-fatal)
@@ -1353,13 +1537,13 @@ class AdjustmentExecutor:
                 if mirror_module.mirror_engine is not None:
                     asyncio.create_task(
                         mirror_module.mirror_engine.mirror_adjustment(
-                            master_trade_id=int(trade.id),
+                            master_trade_id=committed_trade_id,
                             triggered_leg_type=str(triggered_leg_type),
-                            old_product_id=int(triggered_leg.product_id),
-                            new_product_id=int(new_leg.product_id),
-                            new_symbol=str(new_leg.symbol),
-                            new_strike=float(new_leg.strike),
-                            master_qty=int(triggered_leg.quantity),
+                            old_product_id=committed_old_product_id,
+                            new_product_id=committed_new_product_id,
+                            new_symbol=committed_new_symbol,
+                            new_strike=committed_new_strike,
+                            master_qty=committed_triggered_qty,
                         )
                     )
             except Exception as exc:
@@ -1367,9 +1551,9 @@ class AdjustmentExecutor:
 
             return AdjustmentResult(
                 success=True,
-                old_strike=old_strike,
-                new_strike=float(plan.new_strike),
-                premium_collected=new_entry_premium,
+                old_strike=committed_old_strike,
+                new_strike=committed_new_strike,
+                premium_collected=committed_new_entry,
             )
         except AdjustmentError as exc:
             logger.error("Adjustment failed trade=%s: %s", getattr(trade, "id", "?"), exc)
@@ -1397,12 +1581,20 @@ class AdjustmentExecutor:
 
         BOT ISOLATION: only legs from our DB with is_bot_managed=True.
         """
+        try:
+            trade_id = int(getattr(trade, "id", 0) or 0)
+        except Exception:
+            trade_id = 0
+        if trade_id <= 0:
+            raise AdjustmentError("Invalid trade id when loading legs")
+
         legs = (
             db_session.query(Leg)
             .filter(
-                Leg.trade_id == trade.id,
+                Leg.trade_id == trade_id,
                 Leg.status == "open",
                 Leg.is_bot_managed.is_(True),
+                Leg.leg_type.in_(("call", "put")),
             )
             .all()
         )
@@ -1410,7 +1602,7 @@ class AdjustmentExecutor:
         put_leg = next((leg for leg in legs if leg.leg_type == "put"), None)
         if call_leg is None or put_leg is None:
             raise AdjustmentError(
-                f"Open bot-managed call/put legs not found for trade {trade.id}"
+                f"Open bot-managed call/put legs not found for trade {trade_id}"
             )
         return call_leg, put_leg
 
@@ -1476,11 +1668,21 @@ class AdjustmentExecutor:
                 trade_row.exit_reason = None
                 trade_row.exit_time = None
 
+        db_session.expire_on_commit = False
         db_session.commit()
+        try:
+            db_session.refresh(triggered_leg)
+        except Exception:
+            pass
+        if trade_row is not None:
+            try:
+                db_session.refresh(trade_row)
+            except Exception:
+                pass
         logger.critical(
             "Partial adjustment DB updated: leg_id=%s marked closed "
             "(one-legged). Trade stays ACTIVE for manual close of remaining leg.",
-            triggered_leg.id,
+            getattr(triggered_leg, "id", "?"),
         )
 
     def _log_partial_error(

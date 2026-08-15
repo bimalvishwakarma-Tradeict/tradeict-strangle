@@ -242,6 +242,10 @@ class BotEngine:
                 continue
             if tid in self._premium_collapse_pending:
                 continue
+            # Never schedule integrity while mid-adjustment (leg ask collapses
+            # when we close the triggered leg — that is intentional).
+            if getattr(state, "is_adjusting", False):
+                continue
             logger.warning(
                 "Premium collapse trade=%s %s ask=%.4f entry=%.4f "
                 "— immediate position check",
@@ -485,6 +489,25 @@ class BotEngine:
         """
         trade_id = trade_state.trade_id
 
+        # CRITICAL: Skip integrity if adjustment is in progress.
+        # During adjustment one leg is intentionally closed temporarily.
+        # Re-read from tracker so we never use a stale is_adjusting=False.
+        live = self.position_tracker.get(trade_id)
+        if live is not None and getattr(live, "is_adjusting", False):
+            logger.debug(
+                "[INTEGRITY_SKIP] Trade#%s — adjustment in progress, "
+                "skipping integrity check",
+                trade_id,
+            )
+            return "ok"
+        if getattr(trade_state, "is_adjusting", False):
+            logger.debug(
+                "[INTEGRITY_SKIP] Trade#%s — adjustment in progress "
+                "(trade_state flag), skipping integrity check",
+                trade_id,
+            )
+            return "ok"
+
         # Demo/virtual trades have no real Delta positions — skip integrity
         if bool(getattr(trade_state.trade, "is_demo", False)):
             logger.debug(
@@ -498,12 +521,6 @@ class BotEngine:
             logger.debug(
                 "Trade %s: skipping integrity check (in conversion mode)",
                 trade_id,
-            )
-            return "ok"
-
-        if getattr(trade_state, "is_adjusting", False):
-            logger.debug(
-                "Trade %s: skipping integrity (adjusting)", trade_id
             )
             return "ok"
 
@@ -521,6 +538,16 @@ class BotEngine:
             )
 
         if open_leg_count < 2:
+            # Also skip when adjusting (one leg intentionally closed in DB)
+            live2 = self.position_tracker.get(trade_id)
+            if live2 is not None and getattr(live2, "is_adjusting", False):
+                logger.debug(
+                    "[INTEGRITY_SKIP] Trade#%s — adjusting with %s open "
+                    "short leg(s)",
+                    trade_id,
+                    open_leg_count,
+                )
+                return "ok"
             logger.warning(
                 "Trade %s has only %s open short leg(s) in DB. "
                 "Partial adjustment state — skipping integrity check.",
@@ -551,6 +578,17 @@ class BotEngine:
                 "Skipping this cycle.",
                 trade_id,
                 exc,
+            )
+            return "ok"
+
+        # Re-check adjusting AFTER awaits — race: adjust may have started
+        # while we were verifying Delta positions.
+        live3 = self.position_tracker.get(trade_id)
+        if live3 is not None and getattr(live3, "is_adjusting", False):
+            logger.debug(
+                "[INTEGRITY_SKIP] Trade#%s — adjustment started during "
+                "Delta verify, ignoring result",
+                trade_id,
             )
             return "ok"
 
@@ -605,20 +643,45 @@ class BotEngine:
 
         Returns False if trade was closed / emergency-handled (caller must stop).
         """
-        if trade_state.trade_id in self._integrity_in_progress:
+        trade_id = trade_state.trade_id
+
+        # Absolute gate: never act while adjustment is in progress
+        live = self.position_tracker.get(trade_id)
+        if (live is not None and getattr(live, "is_adjusting", False)) or getattr(
+            trade_state, "is_adjusting", False
+        ):
+            logger.debug(
+                "[INTEGRITY_SKIP] Trade#%s enforce skipped (adjusting) source=%s",
+                trade_id,
+                source,
+            )
+            return True
+
+        if trade_id in self._integrity_in_progress:
             return True
 
         integrity = await self._check_position_integrity(trade_state)
         log_and_buffer(
             "POSITION_CHECK",
-            trade_state.trade_id,
+            trade_id,
             {"status": integrity, "source": source},
         )
 
         if integrity == "ok":
             return True
 
-        self._integrity_in_progress.add(trade_state.trade_id)
+        # Race guard: adjustment may have started during the check
+        live2 = self.position_tracker.get(trade_id)
+        if live2 is not None and getattr(live2, "is_adjusting", False):
+            logger.warning(
+                "[INTEGRITY_SKIP] Trade#%s — was %s but adjustment started; "
+                "not acting",
+                trade_id,
+                integrity,
+            )
+            return True
+
+        self._integrity_in_progress.add(trade_id)
         try:
             if integrity == "manual_close":
                 logger.warning(
@@ -1138,6 +1201,18 @@ class BotEngine:
     async def _process_trade(self, trade_state: TradeState) -> None:
         assert self.delta_client is not None
         trade_id = trade_state.trade_id
+
+        # Never run monitor/integrity while an adjustment holds the lock
+        live = self.position_tracker.get(trade_id)
+        if (live is not None and getattr(live, "is_adjusting", False)) or getattr(
+            trade_state, "is_adjusting", False
+        ):
+            logger.debug(
+                "[MONITOR_SKIP] Trade#%s — adjustment in progress",
+                trade_id,
+            )
+            return
+
         call_leg = trade_state.call_leg
         put_leg = trade_state.put_leg
         trade = trade_state.trade
