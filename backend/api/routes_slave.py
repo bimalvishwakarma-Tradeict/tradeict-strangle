@@ -873,6 +873,10 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "qty_multiplier": float(slave.qty_multiplier or 1.0),
                 "is_active": bool(slave.is_active),
                 "is_virtual": is_virtual,
+                "earner_user_id": getattr(slave, "earner_user_id", None),
+                "earner_subscription_id": getattr(
+                    slave, "earner_subscription_id", None
+                ),
                 "connection_status": str(slave.connection_status or "unknown"),
                 "balance_usd": bal_usd,
                 "balance_inr": round(bal_usd * rate, 2),
