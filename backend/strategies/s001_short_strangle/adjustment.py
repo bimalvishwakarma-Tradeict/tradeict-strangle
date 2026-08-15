@@ -198,6 +198,26 @@ class AdjustmentExecutor:
                     f"{other_leg.symbol} (no mark fallback)"
                 )
 
+            # Cap match target at 2× other-leg entry (prevent runaway premiums).
+            # Keep other_premium as LIVE offer for conversion / cover checks.
+            other_leg_entry = float(other_leg.initial_premium or 0.0)
+            other_leg_current_offer = float(other_premium)
+            if other_leg_entry > 0:
+                target_premium = min(
+                    other_leg_current_offer, other_leg_entry * 2.0
+                )
+            else:
+                target_premium = other_leg_current_offer
+            logger.info(
+                "[ADJ_TARGET_PREMIUM] Trade#%s other_leg_offer=%.2f "
+                "other_leg_entry=%.2f cap=%.2f target=%.2f",
+                trade.id,
+                other_leg_current_offer,
+                other_leg_entry,
+                other_leg_entry * 2.0 if other_leg_entry > 0 else 0.0,
+                target_premium,
+            )
+
             triggered_baseline = float(
                 getattr(triggered_leg, "trigger_baseline_premium", None)
                 or getattr(triggered_leg, "trigger_premium", None)
@@ -300,7 +320,7 @@ class AdjustmentExecutor:
                     delta_client,
                     trade,
                     triggered_leg_type,
-                    other_premium,
+                    float(target_premium),
                     current_strike=float(triggered_leg.strike),
                     target_premium_override=cover_target_premium,
                 )

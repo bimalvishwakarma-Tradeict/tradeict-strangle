@@ -36,6 +36,7 @@ class AutoTradeSettingsSchema(BaseModel):
 
     # Trigger
     trigger_mode: str = "slab"
+    combined_trigger_mode: bool = False
     flat_trigger_pct: float = Field(default=150.0, ge=100, le=500)
     slab_24h: float = Field(default=200.0, ge=100, le=500)
     slab_12h: float = Field(default=175.0, ge=100, le=500)
@@ -103,6 +104,9 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "universal_sl_pct": float(s.universal_sl_pct),
         "slippage_pct": float(s.slippage_pct),
         "trigger_mode": s.trigger_mode,
+        "combined_trigger_mode": bool(
+            getattr(s, "combined_trigger_mode", False)
+        ),
         "flat_trigger_pct": float(s.flat_trigger_pct),
         "slab_24h": float(s.slab_24h),
         "slab_12h": float(s.slab_12h),
@@ -206,6 +210,7 @@ async def update_auto_trade_settings(
     settings.universal_sl_pct = float(payload.universal_sl_pct)
     settings.slippage_pct = float(payload.slippage_pct)
     settings.trigger_mode = payload.trigger_mode.lower().strip()
+    settings.combined_trigger_mode = bool(payload.combined_trigger_mode)
     settings.flat_trigger_pct = float(payload.flat_trigger_pct)
     settings.slab_24h = float(payload.slab_24h)
     settings.slab_12h = float(payload.slab_12h)

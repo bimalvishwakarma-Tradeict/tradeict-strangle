@@ -679,6 +679,9 @@ class AutoTradeEngine:
                 profit_target_usd=profit_target_usd,
                 stoploss_usd=stoploss_usd,
                 trigger_mode=str(settings.trigger_mode or "slab"),
+                combined_trigger_mode=bool(
+                    getattr(settings, "combined_trigger_mode", False)
+                ),
                 realized_pnl=0.0,
                 monitoring_starts_at=monitoring_starts,
                 initial_max_profit=initial_max_profit,

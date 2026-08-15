@@ -94,6 +94,8 @@ class TradeInitiateRequest(BaseModel):
     put_delta_at_entry: float | None = None
     # Virtual/demo trade — no real Delta orders
     is_demo: bool = False
+    # Combined call+put premium trigger (vs per-leg)
+    combined_trigger_mode: bool = False
 
 
 class TradeRegisterExistingRequest(TradeInitiateRequest):
@@ -122,6 +124,7 @@ class TradeSettingsUpdate(BaseModel):
     premium_slab_200: float | None = Field(default=None, ge=1, le=500)
     premium_slab_100: float | None = Field(default=None, ge=1, le=500)
     premium_slab_lt100: float | None = Field(default=None, ge=1, le=500)
+    combined_trigger_mode: bool | None = None
 
 
 class TradeExitRequest(BaseModel):

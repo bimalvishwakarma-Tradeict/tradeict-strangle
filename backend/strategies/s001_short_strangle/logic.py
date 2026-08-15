@@ -513,6 +513,112 @@ class ShortStrangleStrategy(BaseStrategy):
         except Exception:
             pass
 
+        # Combined premium trigger mode (overrides per-leg triggers)
+        combined_trigger_mode = bool(
+            getattr(trade, "combined_trigger_mode", False)
+        )
+        if not combined_trigger_mode and db_session is not None:
+            try:
+                from backend.database import get_or_create_auto_settings
+
+                _ats = get_or_create_auto_settings(db_session)
+                combined_trigger_mode = bool(
+                    getattr(_ats, "combined_trigger_mode", False)
+                )
+            except Exception:
+                combined_trigger_mode = False
+
+        if combined_trigger_mode and call_open and put_open:
+            call_entry = float(getattr(call_leg, "initial_premium", 0) or 0)
+            put_entry = float(getattr(put_leg, "initial_premium", 0) or 0)
+            combined_current = float(call_premium) + float(put_premium)
+            combined_entry = call_entry + put_entry
+            # Single % for sum — use call slab (same as put in flat/slab;
+            # average in premium mode so both bands contribute)
+            if mode == "premium":
+                trigger_pct = (call_trigger_pct + put_trigger_pct) / 2.0
+            else:
+                trigger_pct = float(call_trigger_pct)
+            combined_trigger_at = (
+                combined_entry * (trigger_pct / 100.0)
+                if combined_entry > 0
+                else 0.0
+            )
+            if combined_entry > 0 and combined_current >= combined_trigger_at:
+                call_pct = (
+                    (call_premium / call_entry) if call_entry > 0 else 0.0
+                )
+                put_pct = (put_premium / put_entry) if put_entry > 0 else 0.0
+                triggered_leg = "call" if call_pct >= put_pct else "put"
+                trig_pct_hit = (
+                    call_trigger_pct
+                    if triggered_leg == "call"
+                    else put_trigger_pct
+                )
+                logger.info(
+                    "[COMBINED_TRIGGER] Trade#%s combined=%.2f threshold=%.2f "
+                    "call_pct=%.1f%% put_pct=%.1f%% triggered=%s",
+                    getattr(trade, "id", "?"),
+                    combined_current,
+                    combined_trigger_at,
+                    call_pct * 100.0,
+                    put_pct * 100.0,
+                    triggered_leg,
+                )
+                if net_for_decision > 0:
+                    logger.info(
+                        "DECISION: Net MTM profitable at combined trigger — "
+                        "closing basket | Trade %s Net MTM=%.2f",
+                        getattr(trade, "id", "?"),
+                        net_for_decision,
+                    )
+                    return TradeAction(
+                        should_exit=True,
+                        exit_reason="DECISION_PROFIT_AT_TRIGGER",
+                        current_pnl=net_for_decision,
+                        triggered_leg=triggered_leg,
+                        trigger_pct_hit=trig_pct_hit,
+                        trigger_pct_used=trigger_pct,
+                        call_trigger_pct=call_trigger_pct,
+                        put_trigger_pct=put_trigger_pct,
+                    )
+                max_exit = self._check_max_adjustments_exit(
+                    trade,
+                    db_session,
+                    triggered_leg=triggered_leg,
+                    trigger_pct=trig_pct_hit,
+                    net_for_decision=net_for_decision,
+                    call_trigger_pct=call_trigger_pct,
+                    put_trigger_pct=put_trigger_pct,
+                )
+                if max_exit is not None:
+                    return max_exit
+                return TradeAction(
+                    should_adjust=True,
+                    adjust_leg=triggered_leg,
+                    current_pnl=net_for_decision,
+                    triggered_leg=triggered_leg,
+                    trigger_pct_hit=trig_pct_hit,
+                    trigger_pct_used=trigger_pct,
+                    call_trigger_pct=call_trigger_pct,
+                    put_trigger_pct=put_trigger_pct,
+                )
+            # Combined mode: do not fall through to individual leg triggers
+            logger.info(
+                "Trade %s decision: combined mode HOLD | "
+                "combined=%.2f threshold=%.2f | net_mtm=%.2f",
+                getattr(trade, "id", "?"),
+                combined_current,
+                combined_trigger_at,
+                decision_pnl,
+            )
+            return TradeAction(
+                current_pnl=decision_pnl,
+                trigger_pct_used=trigger_pct,
+                call_trigger_pct=call_trigger_pct,
+                put_trigger_pct=put_trigger_pct,
+            )
+
         if call_open:
             if call_premium >= call_trigger_price:
                 if mode == "premium":

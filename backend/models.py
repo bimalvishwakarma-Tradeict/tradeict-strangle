@@ -66,6 +66,10 @@ class Trade(Base):
         Float, nullable=True, default=200.0
     )
     trigger_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    # False = per-leg trigger; True = combined call+put premium vs combined entry
+    combined_trigger_mode: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -227,6 +231,10 @@ class AutoTradeSettings(Base):
 
     # Trigger settings
     trigger_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="slab")
+    # False = individual leg trigger (default); True = combined premium trigger
+    combined_trigger_mode: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     flat_trigger_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=150.0
     )

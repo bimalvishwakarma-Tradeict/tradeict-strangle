@@ -574,6 +574,9 @@ async def _persist_strangle_trade(
         slippage_pct=float(getattr(payload, "slippage_pct", None) or 2.0),
         universal_sl_pct=float(getattr(payload, "universal_sl_pct", None) or 200.0),
         trigger_mode=payload.trigger_mode,
+        combined_trigger_mode=bool(
+            getattr(payload, "combined_trigger_mode", False)
+        ),
         notes=None,
         realized_pnl=0.0,
         monitoring_starts_at=monitoring_starts,
@@ -2557,6 +2560,12 @@ async def update_trade_settings(
         updated["trigger_mode"] = trade.trigger_mode
         if state is not None and hasattr(state.trade, "trigger_mode"):
             state.trade.trigger_mode = trade.trigger_mode
+
+    if "combined_trigger_mode" in updates and updates["combined_trigger_mode"] is not None:
+        trade.combined_trigger_mode = bool(updates["combined_trigger_mode"])
+        updated["combined_trigger_mode"] = trade.combined_trigger_mode
+        if state is not None and hasattr(state.trade, "combined_trigger_mode"):
+            state.trade.combined_trigger_mode = trade.combined_trigger_mode
 
     db.commit()
     return {

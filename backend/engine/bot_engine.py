@@ -2955,19 +2955,36 @@ class BotEngine:
 
                 # Mirror normal adjustment to slaves (await — do not fire-and-forget)
                 # Conversion mode uses mirror_conversion from adjustment.execute instead.
+                logger.info(
+                    "[MIRROR_ADJ_DEBUG] Trade#%s result.success=%s "
+                    "result.new_product_id=%s result.new_symbol=%s "
+                    "result.old_product_id=%s conversion_mode=%s",
+                    trade_id,
+                    result.success,
+                    getattr(result, "new_product_id", "MISSING"),
+                    getattr(result, "new_symbol", "MISSING"),
+                    getattr(result, "old_product_id", "MISSING"),
+                    getattr(result, "conversion_mode", False),
+                )
                 if not getattr(result, "conversion_mode", False):
                     try:
                         import backend.engine.mirror_engine as mirror_module
 
                         me = mirror_module.mirror_engine or self.mirror_engine
-                        new_leg = (
-                            trade_state.call_leg
-                            if triggered == "call"
-                            else trade_state.put_leg
-                        )
+                        # After _reload_legs, get fresh open leg for the adjusted side
+                        if triggered == "call":
+                            new_leg = trade_state.call_leg
+                        else:
+                            new_leg = trade_state.put_leg
+
                         new_pid = int(
                             getattr(result, "new_product_id", None)
                             or getattr(new_leg, "product_id", 0)
+                            or 0
+                        )
+                        old_pid = int(
+                            getattr(result, "old_product_id", None)
+                            or old_product_id
                             or 0
                         )
                         new_sym = str(
@@ -2983,10 +3000,14 @@ class BotEngine:
                         qty = int(
                             getattr(result, "quantity", None) or master_qty or 1
                         )
-                        old_pid = int(
-                            getattr(result, "old_product_id", None)
-                            or old_product_id
-                            or 0
+                        logger.info(
+                            "[MIRROR_ADJ_PRE] Trade#%s new_pid=%s old_pid=%s "
+                            "new_sym=%s me=%s",
+                            trade_id,
+                            new_pid,
+                            old_pid,
+                            new_sym,
+                            me is not None,
                         )
                         if me is None:
                             logger.warning(

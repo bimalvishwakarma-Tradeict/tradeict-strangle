@@ -50,6 +50,9 @@ function applyStatusToForm(data, setters) {
   setters.setPremiumCoverLossEnabled(
     Boolean(data.premium_cover_loss_enabled),
   )
+  setters.setCombinedTriggerMode(
+    Boolean(data.combined_trigger_mode),
+  )
   setters.setIsEnabled(Boolean(data.is_enabled))
   setters.setLastError(data.last_error || null)
   setters.setLastTradeId(data.last_trade_id ?? null)
@@ -108,6 +111,7 @@ export default function AutoTrade() {
   const [conversionModeEnabled, setConversionModeEnabled] = useState(true)
   const [maxAdjustmentsPerBasket, setMaxAdjustmentsPerBasket] = useState('')
   const [premiumCoverLossEnabled, setPremiumCoverLossEnabled] = useState(false)
+  const [combinedTriggerMode, setCombinedTriggerMode] = useState(false)
   const [slabs, setSlabs] = useState(null)
   const [slabsInitial, setSlabsInitial] = useState(null)
   const [slabsKey, setSlabsKey] = useState(0)
@@ -134,6 +138,7 @@ export default function AutoTrade() {
       setConversionModeEnabled,
       setMaxAdjustmentsPerBasket,
       setPremiumCoverLossEnabled,
+      setCombinedTriggerMode,
       setIsEnabled,
       setLastError,
       setLastTradeId,
@@ -371,6 +376,7 @@ export default function AutoTrade() {
           ? null
           : Math.max(1, Math.min(50, Number(maxAdjustmentsPerBasket) || 1)),
       premium_cover_loss_enabled: Boolean(premiumCoverLossEnabled),
+      combined_trigger_mode: Boolean(combinedTriggerMode),
     }
   }
 
@@ -743,6 +749,33 @@ export default function AutoTrade() {
           initialValues={slabsInitial}
         />
       )}
+
+      {/* Combined Premium Trigger */}
+      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">
+          Combined Trigger Mode
+        </h2>
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            checked={combinedTriggerMode}
+            onChange={(e) => setCombinedTriggerMode(e.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
+            title="Adjustment triggers when TOTAL premium (call+put) reaches trigger%, not individual legs"
+          />
+          <span className="text-sm text-gray-300">
+            Combined Premium Trigger{' '}
+            <span className="text-gray-500">
+              ({combinedTriggerMode ? 'ON' : 'OFF'})
+            </span>
+          </span>
+        </label>
+        <p className="text-xs text-gray-500">
+          When ON: adjustment triggers when TOTAL premium (call + put)
+          reaches trigger %, not individual legs. The leg with the higher
+          % increase is adjusted. Default OFF = per-leg triggers.
+        </p>
+      </section>
 
       {/* Low-premium adjustment exit */}
       <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
