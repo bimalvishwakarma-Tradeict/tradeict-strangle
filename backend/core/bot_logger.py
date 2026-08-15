@@ -52,6 +52,12 @@ _IMPORTANT_EVENTS = frozenset(
         "CONVERSION_HOLD",
         "POSITION_VERIFIED",
         "POSITION_WARNING",
+        "MIRROR_ADJ_DEBUG",
+        "MIRROR_ADJ_PRE",
+        "MIRROR_ADJ_CALLED",
+        "MIRROR_ADJ_SKIP",
+        "MIRROR_ADJ_FAIL",
+        "MIRROR_ADJ_ENGINE",
     }
 )
 
@@ -193,8 +199,17 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ADJUSTMENT_DELTA_VERIFY",
         "ORPHAN_AUTO_CLOSED",
         "PARTIAL_ENTRY_CLEANUP",
+        "MIRROR_ADJ_DEBUG",
+        "MIRROR_ADJ_PRE",
+        "MIRROR_ADJ_CALLED",
+        "MIRROR_ADJ_ENGINE",
     ):
         bot_log.info(msg)
+    elif event_type in (
+        "MIRROR_ADJ_SKIP",
+        "MIRROR_ADJ_FAIL",
+    ):
+        bot_log.warning(msg)
     else:
         # INTEGRITY_OK and other high-frequency events stay at debug
         bot_log.debug(msg)

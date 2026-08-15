@@ -12,6 +12,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from backend.core.bot_logger import log_and_buffer
 from backend.core.delta_client import DeltaClient
 from backend.core.encryption import decrypt
 from backend.core.time_utils import get_ist_now
@@ -645,6 +646,17 @@ class MirrorEngine:
                     SlaveTrade.status == "active",
                 )
                 .all()
+            )
+
+            log_and_buffer(
+                "MIRROR_ADJ_ENGINE",
+                master_trade_id,
+                {"slaves_found": len(slave_trades)},
+            )
+            logger.info(
+                "[MIRROR_ADJ_ENGINE] Trade#%s slaves found=%s",
+                master_trade_id,
+                len(slave_trades),
             )
 
             if not slave_trades:

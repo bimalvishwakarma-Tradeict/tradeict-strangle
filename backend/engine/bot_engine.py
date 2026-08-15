@@ -2955,16 +2955,26 @@ class BotEngine:
 
                 # Mirror normal adjustment to slaves (await — do not fire-and-forget)
                 # Conversion mode uses mirror_conversion from adjustment.execute instead.
-                logger.info(
-                    "[MIRROR_ADJ_DEBUG] Trade#%s result.success=%s "
-                    "result.new_product_id=%s result.new_symbol=%s "
-                    "result.old_product_id=%s conversion_mode=%s",
+                # Use log_and_buffer so MIRROR_ADJ_* appears in bot_activity.log
+                # (module logger alone only hits /var/log/trading-bot/error.log).
+                log_and_buffer(
+                    "MIRROR_ADJ_DEBUG",
                     trade_id,
-                    result.success,
-                    getattr(result, "new_product_id", "MISSING"),
-                    getattr(result, "new_symbol", "MISSING"),
-                    getattr(result, "old_product_id", "MISSING"),
-                    getattr(result, "conversion_mode", False),
+                    {
+                        "result.success": result.success,
+                        "result.new_product_id": getattr(
+                            result, "new_product_id", "MISSING"
+                        ),
+                        "result.new_symbol": getattr(
+                            result, "new_symbol", "MISSING"
+                        ),
+                        "result.old_product_id": getattr(
+                            result, "old_product_id", "MISSING"
+                        ),
+                        "conversion_mode": getattr(
+                            result, "conversion_mode", False
+                        ),
+                    },
                 )
                 if not getattr(result, "conversion_mode", False):
                     try:
@@ -3000,28 +3010,31 @@ class BotEngine:
                         qty = int(
                             getattr(result, "quantity", None) or master_qty or 1
                         )
-                        logger.info(
-                            "[MIRROR_ADJ_PRE] Trade#%s new_pid=%s old_pid=%s "
-                            "new_sym=%s me=%s",
+                        log_and_buffer(
+                            "MIRROR_ADJ_PRE",
                             trade_id,
-                            new_pid,
-                            old_pid,
-                            new_sym,
-                            me is not None,
+                            {
+                                "new_pid": new_pid,
+                                "old_pid": old_pid,
+                                "new_sym": new_sym,
+                                "me": me is not None,
+                            },
                         )
                         if me is None:
-                            logger.warning(
-                                "[MIRROR_ADJ_SKIP] Trade#%s — mirror_engine "
-                                "is None",
+                            log_and_buffer(
+                                "MIRROR_ADJ_SKIP",
                                 trade_id,
+                                {"reason": "mirror_engine is None"},
                             )
                         elif old_pid <= 0 or new_pid <= 0:
-                            logger.warning(
-                                "[MIRROR_ADJ_SKIP] Trade#%s — missing "
-                                "product_ids old=%s new=%s",
+                            log_and_buffer(
+                                "MIRROR_ADJ_SKIP",
                                 trade_id,
-                                old_pid,
-                                new_pid,
+                                {
+                                    "reason": "missing product_ids",
+                                    "old_pid": old_pid,
+                                    "new_pid": new_pid,
+                                },
                             )
                         else:
                             await me.mirror_adjustment(
@@ -3033,14 +3046,15 @@ class BotEngine:
                                 new_strike=new_stk,
                                 master_qty=qty,
                             )
-                            logger.info(
-                                "[MIRROR_ADJ_CALLED] Trade#%s triggered_leg=%s "
-                                "old_product=%s new_product=%s qty=%s",
+                            log_and_buffer(
+                                "MIRROR_ADJ_CALLED",
                                 trade_id,
-                                triggered,
-                                old_pid,
-                                new_pid,
-                                qty,
+                                {
+                                    "triggered_leg": triggered,
+                                    "old_product": old_pid,
+                                    "new_product": new_pid,
+                                    "qty": qty,
+                                },
                             )
                     except Exception as mirror_adj_err:
                         logger.warning(
@@ -3048,6 +3062,11 @@ class BotEngine:
                             trade_id,
                             mirror_adj_err,
                             exc_info=True,
+                        )
+                        log_and_buffer(
+                            "MIRROR_ADJ_FAIL",
+                            trade_id,
+                            {"error": str(mirror_adj_err)[:300]},
                         )
 
                 if getattr(result, "conversion_mode", False):
