@@ -91,6 +91,7 @@ class MirrorEngine:
         slave: SlaveAccount | None = None,
         master_margin_used_usd: float | None = None,
         master_total_capital_usd: float | None = None,
+        slave_available_usd: float | None = None,
     ) -> int:
         """
         Calculate slave qty.
@@ -100,9 +101,10 @@ class MirrorEngine:
            slave_qty = master_qty × qty_multiplier
 
         2. Capital-based mode (capital_based_qty=True):
+           effective_capital = min(user_allocated_capital, slave_available)
            master_ratio = master_margin_used / master_total_capital
            per_lot_cost_usd = master_margin_used / master_qty
-           slave_margin_to_use = user_allocated_capital × master_ratio
+           slave_margin_to_use = effective_capital × master_ratio
            slave_qty = max(1, round(slave_margin_to_use / per_lot_cost_usd))
 
            All values in USD. Falls back to fixed multiplier if capital
@@ -120,19 +122,29 @@ class MirrorEngine:
             user_allocated = float(
                 getattr(slave, "user_allocated_capital", None) or 0
             )
-            if user_allocated > 0:
-                # Step 1: What ratio of master capital is being used
+
+            # Get slave available balance (fresh from API or cached)
+            slave_available = (
+                float(slave_available_usd)
+                if slave_available_usd is not None
+                else float(getattr(slave, "balance_usd", 0) or 0)
+            )
+
+            # Effective capital = min(what user allocated, what is actually available)
+            if user_allocated > 0 and slave_available > 0:
+                effective_capital = min(user_allocated, slave_available)
+            elif user_allocated > 0:
+                effective_capital = user_allocated
+            else:
+                effective_capital = slave_available
+
+            if effective_capital > 0:
                 master_ratio = (
                     master_margin_used_usd / master_total_capital_usd
                 )
-
-                # Step 2: Cost per lot in USD
                 per_lot_cost_usd = master_margin_used_usd / master_qty
+                slave_margin_to_use = effective_capital * master_ratio
 
-                # Step 3: How much of slave capital to use (same ratio)
-                slave_margin_to_use = user_allocated * master_ratio
-
-                # Step 4: Calculate slave lots
                 if per_lot_cost_usd > 0:
                     calculated_qty = max(
                         1,
@@ -144,13 +156,16 @@ class MirrorEngine:
                 logger.info(
                     "Capital-based qty: master_total=$%.2f master_used=$%.2f "
                     "master_qty=%s master_ratio=%.3f per_lot=$%.4f "
-                    "slave_allocated=$%.2f slave_margin=$%.2f → slave_qty=%s",
+                    "slave_allocated=$%.2f slave_available=$%.2f "
+                    "effective=$%.2f slave_margin=$%.2f → slave_qty=%s",
                     master_total_capital_usd,
                     master_margin_used_usd,
                     master_qty,
                     master_ratio,
                     per_lot_cost_usd,
                     user_allocated,
+                    slave_available,
+                    effective_capital,
                     slave_margin_to_use,
                     calculated_qty,
                 )
@@ -235,11 +250,14 @@ class MirrorEngine:
         underlying: str,
         db: Any,
     ) -> None:
-        # Fetch master capital data for capital-based qty calculation
+        # Fetch master + fresh slave capital for capital-based qty calculation
         master_margin_used: float | None = None
         master_total_capital: float | None = None
+        slave_fresh_available: float | None = None
+
         if bool(getattr(slave, "capital_based_qty", False)):
             try:
+                # Fetch master capital
                 with self.db_factory() as cap_db:
                     from backend.models import Account
 
@@ -262,25 +280,77 @@ class MirrorEngine:
                             master_available = float(
                                 wallet.get("available_balance", 0) or 0
                             )
-                            # margin_used = total_balance - available_balance
                             master_margin_used = max(
-                                0.0, master_total_capital - master_available
+                                0.0,
+                                master_total_capital - master_available,
                             )
                             logger.info(
-                                "Capital fetch for qty: master_total=$%.2f "
-                                "master_available=$%.2f master_margin_used=$%.2f "
-                                "master_qty=%s",
+                                "Master capital: total=$%.2f available=$%.2f "
+                                "used=$%.2f",
                                 master_total_capital,
                                 master_available,
                                 master_margin_used,
-                                int(master_call_qty),
                             )
                         finally:
                             await master_client.close()
             except Exception as cap_err:
-                logger.warning(
-                    "Capital fetch for slave qty failed: %s", cap_err
+                logger.warning("Master capital fetch failed: %s", cap_err)
+
+            # Fetch fresh slave balance from Delta API
+            # (virtual/paper slaves have no real wallet — use allocated/cached)
+            if bool(getattr(slave, "is_virtual", False)):
+                allocated = float(
+                    getattr(slave, "user_allocated_capital", None) or 0
                 )
+                cached = float(getattr(slave, "balance_usd", 0) or 0)
+                slave_fresh_available = (
+                    allocated if allocated > 0 else cached
+                )
+                logger.info(
+                    "Slave '%s' virtual capital: available=$%.2f "
+                    "(no Delta wallet fetch)",
+                    slave.name,
+                    slave_fresh_available,
+                )
+            else:
+                try:
+                    slave_client = self._get_slave_client(slave)
+                    try:
+                        slave_wallet = await slave_client.get_wallet_balance()
+                        slave_fresh_available = float(
+                            slave_wallet.get("available_balance", 0) or 0
+                        )
+                        logger.info(
+                            "Slave '%s' fresh balance: available=$%.2f",
+                            slave.name,
+                            slave_fresh_available,
+                        )
+                        # Update cached balance in DB
+                        with self.db_factory() as upd_db:
+                            from backend.models import SlaveAccount as SA
+
+                            s = (
+                                upd_db.query(SA)
+                                .filter(SA.id == slave.id)
+                                .first()
+                            )
+                            if s:
+                                s.balance_usd = float(
+                                    slave_wallet.get("balance_usdt", 0) or 0
+                                )
+                                upd_db.commit()
+                    finally:
+                        await slave_client.close()
+                except Exception as bal_err:
+                    logger.warning(
+                        "Slave '%s' balance fetch failed, using cached: %s",
+                        slave.name,
+                        bal_err,
+                    )
+                    # Fallback to cached balance
+                    slave_fresh_available = float(
+                        getattr(slave, "balance_usd", 0) or 0
+                    )
 
         # Use master_call_qty as the lot size for capital-based scaling
         slave_qty = self._calc_qty(
@@ -289,6 +359,7 @@ class MirrorEngine:
             slave=slave,
             master_margin_used_usd=master_margin_used,
             master_total_capital_usd=master_total_capital,
+            slave_available_usd=slave_fresh_available,
         )
 
         logger.info(
