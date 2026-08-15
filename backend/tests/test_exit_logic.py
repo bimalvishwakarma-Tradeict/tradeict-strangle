@@ -77,7 +77,7 @@ def main() -> None:
     assert action.exit_reason == "PROFIT_TARGET"
     print("Test 1 PASSED: Profit target exit ✅")
 
-    # Test 2: Stop loss hit
+    # Test 2: Stop loss hit — MUST use gross_mtm_for_sl (not net alone)
     trade = make_trade(sl_usd=60)
     action = asyncio.run(
         strategy.on_tick(
@@ -87,12 +87,34 @@ def main() -> None:
             250.0,
             180.0,
             db,
-            net_mtm=-65.0,
+            net_mtm=-10.0,  # net alone would NOT trip $60 SL
+            gross_mtm_for_sl=-65.0,  # gross trips SL
         )
     )
     assert action.should_exit is True
     assert action.exit_reason == "STOPLOSS"
     print("Test 2 PASSED: Stop loss exit ✅")
+
+    # Test 2b: Net deep in loss but gross inside SL → must HOLD (Trade #41)
+    trade = make_trade(tp_usd=1.0, sl_usd=0.03)
+    action = asyncio.run(
+        strategy.on_tick(
+            trade,
+            make_leg(100),
+            make_leg(100),
+            100.0,
+            100.0,
+            db,
+            realized_pnl=0.0,
+            delta_mtm=-0.013,
+            net_mtm=-0.0951,
+            gross_mtm_for_sl=-0.003,
+        )
+    )
+    assert action.should_exit is False, (
+        f"False SL on net_mtm: exit={action.should_exit} reason={action.exit_reason}"
+    )
+    print("Test 2b PASSED: net_mtm cannot false-trigger SL ✅")
 
     # Test 3: Decision trigger — profitable → close
     # flat 150%: call baseline 150 → trigger at 225; 262 hits

@@ -1798,6 +1798,35 @@ class BotEngine:
             # else: stay in conversion mode (hedge still open)
 
         if action.should_exit:
+            exit_reason = str(action.exit_reason or "UNKNOWN")
+            # Safety valve: never honor STOPLOSS if gross MTM for SL is still
+            # inside the limit (guards against any net_mtm misuse in strategy).
+            if exit_reason == "STOPLOSS" and stoploss > 0:
+                if gross_mtm_for_stoploss > -stoploss:
+                    logger.critical(
+                        "[SL_FALSE_TRIGGER_BLOCKED] Trade#%s — strategy "
+                        "returned STOPLOSS but gross_mtm_for_stoploss=%.4f "
+                        "> -stoploss=%.4f (net_mtm=%.4f). Ignoring SL exit.",
+                        trade_id,
+                        gross_mtm_for_stoploss,
+                        -stoploss,
+                        net_mtm_val,
+                    )
+                    log_and_buffer(
+                        "SL_FALSE_TRIGGER_BLOCKED",
+                        trade_id,
+                        {
+                            "gross_mtm_for_stoploss": round(
+                                gross_mtm_for_stoploss, 4
+                            ),
+                            "net_mtm": round(net_mtm_val, 4),
+                            "stoploss": stoploss,
+                        },
+                    )
+                    action.should_exit = False
+                    action.exit_reason = None
+
+        if action.should_exit:
             exit_pnl = float(getattr(action, "current_pnl", net_mtm_val) or net_mtm_val)
             await self._exit_trade(
                 trade_state,

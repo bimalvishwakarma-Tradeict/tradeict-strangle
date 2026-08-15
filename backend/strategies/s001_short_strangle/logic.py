@@ -329,7 +329,9 @@ class ShortStrangleStrategy(BaseStrategy):
                 slippage_pct=slippage_pct,
             )
 
-        # Gross MTM for SL: add back cumulative entry spread
+        # Gross MTM for SL: MUST use gross_mtm_for_sl from bot_engine
+        # (gross + cumulative entry spread). NEVER use net_mtm / decision_pnl
+        # for stop-loss — fees + entry spread would false-trigger immediately.
         if gross_mtm_for_sl is not None:
             sl_mtm = float(gross_mtm_for_sl)
         else:
@@ -339,12 +341,32 @@ class ShortStrangleStrategy(BaseStrategy):
                 )
             except (TypeError, ValueError):
                 cumulative_entry_spread = 0.0
-            sl_mtm = total_pnl + cumulative_entry_spread
+            sl_mtm = float(total_pnl) + cumulative_entry_spread
+            logger.warning(
+                "Trade %s: gross_mtm_for_sl not passed — fallback "
+                "sl_mtm=total_pnl+entry_spread=%.4f (still NOT using net_mtm)",
+                getattr(trade, "id", "?"),
+                sl_mtm,
+            )
+
+        sl_limit = abs(float(trade.stoploss_usd or 0.0))
+        tp_limit = float(trade.profit_target_usd or 0.0)
 
         # b. Profit target (Net MTM — fees/slippage deducted)
-        should_exit_profit = decision_pnl >= float(trade.profit_target_usd)
-        # c. Stop loss (Gross MTM for SL — entry spread added back)
-        should_exit_sl = sl_mtm <= -float(trade.stoploss_usd)
+        should_exit_profit = decision_pnl >= tp_limit
+        # c. Stop loss (Gross MTM for SL ONLY — never net_mtm)
+        should_exit_sl = sl_limit > 0 and sl_mtm <= -sl_limit
+
+        # Explicit audit: prove SL decision is not based on net
+        if sl_limit > 0 and decision_pnl <= -sl_limit and not should_exit_sl:
+            logger.info(
+                "Trade %s: net_mtm=%.4f would trip SL (limit=%.4f) but "
+                "gross_mtm_for_sl=%.4f has breathing room — HOLD on SL",
+                getattr(trade, "id", "?"),
+                decision_pnl,
+                sl_limit,
+                sl_mtm,
+            )
 
         if should_exit_profit:
             logger.info(
@@ -368,13 +390,13 @@ class ShortStrangleStrategy(BaseStrategy):
             logger.info(
                 "Trade %s: gross_mtm=%.2f gross_mtm_for_sl=%.2f net_mtm=%.2f | "
                 "target=%s | sl=%s | action=EXIT STOPLOSS "
-                "(gross_mtm_for_sl<=stoploss)",
+                "(gross_mtm_for_sl<=-stoploss; net_mtm NOT used for SL)",
                 getattr(trade, "id", "?"),
                 total_pnl,
                 sl_mtm,
                 decision_pnl,
                 trade.profit_target_usd,
-                trade.stoploss_usd,
+                sl_limit,
             )
             return TradeAction(
                 should_exit=True,
