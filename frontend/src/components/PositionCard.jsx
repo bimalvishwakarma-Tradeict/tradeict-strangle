@@ -59,6 +59,8 @@ function triggerBarClass(pct) {
   return 'bg-green-500'
 }
 
+const PAYOFF_EXPAND_KEY = 'tradeict_payoff_graph_expanded'
+
 function useSettlingCountdown(settlingEndsAt, isSettlingFlag) {
   const [nowTick, setNowTick] = useState(0)
 
@@ -380,326 +382,6 @@ const NEXT_ACTION_BADGE = {
   },
 }
 
-function BotNextActionPlan({ trade, call, put }) {
-  const [expanded, setExpanded] = useState(true)
-  const plan = trade.next_action_plan || {}
-  const action = String(trade.bot_next_action || plan.next_action || 'HOLD')
-  const badge = NEXT_ACTION_BADGE[action] || NEXT_ACTION_BADGE.HOLD
-  const exitWatch = plan.exit_conditions_watch || {}
-  const callTrigger = Number(trade.call_trigger_price || 0)
-  const putTrigger = Number(trade.put_trigger_price || 0)
-  const callOffer = Number(call.current_premium ?? trade.call_premium ?? 0)
-  const putOffer = Number(put.current_premium ?? trade.put_premium ?? 0)
-  const callPct = Number(
-    trade.bot_call_pct_to_trigger ?? plan.call_pct_to_trigger ?? 0,
-  )
-  const putPct = Number(
-    trade.bot_put_pct_to_trigger ?? plan.put_pct_to_trigger ?? 0,
-  )
-  const callBar = Math.min(100, Math.max(0, callPct))
-  const putBar = Math.min(100, Math.max(0, putPct))
-  const tpUsd = Number(exitWatch.profit_target_usd ?? trade.profit_target_usd ?? 0)
-  const slUsd = Number(exitWatch.stoploss_usd ?? trade.stoploss_usd ?? 0)
-  const netNow = Number(exitWatch.current_net_mtm ?? trade.net_mtm ?? 0)
-  const grossSl = Number(
-    exitWatch.current_gross_for_sl ?? trade.gross_mtm_for_stoploss ?? 0,
-  )
-  const pctTp = Number(exitWatch.pct_to_profit_target ?? 0)
-  const pctSl = Number(exitWatch.pct_to_stoploss ?? 0)
-  const convMin = Number(plan.conversion_min_premium ?? 150)
-  const otherOffer = Number(plan.other_leg_current_offer ?? 0)
-
-  return (
-    <div className="border-t border-gray-700 px-4 py-3">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="mb-2 flex w-full items-center justify-between text-left"
-      >
-        <div className="text-sm font-semibold text-white">
-          🤖 Bot&apos;s Next Action Plan
-        </div>
-        <span className="text-xs text-gray-400">
-          {expanded ? 'Collapse ▲' : 'Expand ▼'}
-        </span>
-      </button>
-      {!expanded ? null : (
-        <div className="space-y-3">
-          <div
-            className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${badge.className}`}
-          >
-            {badge.label}
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <div className="mb-1 flex justify-between text-xs text-gray-400">
-                <span>CALL → trigger</span>
-                <span className={callPct >= 80 ? 'text-red-400' : 'text-gray-300'}>
-                  {callPct.toFixed(1)}%
-                </span>
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-gray-700">
-                <div
-                  className={`h-full ${callPct >= 80 ? 'bg-red-500' : 'bg-green-500'}`}
-                  style={{ width: `${callBar}%` }}
-                />
-              </div>
-              <div className="mt-0.5 text-[11px] text-gray-500">
-                ${fmtMoney(callOffer)} / ${fmtMoney(callTrigger)}
-              </div>
-            </div>
-            <div>
-              <div className="mb-1 flex justify-between text-xs text-gray-400">
-                <span>PUT → trigger</span>
-                <span className={putPct >= 80 ? 'text-red-400' : 'text-gray-300'}>
-                  {putPct.toFixed(1)}%
-                </span>
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-gray-700">
-                <div
-                  className={`h-full ${putPct >= 80 ? 'bg-red-500' : 'bg-green-500'}`}
-                  style={{ width: `${putBar}%` }}
-                />
-              </div>
-              <div className="mt-0.5 text-[11px] text-gray-500">
-                ${fmtMoney(putOffer)} / ${fmtMoney(putTrigger)}
-              </div>
-            </div>
-          </div>
-
-          {action === 'HOLD' && (
-            <div className="space-y-1 rounded-lg border border-gray-700 bg-gray-900/40 px-3 py-2 text-xs text-gray-300">
-              <div className="flex justify-between">
-                <span>Call leg</span>
-                <span>
-                  current ${fmtMoney(callOffer)} → trigger ${fmtMoney(callTrigger)}{' '}
-                  ({Math.max(0, 100 - callPct).toFixed(1)}% away)
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Put leg</span>
-                <span>
-                  current ${fmtMoney(putOffer)} → trigger ${fmtMoney(putTrigger)}{' '}
-                  ({Math.max(0, 100 - putPct).toFixed(1)}% away)
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Profit target</span>
-                <span>
-                  Net MTM {fmtSignedMoney(netNow)} → Target ${fmtMoney(tpUsd)} (
-                  {pctTp.toFixed(1)}% reached)
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Stop loss</span>
-                <span>
-                  Gross for SL {fmtSignedMoney(grossSl)} → SL at -$
-                  {fmtMoney(slUsd)} ({pctSl.toFixed(1)}% used)
-                </span>
-              </div>
-            </div>
-          )}
-
-          {(action === 'ADJUST_CALL' || action === 'ADJUST_PUT') && (
-            <div className="space-y-1 rounded-lg border border-orange-800/50 bg-orange-950/20 px-3 py-2 text-xs text-gray-300">
-              <div>
-                Triggered leg:{' '}
-                <span className="font-semibold uppercase text-orange-300">
-                  {plan.triggered_leg || trade.bot_closer_leg || '—'}
-                </span>{' '}
-                @ current $
-                {fmtMoney(
-                  (plan.triggered_leg || trade.bot_closer_leg) === 'put'
-                    ? putOffer
-                    : callOffer,
-                )}{' '}
-                (trigger was $
-                {fmtMoney(
-                  (plan.triggered_leg || trade.bot_closer_leg) === 'put'
-                    ? putTrigger
-                    : callTrigger,
-                )}
-                )
-              </div>
-              <div>
-                Other leg current offer: ${fmtMoney(otherOffer)}
-              </div>
-              <div>
-                Expected new strike:{' '}
-                {plan.estimated_new_strike == null ||
-                plan.estimated_new_strike === 'calculating...'
-                  ? 'Calculating...'
-                  : `${fmtStrike(plan.estimated_new_strike)} @ ~$${fmtMoney(plan.estimated_new_premium)}`}
-              </div>
-              <div>
-                Adjustment type:{' '}
-                <span className="text-green-300">Normal Roll</span>
-              </div>
-              <div className="text-gray-400">
-                Other leg ${fmtMoney(otherOffer)} is{' '}
-                {otherOffer >= convMin ? 'above' : 'below'} conversion minimum $
-                {fmtMoney(convMin)}
-              </div>
-            </div>
-          )}
-
-          {action === 'CONVERSION_LIKELY' && (
-            <div className="space-y-3 rounded-lg border border-red-700/50 bg-red-950/20 px-3 py-3 text-xs text-gray-300">
-              <div className="text-sm font-semibold text-red-300">
-                ⚠️ Conversion Mode Will Activate on Trigger
-              </div>
-              {(() => {
-                const cp = plan.conversion_plan
-                if (!cp) {
-                  return (
-                    <div className="text-gray-500">
-                      Conversion plan details: --
-                    </div>
-                  )
-                }
-                const trig = String(cp.triggered_leg || 'call').toUpperCase()
-                const otherSide = String(
-                  cp.new_other_leg_side || cp.close_other_leg || 'put',
-                ).toUpperCase()
-                const hedgeSide = String(cp.hedge_action || 'BUY')
-                  .replace('BUY ', '')
-                  .trim() || trig
-                return (
-                  <div className="space-y-2">
-                    <div className="rounded border border-amber-700/40 bg-amber-950/30 px-2.5 py-2">
-                      <div className="mb-0.5 font-semibold text-amber-300">
-                        STEP 1 — Buy Hedge
-                      </div>
-                      <div className="text-amber-100">
-                        BUY {hedgeSide} @ strike $
-                        {fmtStrike(cp.hedge_strike)}
-                      </div>
-                      <div className="text-[11px] text-amber-200/70">
-                        One strike toward ATM from triggered {trig} @ $
-                        {fmtStrike(cp.triggered_strike)}
-                        {cp.hedge_symbol_expected
-                          ? ` · ${cp.hedge_symbol_expected}`
-                          : ''}
-                      </div>
-                    </div>
-                    <div className="rounded border border-blue-700/40 bg-blue-950/30 px-2.5 py-2">
-                      <div className="mb-0.5 font-semibold text-blue-300">
-                        STEP 2 — Keep Triggered Short + Close Other
-                      </div>
-                      <div className="text-blue-200">
-                        KEEP short {trig} @ $
-                        {fmtStrike(cp.triggered_strike)} (stays open)
-                      </div>
-                      <div className="text-red-300">
-                        CLOSE short {otherSide} @ $
-                        {fmtStrike(cp.other_leg_strike)} (current offer: $
-                        {fmtMoney(cp.other_leg_current_offer)})
-                      </div>
-                    </div>
-                    <div className="rounded border border-green-700/40 bg-green-950/30 px-2.5 py-2">
-                      <div className="mb-0.5 font-semibold text-green-300">
-                        STEP 3 — Sell New {otherSide}
-                      </div>
-                      <div className="text-green-200">
-                        SELL new {otherSide} targeting ~$
-                        {fmtMoney(cp.new_other_target_premium)}
-                      </div>
-                      <div className="text-[11px] text-green-200/70">
-                        (estimated: triggered offer $
-                        {fmtMoney(cp.triggered_current_offer)} / 2 — actual will
-                        be hedge fill / 2)
-                      </div>
-                    </div>
-                    <div className="text-gray-300">
-                      Why conversion: {cp.why_conversion || '--'}
-                    </div>
-                    <div className="text-[11px] text-gray-500">
-                      After conversion: bot monitors for premium equality to
-                      close hedge
-                    </div>
-                  </div>
-                )
-              })()}
-            </div>
-          )}
-
-          {(action === 'CONVERSION_ACTIVE' || action === 'REVERSAL_WATCH') && (
-            <div className="space-y-2 rounded-lg border border-purple-700/50 bg-purple-950/20 px-3 py-2 text-xs text-gray-300">
-              <div>
-                Hedge: {plan.hedge_symbol || trade.conversion_hedge_symbol || '—'}{' '}
-                bought at $
-                {fmtMoney(
-                  plan.hedge_entry_price ?? trade.conversion_hedge_entry_price,
-                )}
-              </div>
-              <div>
-                Short Call: ${fmtMoney(plan.short_call_premium ?? callOffer)} | Short
-                Put: ${fmtMoney(plan.short_put_premium ?? putOffer)}
-              </div>
-              <div>
-                Premium difference: {Number(plan.premium_equality_pct || 0).toFixed(1)}
-                % (target: ≤ {Number(plan.equality_threshold_pct || 10).toFixed(1)}%)
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-gray-700">
-                <div
-                  className={`h-full ${
-                    Number(plan.premium_equality_pct || 0) <=
-                    Number(plan.equality_threshold_pct || 10)
-                      ? 'bg-green-500'
-                      : 'bg-yellow-500'
-                  }`}
-                  style={{
-                    width: `${Math.min(
-                      100,
-                      Math.max(
-                        5,
-                        (Number(plan.equality_threshold_pct || 10) /
-                          Math.max(Number(plan.premium_equality_pct) || 0.01, 0.01)) *
-                          100,
-                      ),
-                    )}%`,
-                  }}
-                />
-              </div>
-              <div className="text-blue-300">
-                {plan.reversal_condition ||
-                  `Reversal will trigger when: |call - put| / avg ≤ ${Number(plan.equality_threshold_pct || 10).toFixed(1)}%`}
-              </div>
-            </div>
-          )}
-
-          <div className="rounded border border-gray-700 bg-gray-900/30 px-3 py-2 text-xs text-gray-400">
-            Exit conditions: TP at +${fmtMoney(tpUsd)} ({pctTp.toFixed(1)}% reached) |
-            SL at -${fmtMoney(slUsd)} ({pctSl.toFixed(1)}% used)
-          </div>
-          {(() => {
-            const used = Number(trade.adjustment_count ?? 0)
-            const max =
-              trade.max_adjustments_per_basket == null ||
-              trade.max_adjustments_per_basket === ''
-                ? null
-                : Number(trade.max_adjustments_per_basket)
-            const maxLabel = max == null || !Number.isFinite(max) ? '∞' : String(max)
-            let color = 'text-gray-400'
-            if (max != null && Number.isFinite(max)) {
-              if (used >= max) color = 'text-red-400 font-semibold'
-              else if (used >= max - 1) color = 'text-orange-300 font-medium'
-            }
-            return (
-              <div className={`text-xs ${color}`}>
-                Adjustments: {used} used / {maxLabel} allowed
-                {trade.adjustments_remaining != null
-                  ? ` (${trade.adjustments_remaining} remaining)`
-                  : ''}
-              </div>
-            )
-          })()}
-        </div>
-      )}
-    </div>
-  )
-}
 
 function BasketStory({ trade, call, put, mergedAdj }) {
   const isClosed = String(trade.status || '').toLowerCase() !== 'active'
@@ -1021,6 +703,13 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const [editValue, setEditValue] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
   const [triggerDraft, setTriggerDraft] = useState(null)
+  const [payoffExpanded, setPayoffExpanded] = useState(() => {
+    try {
+      return localStorage.getItem(PAYOFF_EXPAND_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -1456,53 +1145,79 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
         </div>
       </div>
 
-      {/* Bot's Next Action Plan */}
-      <BotNextActionPlan trade={trade} call={call} put={put} />
-
-      {/* Live payoff — same as Trade Initiator (hourly slider) */}
+      {/* Live payoff — collapsible; default collapsed (localStorage) */}
       {anyOpen && call.strike != null && put.strike != null && (
         <div className="border-t border-gray-700 px-4 py-3">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setPayoffExpanded((prev) => {
+                const next = !prev
+                try {
+                  localStorage.setItem(PAYOFF_EXPAND_KEY, next ? '1' : '0')
+                } catch {
+                  /* ignore */
+                }
+                return next
+              })
+            }}
+            className="flex w-full items-center justify-between gap-2 text-left"
+          >
             <div className="text-sm font-semibold text-white">
               Live Payoff Graph
             </div>
-            <div className="text-xs text-gray-400">
-              BTC{' '}
-              <span className="font-medium text-orange-300">
-                $
-                {Number(trade.underlying_price || 0).toLocaleString('en-US', {
-                  maximumFractionDigits: 0,
-                }) || '—'}
+            <div className="flex items-center gap-3">
+              <div className="text-xs text-gray-400">
+                BTC{' '}
+                <span className="font-medium text-orange-300">
+                  $
+                  {Number(trade.underlying_price || 0).toLocaleString('en-US', {
+                    maximumFractionDigits: 0,
+                  }) || '—'}
+                </span>
+                <span className="text-gray-600"> · tick updates</span>
+              </div>
+              <span className="text-xs text-gray-400" aria-hidden>
+                {payoffExpanded ? '▲' : '▼'}
               </span>
-              <span className="text-gray-600"> · tick updates</span>
             </div>
-          </div>
-          <PayoffGraph
-            callStrike={Number(call.strike)}
-            putStrike={Number(put.strike)}
-            callPremium={Number(call.initial_premium)}
-            putPremium={Number(put.initial_premium)}
-            quantity={Number(
-              call.quantity ??
-                put.quantity ??
-                trade.call_quantity ??
-                trade.put_quantity ??
-                1,
-            )}
-            currentPrice={
-              Number(trade.underlying_price) > 0
-                ? Number(trade.underlying_price)
-                : undefined
-            }
-            expiryDate={trade.expiry_date || undefined}
-            initialHoursRemaining={Number(trade.hours_to_expiry) || undefined}
-            emptyMessage="Waiting for BTC price…"
-            compact
-          />
+          </button>
+          {payoffExpanded ? (
+            <div className="mt-2">
+              <PayoffGraph
+                callStrike={Number(call.strike)}
+                putStrike={Number(put.strike)}
+                callPremium={Number(call.initial_premium)}
+                putPremium={Number(put.initial_premium)}
+                quantity={Number(
+                  call.quantity ??
+                    put.quantity ??
+                    trade.call_quantity ??
+                    trade.put_quantity ??
+                    1,
+                )}
+                currentPrice={
+                  Number(trade.underlying_price) > 0
+                    ? Number(trade.underlying_price)
+                    : undefined
+                }
+                expiryDate={trade.expiry_date || undefined}
+                initialHoursRemaining={
+                  Number(trade.hours_to_expiry) || undefined
+                }
+                emptyMessage="Waiting for BTC price…"
+                compact
+              />
+            </div>
+          ) : (
+            <div className="mt-1 text-xs text-gray-500">
+              Graph collapsed — click to expand
+            </div>
+          )}
         </div>
       )}
 
-      {/* Bot plan */}
+      {/* Bot Monitoring Plan (single instance) */}
       <div className="border-t border-gray-700 px-4 py-3">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm font-semibold text-white">
@@ -1519,6 +1234,22 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
               : '⚠️ Bracket SL: Not set / incomplete'}
           </div>
         </div>
+
+        {(() => {
+          const action = String(
+            trade.bot_next_action ||
+              trade.next_action_plan?.next_action ||
+              'HOLD',
+          )
+          const badge = NEXT_ACTION_BADGE[action] || NEXT_ACTION_BADGE.HOLD
+          return (
+            <div
+              className={`mb-3 inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${badge.className}`}
+            >
+              {badge.label}
+            </div>
+          )
+        })()}
 
         {combinedMode && (
           <div className="mb-3 space-y-3 rounded-lg border border-cyan-500/40 bg-cyan-500/10 p-3">
@@ -1576,36 +1307,36 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
           </div>
         )}
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <TriggerWatch
-            title="Call Leg Watch"
-            entry={callEntry}
-            baseline={callBaseline}
-            trigger={callTrigger}
-            current={call.current_premium}
-            distance={callDistance}
-            progressPct={callProgress}
-            triggerPct={callTriggerPct}
-            triggerMode={triggerMode}
-            deltaSlPrice={callDeltaSl}
-            universalSlPct={universalSlPct}
-            referenceOnly={combinedMode}
-          />
-          <TriggerWatch
-            title="Put Leg Watch"
-            entry={putEntry}
-            baseline={putBaseline}
-            trigger={putTrigger}
-            current={put.current_premium}
-            distance={putDistance}
-            progressPct={putProgress}
-            triggerPct={putTriggerPct}
-            triggerMode={triggerMode}
-            deltaSlPrice={putDeltaSl}
-            universalSlPct={universalSlPct}
-            referenceOnly={combinedMode}
-          />
-        </div>
+        {!combinedMode && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <TriggerWatch
+              title="Call Leg Watch"
+              entry={callEntry}
+              baseline={callBaseline}
+              trigger={callTrigger}
+              current={call.current_premium}
+              distance={callDistance}
+              progressPct={callProgress}
+              triggerPct={callTriggerPct}
+              triggerMode={triggerMode}
+              deltaSlPrice={callDeltaSl}
+              universalSlPct={universalSlPct}
+            />
+            <TriggerWatch
+              title="Put Leg Watch"
+              entry={putEntry}
+              baseline={putBaseline}
+              trigger={putTrigger}
+              current={put.current_premium}
+              distance={putDistance}
+              progressPct={putProgress}
+              triggerPct={putTriggerPct}
+              triggerMode={triggerMode}
+              deltaSlPrice={putDeltaSl}
+              universalSlPct={universalSlPct}
+            />
+          </div>
+        )}
 
         {trade.in_conversion_mode ? (
           <div className="mt-3 space-y-3">
