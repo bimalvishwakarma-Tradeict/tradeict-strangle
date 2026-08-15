@@ -144,6 +144,11 @@ class AdjustmentExecutor:
         initial_max_profit never changes after trade entry.
         adjustments do NOT affect TP/SL
         (only leg baselines + trade.realized_pnl change).
+
+        LOCK OWNERSHIP: is_adjusting is owned by BotEngine._adjust_trade,
+        which sets True before calling execute() and ALWAYS clears False in
+        a finally block. execute() must NOT clear the lock early — that would
+        reopen the reconcile naked_risk race during post-execute reload.
         """
         # BUG-1: Keep ORM objects usable after commit() — without this,
         # post-commit attribute access raises DetachedInstanceError and can

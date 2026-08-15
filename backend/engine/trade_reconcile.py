@@ -212,6 +212,17 @@ async def reconcile_open_legs_with_delta(
     now = datetime.now(timezone.utc)
 
     for trade in actives:
+        # Skip trades mid-adjustment — Delta shows temporary one-leg-missing
+        if position_tracker is not None:
+            state = position_tracker.get(int(trade.id))
+            if state is not None and getattr(state, "is_adjusting", False):
+                logger.info(
+                    "[RECONCILE_SKIP] Trade#%s — is_adjusting=True, "
+                    "skipping reconcile for this trade",
+                    trade.id,
+                )
+                continue
+
         # Demo/virtual trades have no real Delta size — never reconcile-close them
         if bool(getattr(trade, "is_demo", False)):
             logger.debug(

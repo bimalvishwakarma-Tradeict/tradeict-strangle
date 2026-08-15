@@ -90,6 +90,8 @@ class BotEngine:
         self.mirror_engine: Any | None = None
         # Monitor-cycle counter for periodic slave integrity checks
         self._cycle_count: int = 0
+        # Throttle wrongly-closed leg recovery (trade_id → monotonic ts)
+        self._leg_recovery_last_checked: dict[int, float] = {}
 
     async def start(self) -> None:
         self.is_running = True
@@ -367,49 +369,64 @@ class BotEngine:
                 from backend.database import SessionLocal
                 from backend.engine.trade_reconcile import reconcile_open_legs_with_delta
 
-                with SessionLocal() as db:
-                    recon = await reconcile_open_legs_with_delta(
-                        db=db,
-                        client=self.delta_client,
-                        position_tracker=self.position_tracker,
+                # Skip entire reconcile while any trade is mid-adjustment —
+                # Delta will show a temporary one-leg-missing state.
+                adjusting_ids = [
+                    int(s.trade_id)
+                    for s in self.position_tracker.get_all_active()
+                    if getattr(s, "is_adjusting", False)
+                ]
+                if adjusting_ids:
+                    logger.info(
+                        "[RECONCILE_SKIP] trades adjusting=%s — "
+                        "skipping full reconcile this cycle",
+                        adjusting_ids,
                     )
-                closed_ids = list(recon.get("fully_closed") or [])
-                for tid in closed_ids:
-                    await ws_manager.broadcast(
-                        {
-                            "type": "TRADE_CLOSED",
-                            "trade_id": tid,
-                            "reason": ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value,
-                            "message": "Basket closed — Delta size flat",
-                        }
-                    )
-                for alert in recon.get("naked_risk") or []:
-                    tid = int(alert["trade_id"])
-                    remaining = str(alert["remaining"])
-                    state = self.position_tracker.get(tid)
-                    if state is None:
-                        continue
-
-                    # CRITICAL: Skip naked risk close if trade is currently adjusting
-                    # During adjustment, one leg is intentionally closed temporarily
-                    if getattr(state, "is_adjusting", False):
-                        logger.info(
-                            "[NAKED_SKIP] Trade#%s — is_adjusting=True, "
-                            "skipping emergency close (reconcile bypass guard)",
-                            tid,
+                else:
+                    with SessionLocal() as db:
+                        recon = await reconcile_open_legs_with_delta(
+                            db=db,
+                            client=self.delta_client,
+                            position_tracker=self.position_tracker,
                         )
-                        continue
+                    closed_ids = list(recon.get("fully_closed") or [])
+                    for tid in closed_ids:
+                        await ws_manager.broadcast(
+                            {
+                                "type": "TRADE_CLOSED",
+                                "trade_id": tid,
+                                "reason": ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value,
+                                "message": "Basket closed — Delta size flat",
+                            }
+                        )
+                    for alert in recon.get("naked_risk") or []:
+                        tid = int(alert["trade_id"])
+                        remaining = str(alert["remaining"])
+                        state = self.position_tracker.get(tid)
+                        if state is None:
+                            continue
 
-                    log_and_buffer(
-                        "NAKED_POSITION",
-                        tid,
-                        {
-                            "missing": alert.get("missing"),
-                            "remaining": remaining,
-                            "source": "reconcile",
-                        },
-                    )
-                    await self._emergency_close_remaining_leg(state, remaining)
+                        # CRITICAL: Skip naked risk close if trade is adjusting
+                        if getattr(state, "is_adjusting", False):
+                            logger.info(
+                                "[NAKED_SKIP] Trade#%s — is_adjusting=True, "
+                                "skipping emergency close (reconcile bypass guard)",
+                                tid,
+                            )
+                            continue
+
+                        log_and_buffer(
+                            "NAKED_POSITION",
+                            tid,
+                            {
+                                "missing": alert.get("missing"),
+                                "remaining": remaining,
+                                "source": "reconcile",
+                            },
+                        )
+                        await self._emergency_close_remaining_leg(
+                            state, remaining
+                        )
             except Exception as exc:
                 logger.warning("Monitor reconcile failed: %s", exc)
 
@@ -1260,6 +1277,9 @@ class BotEngine:
                 trade_id,
             )
             return
+
+        # Recover legs wrongly closed by pre-fix emergency race (≤1/min)
+        await self._maybe_recover_legs(trade_state)
 
         call_leg = trade_state.call_leg
         put_leg = trade_state.put_leg
@@ -3056,8 +3076,16 @@ class BotEngine:
                 trade_id, f"Adjustment crashed: {exc}", requires_manual_action=True
             )
         finally:
-            # ALWAYS release lock — prevents permanent skip of this trade
-            self.position_tracker.set_adjusting(trade_id, False)
+            # ALWAYS release lock — even if adjustment crashes or returns early
+            try:
+                self.position_tracker.set_adjusting(trade_id, False)
+            except Exception as unlock_exc:
+                logger.error(
+                    "[ADJUST_LOCK_RELEASE] Trade#%s set_adjusting(False) "
+                    "failed: %s",
+                    trade_id,
+                    unlock_exc,
+                )
             # DIAGNOSTIC — remove after is_adjusting race root-caused
             _live_d = self.position_tracker.get(trade_id)
             logger.warning(
@@ -3067,6 +3095,112 @@ class BotEngine:
                 trade_id,
                 getattr(_live_d, "is_adjusting", None) if _live_d else None,
                 getattr(trade_state, "is_adjusting", None),
+            )
+            logger.debug(
+                "[ADJUST_LOCK_RELEASED] Trade#%s is_adjusting=False",
+                trade_id,
+            )
+
+    async def _maybe_recover_legs(self, trade_state: TradeState) -> None:
+        """
+        If Delta still has size for a short call/put product_id but DB marks
+        that leg closed, re-open the DB row.
+
+        Recovers baskets damaged by the pre-c93d58b emergency-close-during-
+        adjustment race. Throttled to once per trade per 60s.
+        """
+        trade_id = int(trade_state.trade_id)
+        now = time.monotonic()
+        last = float(self._leg_recovery_last_checked.get(trade_id, 0.0) or 0.0)
+        if now - last < 60.0:
+            return
+        self._leg_recovery_last_checked[trade_id] = now
+
+        if bool(getattr(trade_state.trade, "is_demo", False)):
+            return
+
+        if self.delta_client is None:
+            return
+
+        try:
+            positions = await self.delta_client.get_positions()
+        except Exception as exc:
+            logger.warning(
+                "[LEG_RECOVERY] Delta positions fetch failed trade=%s: %s",
+                trade_id,
+                exc,
+            )
+            return
+
+        size_by_pid: dict[int, int] = {}
+        for pos in positions or []:
+            try:
+                pid = int(pos.get("product_id") or 0)
+                size = abs(int(pos.get("size") or 0))
+            except (TypeError, ValueError):
+                continue
+            if pid > 0 and size > 0:
+                size_by_pid[pid] = size
+
+        if not size_by_pid:
+            return
+
+        try:
+            with self.db_factory() as recovery_db:
+                recovered = False
+                for leg_type in ("call", "put"):
+                    leg = (
+                        recovery_db.query(Leg)
+                        .filter(
+                            Leg.trade_id == trade_id,
+                            Leg.leg_type == leg_type,
+                            Leg.is_bot_managed.is_(True),
+                        )
+                        .order_by(Leg.id.desc())
+                        .first()
+                    )
+                    if leg is None:
+                        continue
+                    if str(leg.status or "").lower() != "closed":
+                        continue
+                    pid = int(leg.product_id or 0)
+                    if pid <= 0 or size_by_pid.get(pid, 0) <= 0:
+                        continue
+                    leg.status = "open"
+                    leg.exit_premium = None
+                    leg.exit_time = None
+                    leg.exit_order_id = None
+                    recovered = True
+                    logger.warning(
+                        "[LEG_RECOVERY] Trade#%s %s leg id=%s product=%s "
+                        "re-opened (Delta still has size; was wrongly closed)",
+                        trade_id,
+                        leg_type,
+                        leg.id,
+                        pid,
+                    )
+
+                if recovered:
+                    # Ensure trade stays ACTIVE
+                    trade_row = (
+                        recovery_db.query(Trade)
+                        .filter(Trade.id == trade_id)
+                        .first()
+                    )
+                    if trade_row is not None and str(
+                        trade_row.status or ""
+                    ).lower() != TradeStatus.ACTIVE.value:
+                        trade_row.status = TradeStatus.ACTIVE.value
+                        trade_row.exit_reason = None
+                        trade_row.exit_time = None
+                    recovery_db.commit()
+                    # Reload tracker legs so monitor sees both open
+                    self._reload_legs(trade_state)
+        except Exception as rec_err:
+            logger.warning(
+                "[LEG_RECOVERY] Failed for Trade#%s: %s",
+                trade_id,
+                rec_err,
             )
 
     def _apply_adjustment_cooldown(self, trade_state: TradeState) -> None:
