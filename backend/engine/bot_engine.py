@@ -1656,6 +1656,25 @@ class BotEngine:
         log_and_buffer("PNL_CHECK", trade_id, pnl_log)
 
         with self.db_factory() as db:
+            # Refresh combined_trigger_mode from SQLite onto in-memory trade
+            # BEFORE on_tick — tracker copy goes stale after AutoTrade toggle.
+            try:
+                row = (
+                    db.query(Trade)
+                    .filter(Trade.id == trade_id)
+                    .first()
+                )
+                if row is not None:
+                    trade.combined_trigger_mode = bool(
+                        getattr(row, "combined_trigger_mode", False)
+                    )
+            except Exception as refresh_exc:
+                logger.warning(
+                    "[COMBINED_TRIGGER_MODE] pre-tick refresh failed "
+                    "trade=%s: %s",
+                    trade_id,
+                    refresh_exc,
+                )
             call_trig_pct = float(
                 self.strategy.get_trigger_for_leg(call_premium, trade, db)
             )
@@ -1708,6 +1727,9 @@ class BotEngine:
         mode = str(getattr(trade, "trigger_mode", "slab") or "slab").lower()
         trigger_details: dict[str, Any] = {
             "trigger_mode": mode,
+            "combined_trigger_mode": bool(
+                getattr(trade, "combined_trigger_mode", False)
+            ),
             "trigger_pct": trigger_for_plan,
             "call_trigger_pct": round(call_trig_pct, 1),
             "put_trigger_pct": round(put_trig_pct, 1),

@@ -264,6 +264,61 @@ class ShortStrangleStrategy(BaseStrategy):
         # Use 0 premium for flat/slab — premium arg ignored
         return self.get_trigger_for_leg(0.0, trade, db_session)
 
+    def _read_combined_trigger_flags(
+        self, trade: Any, db_session: Any
+    ) -> tuple[bool, bool]:
+        """
+        Fresh SQL read of combined_trigger_mode from trades + auto_trade_settings.
+
+        Do NOT trust in-memory getattr alone — detached TradeState.trade stays
+        stale after AutoTrade UI toggles the flag in SQLite.
+        Returns (trade_flag, settings_flag).
+        """
+        trade_flag = bool(getattr(trade, "combined_trigger_mode", False))
+        settings_flag = False
+        trade_id = int(getattr(trade, "id", 0) or 0)
+        if db_session is None:
+            return trade_flag, settings_flag
+        try:
+            from backend.models import AutoTradeSettings, Trade
+
+            if trade_id > 0:
+                db_trade_val = (
+                    db_session.query(Trade.combined_trigger_mode)
+                    .filter(Trade.id == trade_id)
+                    .scalar()
+                )
+                if db_trade_val is not None:
+                    trade_flag = bool(db_trade_val)
+            db_settings_val = (
+                db_session.query(AutoTradeSettings.combined_trigger_mode)
+                .filter(AutoTradeSettings.id == 1)
+                .scalar()
+            )
+            if db_settings_val is not None:
+                settings_flag = bool(db_settings_val)
+        except Exception as exc:
+            logger.warning(
+                "[COMBINED_TRIGGER_MODE] DB flag read failed trade=%s: %s",
+                trade_id or "?",
+                exc,
+                exc_info=True,
+            )
+            # Fallback: settings via helper (may still work)
+            try:
+                from backend.database import get_or_create_auto_settings
+
+                _ats = get_or_create_auto_settings(db_session)
+                settings_flag = bool(
+                    getattr(_ats, "combined_trigger_mode", False)
+                )
+            except Exception as exc2:
+                logger.warning(
+                    "[COMBINED_TRIGGER_MODE] settings fallback failed: %s",
+                    exc2,
+                )
+        return trade_flag, settings_flag
+
     async def on_tick(
         self,
         trade: Any,
@@ -292,6 +347,26 @@ class ShortStrangleStrategy(BaseStrategy):
         When ``net_mtm`` is provided (from bot_engine), use it for b/e.
         Otherwise compute via compute_net_mtm (gross − fees − slip).
         """
+        logger.info(
+            "[ON_TICK_PARAMS] trade_id=%s combined_trigger_mode_trade=%s",
+            getattr(trade, "id", "?"),
+            getattr(trade, "combined_trigger_mode", "MISSING"),
+        )
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "ON_TICK_PARAMS",
+                int(getattr(trade, "id", 0) or 0),
+                {
+                    "combined_trigger_mode_trade": getattr(
+                        trade, "combined_trigger_mode", "MISSING"
+                    ),
+                },
+            )
+        except Exception:
+            pass
+
         calculated_pnl = self.calculate_pnl(
             trade,
             call_leg,
@@ -513,27 +588,19 @@ class ShortStrangleStrategy(BaseStrategy):
         except Exception:
             pass
 
-        # Combined premium trigger mode (overrides per-leg triggers).
-        # AutoTrade UI toggle lives on AutoTradeSettings — read it every tick.
-        # Per-trade flag is OR'd so initiate-time / mid-trade PATCH also works.
-        trade_flag = bool(getattr(trade, "combined_trigger_mode", False))
-        settings_flag = False
-        if db_session is not None:
-            try:
-                from backend.database import get_or_create_auto_settings
-
-                _ats = get_or_create_auto_settings(db_session)
-                settings_flag = bool(
-                    getattr(_ats, "combined_trigger_mode", False)
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[COMBINED_TRIGGER_MODE] Trade#%s settings read failed: %s",
-                    getattr(trade, "id", "?"),
-                    exc,
-                    exc_info=True,
-                )
+        # --- Combined vs individual trigger (MUST run before per-leg adjust) ---
+        # Fresh DB read every tick — in-memory trade / settings objects go stale
+        # after AutoTrade UI toggle; getattr on detached ORM lied as False.
+        trade_flag, settings_flag = self._read_combined_trigger_flags(
+            trade, db_session
+        )
         combined_trigger_mode = bool(settings_flag or trade_flag)
+        # Keep in-memory trade in sync for the rest of this tick / next push
+        try:
+            trade.combined_trigger_mode = combined_trigger_mode
+        except Exception:
+            pass
+
         logger.info(
             "[COMBINED_TRIGGER_MODE] Trade#%s active=%s "
             "(settings=%s trade=%s)",
@@ -542,24 +609,62 @@ class ShortStrangleStrategy(BaseStrategy):
             settings_flag,
             trade_flag,
         )
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "COMBINED_TRIGGER_MODE",
+                int(getattr(trade, "id", 0) or 0),
+                {
+                    "active": combined_trigger_mode,
+                    "settings": settings_flag,
+                    "trade": trade_flag,
+                },
+            )
+        except Exception:
+            pass
 
         if combined_trigger_mode and call_open and put_open:
             call_entry = float(getattr(call_leg, "initial_premium", 0) or 0)
             put_entry = float(getattr(put_leg, "initial_premium", 0) or 0)
             combined_current = float(call_premium) + float(put_premium)
             combined_entry = call_entry + put_entry
-            # Single % for sum — use call slab (same as put in flat/slab;
-            # average in premium mode so both bands contribute)
             if mode == "premium":
                 trigger_pct = (call_trigger_pct + put_trigger_pct) / 2.0
             else:
                 trigger_pct = float(call_trigger_pct)
-            combined_trigger_at = (
+            combined_threshold = (
                 combined_entry * (trigger_pct / 100.0)
                 if combined_entry > 0
                 else 0.0
             )
-            if combined_entry > 0 and combined_current >= combined_trigger_at:
+            logger.info(
+                "[COMBINED_CALC] combined_current=%.2f threshold=%.2f "
+                "active=%s entry=%.2f pct=%.1f",
+                combined_current,
+                combined_threshold,
+                True,
+                combined_entry,
+                trigger_pct,
+            )
+            try:
+                from backend.core.bot_logger import log_and_buffer
+
+                log_and_buffer(
+                    "COMBINED_CALC",
+                    int(getattr(trade, "id", 0) or 0),
+                    {
+                        "combined_current": round(combined_current, 2),
+                        "threshold": round(combined_threshold, 2),
+                        "combined_entry": round(combined_entry, 2),
+                        "trigger_pct": round(trigger_pct, 1),
+                        "active": True,
+                    },
+                )
+            except Exception:
+                pass
+
+            if combined_entry > 0 and combined_current >= combined_threshold:
                 call_pct = (
                     (call_premium / call_entry) if call_entry > 0 else 0.0
                 )
@@ -575,11 +680,27 @@ class ShortStrangleStrategy(BaseStrategy):
                     "call_pct=%.1f%% put_pct=%.1f%% triggered=%s",
                     getattr(trade, "id", "?"),
                     combined_current,
-                    combined_trigger_at,
+                    combined_threshold,
                     call_pct * 100.0,
                     put_pct * 100.0,
                     triggered_leg,
                 )
+                try:
+                    from backend.core.bot_logger import log_and_buffer
+
+                    log_and_buffer(
+                        "COMBINED_TRIGGER",
+                        int(getattr(trade, "id", 0) or 0),
+                        {
+                            "combined": round(combined_current, 2),
+                            "threshold": round(combined_threshold, 2),
+                            "triggered_leg": triggered_leg,
+                            "call_pct": round(call_pct * 100.0, 1),
+                            "put_pct": round(put_pct * 100.0, 1),
+                        },
+                    )
+                except Exception:
+                    pass
                 if net_for_decision > 0:
                     logger.info(
                         "DECISION: Net MTM profitable at combined trigger — "
@@ -618,13 +739,14 @@ class ShortStrangleStrategy(BaseStrategy):
                     call_trigger_pct=call_trigger_pct,
                     put_trigger_pct=put_trigger_pct,
                 )
-            # Combined mode: do not fall through to individual leg triggers
+            # Combined mode ON but under threshold — never fall through to
+            # individual leg triggers
             logger.info(
                 "Trade %s decision: combined mode HOLD | "
                 "combined=%.2f threshold=%.2f | net_mtm=%.2f",
                 getattr(trade, "id", "?"),
                 combined_current,
-                combined_trigger_at,
+                combined_threshold,
                 decision_pnl,
             )
             return TradeAction(
