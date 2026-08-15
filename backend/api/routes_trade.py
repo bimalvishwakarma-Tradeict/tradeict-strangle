@@ -1030,11 +1030,19 @@ async def initiate_trade(
                 {"stage": "tracker_add", "error": "missing_after_add"},
             )
         else:
-            logger.info("Trade %s confirmed in position tracker", trade.id)
+            logger.info(
+                "Trade %s confirmed in position tracker (is_demo=%s)",
+                trade.id,
+                bool(getattr(trade, "is_demo", False)),
+            )
             log_and_buffer(
                 "ENTRY_GUARD_PASS",
                 int(trade.id),
-                {"stage": "tracker_confirmed", "source": "manual"},
+                {
+                    "stage": "tracker_confirmed",
+                    "source": "manual_demo" if is_demo else "manual",
+                    "is_demo": is_demo,
+                },
             )
         logger.info(
             "Step 9: Added to position tracker trade_id=%s active_count=%s "
@@ -1275,6 +1283,8 @@ def _sync_tracker_from_db(db: Session) -> None:
         state.trade.monitoring_starts_at = row.monitoring_starts_at
         state.trade.realized_pnl = float(row.realized_pnl or 0.0)
         state.trade.status = row.status
+        if hasattr(row, "is_demo"):
+            state.trade.is_demo = bool(row.is_demo)
 
     for trade in active_trades:
         if trade.id in tracked_ids:

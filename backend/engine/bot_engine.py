@@ -221,6 +221,9 @@ class BotEngine:
         (Delta SL / external close likely).
         """
         for state in self.position_tracker.get_all_active():
+            # Demo trades have no Delta positions — never trigger integrity
+            if bool(getattr(state.trade, "is_demo", False)):
+                continue
             call_sym = str(state.call_leg.symbol)
             put_sym = str(state.put_leg.symbol)
             if symbol not in {call_sym, put_sym}:
@@ -1152,6 +1155,7 @@ class BotEngine:
                 "call_open": call_open,
                 "put_open": put_open,
                 "is_settling": is_settling,
+                "is_demo": bool(getattr(trade, "is_demo", False)),
             },
         )
 
@@ -1164,6 +1168,7 @@ class BotEngine:
         realized = float(getattr(trade, "realized_pnl", None) or 0.0)
         call_offer = call_premium
         put_offer = put_premium
+        trade_is_demo = bool(getattr(trade, "is_demo", False))
 
         with self.db_factory() as _db_legs:
             all_open_legs = (
@@ -1179,70 +1184,138 @@ class BotEngine:
             for _leg in all_open_legs:
                 _db_legs.expunge(_leg)
 
-        try:
-            pids: list[int] = [
-                int(leg.product_id)
-                for leg in all_open_legs
-                if int(getattr(leg, "product_id", 0) or 0) > 0
-            ]
-            if pids:
-                upnl_data = await self.delta_client.get_positions_upnl(pids)
-                any_hit = False
-                for leg in all_open_legs:
-                    pid = int(leg.product_id)
-                    row = upnl_data.get(pid) or {}
-                    if pid not in upnl_data:
-                        continue
-                    any_hit = True
-                    leg_upnl = float(row.get("upnl") or 0.0)
-                    delta_upnl += leg_upnl
-                    lt = str(leg.leg_type or "").lower()
-                    best = float(row.get("best_offer") or 0)
-                    if lt == "call":
-                        call_mtm = leg_upnl
-                        if best > 0:
-                            call_offer = best
-                            call_premium = call_offer
-                            self._live_prices[str(leg.symbol)] = call_premium
-                    elif lt == "put":
-                        put_mtm = leg_upnl
-                        if best > 0:
-                            put_offer = best
-                            put_premium = put_offer
-                            self._live_prices[str(leg.symbol)] = put_premium
-                    elif bool(getattr(leg, "is_long", False)) or lt.startswith(
-                        "hedge"
-                    ):
-                        hedge_upnl = leg_upnl
-                        if best > 0:
-                            self._live_prices[str(leg.symbol)] = best
-
-                if any_hit:
-                    self.position_tracker.update_delta_mtm(trade_id, delta_upnl)
-                    mtm_available = True
-                    logger.info(
-                        "Trade %s P&L: call_upnl=%.4f put_upnl=%.4f "
-                        "hedge_upnl=%.4f delta_upnl=%.4f realized=%.4f "
-                        "total=%.4f call_offer=%.2f put_offer=%.2f "
-                        "target=%s sl=%s",
-                        trade_id,
-                        call_mtm,
-                        put_mtm,
-                        hedge_upnl,
-                        delta_upnl,
-                        realized,
-                        realized + delta_upnl,
-                        call_offer,
-                        put_offer,
-                        getattr(trade, "profit_target_usd", 0),
-                        getattr(trade, "stoploss_usd", 0),
+        # Demo trades: no Delta positions — P&L from live mark prices only
+        # demo_upnl = (entry - mark) × qty × 0.001 for shorts
+        if trade_is_demo:
+            delta_upnl = 0.0
+            hedge_upnl = 0.0
+            call_mtm = 0.0
+            put_mtm = 0.0
+            for leg in all_open_legs:
+                lt = str(leg.leg_type or "").lower()
+                is_long = bool(getattr(leg, "is_long", False)) or lt.startswith(
+                    "hedge"
+                )
+                try:
+                    px = float(
+                        await self.delta_client.get_mark_price(str(leg.symbol))
                     )
+                except Exception:
+                    px = 0.0
+                if px <= 0:
+                    px = float(
+                        self._live_prices.get(str(leg.symbol))
+                        or leg.initial_premium
+                        or 0
+                    )
+                entry = float(leg.initial_premium or 0)
+                qty = abs(int(leg.quantity or 0))
+                if is_long:
+                    leg_upnl = (px - entry) * qty * float(OPTIONS_CONTRACT_VALUE)
                 else:
-                    logger.warning(
-                        "Trade %s: no Delta positions for open product_ids %s",
-                        trade_id,
-                        pids,
-                    )
+                    leg_upnl = (entry - px) * qty * float(OPTIONS_CONTRACT_VALUE)
+                delta_upnl += leg_upnl
+                if lt == "call":
+                    call_mtm = leg_upnl
+                    call_premium = px
+                    call_offer = px
+                elif lt == "put":
+                    put_mtm = leg_upnl
+                    put_premium = px
+                    put_offer = px
+                elif is_long:
+                    hedge_upnl = leg_upnl
+                self._live_prices[str(leg.symbol)] = px
+            self.position_tracker.update_delta_mtm(trade_id, delta_upnl)
+            mtm_available = True
+            log_and_buffer(
+                "DEMO_PNL",
+                trade_id,
+                {
+                    "call_mark": round(call_premium, 2),
+                    "put_mark": round(put_premium, 2),
+                    "call_upnl": round(call_mtm, 4),
+                    "put_upnl": round(put_mtm, 4),
+                    "hedge_upnl": round(hedge_upnl, 4),
+                    "delta_upnl": round(delta_upnl, 4),
+                    "realized": round(realized, 4),
+                },
+            )
+            logger.info(
+                "[DEMO] Trade %s P&L from marks: call=%.4f put=%.4f "
+                "hedge=%.4f total_upnl=%.4f",
+                trade_id,
+                call_mtm,
+                put_mtm,
+                hedge_upnl,
+                delta_upnl,
+            )
+
+        try:
+            if not trade_is_demo:
+                pids: list[int] = [
+                    int(leg.product_id)
+                    for leg in all_open_legs
+                    if int(getattr(leg, "product_id", 0) or 0) > 0
+                ]
+                if pids:
+                    upnl_data = await self.delta_client.get_positions_upnl(pids)
+                    any_hit = False
+                    for leg in all_open_legs:
+                        pid = int(leg.product_id)
+                        row = upnl_data.get(pid) or {}
+                        if pid not in upnl_data:
+                            continue
+                        any_hit = True
+                        leg_upnl = float(row.get("upnl") or 0.0)
+                        delta_upnl += leg_upnl
+                        lt = str(leg.leg_type or "").lower()
+                        best = float(row.get("best_offer") or 0)
+                        if lt == "call":
+                            call_mtm = leg_upnl
+                            if best > 0:
+                                call_offer = best
+                                call_premium = call_offer
+                                self._live_prices[str(leg.symbol)] = call_premium
+                        elif lt == "put":
+                            put_mtm = leg_upnl
+                            if best > 0:
+                                put_offer = best
+                                put_premium = put_offer
+                                self._live_prices[str(leg.symbol)] = put_premium
+                        elif bool(getattr(leg, "is_long", False)) or lt.startswith(
+                            "hedge"
+                        ):
+                            hedge_upnl = leg_upnl
+                            if best > 0:
+                                self._live_prices[str(leg.symbol)] = best
+
+                    if any_hit:
+                        self.position_tracker.update_delta_mtm(trade_id, delta_upnl)
+                        mtm_available = True
+                        logger.info(
+                            "Trade %s P&L: call_upnl=%.4f put_upnl=%.4f "
+                            "hedge_upnl=%.4f delta_upnl=%.4f realized=%.4f "
+                            "total=%.4f call_offer=%.2f put_offer=%.2f "
+                            "target=%s sl=%s",
+                            trade_id,
+                            call_mtm,
+                            put_mtm,
+                            hedge_upnl,
+                            delta_upnl,
+                            realized,
+                            realized + delta_upnl,
+                            call_offer,
+                            put_offer,
+                            getattr(trade, "profit_target_usd", 0),
+                            getattr(trade, "stoploss_usd", 0),
+                        )
+                    else:
+                        logger.warning(
+                            "Trade %s: no Delta positions for open product_ids %s",
+                            trade_id,
+                            pids,
+                        )
         except Exception as exc:
             logger.warning(
                 "Delta UPL@offer fetch failed for trade %s — fallback: %s",

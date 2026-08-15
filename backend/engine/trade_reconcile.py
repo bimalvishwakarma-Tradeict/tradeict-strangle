@@ -212,6 +212,14 @@ async def reconcile_open_legs_with_delta(
     now = datetime.now(timezone.utc)
 
     for trade in actives:
+        # Demo/virtual trades have no real Delta size — never reconcile-close them
+        if bool(getattr(trade, "is_demo", False)):
+            logger.debug(
+                "Reconcile skip trade=%s (is_demo=True)",
+                trade.id,
+            )
+            continue
+
         open_legs = (
             db.query(Leg)
             .filter(
