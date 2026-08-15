@@ -2905,6 +2905,8 @@ class BotEngine:
             )
             old_strike = float(old_leg.strike)
             old_premium = float(old_leg.initial_premium)
+            old_product_id = int(getattr(old_leg, "product_id", 0) or 0)
+            master_qty = int(getattr(old_leg, "quantity", 1) or 1)
             other_prem = float(
                 getattr(trade_state, "last_put_premium", 0)
                 if triggered == "call"
@@ -2950,6 +2952,83 @@ class BotEngine:
                         "cooldown_minutes": ADJUSTMENT_COOLDOWN_MINUTES,
                     },
                 )
+
+                # Mirror normal adjustment to slaves (await — do not fire-and-forget)
+                # Conversion mode uses mirror_conversion from adjustment.execute instead.
+                if not getattr(result, "conversion_mode", False):
+                    try:
+                        import backend.engine.mirror_engine as mirror_module
+
+                        me = mirror_module.mirror_engine or self.mirror_engine
+                        new_leg = (
+                            trade_state.call_leg
+                            if triggered == "call"
+                            else trade_state.put_leg
+                        )
+                        new_pid = int(
+                            getattr(result, "new_product_id", None)
+                            or getattr(new_leg, "product_id", 0)
+                            or 0
+                        )
+                        new_sym = str(
+                            getattr(result, "new_symbol", None)
+                            or getattr(new_leg, "symbol", "")
+                            or ""
+                        )
+                        new_stk = float(
+                            getattr(result, "new_strike", None)
+                            or getattr(new_leg, "strike", 0)
+                            or 0
+                        )
+                        qty = int(
+                            getattr(result, "quantity", None) or master_qty or 1
+                        )
+                        old_pid = int(
+                            getattr(result, "old_product_id", None)
+                            or old_product_id
+                            or 0
+                        )
+                        if me is None:
+                            logger.warning(
+                                "[MIRROR_ADJ_SKIP] Trade#%s — mirror_engine "
+                                "is None",
+                                trade_id,
+                            )
+                        elif old_pid <= 0 or new_pid <= 0:
+                            logger.warning(
+                                "[MIRROR_ADJ_SKIP] Trade#%s — missing "
+                                "product_ids old=%s new=%s",
+                                trade_id,
+                                old_pid,
+                                new_pid,
+                            )
+                        else:
+                            await me.mirror_adjustment(
+                                master_trade_id=trade_id,
+                                triggered_leg_type=triggered,
+                                old_product_id=old_pid,
+                                new_product_id=new_pid,
+                                new_symbol=new_sym,
+                                new_strike=new_stk,
+                                master_qty=qty,
+                            )
+                            logger.info(
+                                "[MIRROR_ADJ_CALLED] Trade#%s triggered_leg=%s "
+                                "old_product=%s new_product=%s qty=%s",
+                                trade_id,
+                                triggered,
+                                old_pid,
+                                new_pid,
+                                qty,
+                            )
+                    except Exception as mirror_adj_err:
+                        logger.warning(
+                            "[MIRROR_ADJ_FAIL] Trade#%s: %s",
+                            trade_id,
+                            mirror_adj_err,
+                            exc_info=True,
+                        )
+
                 if getattr(result, "conversion_mode", False):
                     logger.info(
                         "[CONVERSION_MODE] Trade %s entered conversion mode. "

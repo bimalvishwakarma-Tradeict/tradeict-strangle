@@ -66,6 +66,11 @@ class AdjustmentResult:
     hedge_product_id: int | None = None
     hedge_entry_price: float | None = None
     hedge_symbol: str | None = None
+    # For slave mirror_adjustment (normal adjust only)
+    old_product_id: int | None = None
+    new_product_id: int | None = None
+    new_symbol: str | None = None
+    quantity: int | None = None
 
 
 class BaseStrategy(ABC):

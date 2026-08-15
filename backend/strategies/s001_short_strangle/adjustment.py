@@ -1555,30 +1555,17 @@ class AdjustmentExecutor:
                 committed_trade_realized,
             )
 
-            # Mirror adjustment to slave accounts (non-fatal)
-            try:
-                import backend.engine.mirror_engine as mirror_module
-
-                if mirror_module.mirror_engine is not None:
-                    asyncio.create_task(
-                        mirror_module.mirror_engine.mirror_adjustment(
-                            master_trade_id=committed_trade_id,
-                            triggered_leg_type=str(triggered_leg_type),
-                            old_product_id=committed_old_product_id,
-                            new_product_id=committed_new_product_id,
-                            new_symbol=committed_new_symbol,
-                            new_strike=committed_new_strike,
-                            master_qty=committed_triggered_qty,
-                        )
-                    )
-            except Exception as exc:
-                logger.warning("Mirror adjustment queue failed: %s", exc)
-
+            # Mirror is invoked by BotEngine._adjust_trade after success
+            # (awaited there so exceptions are not lost on create_task).
             return AdjustmentResult(
                 success=True,
                 old_strike=committed_old_strike,
                 new_strike=committed_new_strike,
                 premium_collected=committed_new_entry,
+                old_product_id=committed_old_product_id,
+                new_product_id=committed_new_product_id,
+                new_symbol=committed_new_symbol,
+                quantity=committed_triggered_qty,
             )
         except AdjustmentError as exc:
             logger.error("Adjustment failed trade=%s: %s", getattr(trade, "id", "?"), exc)
