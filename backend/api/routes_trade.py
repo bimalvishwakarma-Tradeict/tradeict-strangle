@@ -2075,29 +2075,38 @@ async def exit_trade(
             else getattr(trade, "conversion_hedge_product_id", None)
         )
 
-        # Mirror exit to slaves before closing master legs (need product_ids)
+        # Mirror exit to slaves before closing master legs.
+        # AWAIT live-position close (hint product_ids may be stale post-adj).
         try:
             import backend.engine.mirror_engine as mirror_module
 
-            if mirror_module.mirror_engine is not None:
-                asyncio.create_task(
-                    mirror_module.mirror_engine.mirror_exit(
-                        master_trade_id=int(trade_id),
-                        call_product_id=int(
-                            (call_leg.product_id if call_leg else 0) or 0
-                        ),
-                        put_product_id=int(
-                            (put_leg.product_id if put_leg else 0) or 0
-                        ),
-                        reason=reason,
-                        hedge_product_id=(
-                            int(hedge_pid) if hedge_pid else None
-                        ),
-                    )
+            me = mirror_module.mirror_engine
+            if me is not None:
+                await me.mirror_exit(
+                    master_trade_id=int(trade_id),
+                    call_product_id=int(
+                        (call_leg.product_id if call_leg else 0) or 0
+                    ),
+                    put_product_id=int(
+                        (put_leg.product_id if put_leg else 0) or 0
+                    ),
+                    reason=reason,
+                    hedge_product_id=(
+                        int(hedge_pid) if hedge_pid else None
+                    ),
                 )
-                logger.info("Mirror exit queued for trade %s (fallback path)", trade_id)
+                logger.info(
+                    "[MIRROR_EXIT] Awaited complete for trade %s "
+                    "(fallback path)",
+                    trade_id,
+                )
         except Exception as exc:
-            logger.warning("Mirror exit queue failed: %s", exc)
+            logger.warning(
+                "[MIRROR_EXIT] Failed trade %s (fallback): %s",
+                trade_id,
+                exc,
+                exc_info=True,
+            )
 
         call_close = None
         put_close = None
