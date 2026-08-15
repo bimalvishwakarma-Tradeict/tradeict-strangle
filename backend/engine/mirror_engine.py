@@ -1247,6 +1247,24 @@ class MirrorEngine:
                 if not slave or not slave.is_active:
                     continue
 
+                # Virtual/paper slaves have no real Delta positions — never
+                # mark their SlaveTrade closed via integrity.
+                if bool(getattr(slave, "is_virtual", False)):
+                    logger.debug(
+                        "Slave '%s' integrity skip (is_virtual=True) "
+                        "slave_trade=%s",
+                        slave.name,
+                        slave_trade.id,
+                    )
+                    continue
+                # Also skip rows that were opened as VIRTUAL fills
+                if str(slave_trade.call_order_id or "").upper() == "VIRTUAL":
+                    logger.debug(
+                        "SlaveTrade %s integrity skip (VIRTUAL order_id)",
+                        slave_trade.id,
+                    )
+                    continue
+
                 client = self._get_slave_client(slave)
                 try:
                     slave_positions = await client.get_option_positions()

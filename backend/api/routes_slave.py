@@ -617,9 +617,12 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             logger.warning("Master balance fetch failed for overview: %s", exc)
             master_error = str(exc)
 
-    # Master active trade from in-memory tracker
-    master_trade_data: dict[str, Any] | None = None
+    # Master active trades from in-memory tracker (keyed by trade id)
     master_states = bot_engine.position_tracker.get_all_active()
+    master_by_id: dict[int, Any] = {
+        int(s.trade_id): s for s in master_states
+    }
+    master_trade_data: dict[str, Any] | None = None
     if master_states:
         state = master_states[0]
         call_leg = state.call_leg
@@ -639,6 +642,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             "trade_id": state.trade_id,
             "underlying": getattr(state.trade, "underlying", None),
             "basket_number": getattr(state.trade, "basket_number", None),
+            "is_demo": bool(getattr(state.trade, "is_demo", False)),
             "net_mtm": net_mtm,
             "gross_mtm": gross_mtm,
             "realized_pnl": float(getattr(state.trade, "realized_pnl", 0) or 0),
@@ -661,6 +665,37 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             "status": "live",
         }
 
+    def _master_snapshot(trade_id: int) -> dict[str, Any] | None:
+        """Build master trade snapshot for a specific trade_id from tracker."""
+        state = master_by_id.get(int(trade_id))
+        if state is None:
+            return None
+        call_leg = state.call_leg
+        put_leg = state.put_leg
+        gross_mtm = float(getattr(state, "last_pnl", 0) or 0)
+        _raw_net = getattr(state, "last_net_mtm", None)
+        net_mtm = (
+            float(_raw_net)
+            if _raw_net is not None and _raw_net != 0.0
+            else gross_mtm
+        )
+        return {
+            "trade_id": state.trade_id,
+            "underlying": getattr(state.trade, "underlying", None),
+            "basket_number": getattr(state.trade, "basket_number", None),
+            "is_demo": bool(getattr(state.trade, "is_demo", False)),
+            "net_mtm": net_mtm,
+            "gross_mtm": gross_mtm,
+            "profit_target_usd": float(
+                getattr(state.trade, "profit_target_usd", 0) or 0
+            ),
+            "call_strike": float(getattr(call_leg, "strike", 0) or 0),
+            "put_strike": float(getattr(put_leg, "strike", 0) or 0),
+            "call_premium": float(getattr(state, "last_call_premium", 0) or 0),
+            "put_premium": float(getattr(state, "last_put_premium", 0) or 0),
+            "expiry_date": str(getattr(state.trade, "expiry_date", "") or ""),
+        }
+
     slaves = (
         db.query(SlaveAccount).order_by(SlaveAccount.id.asc()).all()
     )
@@ -672,10 +707,15 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
     )
 
     for slave in slaves:
-        # Refresh balance opportunistically (best-effort, non-fatal)
+        is_virtual = bool(getattr(slave, "is_virtual", False))
+        # Refresh balance opportunistically (skip for virtual — no real Delta)
         bal_usd = float(slave.balance_usd or 0.0)
         avail_usd: float | None = None
-        if slave.is_active and slave.connection_status != "error":
+        if (
+            not is_virtual
+            and slave.is_active
+            and slave.connection_status != "error"
+        ):
             try:
                 client = DeltaClient(
                     decrypt(slave.api_key_encrypted),
@@ -699,11 +739,22 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 logger.warning(
                     "Slave %s balance refresh failed: %s", slave.name, exc
                 )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        elif is_virtual:
+            # Prefer allocated capital for display when set
+            allocated = getattr(slave, "user_allocated_capital", None)
+            if allocated is not None and float(allocated) > 0:
+                bal_usd = float(allocated)
+                avail_usd = float(allocated)
 
+        # Active mirrored trade — include VIRTUAL order_ids (paper slaves)
         active_st = (
             db.query(SlaveTrade)
             .filter(
-                SlaveTrade.slave_account_id == slave.id,
+                SlaveTrade.slave_account_id == int(slave.id),
                 SlaveTrade.status == "active",
             )
             .order_by(SlaveTrade.id.desc())
@@ -720,14 +771,22 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             mult = float(slave.qty_multiplier or 1.0)
             last_updated_iso = _iso(active_st.last_updated)
 
-            # Slave P&L = master P&L × qty_multiplier (slave mirrors master exactly)
-            # master_trade_data already has correct gross_mtm and net_mtm from tracker
-            if master_trade_data:
+            # Prefer the master snapshot that matches THIS slave's master trade
+            linked_master = _master_snapshot(int(active_st.master_trade_id))
+            pnl_source = linked_master or master_trade_data
+            target_src = (
+                float(linked_master["profit_target_usd"])
+                if linked_master
+                else master_target
+            )
+
+            # Slave P&L = master P&L × qty_multiplier (slave mirrors master)
+            if pnl_source:
                 slave_gross_mtm = round(
-                    float(master_trade_data.get("gross_mtm") or 0) * mult, 4
+                    float(pnl_source.get("gross_mtm") or 0) * mult, 4
                 )
                 slave_net_mtm = round(
-                    float(master_trade_data.get("net_mtm") or 0) * mult, 4
+                    float(pnl_source.get("net_mtm") or 0) * mult, 4
                 )
             else:
                 # Master not in tracker yet — fallback to stored last_mtm
@@ -735,9 +794,20 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 slave_net_mtm = slave_gross_mtm
 
             # Persist net_mtm to DB so history is meaningful
-            active_st.last_mtm = slave_net_mtm
-            active_st.last_updated = get_ist_now()
-            db.commit()
+            try:
+                active_st.last_mtm = slave_net_mtm
+                active_st.last_updated = get_ist_now()
+                db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "SlaveTrade %s last_mtm update failed: %s",
+                    active_st.id,
+                    exc,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
             slave_trade_data = {
                 "slave_trade_id": active_st.id,
@@ -745,6 +815,10 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "actual_quantity": int(active_st.actual_quantity or 1),
                 "call_fill_price": active_st.call_fill_price,
                 "put_fill_price": active_st.put_fill_price,
+                "call_order_id": active_st.call_order_id,
+                "put_order_id": active_st.put_order_id,
+                "is_virtual": is_virtual
+                or str(active_st.call_order_id or "").upper() == "VIRTUAL",
                 "status": active_st.status,
                 "gross_mtm": slave_gross_mtm,
                 "last_mtm": slave_net_mtm,
@@ -753,32 +827,42 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "last_mtm_updated": last_updated_iso,
                 "net_mtm_updated": last_updated_iso,
                 "last_error": active_st.last_error,
-                "profit_target_usd": round(master_target * mult, 2)
-                    if master_target else None,
+                "profit_target_usd": round(target_src * mult, 2)
+                if target_src
+                else None,
                 "call_strike": (
-                    float(master_trade_data["call_strike"])
-                    if master_trade_data else None
+                    float(pnl_source["call_strike"])
+                    if pnl_source and pnl_source.get("call_strike") is not None
+                    else None
                 ),
                 "put_strike": (
-                    float(master_trade_data["put_strike"])
-                    if master_trade_data else None
+                    float(pnl_source["put_strike"])
+                    if pnl_source and pnl_source.get("put_strike") is not None
+                    else None
                 ),
                 "call_premium": (
-                    float(master_trade_data["call_premium"])
-                    if master_trade_data else None
+                    float(pnl_source["call_premium"])
+                    if pnl_source and pnl_source.get("call_premium") is not None
+                    else None
                 ),
                 "put_premium": (
-                    float(master_trade_data["put_premium"])
-                    if master_trade_data else None
+                    float(pnl_source["put_premium"])
+                    if pnl_source and pnl_source.get("put_premium") is not None
+                    else None
                 ),
                 "underlying": master_row.underlying if master_row else None,
                 "basket_number": (
                     getattr(master_row, "basket_number", None)
-                    if master_row else None
+                    if master_row
+                    else None
+                ),
+                "is_demo_master": bool(
+                    getattr(master_row, "is_demo", False) if master_row else False
                 ),
                 "expiry_date": (
                     str(getattr(master_row, "expiry_date", "") or "")
-                    if master_row else ""
+                    if master_row
+                    else ""
                 ),
             }
 
@@ -788,6 +872,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "name": slave.name,
                 "qty_multiplier": float(slave.qty_multiplier or 1.0),
                 "is_active": bool(slave.is_active),
+                "is_virtual": is_virtual,
                 "connection_status": str(slave.connection_status or "unknown"),
                 "balance_usd": bal_usd,
                 "balance_inr": round(bal_usd * rate, 2),
