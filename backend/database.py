@@ -460,6 +460,51 @@ def _migrate_schema() -> None:
                         "WHERE adjustment_count IS NULL"
                     )
                 )
+    if "slave_accounts" in tables:
+        slave_cols = {
+            col["name"] for col in inspector.get_columns("slave_accounts")
+        }
+        if "capital_based_qty" not in slave_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE slave_accounts "
+                        "ADD COLUMN capital_based_qty BOOLEAN DEFAULT 0"
+                    )
+                )
+        if "user_allocated_capital" not in slave_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE slave_accounts "
+                        "ADD COLUMN user_allocated_capital FLOAT DEFAULT NULL"
+                    )
+                )
+        if "earner_user_id" not in slave_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE slave_accounts "
+                        "ADD COLUMN earner_user_id VARCHAR(255) DEFAULT NULL"
+                    )
+                )
+        if "earner_subscription_id" not in slave_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE slave_accounts "
+                        "ADD COLUMN earner_subscription_id "
+                        "VARCHAR(255) DEFAULT NULL"
+                    )
+                )
+        if "is_virtual" not in slave_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE slave_accounts "
+                        "ADD COLUMN is_virtual BOOLEAN DEFAULT 0"
+                    )
+                )
 
 
 def get_usd_inr_rate(db: Session) -> float:

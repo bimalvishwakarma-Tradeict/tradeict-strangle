@@ -138,6 +138,7 @@ class SlaveAccountCreate(BaseModel):
     user_allocated_capital: float | None = None
     earner_user_id: str | None = None
     earner_subscription_id: str | None = None
+    is_virtual: bool = False
     is_active: bool = True
 
 
@@ -150,6 +151,7 @@ class SlaveAccountUpdate(BaseModel):
     user_allocated_capital: float | None = None
     earner_user_id: str | None = None
     earner_subscription_id: str | None = None
+    is_virtual: bool | None = None
     is_active: bool | None = None
 
 
@@ -161,6 +163,7 @@ class SlaveAccountResponse(BaseModel):
     user_allocated_capital: float | None = None
     earner_user_id: str | None = None
     earner_subscription_id: str | None = None
+    is_virtual: bool = False
     is_active: bool
     connection_status: str
     balance_usd: float

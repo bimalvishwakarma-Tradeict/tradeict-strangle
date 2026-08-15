@@ -327,6 +327,10 @@ class SlaveAccount(Base):
     # Earner subscription identifier — for webhook callbacks
     earner_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Virtual/paper trading mode — no real orders placed on Delta Exchange
+    # P&L tracked internally using live market prices
+    is_virtual: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     # True = mirror all trades; False = paused
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 

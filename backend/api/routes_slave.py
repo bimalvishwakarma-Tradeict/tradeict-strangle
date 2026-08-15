@@ -66,6 +66,7 @@ def _to_response(slave: SlaveAccount, db: Session, rate: float) -> dict[str, Any
         "earner_subscription_id": getattr(
             slave, "earner_subscription_id", None
         ),
+        "is_virtual": bool(getattr(slave, "is_virtual", False)),
         "is_active": bool(slave.is_active),
         "connection_status": str(slave.connection_status or "unknown"),
         "balance_usd": bal_usd,
@@ -122,6 +123,7 @@ async def create_slave_account(
         user_allocated_capital=payload.user_allocated_capital,
         earner_user_id=payload.earner_user_id,
         earner_subscription_id=payload.earner_subscription_id,
+        is_virtual=bool(payload.is_virtual),
         is_active=bool(payload.is_active),
         connection_status="connected",
         last_connected_at=now,
@@ -241,6 +243,9 @@ async def update_slave_account(
             if updates["earner_subscription_id"] is not None
             else None
         )
+
+    if "is_virtual" in updates and updates["is_virtual"] is not None:
+        slave.is_virtual = bool(updates["is_virtual"])
 
     if "is_active" in updates and updates["is_active"] is not None:
         slave.is_active = bool(updates["is_active"])

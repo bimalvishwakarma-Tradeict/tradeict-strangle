@@ -242,6 +242,35 @@ class MirrorEngine:
             underlying,
         )
 
+        # Virtual mode: track position in DB but don't place real orders
+        if bool(getattr(slave, "is_virtual", False)):
+            logger.info(
+                "VIRTUAL TRADE: slave='%s' call=%s put=%s qty=%s "
+                "(no real order placed)",
+                slave.name,
+                master_call_strike,
+                master_put_strike,
+                slave_qty,
+            )
+            virt_trade = SlaveTrade(
+                slave_account_id=int(slave.id),
+                master_trade_id=int(master_trade_id),
+                actual_quantity=slave_qty,
+                call_fill_price=float(master_call_fill or 0),
+                put_fill_price=float(master_put_fill or 0),
+                call_order_id="VIRTUAL",
+                put_order_id="VIRTUAL",
+                status="active",
+            )
+            db.add(virt_trade)
+            db.commit()
+            logger.info(
+                "VIRTUAL TRADE created: slave='%s' slave_trade_id=%s",
+                slave.name,
+                virt_trade.id,
+            )
+            return  # Skip real order placement
+
         client = self._get_slave_client(slave)
         try:
             # Guard: skip if slave already holds these products
@@ -533,6 +562,34 @@ class MirrorEngine:
         new_strike: float,
         db: Any,
     ) -> None:
+        # Virtual mode: track adjustment in DB but don't place real orders
+        if bool(getattr(slave, "is_virtual", False)):
+            logger.info(
+                "VIRTUAL ADJUSTMENT: slave='%s' skipping real orders",
+                slave.name,
+            )
+            with self.db_factory() as virt_db:
+                st = (
+                    virt_db.query(SlaveTrade)
+                    .filter(
+                        SlaveTrade.slave_account_id == slave.id,
+                        SlaveTrade.master_trade_id
+                        == slave_trade.master_trade_id,
+                        SlaveTrade.status == "active",
+                    )
+                    .first()
+                )
+                if st:
+                    # No live slave fill in virtual mode — keep existing fills
+                    # and mark the adjusted leg order as VIRTUAL
+                    leg = str(triggered_leg_type).lower()
+                    if leg == "call":
+                        st.call_order_id = "VIRTUAL"
+                    else:
+                        st.put_order_id = "VIRTUAL"
+                    virt_db.commit()
+            return
+
         client = self._get_slave_client(slave)
         qty = max(1, int(slave_trade.actual_quantity or 1))
         leg = str(triggered_leg_type).lower()
@@ -888,6 +945,40 @@ class MirrorEngine:
         db: Any,
         hedge_product_id: int | None = None,
     ) -> None:
+        # Virtual mode: close in DB only — no real Delta orders
+        if bool(getattr(slave, "is_virtual", False)):
+            logger.info(
+                "VIRTUAL EXIT: slave='%s' master_trade_id=%s "
+                "(no real order placed)",
+                slave.name,
+                slave_trade.master_trade_id,
+            )
+            with self.db_factory() as virt_db:
+                st = (
+                    virt_db.query(SlaveTrade)
+                    .filter(
+                        SlaveTrade.slave_account_id == slave.id,
+                        SlaveTrade.master_trade_id
+                        == slave_trade.master_trade_id,
+                        SlaveTrade.status == "active",
+                    )
+                    .first()
+                )
+                if st:
+                    st.status = "closed"
+                    st.call_sl_order_id = None
+                    st.put_sl_order_id = None
+                    st.last_updated = get_ist_now()
+                    virt_db.commit()
+                    logger.info(
+                        "VIRTUAL EXIT done: slave='%s' slave_trade_id=%s",
+                        slave.name,
+                        st.id,
+                    )
+            # Also mark the in-session object closed so caller state is consistent
+            slave_trade.status = "closed"
+            return
+
         client = self._get_slave_client(slave)
         qty = max(1, int(slave_trade.actual_quantity or 1))
 
