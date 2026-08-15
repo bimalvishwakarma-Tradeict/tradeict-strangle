@@ -150,7 +150,25 @@ async def verify_db_consistency(
                 )
                 .all()
             )
+            from backend.engine.mirror_engine import is_virtual_slave_trade
+
+            closed_orphans = 0
             for st in orphan_slave_trades:
+                slave = (
+                    db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == st.slave_account_id)
+                    .first()
+                )
+                if is_virtual_slave_trade(slave, st):
+                    logger.warning(
+                        "[DB_AUDIT] Skipping auto-close of virtual "
+                        "SlaveTrade %s (master Trade %s closed) — "
+                        "leave status=active until intentional exit",
+                        st.id,
+                        st.master_trade_id,
+                    )
+                    warnings += 1
+                    continue
                 logger.warning(
                     "[DB_AUDIT] SlaveTrade %s is 'active' but master "
                     "Trade %s is closed. Fixing.",
@@ -158,8 +176,9 @@ async def verify_db_consistency(
                     st.master_trade_id,
                 )
                 st.status = "closed"
+                closed_orphans += 1
                 fixes += 1
-            if orphan_slave_trades:
+            if closed_orphans:
                 db.commit()
 
         # CHECK 5: Duplicate active trades for same underlying

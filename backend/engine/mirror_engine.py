@@ -21,6 +21,24 @@ from backend.models import SlaveAccount, SlaveTrade, Trade
 logger = logging.getLogger(__name__)
 
 
+def is_virtual_slave_trade(
+    slave: SlaveAccount | None,
+    slave_trade: SlaveTrade | None,
+) -> bool:
+    """
+    True when this SlaveTrade must not be closed by integrity / auto-cleanup.
+
+    Matches either the slave account flag or VIRTUAL paper order IDs.
+    """
+    if slave is not None and bool(getattr(slave, "is_virtual", False)):
+        return True
+    if slave_trade is None:
+        return False
+    call_oid = str(getattr(slave_trade, "call_order_id", None) or "").upper()
+    put_oid = str(getattr(slave_trade, "put_order_id", None) or "").upper()
+    return call_oid == "VIRTUAL" or put_oid == "VIRTUAL"
+
+
 class MirrorEngine:
     """
     Mirror master account actions (entry / adjustment / exit) onto all
@@ -37,6 +55,34 @@ class MirrorEngine:
         api_key = decrypt(slave.api_key_encrypted)
         api_secret = decrypt(slave.api_secret_encrypted)
         return DeltaClient(api_key, api_secret)
+
+    def _close_slave_trade(
+        self,
+        slave: SlaveAccount | None,
+        slave_trade: SlaveTrade,
+        *,
+        reason: str,
+        allow_virtual: bool = False,
+    ) -> bool:
+        """
+        Set SlaveTrade status to closed.
+
+        Virtual/paper trades are refused unless allow_virtual=True
+        (intentional master-exit mirror only).
+        """
+        if not allow_virtual and is_virtual_slave_trade(slave, slave_trade):
+            logger.warning(
+                "Refusing to auto-close virtual SlaveTrade id=%s "
+                "(slave=%s call_order_id=%s put_order_id=%s) reason=%s",
+                getattr(slave_trade, "id", None),
+                getattr(slave, "name", None) if slave else None,
+                getattr(slave_trade, "call_order_id", None),
+                getattr(slave_trade, "put_order_id", None),
+                reason,
+            )
+            return False
+        slave_trade.status = "closed"
+        return True
 
     def _calc_qty(
         self,
@@ -946,7 +992,7 @@ class MirrorEngine:
         hedge_product_id: int | None = None,
     ) -> None:
         # Virtual mode: close in DB only — no real Delta orders
-        if bool(getattr(slave, "is_virtual", False)):
+        if is_virtual_slave_trade(slave, slave_trade):
             logger.info(
                 "VIRTUAL EXIT: slave='%s' master_trade_id=%s "
                 "(no real order placed)",
@@ -965,7 +1011,12 @@ class MirrorEngine:
                     .first()
                 )
                 if st:
-                    st.status = "closed"
+                    self._close_slave_trade(
+                        slave,
+                        st,
+                        reason=f"virtual_master_exit:{reason}",
+                        allow_virtual=True,
+                    )
                     st.call_sl_order_id = None
                     st.put_sl_order_id = None
                     st.last_updated = get_ist_now()
@@ -976,7 +1027,12 @@ class MirrorEngine:
                         st.id,
                     )
             # Also mark the in-session object closed so caller state is consistent
-            slave_trade.status = "closed"
+            self._close_slave_trade(
+                slave,
+                slave_trade,
+                reason=f"virtual_master_exit:{reason}",
+                allow_virtual=True,
+            )
             return
 
         client = self._get_slave_client(slave)
@@ -1058,7 +1114,13 @@ class MirrorEngine:
                     )
 
             # Always mark closed in DB (positions may already be gone)
-            slave_trade.status = "closed"
+            if not self._close_slave_trade(
+                slave,
+                slave_trade,
+                reason=f"mirror_exit:{reason}",
+                allow_virtual=False,
+            ):
+                return
             slave_trade.call_sl_order_id = None
             slave_trade.put_sl_order_id = None
             slave_trade.last_updated = get_ist_now()
@@ -1079,8 +1141,21 @@ class MirrorEngine:
             except Exception:
                 pass
             # Still try to mark closed so we don't leave stuck active slaves
+            # (never auto-close virtual/paper SlaveTrades)
             try:
-                slave_trade.status = "closed"
+                if not self._close_slave_trade(
+                    slave,
+                    slave_trade,
+                    reason=f"mirror_exit_failed:{exc}",
+                    allow_virtual=False,
+                ):
+                    slave_trade.last_error = str(exc)[:500]
+                    slave_trade.error_count = (
+                        int(slave_trade.error_count or 0) + 1
+                    )
+                    slave_trade.last_updated = get_ist_now()
+                    db.commit()
+                    return
                 slave_trade.call_sl_order_id = None
                 slave_trade.put_sl_order_id = None
                 slave_trade.last_error = str(exc)[:500]
@@ -1182,6 +1257,15 @@ class MirrorEngine:
                 if slave is None or not slave.is_active:
                     continue
 
+                # Virtual/paper: no real Delta positions — keep last_mtm from overview
+                if is_virtual_slave_trade(slave, slave_trade):
+                    logger.debug(
+                        "Slave '%s' MTM skip (virtual SlaveTrade %s)",
+                        slave.name,
+                        slave_trade.id,
+                    )
+                    continue
+
                 client = self._get_slave_client(slave)
                 try:
                     # UPL@Offer via get_positions_upnl (best_ask, never API
@@ -1225,6 +1309,8 @@ class MirrorEngine:
         """
         Periodic check: active SlaveTrades should still have open options
         on the slave account. Mark closed if the slave book is empty.
+
+        Virtual/paper SlaveTrades are never closed here.
         """
         with self.db_factory() as db:
             slave_trades = (
@@ -1247,21 +1333,17 @@ class MirrorEngine:
                 if not slave or not slave.is_active:
                     continue
 
-                # Virtual/paper slaves have no real Delta positions — never
-                # mark their SlaveTrade closed via integrity.
-                if bool(getattr(slave, "is_virtual", False)):
-                    logger.debug(
-                        "Slave '%s' integrity skip (is_virtual=True) "
-                        "slave_trade=%s",
+                # Permanent guard: never integrity-close virtual/paper trades
+                if is_virtual_slave_trade(slave, slave_trade):
+                    logger.warning(
+                        "Slave integrity SKIP (virtual): slave='%s' "
+                        "slave_trade=%s is_virtual=%s call_order_id=%s "
+                        "put_order_id=%s — leaving status=active",
                         slave.name,
                         slave_trade.id,
-                    )
-                    continue
-                # Also skip rows that were opened as VIRTUAL fills
-                if str(slave_trade.call_order_id or "").upper() == "VIRTUAL":
-                    logger.debug(
-                        "SlaveTrade %s integrity skip (VIRTUAL order_id)",
-                        slave_trade.id,
+                        bool(getattr(slave, "is_virtual", False)),
+                        slave_trade.call_order_id,
+                        slave_trade.put_order_id,
                     )
                     continue
 
@@ -1275,9 +1357,14 @@ class MirrorEngine:
                             slave.name,
                             slave_trade.id,
                         )
-                        slave_trade.status = "closed"
-                        slave_trade.last_updated = get_ist_now()
-                        db.commit()
+                        if self._close_slave_trade(
+                            slave,
+                            slave_trade,
+                            reason="integrity_empty_book",
+                            allow_virtual=False,
+                        ):
+                            slave_trade.last_updated = get_ist_now()
+                            db.commit()
                     else:
                         logger.debug(
                             "Slave '%s' integrity OK: %s option positions",

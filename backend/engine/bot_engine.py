@@ -439,6 +439,7 @@ class BotEngine:
                 )
 
         # Every 5th cycle, verify slave positions still match active SlaveTrades
+        # Skip demo masters — their virtual slaves have no real Delta positions.
         self._cycle_count = int(getattr(self, "_cycle_count", 0) or 0) + 1
         if self._cycle_count % 5 == 0:
             try:
@@ -447,6 +448,8 @@ class BotEngine:
                 me = mirror_mod.mirror_engine or self.mirror_engine
                 if me is not None:
                     for state in self.position_tracker.get_all_active():
+                        if bool(getattr(state.trade, "is_demo", False)):
+                            continue
                         asyncio.create_task(
                             me.check_slave_integrity(state.trade_id)
                         )
@@ -693,7 +696,7 @@ class BotEngine:
 
         from backend.core.delta_sl import cancel_leg_sl_order
         from backend.engine.trade_reconcile import book_leg_close
-        from backend.models import SlaveTrade
+        from backend.models import SlaveAccount, SlaveTrade
 
         now_utc = datetime.now(timezone.utc)
         closed_n = 0
@@ -737,6 +740,9 @@ class BotEngine:
                     )
 
             # Mark active slave trades closed (no close orders — likely gone too)
+            # Never auto-close virtual/paper SlaveTrades here.
+            from backend.engine.mirror_engine import is_virtual_slave_trade
+
             slave_trades = (
                 db.query(SlaveTrade)
                 .filter(
@@ -745,13 +751,28 @@ class BotEngine:
                 )
                 .all()
             )
+            closed_slave_n = 0
             for st in slave_trades:
+                slave_acc = (
+                    db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == st.slave_account_id)
+                    .first()
+                )
+                if is_virtual_slave_trade(slave_acc, st):
+                    logger.warning(
+                        "Skipping auto-close of virtual SlaveTrade %s "
+                        "(manual master close trade=%s)",
+                        st.id,
+                        trade_id,
+                    )
+                    continue
                 st.status = "closed"
-            if slave_trades:
+                closed_slave_n += 1
+            if closed_slave_n:
                 logger.info(
                     "Marked %s slave trade(s) closed for manual-closed "
                     "master trade %s",
-                    len(slave_trades),
+                    closed_slave_n,
                     trade_id,
                 )
 
@@ -1010,7 +1031,23 @@ class BotEngine:
                 )
                 .all()
             )
+            from backend.engine.mirror_engine import is_virtual_slave_trade
+            from backend.models import SlaveAccount as _SlaveAccount
+
             for st in slave_trades:
+                slave_acc = (
+                    db.query(_SlaveAccount)
+                    .filter(_SlaveAccount.id == st.slave_account_id)
+                    .first()
+                )
+                if is_virtual_slave_trade(slave_acc, st):
+                    logger.warning(
+                        "Skipping auto-close of virtual SlaveTrade %s "
+                        "(emergency master close trade=%s)",
+                        st.id,
+                        trade_id,
+                    )
+                    continue
                 st.status = "closed"
 
             try:
