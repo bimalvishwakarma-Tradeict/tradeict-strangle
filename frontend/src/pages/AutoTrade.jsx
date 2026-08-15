@@ -759,7 +759,32 @@ export default function AutoTrade() {
           <input
             type="checkbox"
             checked={combinedTriggerMode}
-            onChange={(e) => setCombinedTriggerMode(e.target.checked)}
+            onChange={async (e) => {
+              const on = e.target.checked
+              setCombinedTriggerMode(on)
+              // Persist immediately — toggle alone used to leave DB at False
+              // until Save, so on_tick kept using individual triggers.
+              try {
+                const updated = await saveAutoTradeSettings({
+                  ...buildPayload(),
+                  combined_trigger_mode: on,
+                })
+                applyStatusToForm(updated, formSetters)
+                setToast({
+                  type: 'success',
+                  message: on
+                    ? '✅ Combined trigger ON'
+                    : '✅ Combined trigger OFF',
+                })
+              } catch (err) {
+                setCombinedTriggerMode(!on)
+                setToast({
+                  type: 'error',
+                  message:
+                    err.message || 'Failed to save combined trigger mode',
+                })
+              }
+            }}
             className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
             title="Adjustment triggers when TOTAL premium (call+put) reaches trigger%, not individual legs"
           />

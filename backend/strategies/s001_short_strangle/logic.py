@@ -513,20 +513,35 @@ class ShortStrangleStrategy(BaseStrategy):
         except Exception:
             pass
 
-        # Combined premium trigger mode (overrides per-leg triggers)
-        combined_trigger_mode = bool(
-            getattr(trade, "combined_trigger_mode", False)
-        )
-        if not combined_trigger_mode and db_session is not None:
+        # Combined premium trigger mode (overrides per-leg triggers).
+        # AutoTrade UI toggle lives on AutoTradeSettings — read it every tick.
+        # Per-trade flag is OR'd so initiate-time / mid-trade PATCH also works.
+        trade_flag = bool(getattr(trade, "combined_trigger_mode", False))
+        settings_flag = False
+        if db_session is not None:
             try:
                 from backend.database import get_or_create_auto_settings
 
                 _ats = get_or_create_auto_settings(db_session)
-                combined_trigger_mode = bool(
+                settings_flag = bool(
                     getattr(_ats, "combined_trigger_mode", False)
                 )
-            except Exception:
-                combined_trigger_mode = False
+            except Exception as exc:
+                logger.warning(
+                    "[COMBINED_TRIGGER_MODE] Trade#%s settings read failed: %s",
+                    getattr(trade, "id", "?"),
+                    exc,
+                    exc_info=True,
+                )
+        combined_trigger_mode = bool(settings_flag or trade_flag)
+        logger.info(
+            "[COMBINED_TRIGGER_MODE] Trade#%s active=%s "
+            "(settings=%s trade=%s)",
+            getattr(trade, "id", "?"),
+            combined_trigger_mode,
+            settings_flag,
+            trade_flag,
+        )
 
         if combined_trigger_mode and call_open and put_open:
             call_entry = float(getattr(call_leg, "initial_premium", 0) or 0)

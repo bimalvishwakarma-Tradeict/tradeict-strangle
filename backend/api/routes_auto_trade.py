@@ -245,11 +245,59 @@ async def update_auto_trade_settings(
 
     db.commit()
     db.refresh(settings)
+
+    # Propagate combined_trigger_mode to ALL active trades + in-memory tracker.
+    # Otherwise trades opened before the toggle stay on individual triggers
+    # if settings read ever fails or trade flag is treated as sole source.
+    try:
+        from backend.config import TradeStatus
+        from backend.models import Trade
+
+        combined_val = bool(settings.combined_trigger_mode)
+        active_trades = (
+            db.query(Trade)
+            .filter(Trade.status == TradeStatus.ACTIVE.value)
+            .all()
+        )
+        synced_ids: list[int] = []
+        for t in active_trades:
+            t.combined_trigger_mode = combined_val
+            synced_ids.append(int(t.id))
+        if synced_ids:
+            db.commit()
+            logger.info(
+                "[COMBINED_TRIGGER_MODE] Synced to active trades %s → %s",
+                synced_ids,
+                combined_val,
+            )
+            try:
+                from backend.engine.bot_engine import bot_engine
+
+                for tid in synced_ids:
+                    state = bot_engine.position_tracker.get(tid)
+                    if state is not None and hasattr(
+                        state.trade, "combined_trigger_mode"
+                    ):
+                        state.trade.combined_trigger_mode = combined_val
+            except Exception as sync_exc:
+                logger.warning(
+                    "[COMBINED_TRIGGER_MODE] In-memory sync failed: %s",
+                    sync_exc,
+                )
+    except Exception as prop_exc:
+        logger.warning(
+            "[COMBINED_TRIGGER_MODE] Propagate to trades failed: %s",
+            prop_exc,
+            exc_info=True,
+        )
+
     logger.info(
-        "Auto trade settings updated: underlying=%s dte=%s type=%s",
+        "Auto trade settings updated: underlying=%s dte=%s type=%s "
+        "combined_trigger_mode=%s",
         settings.underlying,
         settings.expiry_dte,
         settings.trade_type,
+        bool(settings.combined_trigger_mode),
     )
     return settings_to_dict(settings)
 
