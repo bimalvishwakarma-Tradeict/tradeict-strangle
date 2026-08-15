@@ -100,17 +100,13 @@ class MirrorEngine:
            slave_qty = master_qty × qty_multiplier
 
         2. Capital-based mode (capital_based_qty=True):
-           Formula:
-             master_free_ratio = master_margin_used / master_total_capital
-             user_free_capital = user_allocated_capital × master_free_ratio
-             multiplier = user_free_capital / master_margin_used
-             slave_qty = master_qty × multiplier
+           master_ratio = master_margin_used / master_total_capital
+           per_lot_cost_usd = master_margin_used / master_qty
+           slave_margin_to_use = user_allocated_capital × master_ratio
+           slave_qty = max(1, round(slave_margin_to_use / per_lot_cost_usd))
 
-           Example:
-             master_total=$300, master_margin_used=$100 → free_ratio=33.3%
-             user_allocated=$900 → user_free=$300 → multiplier=3.0 → slave_qty=3×master_qty
-
-           Falls back to fixed multiplier if capital data is unavailable.
+           All values in USD. Falls back to fixed multiplier if capital
+           data is unavailable.
         """
         if (
             slave is not None
@@ -119,37 +115,46 @@ class MirrorEngine:
             and master_margin_used_usd > 0
             and master_total_capital_usd is not None
             and master_total_capital_usd > 0
+            and master_qty > 0
         ):
             user_allocated = float(
                 getattr(slave, "user_allocated_capital", None) or 0
             )
             if user_allocated > 0:
-                master_free_ratio = (
+                # Step 1: What ratio of master capital is being used
+                master_ratio = (
                     master_margin_used_usd / master_total_capital_usd
                 )
-                user_free_capital = user_allocated * master_free_ratio
-                capital_multiplier = (
-                    user_free_capital / master_margin_used_usd
-                )
-                # safety clamp
-                capital_multiplier = max(0.1, min(capital_multiplier, 100.0))
-                calculated_qty = max(
-                    1,
-                    int(round(float(master_qty) * capital_multiplier)),
-                )
+
+                # Step 2: Cost per lot in USD
+                per_lot_cost_usd = master_margin_used_usd / master_qty
+
+                # Step 3: How much of slave capital to use (same ratio)
+                slave_margin_to_use = user_allocated * master_ratio
+
+                # Step 4: Calculate slave lots
+                if per_lot_cost_usd > 0:
+                    calculated_qty = max(
+                        1,
+                        round(slave_margin_to_use / per_lot_cost_usd),
+                    )
+                else:
+                    calculated_qty = master_qty
+
                 logger.info(
-                    "Capital-based qty: master_capital=$%.2f master_margin=$%.2f "
-                    "free_ratio=%.3f user_allocated=$%.2f user_free=$%.2f "
-                    "multiplier=%.3f → slave_qty=%s",
+                    "Capital-based qty: master_total=$%.2f master_used=$%.2f "
+                    "master_qty=%s master_ratio=%.3f per_lot=$%.4f "
+                    "slave_allocated=$%.2f slave_margin=$%.2f → slave_qty=%s",
                     master_total_capital_usd,
                     master_margin_used_usd,
-                    master_free_ratio,
+                    master_qty,
+                    master_ratio,
+                    per_lot_cost_usd,
                     user_allocated,
-                    user_free_capital,
-                    capital_multiplier,
+                    slave_margin_to_use,
                     calculated_qty,
                 )
-                return calculated_qty
+                return int(calculated_qty)
 
         # Fallback: fixed multiplier
         return max(1, int(round(float(master_qty) * float(multiplier))))
@@ -261,6 +266,15 @@ class MirrorEngine:
                             master_margin_used = max(
                                 0.0, master_total_capital - master_available
                             )
+                            logger.info(
+                                "Capital fetch for qty: master_total=$%.2f "
+                                "master_available=$%.2f master_margin_used=$%.2f "
+                                "master_qty=%s",
+                                master_total_capital,
+                                master_available,
+                                master_margin_used,
+                                int(master_call_qty),
+                            )
                         finally:
                             await master_client.close()
             except Exception as cap_err:
@@ -268,8 +282,9 @@ class MirrorEngine:
                     "Capital fetch for slave qty failed: %s", cap_err
                 )
 
+        # Use master_call_qty as the lot size for capital-based scaling
         slave_qty = self._calc_qty(
-            master_call_qty,
+            int(master_call_qty),
             float(slave.qty_multiplier or 1.0),
             slave=slave,
             master_margin_used_usd=master_margin_used,
