@@ -493,6 +493,16 @@ class BotEngine:
         # During adjustment one leg is intentionally closed temporarily.
         # Re-read from tracker so we never use a stale is_adjusting=False.
         live = self.position_tracker.get(trade_id)
+        # DIAGNOSTIC — remove after is_adjusting race root-caused
+        logger.warning(
+            "[DIAG_IS_ADJUSTING] (b) _check_position_integrity START "
+            "trade_id=%s tracker.is_adjusting=%s "
+            "trade_state.is_adjusting=%s tracker_has_trade=%s",
+            trade_id,
+            getattr(live, "is_adjusting", None) if live else None,
+            getattr(trade_state, "is_adjusting", None),
+            live is not None,
+        )
         if live is not None and getattr(live, "is_adjusting", False):
             logger.debug(
                 "[INTEGRITY_SKIP] Trade#%s — adjustment in progress, "
@@ -878,6 +888,20 @@ class BotEngine:
         trade_id = trade_state.trade_id
         remaining = str(leg_to_close).lower().strip()
         missing = "put" if remaining == "call" else "call"
+
+        # DIAGNOSTIC — remove after is_adjusting race root-caused
+        _live_c = self.position_tracker.get(trade_id)
+        logger.warning(
+            "[DIAG_IS_ADJUSTING] (c) BEFORE EMERGENCY_CLOSE trade_id=%s "
+            "closing=%s missing=%s | tracker.is_adjusting=%s "
+            "trade_state.is_adjusting=%s — THIS PATH MAY BYPASS "
+            "_check_position_integrity (e.g. reconcile naked_risk)",
+            trade_id,
+            remaining,
+            missing,
+            getattr(_live_c, "is_adjusting", None) if _live_c else None,
+            getattr(trade_state, "is_adjusting", None),
+        )
 
         remaining_leg_mem = (
             trade_state.call_leg if remaining == "call" else trade_state.put_leg
@@ -2787,6 +2811,17 @@ class BotEngine:
         # Lock FIRST — before any async work — so integrity monitor cannot
         # emergency-close a mid-adjustment naked leg (INTEGRITY_NAKED race).
         self.position_tracker.set_adjusting(trade_id, True)
+        # DIAGNOSTIC — remove after is_adjusting race root-caused
+        _live_a = self.position_tracker.get(trade_id)
+        logger.warning(
+            "[DIAG_IS_ADJUSTING] (a) _adjust_trade START trade_id=%s "
+            "set_adjusting(True) done | tracker.is_adjusting=%s "
+            "trade_state.is_adjusting=%s tracker_has_trade=%s",
+            trade_id,
+            getattr(_live_a, "is_adjusting", None) if _live_a else None,
+            getattr(trade_state, "is_adjusting", None),
+            _live_a is not None,
+        )
         try:
             triggered = triggered_leg_type.lower()
             old_leg = (
@@ -2999,6 +3034,16 @@ class BotEngine:
         finally:
             # ALWAYS release lock — prevents permanent skip of this trade
             self.position_tracker.set_adjusting(trade_id, False)
+            # DIAGNOSTIC — remove after is_adjusting race root-caused
+            _live_d = self.position_tracker.get(trade_id)
+            logger.warning(
+                "[DIAG_IS_ADJUSTING] (d) _adjust_trade END trade_id=%s "
+                "set_adjusting(False) done | tracker.is_adjusting=%s "
+                "trade_state.is_adjusting=%s",
+                trade_id,
+                getattr(_live_d, "is_adjusting", None) if _live_d else None,
+                getattr(trade_state, "is_adjusting", None),
+            )
 
     def _apply_adjustment_cooldown(self, trade_state: TradeState) -> None:
         """
