@@ -1120,6 +1120,26 @@ class AdjustmentExecutor:
             else:
                 logger.info("[AUDIT] New leg confirmed on Delta")
 
+            # Re-attach legs/trade after potential cross-session commits
+            # (e.g. reconcile emergency close on another SessionLocal).
+            try:
+                db_session.refresh(triggered_leg)
+            except Exception:
+                triggered_leg = db_session.merge(triggered_leg)
+                db_session.refresh(triggered_leg)
+
+            try:
+                db_session.refresh(other_leg)
+            except Exception:
+                other_leg = db_session.merge(other_leg)
+                db_session.refresh(other_leg)
+
+            try:
+                db_session.refresh(trade)
+            except Exception:
+                trade = db_session.merge(trade)
+                db_session.refresh(trade)
+
             # Steps 6–8: Update DB on full success
             # BOTH legs reset trigger baseline after a successful adjustment:
             #   triggered → new fill price

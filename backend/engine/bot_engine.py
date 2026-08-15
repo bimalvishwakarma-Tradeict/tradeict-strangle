@@ -389,6 +389,17 @@ class BotEngine:
                     state = self.position_tracker.get(tid)
                     if state is None:
                         continue
+
+                    # CRITICAL: Skip naked risk close if trade is currently adjusting
+                    # During adjustment, one leg is intentionally closed temporarily
+                    if getattr(state, "is_adjusting", False):
+                        logger.info(
+                            "[NAKED_SKIP] Trade#%s — is_adjusting=True, "
+                            "skipping emergency close (reconcile bypass guard)",
+                            tid,
+                        )
+                        continue
+
                     log_and_buffer(
                         "NAKED_POSITION",
                         tid,
@@ -889,13 +900,26 @@ class BotEngine:
         remaining = str(leg_to_close).lower().strip()
         missing = "put" if remaining == "call" else "call"
 
+        # Double-check: never close remaining leg if adjustment in progress
+        # (covers reconcile naked_risk and any other caller)
+        live = self.position_tracker.get(trade_id)
+        if getattr(trade_state, "is_adjusting", False) or (
+            live is not None and getattr(live, "is_adjusting", False)
+        ):
+            logger.warning(
+                "[EMERGENCY_CLOSE_BLOCKED] Trade#%s — is_adjusting=True, "
+                "refusing emergency close of %s leg",
+                trade_id,
+                remaining,
+            )
+            return
+
         # DIAGNOSTIC — remove after is_adjusting race root-caused
-        _live_c = self.position_tracker.get(trade_id)
+        _live_c = live if live is not None else self.position_tracker.get(trade_id)
         logger.warning(
             "[DIAG_IS_ADJUSTING] (c) BEFORE EMERGENCY_CLOSE trade_id=%s "
             "closing=%s missing=%s | tracker.is_adjusting=%s "
-            "trade_state.is_adjusting=%s — THIS PATH MAY BYPASS "
-            "_check_position_integrity (e.g. reconcile naked_risk)",
+            "trade_state.is_adjusting=%s",
             trade_id,
             remaining,
             missing,
