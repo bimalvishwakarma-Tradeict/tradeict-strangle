@@ -32,6 +32,26 @@ class AdjustmentError(Exception):
     """Raised for adjustment precondition failures (missing legs, etc.)."""
 
 
+async def _demo_mark_order_result(
+    delta_client: Any,
+    symbol: str,
+    fallback: float = 0.0,
+) -> OrderResult:
+    """Synthetic fill for demo/virtual trades (no real Delta order)."""
+    try:
+        px = float(await delta_client.get_mark_price(str(symbol)))
+    except Exception:
+        px = 0.0
+    if px <= 0:
+        px = float(fallback or 0.0)
+    return OrderResult(
+        success=True,
+        order_id=None,
+        filled_price=px,
+        commission=0.0,
+    )
+
+
 async def _resolve_offer_price(
     delta_client: Any,
     symbol: str,
@@ -522,12 +542,22 @@ class AdjustmentExecutor:
 
                 # Place BUY order for hedge leg
                 try:
-                    hedge_result = await order_executor.buy_option(
-                        product_id=int(hedge_plan.new_product_id),
-                        quantity=int(triggered_leg.quantity),
-                        delta_client=delta_client,
-                        symbol_for_fallback=str(hedge_plan.new_symbol),
-                    )
+                    if bool(getattr(trade, "is_demo", False)):
+                        logger.info(
+                            "[DEMO] Virtual conversion hedge buy — no real order"
+                        )
+                        hedge_result = await _demo_mark_order_result(
+                            delta_client,
+                            str(hedge_plan.new_symbol),
+                            float(hedge_plan.target_premium or 0),
+                        )
+                    else:
+                        hedge_result = await order_executor.buy_option(
+                            product_id=int(hedge_plan.new_product_id),
+                            quantity=int(triggered_leg.quantity),
+                            delta_client=delta_client,
+                            symbol_for_fallback=str(hedge_plan.new_symbol),
+                        )
                 except Exception as exc:
                     logger.error(
                         "[CONVERSION_MODE] Hedge buy failed for trade %s: %s",
@@ -602,9 +632,19 @@ class AdjustmentExecutor:
                 )
 
                 # Close existing other leg
-                other_close_result = await order_executor.close_leg(
-                    other_leg, delta_client
-                )
+                if bool(getattr(trade, "is_demo", False)):
+                    logger.info(
+                        "[DEMO] Virtual conversion other-leg close — no real order"
+                    )
+                    other_close_result = await _demo_mark_order_result(
+                        delta_client,
+                        str(other_leg.symbol),
+                        float(other_premium or 0),
+                    )
+                else:
+                    other_close_result = await order_executor.close_leg(
+                        other_leg, delta_client
+                    )
                 if not other_close_result.success:
                     # Hedge already placed — critical partial state
                     logger.critical(
@@ -668,12 +708,22 @@ class AdjustmentExecutor:
                     )
 
                 # Short new other leg
-                new_other_result = await order_executor.sell_option(
-                    product_id=int(new_other_plan.new_product_id),
-                    quantity=int(other_leg.quantity),
-                    delta_client=delta_client,
-                    symbol_for_fallback=str(new_other_plan.new_symbol),
-                )
+                if bool(getattr(trade, "is_demo", False)):
+                    logger.info(
+                        "[DEMO] Virtual conversion new other short — no real order"
+                    )
+                    new_other_result = await _demo_mark_order_result(
+                        delta_client,
+                        str(new_other_plan.new_symbol),
+                        float(new_other_target or 0),
+                    )
+                else:
+                    new_other_result = await order_executor.sell_option(
+                        product_id=int(new_other_plan.new_product_id),
+                        quantity=int(other_leg.quantity),
+                        delta_client=delta_client,
+                        symbol_for_fallback=str(new_other_plan.new_symbol),
+                    )
                 if not new_other_result.success:
                     logger.critical(
                         "[CONVERSION_MODE] PARTIAL: other closed but new short "
@@ -863,50 +913,56 @@ class AdjustmentExecutor:
                 )
 
             # --- AUDIT: verify triggered leg still on Delta before close ---
-            logger.info(
-                "[AUDIT] Verifying triggered leg on Delta before close..."
-            )
-            try:
-                leg_exists = await delta_client.verify_position_exists(
-                    int(triggered_leg.product_id)
+            trade_is_demo = bool(getattr(trade, "is_demo", False))
+            if trade_is_demo:
+                logger.info(
+                    "[DEMO] Virtual adjustment — skipping Delta pre-close audit"
                 )
-            except Exception as exc:
-                logger.warning(
-                    "[AUDIT] verify_position_exists failed before close: %s",
-                    exc,
+            else:
+                logger.info(
+                    "[AUDIT] Verifying triggered leg on Delta before close..."
                 )
-                leg_exists = True  # proceed cautiously if check unavailable
-            log_and_buffer(
-                "ADJUSTMENT_DELTA_VERIFY",
-                int(trade.id),
-                {
-                    "stage": "pre_close",
-                    "leg": triggered_leg_type,
-                    "product_id": int(triggered_leg.product_id),
-                    "exists": bool(leg_exists),
-                },
-            )
-            if not leg_exists:
-                logger.warning(
-                    "[AUDIT] Triggered leg %s NOT found on Delta. "
-                    "May have been closed already. Skipping adjustment.",
-                    triggered_leg.symbol,
+                try:
+                    leg_exists = await delta_client.verify_position_exists(
+                        int(triggered_leg.product_id)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[AUDIT] verify_position_exists failed before close: %s",
+                        exc,
+                    )
+                    leg_exists = True  # proceed cautiously if check unavailable
+                log_and_buffer(
+                    "ADJUSTMENT_DELTA_VERIFY",
+                    int(trade.id),
+                    {
+                        "stage": "pre_close",
+                        "leg": triggered_leg_type,
+                        "product_id": int(triggered_leg.product_id),
+                        "exists": bool(leg_exists),
+                    },
                 )
-                return AdjustmentResult(
-                    success=False,
-                    is_partial=False,
-                    error_message=(
-                        "Triggered leg not found on Delta — already closed?"
-                    ),
-                )
-            logger.info("[AUDIT] Triggered leg confirmed on Delta")
+                if not leg_exists:
+                    logger.warning(
+                        "[AUDIT] Triggered leg %s NOT found on Delta. "
+                        "May have been closed already. Skipping adjustment.",
+                        triggered_leg.symbol,
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        is_partial=False,
+                        error_message=(
+                            "Triggered leg not found on Delta — already closed?"
+                        ),
+                    )
+                logger.info("[AUDIT] Triggered leg confirmed on Delta")
 
             # Step 3→4: Close triggered leg
             # If this leg was protected by a legacy *separate* SL order
             # (delta_sl_order_id exists), cancel it before/around the close so
             # we don't leave orphan stop orders behind.
             legacy_sl_oid = getattr(triggered_leg, "delta_sl_order_id", None)
-            if legacy_sl_oid:
+            if legacy_sl_oid and not trade_is_demo:
                 try:
                     await delta_client.cancel_order(int(legacy_sl_oid))
                     triggered_leg.delta_sl_order_id = None
@@ -920,9 +976,23 @@ class AdjustmentExecutor:
                         exc,
                     )
 
-            exit_result: OrderResult = await order_executor.close_leg(
-                triggered_leg, delta_client
-            )
+            if trade_is_demo:
+                logger.info(
+                    "[DEMO] Virtual adjustment exit+entry — no real orders"
+                )
+                exit_result = await _demo_mark_order_result(
+                    delta_client,
+                    str(triggered_leg.symbol),
+                    float(
+                        triggered_leg.trigger_baseline_premium
+                        or triggered_leg.initial_premium
+                        or 0
+                    ),
+                )
+            else:
+                exit_result = await order_executor.close_leg(
+                    triggered_leg, delta_client
+                )
             if not exit_result.success:
                 msg = (
                     f"Failed to exit {triggered_leg_type} leg: "
@@ -932,34 +1002,35 @@ class AdjustmentExecutor:
                 return AdjustmentResult(success=False, error_message=msg)
 
             # AUDIT: verify close registered on Delta
-            await asyncio.sleep(2)
-            try:
-                still_exists = await delta_client.verify_position_exists(
-                    int(triggered_leg.product_id)
+            if not trade_is_demo:
+                await asyncio.sleep(2)
+                try:
+                    still_exists = await delta_client.verify_position_exists(
+                        int(triggered_leg.product_id)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[AUDIT] post-close verify failed: %s", exc
+                    )
+                    still_exists = False
+                log_and_buffer(
+                    "ADJUSTMENT_DELTA_VERIFY",
+                    int(trade.id),
+                    {
+                        "stage": "post_close",
+                        "leg": triggered_leg_type,
+                        "product_id": int(triggered_leg.product_id),
+                        "still_exists": bool(still_exists),
+                    },
                 )
-            except Exception as exc:
-                logger.warning(
-                    "[AUDIT] post-close verify failed: %s", exc
-                )
-                still_exists = False
-            log_and_buffer(
-                "ADJUSTMENT_DELTA_VERIFY",
-                int(trade.id),
-                {
-                    "stage": "post_close",
-                    "leg": triggered_leg_type,
-                    "product_id": int(triggered_leg.product_id),
-                    "still_exists": bool(still_exists),
-                },
-            )
-            if still_exists:
-                logger.warning(
-                    "[AUDIT] Triggered leg %s still visible on Delta after "
-                    "close order. Order may be pending. Proceeding anyway.",
-                    triggered_leg.symbol,
-                )
-            else:
-                logger.info("[AUDIT] Triggered leg closed on Delta")
+                if still_exists:
+                    logger.warning(
+                        "[AUDIT] Triggered leg %s still visible on Delta after "
+                        "close order. Order may be pending. Proceeding anyway.",
+                        triggered_leg.symbol,
+                    )
+                else:
+                    logger.info("[AUDIT] Triggered leg closed on Delta")
 
             # Step 5: Enter new leg with bracket SL attached at placement time.
             # Bracket SL confirmed working on Delta Exchange India
@@ -978,14 +1049,21 @@ class AdjustmentExecutor:
             bracket_sl_limit = (
                 round(bracket_sl_price * 1.05, 2) if bracket_sl_price > 0 else None
             )
-            entry_result: OrderResult = await order_executor.sell_option(
-                product_id=int(plan.new_product_id),
-                quantity=int(triggered_leg.quantity),
-                delta_client=delta_client,
-                symbol_for_fallback=str(plan.new_symbol),
-                bracket_sl_price=bracket_sl_price if bracket_sl_price > 0 else None,
-                bracket_sl_limit=bracket_sl_limit,
-            )
+            if trade_is_demo:
+                entry_result = await _demo_mark_order_result(
+                    delta_client,
+                    str(plan.new_symbol),
+                    float(expected_new_entry or other_premium or 0),
+                )
+            else:
+                entry_result = await order_executor.sell_option(
+                    product_id=int(plan.new_product_id),
+                    quantity=int(triggered_leg.quantity),
+                    delta_client=delta_client,
+                    symbol_for_fallback=str(plan.new_symbol),
+                    bracket_sl_price=bracket_sl_price if bracket_sl_price > 0 else None,
+                    bracket_sl_limit=bracket_sl_limit,
+                )
             if not entry_result.success:
                 other_leg_type = (
                     "put" if triggered_leg_type.lower() == "call" else "call"

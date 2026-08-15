@@ -103,6 +103,8 @@ class Trade(Base):
     conversion_triggered_leg: Mapped[str | None] = mapped_column(
         String(10), nullable=True
     )
+    # True = virtual/demo trade — no real Delta orders placed
+    is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     account: Mapped[Account] = relationship("Account", back_populates="trades")
     legs: Mapped[list[Leg]] = relationship("Leg", back_populates="trade")
@@ -278,6 +280,8 @@ class AutoTradeSettings(Base):
     premium_cover_loss_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+    # Demo/virtual mode — places virtual trades without real Delta orders
+    is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Status tracking
     last_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

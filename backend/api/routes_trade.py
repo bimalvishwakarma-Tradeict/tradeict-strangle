@@ -579,6 +579,7 @@ async def _persist_strangle_trade(
         monitoring_starts_at=monitoring_starts,
         basket_number=basket_no,
         cumulative_entry_spread_usd=0.0,
+        is_demo=bool(getattr(payload, "is_demo", False)),
     )
     db.add(trade)
     db.flush()
@@ -734,6 +735,10 @@ async def initiate_trade(
     try:
         await _manual_entry_triple_guard(db, account, underlying, client)
 
+        import time as _time
+
+        is_demo = bool(getattr(payload, "is_demo", False))
+
         # Bracket SL confirmed working on Delta Exchange India
         # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
         # Bracket auto-cancels when position is closed (any reason)
@@ -752,119 +757,175 @@ async def initiate_trade(
         call_sl_limit = round(call_sl_trigger_price * 1.05, 2)
         put_sl_limit = round(put_sl_trigger_price * 1.05, 2)
 
-        # --- Step 1: Place CALL ---
-        logger.info("Step 1: Placing call order %s", payload.call_symbol)
-        call_result = await bot_engine.order_executor.sell_option(
-            product_id=int(payload.call_product_id),
-            quantity=int(payload.quantity),
-            delta_client=client,
-            symbol_for_fallback=payload.call_symbol,
-            bracket_sl_price=call_sl_trigger_price,
-            bracket_sl_limit=call_sl_limit,
-        )
-        if not call_result.success:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Call order failed: {call_result.error or 'unknown error'}",
-            )
-        call_order_id = (
-            str(call_result.order_id) if call_result.order_id is not None else None
-        )
-        logger.info(
-            "Step 2: Call order response order_id=%s filled_price=%s success=%s",
-            call_order_id,
-            call_result.filled_price,
-            call_result.success,
-        )
+        call_result = None
+        put_result = None
 
-        call_fill_price = float(call_result.filled_price or 0.0)
-        if call_fill_price <= 0 and call_order_id:
-            call_fill_price = await client.resolve_fill_price(
-                {"order_id": call_order_id},
-                symbol_for_fallback=None,
+        if is_demo:
+            # Virtual trade: live mark prices instead of placing real orders
+            logger.info(
+                "[DEMO] Virtual master trade — fetching live prices "
+                "instead of placing orders"
             )
-        if call_fill_price <= 0:
-            call_fill_price = float(await client.get_mark_price(payload.call_symbol))
-            logger.warning("Call fill unavailable, using mark: %s", call_fill_price)
-        if call_fill_price <= 0:
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Call order placed but fill/mark price could not be resolved. "
-                    f"Call order ID: {call_order_id}"
-                ),
-            )
-        logger.info("Step 3: Call fill price: %s", call_fill_price)
-        await _verify_leg_on_delta(
-            client,
-            product_id=int(payload.call_product_id),
-            leg_label="Call",
-            order_id=call_order_id,
-        )
-
-        # --- Step 4: Place PUT ---
-        logger.info("Step 4: Placing put order %s", payload.put_symbol)
-        put_result = await bot_engine.order_executor.sell_option(
-            product_id=int(payload.put_product_id),
-            quantity=int(payload.quantity),
-            delta_client=client,
-            symbol_for_fallback=payload.put_symbol,
-            bracket_sl_price=put_sl_trigger_price,
-            bracket_sl_limit=put_sl_limit,
-        )
-        if not put_result.success:
-            logger.critical(
-                "PUT order FAILED after call was placed! "
-                "Call order_id=%s at %s. Manual intervention needed!",
-                call_order_id,
+            try:
+                call_ticker = await client.get_ticker(payload.call_symbol)
+                put_ticker = await client.get_ticker(payload.put_symbol)
+                call_fill_price = float(
+                    call_ticker.get("mark_price")
+                    or call_ticker.get("close")
+                    or 0
+                )
+                put_fill_price = float(
+                    put_ticker.get("mark_price")
+                    or put_ticker.get("close")
+                    or 0
+                )
+            except Exception as e:
+                logger.warning(
+                    "[DEMO] Could not fetch live prices: %s — using marks",
+                    e,
+                )
+                call_fill_price = float(
+                    await client.get_mark_price(payload.call_symbol)
+                )
+                put_fill_price = float(
+                    await client.get_mark_price(payload.put_symbol)
+                )
+            if call_fill_price <= 0:
+                call_fill_price = float(call_baseline_for_sl or 0)
+            if put_fill_price <= 0:
+                put_fill_price = float(put_baseline_for_sl or 0)
+            if call_fill_price <= 0 or put_fill_price <= 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "[DEMO] Could not resolve mark prices for virtual "
+                        "trade fills"
+                    ),
+                )
+            ts = int(_time.time())
+            call_order_id = f"DEMO-CALL-{ts}"
+            put_order_id = f"DEMO-PUT-{ts}"
+            logger.info(
+                "[DEMO] Virtual fills: call=%s put=%s call_id=%s put_id=%s",
                 call_fill_price,
+                put_fill_price,
+                call_order_id,
+                put_order_id,
             )
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"PARTIAL FILL: Call placed @ {call_fill_price} "
-                    f"but Put order failed ({put_result.error or 'unknown'}). "
-                    f"Check Delta Exchange manually. Call order ID: {call_order_id}"
-                ),
+        else:
+            # --- Step 1: Place CALL ---
+            logger.info("Step 1: Placing call order %s", payload.call_symbol)
+            call_result = await bot_engine.order_executor.sell_option(
+                product_id=int(payload.call_product_id),
+                quantity=int(payload.quantity),
+                delta_client=client,
+                symbol_for_fallback=payload.call_symbol,
+                bracket_sl_price=call_sl_trigger_price,
+                bracket_sl_limit=call_sl_limit,
+            )
+            if not call_result.success:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Call order failed: {call_result.error or 'unknown error'}",
+                )
+            call_order_id = (
+                str(call_result.order_id) if call_result.order_id is not None else None
+            )
+            logger.info(
+                "Step 2: Call order response order_id=%s filled_price=%s success=%s",
+                call_order_id,
+                call_result.filled_price,
+                call_result.success,
             )
 
-        put_order_id = (
-            str(put_result.order_id) if put_result.order_id is not None else None
-        )
-        logger.info(
-            "Step 5: Put order response order_id=%s filled_price=%s success=%s",
-            put_order_id,
-            put_result.filled_price,
-            put_result.success,
-        )
+            call_fill_price = float(call_result.filled_price or 0.0)
+            if call_fill_price <= 0 and call_order_id:
+                call_fill_price = await client.resolve_fill_price(
+                    {"order_id": call_order_id},
+                    symbol_for_fallback=None,
+                )
+            if call_fill_price <= 0:
+                call_fill_price = float(await client.get_mark_price(payload.call_symbol))
+                logger.warning("Call fill unavailable, using mark: %s", call_fill_price)
+            if call_fill_price <= 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Call order placed but fill/mark price could not be resolved. "
+                        f"Call order ID: {call_order_id}"
+                    ),
+                )
+            logger.info("Step 3: Call fill price: %s", call_fill_price)
+            await _verify_leg_on_delta(
+                client,
+                product_id=int(payload.call_product_id),
+                leg_label="Call",
+                order_id=call_order_id,
+            )
 
-        put_fill_price = float(put_result.filled_price or 0.0)
-        if put_fill_price <= 0 and put_order_id:
-            put_fill_price = await client.resolve_fill_price(
-                {"order_id": put_order_id},
-                symbol_for_fallback=None,
+            # --- Step 4: Place PUT ---
+            logger.info("Step 4: Placing put order %s", payload.put_symbol)
+            put_result = await bot_engine.order_executor.sell_option(
+                product_id=int(payload.put_product_id),
+                quantity=int(payload.quantity),
+                delta_client=client,
+                symbol_for_fallback=payload.put_symbol,
+                bracket_sl_price=put_sl_trigger_price,
+                bracket_sl_limit=put_sl_limit,
             )
-        if put_fill_price <= 0:
-            put_fill_price = float(await client.get_mark_price(payload.put_symbol))
-            logger.warning("Put fill unavailable, using mark: %s", put_fill_price)
-        if put_fill_price <= 0:
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "PARTIAL FILL RISK: Put may have filled but price unknown. "
-                    f"Call order ID: {call_order_id}, Put order ID: {put_order_id}"
-                ),
+            if not put_result.success:
+                logger.critical(
+                    "PUT order FAILED after call was placed! "
+                    "Call order_id=%s at %s. Manual intervention needed!",
+                    call_order_id,
+                    call_fill_price,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"PARTIAL FILL: Call placed @ {call_fill_price} "
+                        f"but Put order failed ({put_result.error or 'unknown'}). "
+                        f"Check Delta Exchange manually. Call order ID: {call_order_id}"
+                    ),
+                )
+
+            put_order_id = (
+                str(put_result.order_id) if put_result.order_id is not None else None
             )
-        logger.info("Step 6: Put fill price: %s", put_fill_price)
-        await _verify_leg_on_delta(
-            client,
-            product_id=int(payload.put_product_id),
-            leg_label="Put",
-            order_id=put_order_id,
-        )
+            logger.info(
+                "Step 5: Put order response order_id=%s filled_price=%s success=%s",
+                put_order_id,
+                put_result.filled_price,
+                put_result.success,
+            )
+
+            put_fill_price = float(put_result.filled_price or 0.0)
+            if put_fill_price <= 0 and put_order_id:
+                put_fill_price = await client.resolve_fill_price(
+                    {"order_id": put_order_id},
+                    symbol_for_fallback=None,
+                )
+            if put_fill_price <= 0:
+                put_fill_price = float(await client.get_mark_price(payload.put_symbol))
+                logger.warning("Put fill unavailable, using mark: %s", put_fill_price)
+            if put_fill_price <= 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "PARTIAL FILL RISK: Put may have filled but price unknown. "
+                        f"Call order ID: {call_order_id}, Put order ID: {put_order_id}"
+                    ),
+                )
+            logger.info("Step 6: Put fill price: %s", put_fill_price)
+            await _verify_leg_on_delta(
+                client,
+                product_id=int(payload.put_product_id),
+                leg_label="Put",
+                order_id=put_order_id,
+            )
 
         # --- Step 7–8: Save to DB ---
-        logger.info("Step 7: Saving to DB...")
+        logger.info("Step 7: Saving to DB%s...", " (DEMO)" if is_demo else "")
         monitoring_starts = settling_ends_at_after_place()
         try:
             trade, call_leg, put_leg = await _persist_strangle_trade(
@@ -882,18 +943,22 @@ async def initiate_trade(
                 monitoring_starts=monitoring_starts,
                 call_entry_fee=(
                     float(call_result.commission)
-                    if call_result.commission is not None
-                    else None
+                    if call_result is not None and call_result.commission is not None
+                    else (0.0 if is_demo else None)
                 ),
                 put_entry_fee=(
                     float(put_result.commission)
-                    if put_result.commission is not None
-                    else None
+                    if put_result is not None and put_result.commission is not None
+                    else (0.0 if is_demo else None)
                 ),
                 call_sent_price=call_baseline_for_sl,
                 put_sent_price=put_baseline_for_sl,
             )
-            logger.info("Step 8: Trade saved, id=%s", trade.id)
+            logger.info(
+                "Step 8: Trade saved, id=%s is_demo=%s",
+                trade.id,
+                is_demo,
+            )
         except Exception as exc:
             db.rollback()
             logger.critical(
@@ -1023,8 +1088,12 @@ async def initiate_trade(
         return {
             "success": True,
             "trade_id": trade.id,
+            "is_demo": bool(getattr(trade, "is_demo", False)),
             "message": (
-                "Strangle placed on Delta Exchange and registered for monitoring"
+                "[DEMO] Virtual strangle registered for monitoring — "
+                "no real Delta orders placed"
+                if bool(getattr(trade, "is_demo", False))
+                else "Strangle placed on Delta Exchange and registered for monitoring"
             ),
             "call_filled_at": call_fill_price,
             "put_filled_at": put_fill_price,
@@ -1551,6 +1620,7 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "expiry_date": str(state.trade.expiry_date),
             "expiry_label": get_dte_label(state.trade.expiry_date),
             "status": state.trade.status,
+            "is_demo": bool(getattr(state.trade, "is_demo", False)),
             "open_leg_count": open_count,
             "call_leg": call_snap,
             "put_leg": put_snap,

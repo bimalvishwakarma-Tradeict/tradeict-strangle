@@ -57,6 +57,7 @@ class AutoTradeSettingsSchema(BaseModel):
     conversion_mode_enabled: bool = True
     max_adjustments_per_basket: int | None = Field(default=None, ge=1, le=50)
     premium_cover_loss_enabled: bool | None = None
+    is_demo: bool | None = None
 
     @field_validator("trade_type")
     @classmethod
@@ -132,6 +133,7 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "premium_cover_loss_enabled": bool(
             getattr(s, "premium_cover_loss_enabled", False)
         ),
+        "is_demo": bool(getattr(s, "is_demo", False)),
         "last_trade_id": s.last_trade_id,
         "last_exit_time": last_exit.isoformat() if last_exit else None,
         "next_entry_time": next_entry.isoformat() if next_entry else None,
@@ -231,6 +233,8 @@ async def update_auto_trade_settings(
         )
     if payload.premium_cover_loss_enabled is not None:
         settings.premium_cover_loss_enabled = payload.premium_cover_loss_enabled
+    if payload.is_demo is not None:
+        settings.is_demo = bool(payload.is_demo)
     settings.updated_at = get_ist_now()
     # Do NOT change is_enabled here
 

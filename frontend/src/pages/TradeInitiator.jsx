@@ -69,6 +69,7 @@ export default function TradeInitiator() {
   const [slippagePct, setSlippagePct] = useState('2')
   const [universalSlPct, setUniversalSlPct] = useState('200')
   const [slabs, setSlabs] = useState(null)
+  const [isDemo, setIsDemo] = useState(false)
 
   // Emergency-only: manual fill prices
   const [callEntry, setCallEntry] = useState('')
@@ -260,6 +261,7 @@ export default function TradeInitiator() {
       premium_slab_lt100: slabs.premium_slab_lt100,
       call_delta_at_entry: selectedCall.call_delta ?? null,
       put_delta_at_entry: selectedPut.put_delta ?? null,
+      is_demo: Boolean(isDemo) && !emergencyMode,
     }
     if (emergencyMode) {
       return {
@@ -321,7 +323,9 @@ export default function TradeInitiator() {
           <h1 className="mt-2 text-xl font-semibold text-white">
             {emergencyMode
               ? 'Trade Registered Successfully'
-              : 'Strangle Placed Successfully!'}
+              : successResult.is_demo
+                ? 'Demo Strangle Registered!'
+                : 'Strangle Placed Successfully!'}
           </h1>
           <div className="mt-4 space-y-1 text-sm text-gray-300">
             <div>
@@ -381,6 +385,30 @@ export default function TradeInitiator() {
         <div className="rounded-md border border-amber-700/50 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
           Emergency registration mode — orders will NOT be placed on Delta.
         </div>
+      )}
+
+      {!emergencyMode && (
+        <section className="space-y-2 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              checked={isDemo}
+              onChange={(e) => setIsDemo(e.target.checked)}
+              className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
+            />
+            <span className="text-sm text-gray-300">
+              🎮 Demo Trade (Virtual — no real orders){' '}
+              <span className="text-gray-500">
+                ({isDemo ? 'ON' : 'OFF'})
+              </span>
+            </span>
+          </label>
+          {isDemo && (
+            <div className="rounded-md border border-yellow-600/50 bg-yellow-950/40 px-3 py-2 text-sm text-yellow-200">
+              This is a virtual trade. No real money will be used.
+            </div>
+          )}
+        </section>
       )}
 
       {partialError && (
@@ -728,10 +756,14 @@ export default function TradeInitiator() {
             <LoadingSpinner size="sm" />
             {emergencyMode
               ? 'Registering…'
-              : PLACE_STEPS[placeStep] || 'Placing…'}
+              : isDemo
+                ? 'Registering demo trade…'
+                : PLACE_STEPS[placeStep] || 'Placing…'}
           </>
         ) : emergencyMode ? (
           'Register Existing Trade'
+        ) : isDemo ? (
+          '🎮 Place Demo Trade'
         ) : (
           'Place Strangle on Delta Exchange'
         )}

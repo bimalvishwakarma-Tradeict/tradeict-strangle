@@ -92,6 +92,8 @@ class TradeInitiateRequest(BaseModel):
     premium_slab_lt100: float = Field(default=200.0, ge=1, le=500)
     call_delta_at_entry: float | None = None
     put_delta_at_entry: float | None = None
+    # Virtual/demo trade — no real Delta orders
+    is_demo: bool = False
 
 
 class TradeRegisterExistingRequest(TradeInitiateRequest):

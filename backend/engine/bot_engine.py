@@ -479,6 +479,14 @@ class BotEngine:
         """
         trade_id = trade_state.trade_id
 
+        # Demo/virtual trades have no real Delta positions — skip integrity
+        if bool(getattr(trade_state.trade, "is_demo", False)):
+            logger.debug(
+                "Trade %s: skipping integrity check (demo/virtual trade)",
+                trade_id,
+            )
+            return "ok"
+
         # Skip integrity during conversion mode — position structure changes
         if bool(getattr(trade_state.trade, "in_conversion_mode", False)):
             logger.debug(
@@ -1802,17 +1810,32 @@ class BotEngine:
         # Step 4: Close ALL open legs on Delta (short=BUY, long hedge=SELL)
         close_results: dict[int, Any] = {}
         hard_fail = False
-        for leg in all_open_legs:
-            leg_id = int(leg.id)
-            is_long = bool(getattr(leg, "is_long", False)) or str(
-                getattr(leg, "leg_type", "")
-            ).startswith("hedge")
-            fill_label = "hedge" if is_long else str(leg.leg_type)
-            on_delta = exists_map.get(leg_id, False)
+        trade_is_demo = bool(getattr(trade, "is_demo", False))
 
-            if not on_delta:
-                logger.warning(
-                    "[EXIT_CLOSE] %s not on Delta — skipping close", fill_label
+        if trade_is_demo:
+            from backend.strategies.base_strategy import OrderResult
+
+            logger.info(
+                "[DEMO] Virtual exit — no real Delta orders, "
+                "marking closed with mark prices"
+            )
+            for leg in all_open_legs:
+                leg_id = int(leg.id)
+                is_long = bool(getattr(leg, "is_long", False)) or str(
+                    getattr(leg, "leg_type", "")
+                ).startswith("hedge")
+                fill_label = "hedge" if is_long else str(leg.leg_type)
+                try:
+                    px = float(
+                        await self.delta_client.get_mark_price(str(leg.symbol))
+                    )
+                except Exception:
+                    px = float(getattr(leg, "initial_premium", 0) or 0)
+                close_results[leg_id] = OrderResult(
+                    success=True,
+                    order_id=None,
+                    filled_price=px,
+                    commission=0.0,
                 )
                 log_and_buffer(
                     "EXIT_CLOSE",
@@ -1820,60 +1843,84 @@ class BotEngine:
                     {
                         "leg": fill_label,
                         "ok": True,
-                        "skipped": "not_on_delta",
+                        "fill": px,
                         "is_long": is_long,
+                        "demo": True,
                     },
                 )
-                continue
+        else:
+            for leg in all_open_legs:
+                leg_id = int(leg.id)
+                is_long = bool(getattr(leg, "is_long", False)) or str(
+                    getattr(leg, "leg_type", "")
+                ).startswith("hedge")
+                fill_label = "hedge" if is_long else str(leg.leg_type)
+                on_delta = exists_map.get(leg_id, False)
 
-            if is_long:
-                close_result = await self.order_executor.close_long_position(
-                    product_id=int(leg.product_id),
-                    quantity=int(leg.quantity),
-                    delta_client=self.delta_client,
-                    symbol_for_fallback=str(leg.symbol),
-                )
-            else:
-                close_result = await self.order_executor.close_leg(
-                    leg, self.delta_client
-                )
-            close_results[leg_id] = close_result
+                if not on_delta:
+                    logger.warning(
+                        "[EXIT_CLOSE] %s not on Delta — skipping close", fill_label
+                    )
+                    log_and_buffer(
+                        "EXIT_CLOSE",
+                        trade_id,
+                        {
+                            "leg": fill_label,
+                            "ok": True,
+                            "skipped": "not_on_delta",
+                            "is_long": is_long,
+                        },
+                    )
+                    continue
 
-            if close_result.success:
-                logger.info(
-                    "EXIT_CLOSE %s @ %.2f",
-                    fill_label,
-                    float(close_result.filled_price or 0),
-                )
-                log_and_buffer(
-                    "EXIT_CLOSE",
-                    trade_id,
-                    {
-                        "leg": fill_label,
-                        "ok": True,
-                        "fill": float(close_result.filled_price or 0),
-                        "is_long": is_long,
-                    },
-                )
-            else:
-                logger.error(
-                    "EXIT_CLOSE FAILED for %s: %s",
-                    leg.symbol,
-                    close_result.error,
-                )
-                log_and_buffer(
-                    "EXIT_CLOSE",
-                    trade_id,
-                    {
-                        "leg": fill_label,
-                        "ok": False,
-                        "error": close_result.error,
-                        "is_long": is_long,
-                    },
-                )
+                if is_long:
+                    close_result = await self.order_executor.close_long_position(
+                        product_id=int(leg.product_id),
+                        quantity=int(leg.quantity),
+                        delta_client=self.delta_client,
+                        symbol_for_fallback=str(leg.symbol),
+                    )
+                else:
+                    close_result = await self.order_executor.close_leg(
+                        leg, self.delta_client
+                    )
+                close_results[leg_id] = close_result
+
+                if close_result.success:
+                    logger.info(
+                        "EXIT_CLOSE %s @ %.2f",
+                        fill_label,
+                        float(close_result.filled_price or 0),
+                    )
+                    log_and_buffer(
+                        "EXIT_CLOSE",
+                        trade_id,
+                        {
+                            "leg": fill_label,
+                            "ok": True,
+                            "fill": float(close_result.filled_price or 0),
+                            "is_long": is_long,
+                        },
+                    )
+                else:
+                    logger.error(
+                        "EXIT_CLOSE FAILED for %s: %s",
+                        leg.symbol,
+                        close_result.error,
+                    )
+                    log_and_buffer(
+                        "EXIT_CLOSE",
+                        trade_id,
+                        {
+                            "leg": fill_label,
+                            "ok": False,
+                            "error": close_result.error,
+                            "is_long": is_long,
+                        },
+                    )
 
         # Step 5: Wait and verify closes
-        await asyncio.sleep(2)
+        await asyncio.sleep(2 if not trade_is_demo else 0)
         still_map: dict[str, bool] = {}
         for leg in all_open_legs:
             leg_id = int(leg.id)
@@ -2324,12 +2371,33 @@ class BotEngine:
                 )
                 hedge_product_id = int(hedge_leg.product_id)
                 try:
-                    close_res = await self.order_executor.close_long_position(
-                        product_id=int(hedge_leg.product_id),
-                        quantity=int(hedge_leg.quantity),
-                        delta_client=self.delta_client,
-                        symbol_for_fallback=str(hedge_leg.symbol),
-                    )
+                    if bool(getattr(trade, "is_demo", False)):
+                        logger.info(
+                            "[DEMO] Virtual hedge close — no real Delta order"
+                        )
+                        from backend.strategies.base_strategy import OrderResult
+
+                        try:
+                            px = float(
+                                await self.delta_client.get_mark_price(
+                                    str(hedge_leg.symbol)
+                                )
+                            )
+                        except Exception:
+                            px = float(hedge_leg.initial_premium or 0)
+                        close_res = OrderResult(
+                            success=True,
+                            order_id=None,
+                            filled_price=px,
+                            commission=0.0,
+                        )
+                    else:
+                        close_res = await self.order_executor.close_long_position(
+                            product_id=int(hedge_leg.product_id),
+                            quantity=int(hedge_leg.quantity),
+                            delta_client=self.delta_client,
+                            symbol_for_fallback=str(hedge_leg.symbol),
+                        )
                     if close_res.success:
                         hedge_close_success = True
                         hedge_close_price = float(close_res.filled_price or 0)
@@ -2387,12 +2455,32 @@ class BotEngine:
                         or getattr(trade_state.put_leg, "quantity", None)
                         or 1
                     )
-                    close_res = await self.order_executor.close_long_position(
-                        product_id=int(hedge_product_id),
-                        quantity=qty,
-                        delta_client=self.delta_client,
-                        symbol_for_fallback=hedge_symbol or None,
-                    )
+                    if bool(getattr(trade, "is_demo", False)):
+                        from backend.strategies.base_strategy import OrderResult
+
+                        logger.info(
+                            "[DEMO] Virtual legacy hedge close — no real order"
+                        )
+                        try:
+                            px = float(
+                                await self.delta_client.get_mark_price(
+                                    str(hedge_symbol or "")
+                                )
+                            )
+                        except Exception:
+                            px = float(hedge_entry_price or 0)
+                        close_res = OrderResult(
+                            success=True,
+                            filled_price=px,
+                            commission=0.0,
+                        )
+                    else:
+                        close_res = await self.order_executor.close_long_position(
+                            product_id=int(hedge_product_id),
+                            quantity=qty,
+                            delta_client=self.delta_client,
+                            symbol_for_fallback=hedge_symbol or None,
+                        )
                     if close_res.success:
                         hedge_close_success = True
                         hedge_close_price = float(close_res.filled_price or 0)

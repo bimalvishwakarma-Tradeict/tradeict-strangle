@@ -505,6 +505,29 @@ def _migrate_schema() -> None:
                         "ADD COLUMN is_virtual BOOLEAN DEFAULT 0"
                     )
                 )
+    # Demo / virtual master trades
+    if "auto_trade_settings" in tables:
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "is_demo" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN is_demo BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
+    if "trades" in tables:
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "is_demo" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades "
+                        "ADD COLUMN is_demo BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
 
 
 def get_usd_inr_rate(db: Session) -> float:
