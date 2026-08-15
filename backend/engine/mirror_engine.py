@@ -1038,7 +1038,9 @@ class MirrorEngine:
     ) -> None:
         """
         Mirror trade exit on all slaves.
-        Cancel SL orders + close both shorts (+ long hedge if present) at market.
+
+        Closes CURRENT live Delta option positions (post-adjustment product_ids
+        may differ from entry). Hint product_ids are logged for diagnosis only.
         """
         with self.db_factory() as db:
             slave_trades = (
@@ -1051,12 +1053,24 @@ class MirrorEngine:
             )
 
             if not slave_trades:
+                logger.info(
+                    "[MIRROR_EXIT] Trade#%s — no active slave_trades "
+                    "(call=%s put=%s reason=%s)",
+                    master_trade_id,
+                    call_product_id,
+                    put_product_id,
+                    reason,
+                )
                 return
 
             logger.info(
-                "Mirroring exit to %s slaves: reason=%s hedge=%s",
+                "[MIRROR_EXIT] Trade#%s mirroring to %s slaves: "
+                "reason=%s hint_call=%s hint_put=%s hint_hedge=%s",
+                master_trade_id,
                 len(slave_trades),
                 reason,
+                call_product_id,
+                put_product_id,
                 hedge_product_id,
             )
 
@@ -1134,7 +1148,7 @@ class MirrorEngine:
             return
 
         client = self._get_slave_client(slave)
-        qty = max(1, int(slave_trade.actual_quantity or 1))
+        stored_qty = max(1, int(slave_trade.actual_quantity or 1))
 
         try:
             # Cancel SL orders first
@@ -1148,68 +1162,175 @@ class MirrorEngine:
                     except Exception as exc:
                         logger.warning("SL cancel failed: %s", exc)
 
-            # Verify slave positions before close
+            # Close CURRENT live positions — do NOT rely on hint product_ids
+            # (they go stale after adjustment if slave legs differ from master).
             try:
-                call_on_slave = await client.verify_position_exists(
-                    int(call_product_id)
-                )
-                put_on_slave = await client.verify_position_exists(
-                    int(put_product_id)
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Slave '%s' position verify failed: %s — assume exists",
+                live_positions = await client.get_option_positions()
+            except Exception as pos_exc:
+                logger.error(
+                    "[MIRROR_EXIT] Slave '%s' get_option_positions FAILED: %s "
+                    "— falling back to hint product_ids",
                     slave.name,
-                    exc,
+                    pos_exc,
                 )
-                call_on_slave = True
-                put_on_slave = True
+                live_positions = []
 
-            if call_on_slave:
-                await client.place_order(
-                    product_id=int(call_product_id),
-                    size=qty,
-                    side="buy",
-                )
-                logger.info("Slave '%s' call closed", slave.name)
-            else:
-                logger.warning(
-                    "Slave '%s' call not on Delta, skipping close",
-                    slave.name,
-                )
+            hint_ids = {
+                int(pid)
+                for pid in (call_product_id, put_product_id, hedge_product_id or 0)
+                if pid and int(pid) > 0
+            }
+            logger.info(
+                "[MIRROR_EXIT] Slave '%s' live_positions=%s hint_ids=%s "
+                "stored_qty=%s",
+                slave.name,
+                [
+                    {
+                        "product_id": int(p.get("product_id") or 0),
+                        "symbol": str(p.get("product_symbol") or ""),
+                        "size": float(p.get("size") or 0),
+                    }
+                    for p in live_positions
+                ],
+                sorted(hint_ids),
+                stored_qty,
+            )
 
-            if put_on_slave:
-                await client.place_order(
-                    product_id=int(put_product_id),
-                    size=qty,
-                    side="buy",
-                )
-                logger.info("Slave '%s' put closed", slave.name)
-            else:
-                logger.warning(
-                    "Slave '%s' put not on Delta, skipping close",
-                    slave.name,
-                )
+            targets: list[dict[str, Any]] = []
+            if live_positions:
+                # Prefer positions matching master hints when present
+                matched = [
+                    p
+                    for p in live_positions
+                    if int(p.get("product_id") or 0) in hint_ids
+                ]
+                matched_pids = {
+                    int(p.get("product_id") or 0) for p in matched
+                }
+                # Always include unmatched SHORTS — adjusted legs may not be
+                # in hint_ids when master/slave drifted
+                extras = [
+                    p
+                    for p in live_positions
+                    if float(p.get("size") or 0) < 0
+                    and int(p.get("product_id") or 0) not in matched_pids
+                ]
+                # Longs: include if matches hedge hint, or if any hedge was
+                # expected and this long wasn't already matched
+                if hedge_product_id:
+                    for p in live_positions:
+                        pid = int(p.get("product_id") or 0)
+                        size = float(p.get("size") or 0)
+                        if size > 0 and pid not in matched_pids:
+                            extras.append(p)
 
-            # Close long hedge with SELL (not buy)
-            if hedge_product_id:
-                try:
-                    hedge_on_slave = await client.verify_position_exists(
-                        int(hedge_product_id)
-                    )
-                except Exception:
-                    hedge_on_slave = True
-                if hedge_on_slave:
-                    await client.place_order(
-                        product_id=int(hedge_product_id),
-                        size=qty,
-                        side="sell",
-                    )
-                    logger.info(
-                        "Slave '%s' hedge closed (sell) product=%s",
+                if matched or extras:
+                    targets = matched + extras
+                else:
+                    # No hints matched and no shorts found via filter —
+                    # close entire option book for this dedicated slave
+                    targets = list(live_positions)
+                    logger.warning(
+                        "[MIRROR_EXIT] Slave '%s' — closing ALL %s live "
+                        "option positions (hints stale or empty)",
                         slave.name,
-                        hedge_product_id,
+                        len(targets),
                     )
+            else:
+                # Positions API empty — last resort: try hint product_ids
+                logger.warning(
+                    "[MIRROR_EXIT] Slave '%s' no live positions returned — "
+                    "trying hint product_ids call=%s put=%s hedge=%s",
+                    slave.name,
+                    call_product_id,
+                    put_product_id,
+                    hedge_product_id,
+                )
+                for pid, side in (
+                    (int(call_product_id or 0), "buy"),
+                    (int(put_product_id or 0), "buy"),
+                ):
+                    if pid <= 0:
+                        continue
+                    targets.append(
+                        {
+                            "product_id": pid,
+                            "size": -float(stored_qty),
+                            "product_symbol": f"hint-{pid}",
+                            "_fallback_side": side,
+                        }
+                    )
+                if hedge_product_id:
+                    targets.append(
+                        {
+                            "product_id": int(hedge_product_id),
+                            "size": float(stored_qty),
+                            "product_symbol": f"hint-hedge-{hedge_product_id}",
+                            "_fallback_side": "sell",
+                        }
+                    )
+
+            closed_count = 0
+            for pos in targets:
+                pid = int(pos.get("product_id") or 0)
+                size = float(pos.get("size") or 0)
+                sym = str(pos.get("product_symbol") or "")
+                if pid <= 0 or size == 0:
+                    continue
+                close_size = max(1, abs(int(size)))
+                if size < 0:
+                    side = "buy"  # close short
+                else:
+                    side = "sell"  # close long hedge
+                # Explicit fallback override when inventing hint rows
+                if pos.get("_fallback_side"):
+                    side = str(pos["_fallback_side"])
+                try:
+                    await client.place_order(
+                        product_id=pid,
+                        size=close_size,
+                        side=side,
+                        reduce_only=True,
+                    )
+                    closed_count += 1
+                    logger.info(
+                        "[MIRROR_EXIT] Slave '%s' closed %s product=%s "
+                        "size=%s side=%s",
+                        slave.name,
+                        sym,
+                        pid,
+                        close_size,
+                        side,
+                    )
+                except Exception as close_exc:
+                    # Retry without reduce_only (some accounts reject it)
+                    try:
+                        await client.place_order(
+                            product_id=pid,
+                            size=close_size,
+                            side=side,
+                        )
+                        closed_count += 1
+                        logger.info(
+                            "[MIRROR_EXIT] Slave '%s' closed %s product=%s "
+                            "size=%s side=%s (retry no reduce_only)",
+                            slave.name,
+                            sym,
+                            pid,
+                            close_size,
+                            side,
+                        )
+                    except Exception as retry_exc:
+                        logger.error(
+                            "[MIRROR_EXIT] Slave '%s' FAILED close "
+                            "product=%s size=%s side=%s: %s / %s",
+                            slave.name,
+                            pid,
+                            close_size,
+                            side,
+                            close_exc,
+                            retry_exc,
+                        )
 
             # Always mark closed in DB (positions may already be gone)
             if not self._close_slave_trade(
@@ -1225,11 +1346,12 @@ class MirrorEngine:
             db.commit()
 
             logger.info(
-                "Slave '%s' exit complete for trade %s: reason=%s qty=%s",
+                "[MIRROR_EXIT] Slave '%s' exit complete trade=%s "
+                "reason=%s closed_legs=%s",
                 slave.name,
                 slave_trade.master_trade_id,
                 reason,
-                qty,
+                closed_count,
             )
 
         except Exception as exc:

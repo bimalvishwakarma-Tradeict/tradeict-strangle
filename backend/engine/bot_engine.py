@@ -2069,25 +2069,43 @@ class BotEngine:
                         logger.warning("SL cancel failed (non-fatal): %s", exc)
             db.commit()
 
-        # Step 3: Mirror exit to slaves BEFORE closing master (incl. hedge)
+        # Step 3: Mirror exit to slaves BEFORE closing master (incl. hedge).
+        # AWAIT — fire-and-forget left slaves open after adjustments when
+        # hint product_ids were stale / task errors were swallowed.
         try:
             import backend.engine.mirror_engine as mirror_module
 
-            if mirror_module.mirror_engine is not None:
-                asyncio.create_task(
-                    mirror_module.mirror_engine.mirror_exit(
-                        master_trade_id=trade_id,
-                        call_product_id=int(call_leg_mem.product_id or 0),
-                        put_product_id=int(put_leg_mem.product_id or 0),
-                        reason=reason,
-                        hedge_product_id=(
-                            int(hedge_pid) if hedge_pid else None
-                        ),
-                    )
+            me = mirror_module.mirror_engine or self.mirror_engine
+            if me is not None:
+                await me.mirror_exit(
+                    master_trade_id=trade_id,
+                    call_product_id=int(
+                        getattr(call_leg_mem, "product_id", 0) or 0
+                    ),
+                    put_product_id=int(
+                        getattr(put_leg_mem, "product_id", 0) or 0
+                    ),
+                    reason=reason,
+                    hedge_product_id=(
+                        int(hedge_pid) if hedge_pid else None
+                    ),
                 )
-                logger.info("Mirror exit queued for trade %s", trade_id)
+                logger.info(
+                    "[MIRROR_EXIT] Awaited complete for trade %s", trade_id
+                )
+            else:
+                logger.warning(
+                    "[MIRROR_EXIT] mirror_engine is None — slaves not closed "
+                    "for trade %s",
+                    trade_id,
+                )
         except Exception as exc:
-            logger.warning("Mirror exit queue failed (non-fatal): %s", exc)
+            logger.warning(
+                "[MIRROR_EXIT] Failed for trade %s (non-fatal): %s",
+                trade_id,
+                exc,
+                exc_info=True,
+            )
 
         # Step 4: Close ALL open legs on Delta (short=BUY, long hedge=SELL)
         close_results: dict[int, Any] = {}
