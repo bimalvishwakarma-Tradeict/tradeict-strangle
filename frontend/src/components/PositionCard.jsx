@@ -241,6 +241,7 @@ function TriggerWatch({
   triggerMode,
   deltaSlPrice,
   universalSlPct,
+  referenceOnly = false,
 }) {
   const pct = Math.max(0, Math.min(120, Number(progressPct) || 0))
   const warn = pct > 70
@@ -253,9 +254,20 @@ function TriggerWatch({
     baselineN > 0 && Math.abs(baselineN - entryN) > 0.005
   const isPremium = triggerMode === 'premium'
   return (
-    <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3">
+    <div
+      className={`rounded-lg border p-3 ${
+        referenceOnly
+          ? 'border-gray-700/60 bg-gray-900/30 opacity-80'
+          : 'border-gray-700 bg-gray-900/50'
+      }`}
+    >
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
         {title}
+        {referenceOnly ? (
+          <span className="ml-2 font-normal normal-case text-gray-500">
+            (Reference only — combined mode active)
+          </span>
+        ) : null}
       </div>
       <div className="space-y-1 text-xs text-gray-300">
         <div className="flex justify-between">
@@ -960,6 +972,44 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const callDistance = callTrigger > 0 ? callTrigger - callOfferLive : 0
   const putDistance = putTrigger > 0 ? putTrigger - putOfferLive : 0
 
+  const combinedMode = Boolean(trade.combined_trigger_mode)
+  const combinedEntry = Number(
+    trade.combined_entry_premium != null
+      ? trade.combined_entry_premium
+      : callEntry + putEntry,
+  )
+  const combinedCurrent = Number(
+    trade.combined_current_premium != null
+      ? trade.combined_current_premium
+      : callOfferLive + putOfferLive,
+  )
+  const combinedTrigPct = Number(
+    trade.combined_trigger_pct != null
+      ? trade.combined_trigger_pct
+      : callTriggerPct || triggerPct || 150,
+  )
+  const combinedThreshold = Number(
+    trade.combined_trigger_threshold != null
+      ? trade.combined_trigger_threshold
+      : combinedEntry > 0
+        ? combinedEntry * (combinedTrigPct / 100)
+        : 0,
+  )
+  const combinedProgress = Number(
+    trade.combined_pct_to_trigger != null
+      ? trade.combined_pct_to_trigger
+      : combinedThreshold > 0
+        ? (combinedCurrent / combinedThreshold) * 100
+        : 0,
+  )
+  const combinedBarPct = Math.max(0, Math.min(120, combinedProgress))
+  const combinedBarClass =
+    combinedBarPct >= 100
+      ? 'bg-red-500 animate-pulse'
+      : combinedBarPct >= 90
+        ? 'bg-orange-500'
+        : 'bg-green-500'
+
   const callRepl = trade.estimated_call_replacement
   const putRepl = trade.estimated_put_replacement
 
@@ -1469,6 +1519,63 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
               : '⚠️ Bracket SL: Not set / incomplete'}
           </div>
         </div>
+
+        {combinedMode && (
+          <div className="mb-3 space-y-3 rounded-lg border border-cyan-500/40 bg-cyan-500/10 p-3">
+            <div className="text-xs font-semibold text-cyan-200">
+              Combined Trigger Mode Active — Adjustment triggers when total
+              premium (CALL + PUT) reaches {fmtMoney(combinedTrigPct)}% of
+              combined entry
+            </div>
+            <div className="grid gap-2 text-xs text-gray-300 sm:grid-cols-3">
+              <div className="flex justify-between gap-2 sm:block">
+                <span className="text-gray-500">Combined Entry</span>
+                <span className="font-mono text-white">
+                  ${fmtMoney(combinedEntry)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2 sm:block">
+                <span className="text-gray-500">Combined Current</span>
+                <span className="font-mono text-white">
+                  ${fmtMoney(combinedCurrent)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2 sm:block">
+                <span className="text-gray-500">Threshold</span>
+                <span className="font-mono text-amber-300">
+                  ${fmtMoney(combinedThreshold)}
+                </span>
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-semibold uppercase tracking-wide text-cyan-300">
+                  Combined Trigger
+                </span>
+                <span
+                  className={
+                    combinedBarPct >= 100
+                      ? 'font-semibold text-red-400'
+                      : combinedBarPct >= 90
+                        ? 'text-orange-300'
+                        : 'text-gray-300'
+                  }
+                >
+                  ${fmtMoney(combinedCurrent)} / ${fmtMoney(combinedThreshold)}{' '}
+                  ({combinedBarPct.toFixed(1)}% to trigger)
+                  {combinedBarPct >= 100 ? ' — TRIGGERED' : ''}
+                </span>
+              </div>
+              <div className="h-2.5 w-full overflow-hidden rounded-full bg-gray-700">
+                <div
+                  className={`h-full rounded-full transition-all ${combinedBarClass}`}
+                  style={{ width: `${Math.min(100, combinedBarPct)}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="grid gap-3 sm:grid-cols-2">
           <TriggerWatch
             title="Call Leg Watch"
@@ -1482,6 +1589,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             triggerMode={triggerMode}
             deltaSlPrice={callDeltaSl}
             universalSlPct={universalSlPct}
+            referenceOnly={combinedMode}
           />
           <TriggerWatch
             title="Put Leg Watch"
@@ -1495,6 +1603,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             triggerMode={triggerMode}
             deltaSlPrice={putDeltaSl}
             universalSlPct={universalSlPct}
+            referenceOnly={combinedMode}
           />
         </div>
 

@@ -299,6 +299,32 @@ export function useTrades() {
               ? Number(msg.put_trigger_pct)
               : existing.put_trigger_pct,
           trigger_mode: msg.trigger_mode ?? existing.trigger_mode,
+          combined_trigger_mode:
+            msg.combined_trigger_mode != null
+              ? Boolean(msg.combined_trigger_mode)
+              : existing.combined_trigger_mode,
+          combined_entry_premium:
+            msg.combined_entry_premium != null
+              ? Number(msg.combined_entry_premium)
+              : existing.combined_entry_premium,
+          combined_current_premium:
+            msg.combined_current_premium != null
+              ? Number(msg.combined_current_premium)
+              : existing.combined_current_premium,
+          combined_trigger_pct:
+            msg.combined_trigger_pct != null
+              ? Number(msg.combined_trigger_pct)
+              : existing.combined_trigger_pct,
+          combined_trigger_threshold:
+            msg.combined_trigger_threshold != null
+              ? Number(msg.combined_trigger_threshold)
+              : existing.combined_trigger_threshold,
+          combined_pct_to_trigger:
+            msg.combined_pct_to_trigger != null
+              ? Number(msg.combined_pct_to_trigger)
+              : existing.combined_pct_to_trigger,
+          combined_triggered_leg:
+            msg.combined_triggered_leg ?? existing.combined_triggered_leg,
           premium_slab_300: msg.premium_slab_300 ?? existing.premium_slab_300,
           premium_slab_200: msg.premium_slab_200 ?? existing.premium_slab_200,
           premium_slab_100: msg.premium_slab_100 ?? existing.premium_slab_100,

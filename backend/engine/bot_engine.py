@@ -3767,6 +3767,30 @@ class BotEngine:
             (abs(gross_sl_now) / stoploss_usd * 100.0) if stoploss_usd > 0 else 0.0
         )
 
+        # Combined premium trigger (call+put vs combined entry × %)
+        combined_mode = bool(getattr(trade, "combined_trigger_mode", False))
+        mode_l = str(mode or "slab").lower()
+        if mode_l == "premium":
+            combined_trig_pct = (call_pct + put_pct) / 2.0
+        else:
+            combined_trig_pct = float(call_pct)
+        combined_entry = call_entry + put_entry
+        combined_current = float(call_prem) + float(put_prem)
+        combined_threshold = (
+            combined_entry * (combined_trig_pct / 100.0)
+            if combined_entry > 0
+            else 0.0
+        )
+        combined_pct_to = (
+            (combined_current / combined_threshold * 100.0)
+            if combined_threshold > 0
+            else 0.0
+        )
+        # Which leg moved more vs entry (for combined adjust target)
+        call_move = (call_prem / call_entry) if call_entry > 0 else 0.0
+        put_move = (put_prem / put_entry) if put_entry > 0 else 0.0
+        combined_triggered_leg = "call" if call_move >= put_move else "put"
+
         # Priority: conversion → near SL → near TP → adjust/conversion_likely → HOLD
         if in_conversion:
             hedge_sym = getattr(trade, "conversion_hedge_symbol", None)
@@ -3775,7 +3799,17 @@ class BotEngine:
             next_action = "STOPLOSS_NEAR"
         elif target_usd > 0 and pct_to_tp >= 80.0:
             next_action = "PROFIT_TARGET_NEAR"
-        elif call_pct_to >= 80.0 or put_pct_to >= 80.0:
+        elif combined_mode and combined_pct_to >= 80.0:
+            triggered = combined_triggered_leg
+            other_offer = float(put_prem if triggered == "call" else call_prem)
+            if conv_on and other_offer < conv_min:
+                next_action = "CONVERSION_LIKELY"
+            else:
+                next_action = (
+                    "ADJUST_CALL" if triggered == "call" else "ADJUST_PUT"
+                )
+            closer_leg = triggered
+        elif (not combined_mode) and (call_pct_to >= 80.0 or put_pct_to >= 80.0):
             triggered = closer_leg
             other_offer = float(put_prem if triggered == "call" else call_prem)
             if conv_on and other_offer < conv_min:
@@ -3948,6 +3982,13 @@ class BotEngine:
             "estimated_call_replacement": call_replacement,
             "estimated_put_replacement": put_replacement,
             "trigger_mode": mode,
+            "combined_trigger_mode": combined_mode,
+            "combined_entry_premium": round(combined_entry, 4),
+            "combined_current_premium": round(combined_current, 4),
+            "combined_trigger_pct": round(combined_trig_pct, 2),
+            "combined_trigger_threshold": round(combined_threshold, 4),
+            "combined_pct_to_trigger": round(combined_pct_to, 2),
+            "combined_triggered_leg": combined_triggered_leg,
             "universal_sl_pct": uni_sl,
             "call_sl_trigger_price": (
                 float(call_sl_px) if call_sl_px is not None else None
