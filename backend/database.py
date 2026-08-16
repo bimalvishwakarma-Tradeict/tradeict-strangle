@@ -561,6 +561,37 @@ def _migrate_schema() -> None:
                         "BOOLEAN NOT NULL DEFAULT 0"
                     )
                 )
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        if "entry_settling_seconds" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN entry_settling_seconds "
+                        "INTEGER NOT NULL DEFAULT 60"
+                    )
+                )
+        if "adjustment_settling_seconds" not in at_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE auto_trade_settings "
+                        "ADD COLUMN adjustment_settling_seconds "
+                        "INTEGER NOT NULL DEFAULT 20"
+                    )
+                )
+    if "trades" in tables:
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "adjust_settling_until" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN "
+                        "adjust_settling_until DATETIME"
+                    )
+                )
 
 
 def get_usd_inr_rate(db: Session) -> float:

@@ -32,6 +32,7 @@ def make_trade(
     trade.expiry_date = date.today() + timedelta(days=3)
     trade.trigger_mode = trigger_mode
     trade.monitoring_starts_at = None
+    trade.adjust_settling_until = None
     trade.entry_spread_for_sl_usd = 0.0
     return trade
 
@@ -211,6 +212,43 @@ def main() -> None:
     assert action.should_exit is True
     assert action.exit_reason == "STOPLOSS"
     print("Test 6b PASSED: Settling does NOT suppress STOPLOSS ✅")
+
+    # Test 6c: Adjustment settling skips TP; SL still fires
+    trade = make_trade(tp_usd=30, sl_usd=60)
+    trade.adjust_settling_until = get_ist_now() + td(seconds=20)
+    action = asyncio.run(
+        strategy.on_tick(
+            trade,
+            make_leg(150),
+            make_leg(150),
+            50.0,
+            50.0,
+            db,
+            net_mtm=35.0,
+            gross_mtm_for_sl=0.0,
+        )
+    )
+    assert action.should_exit is False
+    assert action.should_adjust is False
+    print("Test 6c PASSED: Adjustment settling skips TP ✅")
+
+    trade = make_trade(tp_usd=30, sl_usd=0.01)
+    trade.adjust_settling_until = get_ist_now() + td(seconds=20)
+    action = asyncio.run(
+        strategy.on_tick(
+            trade,
+            make_leg(150),
+            make_leg(150),
+            50.0,
+            50.0,
+            db,
+            net_mtm=-0.02,
+            gross_mtm_for_sl=-0.051,
+        )
+    )
+    assert action.should_exit is True
+    assert action.exit_reason == "STOPLOSS"
+    print("Test 6d PASSED: Adjustment settling does NOT suppress STOPLOSS ✅")
 
     print("\n✅ ALL EXIT LOGIC TESTS PASSED")
 

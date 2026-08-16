@@ -380,7 +380,10 @@ class ShortStrangleStrategy(BaseStrategy):
         else:
             total_pnl = calculated_pnl
 
-        settling = get_settling_info(getattr(trade, "monitoring_starts_at", None))
+        settling = get_settling_info(
+            getattr(trade, "monitoring_starts_at", None),
+            getattr(trade, "adjust_settling_until", None),
+        )
         is_settling = bool(settling.get("is_settling"))
         trade_id = int(getattr(trade, "id", 0) or 0)
 
@@ -479,12 +482,13 @@ class ShortStrangleStrategy(BaseStrategy):
                 current_pnl=decision_pnl,
             )
 
-        # Entry settling: skip TP and adjustment only
+        # Entry / adjustment settling: skip TP and adjustment only
         if is_settling:
             logger.info(
-                "Trade %s settling... %sm remaining — "
+                "Trade %s settling (%s)... %sm remaining — "
                 "TP/adjust skipped (SL still active)",
                 getattr(trade, "id", "?"),
+                settling.get("settling_source", "?"),
                 settling["settling_minutes_left"],
             )
             return TradeAction(current_pnl=total_pnl)

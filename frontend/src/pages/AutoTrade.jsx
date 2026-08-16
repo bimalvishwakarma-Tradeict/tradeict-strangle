@@ -27,6 +27,10 @@ function applyStatusToForm(data, setters) {
   }
   setters.setQuantity(Number(data.quantity ?? 1))
   setters.setReEntryDelay(Number(data.re_entry_delay_minutes ?? 1))
+  setters.setEntrySettlingSeconds(String(data.entry_settling_seconds ?? 60))
+  setters.setAdjustmentSettlingSeconds(
+    String(data.adjustment_settling_seconds ?? 20),
+  )
   setters.setTpPct(String(data.tp_pct ?? 50))
   setters.setSlPct(String(data.sl_pct ?? 100))
   setters.setUniversalSlPct(String(data.universal_sl_pct ?? 200))
@@ -99,6 +103,9 @@ export default function AutoTrade() {
   const [expiriesReady, setExpiriesReady] = useState(false)
   const [quantity, setQuantity] = useState(1)
   const [reEntryDelay, setReEntryDelay] = useState(1)
+  const [entrySettlingSeconds, setEntrySettlingSeconds] = useState('60')
+  const [adjustmentSettlingSeconds, setAdjustmentSettlingSeconds] =
+    useState('20')
   const [tpPct, setTpPct] = useState('50')
   const [slPct, setSlPct] = useState('100')
   const [universalSlPct, setUniversalSlPct] = useState('200')
@@ -127,6 +134,8 @@ export default function AutoTrade() {
       setSelectedExpiryDate,
       setQuantity,
       setReEntryDelay,
+      setEntrySettlingSeconds,
+      setAdjustmentSettlingSeconds,
       setTpPct,
       setSlPct,
       setUniversalSlPct,
@@ -347,6 +356,14 @@ export default function AutoTrade() {
       ...payloadExpiry,
       quantity: Math.max(1, Number(quantity) || 1),
       re_entry_delay_minutes: Math.max(0, Number(reEntryDelay) || 0),
+      entry_settling_seconds: Math.min(
+        300,
+        Math.max(0, Number(entrySettlingSeconds) || 0),
+      ),
+      adjustment_settling_seconds: Math.min(
+        300,
+        Math.max(0, Number(adjustmentSettlingSeconds) || 0),
+      ),
       tp_pct: Number(tpPct) || 50,
       sl_pct: Number(slPct) || 100,
       universal_sl_pct: Number(universalSlPct) || 200,
@@ -683,6 +700,42 @@ export default function AutoTrade() {
             0 = immediate re-entry after exit
           </span>
         </label>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block text-sm text-gray-300">
+            Entry Settling (seconds)
+            <input
+              type="number"
+              min={0}
+              max={300}
+              step={1}
+              value={entrySettlingSeconds}
+              onChange={(e) => setEntrySettlingSeconds(e.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+            />
+            <span className="mt-1 block text-xs text-gray-500">
+              Pause profit-target and adjustment checks after a new entry.
+              Stop loss is never paused. 0–300.
+            </span>
+          </label>
+          <label className="block text-sm text-gray-300">
+            Adjustment Settling (seconds)
+            <input
+              type="number"
+              min={0}
+              max={300}
+              step={1}
+              value={adjustmentSettlingSeconds}
+              onChange={(e) => setAdjustmentSettlingSeconds(e.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+            />
+            <span className="mt-1 block text-xs text-gray-500">
+              Pause profit-target and adjustment checks for this long after an
+              adjustment, while the new leg settles and slaves finish mirroring.
+              Stop loss is never paused.
+            </span>
+          </label>
+        </div>
       </section>
 
       {/* Risk */}

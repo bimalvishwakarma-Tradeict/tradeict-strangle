@@ -24,7 +24,7 @@ from backend.core.time_utils import (
     get_dte_label,
     get_hours_to_expiry,
     get_ist_now,
-    get_settling_info,
+    get_settling_info_for_trade,
     settling_ends_at_after_place,
 )
 from backend.core.ws_manager import ws_manager
@@ -1001,7 +1001,19 @@ async def initiate_trade(
 
         # --- Step 7–8: Save to DB ---
         logger.info("Step 7: Saving to DB%s...", " (DEMO)" if is_demo else "")
-        monitoring_starts = settling_ends_at_after_place()
+        from backend.config import ENTRY_SETTLING_SECONDS
+        from backend.database import get_or_create_auto_settings
+
+        _entry_secs = int(ENTRY_SETTLING_SECONDS)
+        try:
+            _ats = get_or_create_auto_settings(db)
+            _raw = getattr(_ats, "entry_settling_seconds", None)
+            if _raw is not None:
+                _entry_secs = int(_raw)
+        except Exception:
+            pass
+        _entry_secs = max(0, min(300, _entry_secs))
+        monitoring_starts = settling_ends_at_after_place(seconds=_entry_secs)
         try:
             trade, call_leg, put_leg = await _persist_strangle_trade(
                 db=db,
@@ -1173,7 +1185,7 @@ async def initiate_trade(
                 "delta_sl_active": delta_sl_ok,
                 "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
                 "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
-                **get_settling_info(trade.monitoring_starts_at),
+                **get_settling_info_for_trade(trade),
             }
         )
 
@@ -1246,7 +1258,21 @@ async def register_existing_trade(
     account = _get_active_account(db)
     await _ensure_no_active_trade(db, account, underlying)
 
-    monitoring_starts = settling_ends_at_after_place(get_ist_now())
+    from backend.config import ENTRY_SETTLING_SECONDS
+    from backend.database import get_or_create_auto_settings
+
+    _entry_secs = int(ENTRY_SETTLING_SECONDS)
+    try:
+        _ats = get_or_create_auto_settings(db)
+        _raw = getattr(_ats, "entry_settling_seconds", None)
+        if _raw is not None:
+            _entry_secs = int(_raw)
+    except Exception:
+        pass
+    _entry_secs = max(0, min(300, _entry_secs))
+    monitoring_starts = settling_ends_at_after_place(
+        get_ist_now(), seconds=_entry_secs
+    )
     trade, call_leg, put_leg = await _persist_strangle_trade(
         db=db,
         account=account,
@@ -1322,7 +1348,7 @@ async def register_existing_trade(
             "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
             "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
             "universal_sl_pct": uni_sl,
-            **get_settling_info(trade.monitoring_starts_at),
+            **get_settling_info_for_trade(trade),
         }
     )
 
@@ -1378,6 +1404,9 @@ def _sync_tracker_from_db(db: Session) -> None:
             bot_engine.position_tracker.mark_closed(state.trade_id)
             continue
         state.trade.monitoring_starts_at = row.monitoring_starts_at
+        state.trade.adjust_settling_until = getattr(
+            row, "adjust_settling_until", None
+        )
         state.trade.realized_pnl = float(row.realized_pnl or 0.0)
         state.trade.status = row.status
         if hasattr(row, "is_demo"):
@@ -1581,9 +1610,7 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
         target = float(state.trade.profit_target_usd or 0)
         display_total = realized + delta_mtm
         pnl_pct = (display_total / target * 100.0) if target else 0.0
-        settling = get_settling_info(
-            getattr(state.trade, "monitoring_starts_at", None)
-        )
+        settling = get_settling_info_for_trade(state.trade)
 
         trigger_pct = bot_engine.strategy.get_current_trigger_pct(state.trade, db)
         call_trig_pct = bot_engine.strategy.get_trigger_for_leg(
@@ -1802,6 +1829,7 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "is_settling": settling["is_settling"],
             "settling_ends_at": settling["settling_ends_at"],
             "settling_minutes_left": settling["settling_minutes_left"],
+            "settling_source": settling.get("settling_source", "none"),
             "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
             "in_conversion_mode": bool(
                 getattr(state.trade, "in_conversion_mode", False)

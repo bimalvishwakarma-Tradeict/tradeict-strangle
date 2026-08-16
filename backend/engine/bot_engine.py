@@ -12,7 +12,7 @@ import asyncio
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,7 +33,7 @@ from backend.core.encryption import decrypt
 from backend.core.time_utils import (
     get_hours_to_expiry,
     get_ist_now,
-    get_settling_info,
+    get_settling_info_for_trade,
 )
 from backend.core.ws_manager import ws_manager
 from backend.database import SessionLocal
@@ -1302,7 +1302,7 @@ class BotEngine:
         ):
             return
 
-        settling = get_settling_info(getattr(trade, "monitoring_starts_at", None))
+        settling = get_settling_info_for_trade(trade)
         is_settling = bool(settling.get("is_settling"))
         if is_settling:
             log_and_buffer(
@@ -1311,6 +1311,7 @@ class BotEngine:
                 {
                     "minutes_left": settling.get("settling_minutes_left"),
                     "ends_at": settling.get("settling_ends_at"),
+                    "settling_source": settling.get("settling_source"),
                 },
             )
 
@@ -1327,6 +1328,7 @@ class BotEngine:
                 "call_open": call_open,
                 "put_open": put_open,
                 "is_settling": is_settling,
+                "settling_source": settling.get("settling_source", "none"),
                 "is_demo": bool(getattr(trade, "is_demo", False)),
             },
         )
@@ -3553,8 +3555,14 @@ class BotEngine:
                         "new_strike": float(result.new_strike or 0),
                         "old_premium": round(old_premium, 2),
                         "new_premium": round(float(result.premium_collected or 0), 2),
-                        "cooldown_minutes": 0,
-
+                        "adjust_settling_until": (
+                            trade_state.trade.adjust_settling_until.isoformat()
+                            if getattr(
+                                trade_state.trade, "adjust_settling_until", None
+                            )
+                            is not None
+                            else None
+                        ),
                     },
                 )
 
@@ -4054,16 +4062,38 @@ class BotEngine:
 
     def _apply_adjustment_cooldown(self, trade_state: TradeState) -> None:
         """
-        No-op for monitoring_starts_at.
+        Start a short adjustment settling window on adjust_settling_until.
 
-        Post-adjustment settling was removed: an adjustment means the trade is
-        under stress, so suspending STOPLOSS (via pushing monitoring_starts_at)
-        is unsafe. monitoring_starts_at is set once at entry only.
+        Does NOT touch monitoring_starts_at (entry-only). STOPLOSS ignores this
+        window; TP and adjustment triggers respect it while quotes settle and
+        slave mirroring finishes.
         """
+        from backend.config import ADJUSTMENT_SETTLING_SECONDS
+        from backend.database import get_or_create_auto_settings
+
+        secs = int(ADJUSTMENT_SETTLING_SECONDS)
+        with self.db_factory() as db:
+            try:
+                cfg = get_or_create_auto_settings(db)
+                raw = getattr(cfg, "adjustment_settling_seconds", None)
+                if raw is not None:
+                    secs = int(raw)
+            except Exception:
+                pass
+            secs = max(0, min(300, secs))
+            until = datetime.now(timezone.utc) + timedelta(seconds=secs)
+            row = db.query(Trade).filter(Trade.id == trade_state.trade_id).first()
+            if row is not None:
+                row.adjust_settling_until = until
+                db.commit()
+            trade_state.trade.adjust_settling_until = until
+
         logger.info(
-            "Trade %s adjustment done — monitoring_starts_at unchanged "
-            "(no post-adjust settling; SL remains active)",
+            "Trade %s adjustment settling until %s (%ss; "
+            "monitoring_starts_at unchanged; SL still active)",
             trade_state.trade_id,
+            until.isoformat(),
+            secs,
         )
 
     def _reload_legs(self, trade_state: TradeState) -> None:
@@ -4728,9 +4758,7 @@ class BotEngine:
         display_total = realized_pnl + float(delta_mtm)
         calculated_total = float(calculated_pnl)
         pnl_pct_of_target = (display_total / target * 100.0) if target else 0.0
-        settling = get_settling_info(
-            getattr(trade_state.trade, "monitoring_starts_at", None)
-        )
+        settling = get_settling_info_for_trade(trade_state.trade)
 
         # Fees from DB legs + slippage for Net MTM on TRADE_UPDATE
         from backend.core.fees import (
@@ -4891,6 +4919,7 @@ class BotEngine:
             "is_settling": settling["is_settling"],
             "settling_ends_at": settling["settling_ends_at"],
             "settling_minutes_left": settling["settling_minutes_left"],
+            "settling_source": settling.get("settling_source", "none"),
             **plan,
             # Slippage AFTER plan so keys are never overwritten
             "slippage_pct": slip_pct,
@@ -4998,9 +5027,7 @@ class BotEngine:
         else:
             put_prem = float(result.premium_collected or put_prem)
 
-        settling = get_settling_info(
-            getattr(trade_state.trade, "monitoring_starts_at", None)
-        )
+        settling = get_settling_info_for_trade(trade_state.trade)
 
         def _snap(leg: Any, prem: float) -> dict[str, Any]:
             initial = float(leg.initial_premium or 0)
@@ -5119,6 +5146,7 @@ class BotEngine:
                 "is_settling": settling["is_settling"],
                 "settling_ends_at": settling["settling_ends_at"],
                 "settling_minutes_left": settling["settling_minutes_left"],
+                "settling_source": settling.get("settling_source", "none"),
                 "open_leg_count": sum(
                     1
                     for x in (
@@ -5152,9 +5180,7 @@ class BotEngine:
         """Snapshot of all active trades for new WebSocket clients."""
         trades: list[dict[str, Any]] = []
         for state in self.position_tracker.get_all_active():
-            settling = get_settling_info(
-                getattr(state.trade, "monitoring_starts_at", None)
-            )
+            settling = get_settling_info_for_trade(state.trade)
             trades.append(
                 {
                     "trade_id": state.trade_id,
@@ -5168,6 +5194,7 @@ class BotEngine:
                     "is_settling": settling["is_settling"],
                     "settling_ends_at": settling["settling_ends_at"],
                     "settling_minutes_left": settling["settling_minutes_left"],
+                    "settling_source": settling.get("settling_source", "none"),
                 }
             )
         return {"type": "INITIAL_STATE", "trades": trades}

@@ -689,7 +689,16 @@ class AutoTradeEngine:
 
             now_utc = datetime.now(timezone.utc)
             now_ist = get_ist_now()
-            monitoring_starts = settling_ends_at_after_place(now_ist)
+            from backend.config import ENTRY_SETTLING_SECONDS
+
+            entry_secs = int(ENTRY_SETTLING_SECONDS)
+            raw_entry = getattr(settings, "entry_settling_seconds", None)
+            if raw_entry is not None:
+                entry_secs = int(raw_entry)
+            entry_secs = max(0, min(300, entry_secs))
+            monitoring_starts = settling_ends_at_after_place(
+                now_ist, seconds=entry_secs
+            )
             basket_no = next_basket_number(db, int(account.id))
 
             trade = Trade(

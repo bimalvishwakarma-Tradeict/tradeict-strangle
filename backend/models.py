@@ -73,9 +73,13 @@ class Trade(Base):
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # P&L: entry settling only (ENTRY_SETTLING_SECONDS). Set once at entry;
-    # never pushed forward on adjustment/conversion. STOPLOSS ignores this.
+    # Entry settling end (set once at entry). Never pushed on adjust/conversion.
+    # STOPLOSS ignores this; TP / adjust triggers respect it.
     monitoring_starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Short post-adjust/conversion settling end (UTC). Independent of entry window.
+    adjust_settling_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     # Human-facing basket id (sequential per account); clubs all legs/adjustments
@@ -220,6 +224,13 @@ class AutoTradeSettings(Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     re_entry_delay_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1
+    )
+    # Settling windows (seconds). 0 = disabled for that window.
+    entry_settling_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=60
+    )
+    adjustment_settling_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=20
     )
 
     # Risk settings

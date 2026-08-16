@@ -27,6 +27,8 @@ class AutoTradeSettingsSchema(BaseModel):
     expiry_date_override: str | None = None
     quantity: int = Field(default=1, ge=1, le=1000)
     re_entry_delay_minutes: int = Field(default=1, ge=0, le=1440)
+    entry_settling_seconds: int = Field(default=60, ge=0, le=300)
+    adjustment_settling_seconds: int = Field(default=20, ge=0, le=300)
 
     # Risk
     tp_pct: float = Field(default=50.0, gt=0, le=500)
@@ -99,6 +101,16 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "expiry_date_override": getattr(s, "expiry_date_override", None),
         "quantity": int(s.quantity),
         "re_entry_delay_minutes": int(s.re_entry_delay_minutes),
+        "entry_settling_seconds": int(
+            getattr(s, "entry_settling_seconds", 60)
+            if getattr(s, "entry_settling_seconds", None) is not None
+            else 60
+        ),
+        "adjustment_settling_seconds": int(
+            getattr(s, "adjustment_settling_seconds", 20)
+            if getattr(s, "adjustment_settling_seconds", None) is not None
+            else 20
+        ),
         "tp_pct": float(s.tp_pct),
         "sl_pct": float(s.sl_pct),
         "universal_sl_pct": float(s.universal_sl_pct),
@@ -205,6 +217,10 @@ async def update_auto_trade_settings(
             settings.expiry_date_override = None
     settings.quantity = int(payload.quantity)
     settings.re_entry_delay_minutes = int(payload.re_entry_delay_minutes)
+    settings.entry_settling_seconds = int(payload.entry_settling_seconds)
+    settings.adjustment_settling_seconds = int(
+        payload.adjustment_settling_seconds
+    )
     settings.tp_pct = float(payload.tp_pct)
     settings.sl_pct = float(payload.sl_pct)
     settings.universal_sl_pct = float(payload.universal_sl_pct)

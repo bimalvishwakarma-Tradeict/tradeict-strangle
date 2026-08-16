@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 # Allow `python backend/core/time_utils.py` from trading-bot/ root
 _ROOT = Path(__file__).resolve().parent.parent.parent
@@ -44,42 +45,83 @@ def settling_ends_at(
     return base + timedelta(minutes=wait)
 
 
-def settling_ends_at_after_place(from_time: datetime | None = None) -> datetime:
-    """Entry settling window after bot-placed fills (ENTRY_SETTLING_SECONDS)."""
-    return settling_ends_at(from_time, seconds=ENTRY_SETTLING_SECONDS)
+def settling_ends_at_after_place(
+    from_time: datetime | None = None,
+    *,
+    seconds: int | None = None,
+) -> datetime:
+    """Entry settling window after bot-placed fills.
 
-
-def get_settling_info(monitoring_starts_at: datetime | None) -> dict:
+    ``seconds`` overrides the config fallback (e.g. AutoTradeSettings value).
     """
-    Settling-period status for API / WS payloads.
+    secs = ENTRY_SETTLING_SECONDS if seconds is None else int(seconds)
+    return settling_ends_at(from_time, seconds=max(0, secs))
 
-    Returns is_settling, settling_ends_at (ISO IST), settling_minutes_left.
+
+def _as_ist(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return IST.localize(dt)
+    return dt.astimezone(IST)
+
+
+def get_settling_info(
+    monitoring_starts_at: datetime | None,
+    adjust_settling_until: datetime | None = None,
+) -> dict[str, Any]:
     """
-    if monitoring_starts_at is None:
-        return {
-            "is_settling": False,
-            "settling_ends_at": None,
-            "settling_minutes_left": 0,
-        }
+    Combined entry + adjustment settling status.
 
+    is_settling when now < monitoring_starts_at OR now < adjust_settling_until.
+    settling_source: "entry" | "adjustment" | "none"
+    STOPLOSS callers must ignore is_settling.
+    """
     now = get_ist_now()
-    starts = monitoring_starts_at
-    if starts.tzinfo is None:
-        starts = IST.localize(starts)
-    else:
-        starts = starts.astimezone(IST)
+    entry_end = _as_ist(monitoring_starts_at)
+    adjust_end = _as_ist(adjust_settling_until)
 
-    remaining = (starts - now).total_seconds()
-    is_settling = remaining > 0
-    minutes_left = max(0, int(remaining // 60))
+    entry_remaining = (entry_end - now).total_seconds() if entry_end else 0.0
+    adjust_remaining = (adjust_end - now).total_seconds() if adjust_end else 0.0
+    entry_active = entry_remaining > 0
+    adjust_active = adjust_remaining > 0
+    is_settling = entry_active or adjust_active
+
+    if entry_active:
+        settling_source = "entry"
+        ends = entry_end
+        remaining = entry_remaining
+        # If adjust ends later, surface the later end for UI countdown
+        if adjust_active and adjust_end is not None and adjust_end > entry_end:
+            ends = adjust_end
+            remaining = adjust_remaining
+    elif adjust_active:
+        settling_source = "adjustment"
+        ends = adjust_end
+        remaining = adjust_remaining
+    else:
+        settling_source = "none"
+        ends = None
+        remaining = 0.0
+
+    minutes_left = max(0, int(remaining // 60)) if is_settling else 0
     if is_settling and minutes_left == 0:
         minutes_left = 1  # still settling; show at least 1m
 
     return {
         "is_settling": is_settling,
-        "settling_ends_at": starts.isoformat(),
+        "settling_ends_at": ends.isoformat() if ends is not None else None,
         "settling_minutes_left": minutes_left,
+        "settling_source": settling_source,
     }
+
+
+def get_settling_info_for_trade(trade: Any) -> dict[str, Any]:
+    """Convenience wrapper: entry + adjust windows from a Trade-like object."""
+    return get_settling_info(
+        getattr(trade, "monitoring_starts_at", None),
+        getattr(trade, "adjust_settling_until", None),
+    )
 
 
 def get_expiry_datetime(expiry_date: date) -> datetime:
@@ -314,5 +356,15 @@ if __name__ == "__main__":
     print("Live get_expiry_date_for_dte:")
     for dte in [0, 1, 2, 7]:
         print(f"  dte={dte} → {get_expiry_date_for_dte(dte)}")
+
+    # Combined settling: entry + adjust
+    info = get_settling_info(None, None)
+    assert info["is_settling"] is False and info["settling_source"] == "none"
+    info = get_settling_info(get_ist_now() + timedelta(seconds=30), None)
+    assert info["is_settling"] is True and info["settling_source"] == "entry"
+    info = get_settling_info(None, get_ist_now() + timedelta(seconds=10))
+    assert info["is_settling"] is True and info["settling_source"] == "adjustment"
+    info = get_settling_info(None, get_ist_now())  # seconds=0 equivalent
+    assert info["is_settling"] is False
 
     print("✅ TIME UTILS TEST PASSED")
