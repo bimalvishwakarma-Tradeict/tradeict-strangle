@@ -3368,16 +3368,9 @@ class BotEngine:
             ) or float(other_leg.initial_premium)
 
             logger.info("Adjusting trade %s, leg: %s", trade_id, triggered_leg_type)
-            log_and_buffer(
-                "ADJUSTMENT_START",
-                trade_id,
-                {
-                    "triggered_leg": triggered,
-                    "old_strike": old_strike,
-                    "old_premium": round(old_premium, 2),
-                    "target_new_premium": round(other_prem, 2),
-                },
-            )
+            # ADJUSTMENT_START with final target_new_premium is emitted inside
+            # AdjustmentExecutor after the basket-loss formula is computed —
+            # do not log a pre-loss placeholder here (caused Trade#66 mismatch).
             with self.db_factory() as db:
                 result = await self.adjustment_executor.execute(
                     trade_state.trade,

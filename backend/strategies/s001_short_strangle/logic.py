@@ -962,13 +962,16 @@ class ShortStrangleStrategy(BaseStrategy):
         other_leg_current_premium: float,
         current_strike: float | None = None,
         target_premium_override: float | None = None,
+        untouched_leg_offer: float | None = None,
     ) -> AdjustmentPlan:
-        """Find replacement strike with premium >= other leg's current offer.
+        """Find replacement strike with premium >= basket target.
 
-        Prefers lowest premium at-or-above the other leg offer. Falls back to
-        nearest if none qualify. Never returns the same strike as current_strike.
-        When target_premium_override is set (premium cover loss), that target
-        is used instead of other_leg_current_premium.
+        ``other_leg_current_premium`` is the final target_new_premium
+        (untouched offer + basket net loss). ``untouched_leg_offer`` is the
+        live offer of the non-triggered short leg (for audit logs only).
+
+        ``target_premium_override`` is ignored — basket formula is the single
+        rule (kept as a kwarg for call-site compatibility).
         """
         leg = triggered_leg_type.lower().strip()
         underlying_key = str(trade.underlying).upper()
@@ -980,10 +983,19 @@ class ShortStrangleStrategy(BaseStrategy):
         else:
             expiry_str = str(expiry)
 
+        # Basket formula already computed by caller — never replace it.
         if target_premium_override is not None:
-            final_target = float(target_premium_override)
-        else:
-            final_target = float(other_leg_current_premium)
+            logger.warning(
+                "find_adjustment_strike: ignoring target_premium_override=%.4f "
+                "(basket formula is the single target rule)",
+                float(target_premium_override),
+            )
+        final_target = float(other_leg_current_premium)
+        untouched_for_log = (
+            float(untouched_leg_offer)
+            if untouched_leg_offer is not None
+            else None
+        )
 
         try:
             from backend.core.bot_logger import log_and_buffer
@@ -993,10 +1005,13 @@ class ShortStrangleStrategy(BaseStrategy):
                 int(getattr(trade, "id", 0) or 0),
                 {
                     "final_target": round(final_target, 2),
-                    "override_used": target_premium_override is not None,
-                    "other_leg_offer": round(
-                        float(other_leg_current_premium), 2
+                    "override_used": False,
+                    "other_leg_offer": (
+                        round(untouched_for_log, 2)
+                        if untouched_for_log is not None
+                        else None
                     ),
+                    "target_new_premium": round(final_target, 2),
                 },
             )
         except Exception:
@@ -1017,14 +1032,19 @@ class ShortStrangleStrategy(BaseStrategy):
         mark_key = "call_mark_price" if leg == "call" else "put_mark_price"
         new_premium = float(row.get(mark_key) or 0)
         method = str(row.get("_match_method") or "above_offer")
-        other_offer = float(other_leg_current_premium)
+        other_offer = (
+            float(untouched_for_log)
+            if untouched_for_log is not None
+            else float(other_leg_current_premium)
+        )
         logger.info(
             "NEW_STRIKE_SELECTED | selected_premium=%.1f | other_leg_offer=%.1f | "
-            "method=%s | selected_strike=%s",
+            "method=%s | selected_strike=%s | target_new_premium=%.1f",
             new_premium,
             other_offer,
             method,
             new_strike,
+            final_target,
         )
         try:
             from backend.core.bot_logger import log_and_buffer
@@ -1035,6 +1055,7 @@ class ShortStrangleStrategy(BaseStrategy):
                 {
                     "selected_premium": round(new_premium, 4),
                     "other_leg_offer": round(other_offer, 4),
+                    "target_new_premium": round(final_target, 4),
                     "method": method,
                     "selected_strike": new_strike,
                 },
