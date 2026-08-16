@@ -1993,6 +1993,57 @@ async def exit_trade(
             )
             .first()
         )
+
+        # Resolve hedge early — needed for hoisted mirror above leftovers branch
+        hedge_leg = (
+            db.query(Leg)
+            .filter(
+                Leg.trade_id == trade_id,
+                Leg.status == "open",
+                Leg.is_bot_managed.is_(True),
+                Leg.is_long.is_(True),
+            )
+            .first()
+        )
+        hedge_pid = (
+            int(hedge_leg.product_id)
+            if hedge_leg is not None
+            else getattr(trade, "conversion_hedge_product_id", None)
+        )
+
+        # HOISTED: every fallback return path mirrors slaves first
+        # (leftovers-only used to return before the old mirror_exit call).
+        try:
+            import backend.engine.mirror_engine as mirror_module
+
+            me = mirror_module.mirror_engine
+            if me is not None:
+                await me.mirror_exit(
+                    master_trade_id=int(trade_id),
+                    call_product_id=int(
+                        (call_leg.product_id if call_leg else 0) or 0
+                    ),
+                    put_product_id=int(
+                        (put_leg.product_id if put_leg else 0) or 0
+                    ),
+                    reason=reason,
+                    hedge_product_id=(
+                        int(hedge_pid) if hedge_pid else None
+                    ),
+                )
+                logger.info(
+                    "[MIRROR_EXIT] Awaited complete for trade %s "
+                    "(fallback path, hoisted)",
+                    trade_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[MIRROR_EXIT] Failed trade %s (fallback hoist): %s",
+                trade_id,
+                exc,
+                exc_info=True,
+            )
+
         # Allow one-legged emergency exit (may still have open hedge)
         if call_leg is None and put_leg is None:
             leftovers = (
@@ -2028,21 +2079,37 @@ async def exit_trade(
                 leftover.status = "closed"
                 leftover.exit_time = get_ist_now()
                 leftover.exit_premium = exit_px
-            trade.status = TradeStatus.EMERGENCY_CLOSED.value
-            trade.exit_time = get_ist_now()
-            trade.exit_reason = reason
-            trade.in_conversion_mode = False
-            trade.conversion_hedge_symbol = None
-            trade.conversion_hedge_product_id = None
-            trade.conversion_hedge_entry_price = None
             db.commit()
-            bot_engine.position_tracker.mark_closed(trade_id)
+
+            # Funnel owns Trade.status / mark_closed (slaves already mirrored)
+            funnel = await bot_engine.close_master_trade(
+                trade_id=int(trade_id),
+                reason=reason,
+                db=db,
+                skip_master_legs=True,
+                trade_state=None,
+            )
+            slaves_closed = int(funnel.get("slaves_closed") or 0)
+            slaves_failed = int(funnel.get("slaves_failed") or 0)
+            if slaves_failed > 0:
+                logger.critical(
+                    "[EXIT_FUNNEL] leftovers-only emergency trade=%s "
+                    "slaves_failed=%s slaves_closed=%s",
+                    trade_id,
+                    slaves_failed,
+                    slaves_closed,
+                )
+            refreshed = db.query(Trade).filter(Trade.id == trade_id).first()
             return {
                 "success": True,
-                "final_pnl": trade.realized_pnl,
+                "final_pnl": (
+                    refreshed.realized_pnl if refreshed else trade.realized_pnl
+                ),
                 "call_closed_at": None,
                 "put_closed_at": None,
                 "message": "No open short legs — leftovers closed",
+                "slaves_closed": slaves_closed,
+                "slaves_failed": slaves_failed,
             }
 
         call_exists = False
@@ -2058,55 +2125,6 @@ async def exit_trade(
             call_exists,
             put_exists,
         )
-
-        hedge_leg = (
-            db.query(Leg)
-            .filter(
-                Leg.trade_id == trade_id,
-                Leg.status == "open",
-                Leg.is_bot_managed.is_(True),
-                Leg.is_long.is_(True),
-            )
-            .first()
-        )
-        hedge_pid = (
-            int(hedge_leg.product_id)
-            if hedge_leg is not None
-            else getattr(trade, "conversion_hedge_product_id", None)
-        )
-
-        # Mirror exit to slaves before closing master legs.
-        # AWAIT live-position close (hint product_ids may be stale post-adj).
-        try:
-            import backend.engine.mirror_engine as mirror_module
-
-            me = mirror_module.mirror_engine
-            if me is not None:
-                await me.mirror_exit(
-                    master_trade_id=int(trade_id),
-                    call_product_id=int(
-                        (call_leg.product_id if call_leg else 0) or 0
-                    ),
-                    put_product_id=int(
-                        (put_leg.product_id if put_leg else 0) or 0
-                    ),
-                    reason=reason,
-                    hedge_product_id=(
-                        int(hedge_pid) if hedge_pid else None
-                    ),
-                )
-                logger.info(
-                    "[MIRROR_EXIT] Awaited complete for trade %s "
-                    "(fallback path)",
-                    trade_id,
-                )
-        except Exception as exc:
-            logger.warning(
-                "[MIRROR_EXIT] Failed trade %s (fallback): %s",
-                trade_id,
-                exc,
-                exc_info=True,
-            )
 
         call_close = None
         put_close = None
@@ -2217,20 +2235,29 @@ async def exit_trade(
             or not put_exists
         )
         success = call_ok and put_ok
+        funnel: dict[str, Any] = {
+            "slaves_closed": 0,
+            "slaves_failed": 0,
+        }
         if success:
-            trade.status = TradeStatus.EMERGENCY_CLOSED.value
-            trade.exit_time = get_ist_now()
-            trade.exit_reason = reason
-            trade.in_conversion_mode = False
-            trade.conversion_hedge_symbol = None
-            trade.conversion_hedge_product_id = None
-            trade.conversion_hedge_entry_price = None
-            trade.conversion_hedge_order_id = None
-            trade.conversion_triggered_leg = None
             if trade.realized_pnl is None:
                 trade.realized_pnl = 0.0
             db.commit()
-            bot_engine.position_tracker.mark_closed(trade_id)
+            # Funnel owns Trade.status / mark_closed (mirror already hoisted)
+            funnel = await bot_engine.close_master_trade(
+                trade_id=int(trade_id),
+                reason=reason,
+                db=db,
+                skip_master_legs=True,
+                trade_state=None,
+            )
+            if int(funnel.get("slaves_failed") or 0) > 0:
+                logger.critical(
+                    "[EXIT_FUNNEL] emergency fallback trade=%s "
+                    "slaves_failed=%s",
+                    trade_id,
+                    funnel.get("slaves_failed"),
+                )
         else:
             db.commit()
             raise HTTPException(
@@ -2240,11 +2267,16 @@ async def exit_trade(
                 ),
             )
 
+        refreshed = db.query(Trade).filter(Trade.id == trade_id).first()
         return {
             "success": True,
-            "final_pnl": trade.realized_pnl,
+            "final_pnl": (
+                refreshed.realized_pnl if refreshed else trade.realized_pnl
+            ),
             "call_closed_at": call_leg.exit_premium if call_leg else None,
             "put_closed_at": put_leg.exit_premium if put_leg else None,
+            "slaves_closed": int(funnel.get("slaves_closed") or 0),
+            "slaves_failed": int(funnel.get("slaves_failed") or 0),
         }
     finally:
         await client.close()
@@ -2278,12 +2310,48 @@ async def close_single_leg(
     if leg is None:
         raise HTTPException(status_code=404, detail=f"Open {leg_key} leg not found")
 
+    product_id = int(leg.product_id or 0)
+
+    # Mirror this leg on slaves BEFORE closing the master leg
+    mirror_counts: dict[str, int] = {
+        "slaves_total": 0,
+        "slaves_closed": 0,
+        "slaves_failed": 0,
+    }
+    try:
+        import backend.engine.mirror_engine as mirror_module
+
+        me = mirror_module.mirror_engine
+        if me is not None and product_id > 0:
+            mirror_counts = await me.mirror_leg_close(
+                master_trade_id=int(trade_id),
+                leg_type=leg_key,
+                product_id=product_id,
+            )
+            if int(mirror_counts.get("slaves_failed") or 0) > 0:
+                logger.critical(
+                    "[MIRROR_LEG_CLOSE] trade=%s leg=%s slaves_failed=%s "
+                    "slaves_closed=%s",
+                    trade_id,
+                    leg_key,
+                    mirror_counts.get("slaves_failed"),
+                    mirror_counts.get("slaves_closed"),
+                )
+    except Exception as mirror_exc:
+        logger.warning(
+            "[MIRROR_LEG_CLOSE] Failed trade=%s leg=%s: %s",
+            trade_id,
+            leg_key,
+            mirror_exc,
+            exc_info=True,
+        )
+
     account = _get_active_account(db)
     client = _build_delta_client(account)
     try:
         leg_exists = False
-        if int(leg.product_id or 0) > 0:
-            leg_exists = await client.verify_position_exists(int(leg.product_id))
+        if product_id > 0:
+            leg_exists = await client.verify_position_exists(product_id)
 
         if not leg_exists:
             logger.warning(
@@ -2305,7 +2373,20 @@ async def close_single_leg(
             db.refresh(leg)
             open_count = count_open_bot_legs(db, trade_id)
             if basket_closed or open_count == 0:
-                bot_engine.position_tracker.mark_closed(trade_id)
+                funnel = await bot_engine.close_master_trade(
+                    trade_id=int(trade_id),
+                    reason=ExitReason.MANUAL_LEG_CLOSE.value,
+                    db=db,
+                    skip_master_legs=True,
+                    trade_state=bot_engine.position_tracker.get(trade_id),
+                )
+                if int(funnel.get("slaves_failed") or 0) > 0:
+                    logger.critical(
+                        "[EXIT_FUNNEL] single-leg basket close trade=%s "
+                        "slaves_failed=%s",
+                        trade_id,
+                        funnel.get("slaves_failed"),
+                    )
                 await ws_manager.broadcast(
                     {
                         "type": "TRADE_CLOSED",
@@ -2313,8 +2394,15 @@ async def close_single_leg(
                         "reason": ExitReason.MANUAL_LEG_CLOSE.value,
                         "final_pnl": float(trade.realized_pnl or 0.0),
                         "message": f"Basket closed after closing {leg_key}",
+                        "slaves_closed": int(
+                            funnel.get("slaves_closed") or 0
+                        ),
+                        "slaves_failed": int(
+                            funnel.get("slaves_failed") or 0
+                        ),
                     }
                 )
+                basket_closed = True
             return {
                 "success": True,
                 "message": (
@@ -2327,6 +2415,9 @@ async def close_single_leg(
                 "open_legs_remaining": open_count,
                 "basket_closed": basket_closed,
                 "basket_number": trade.basket_number,
+                "slaves_total": int(mirror_counts.get("slaves_total") or 0),
+                "slaves_closed": int(mirror_counts.get("slaves_closed") or 0),
+                "slaves_failed": int(mirror_counts.get("slaves_failed") or 0),
             }
 
         result = await bot_engine.order_executor.close_leg(leg, client)
@@ -2367,7 +2458,21 @@ async def close_single_leg(
         call_leg, put_leg = pick_call_put_legs(all_legs)
 
         if basket_closed or open_count == 0:
-            bot_engine.position_tracker.mark_closed(trade_id)
+            # Never finalize master while slaves still hold legs — funnel closes them
+            funnel = await bot_engine.close_master_trade(
+                trade_id=int(trade_id),
+                reason=ExitReason.MANUAL_LEG_CLOSE.value,
+                db=db,
+                skip_master_legs=True,
+                trade_state=bot_engine.position_tracker.get(trade_id),
+            )
+            if int(funnel.get("slaves_failed") or 0) > 0:
+                logger.critical(
+                    "[EXIT_FUNNEL] single-leg basket close trade=%s "
+                    "slaves_failed=%s",
+                    trade_id,
+                    funnel.get("slaves_failed"),
+                )
             await ws_manager.broadcast(
                 {
                     "type": "TRADE_CLOSED",
@@ -2375,8 +2480,11 @@ async def close_single_leg(
                     "reason": ExitReason.MANUAL_LEG_CLOSE.value,
                     "final_pnl": float(trade.realized_pnl or 0.0),
                     "message": f"Basket closed after closing {leg_key}",
+                    "slaves_closed": int(funnel.get("slaves_closed") or 0),
+                    "slaves_failed": int(funnel.get("slaves_failed") or 0),
                 }
             )
+            basket_closed = True
         elif call_leg is not None and put_leg is not None:
             bot_engine.position_tracker.update_legs(
                 trade_id, call_leg, put_leg, trade=trade
@@ -2407,17 +2515,28 @@ async def close_single_leg(
                         ),
                     ),
                     "message": f"{leg_key.upper()} closed — basket still active",
+                    "slaves_total": int(
+                        mirror_counts.get("slaves_total") or 0
+                    ),
+                    "slaves_closed": int(
+                        mirror_counts.get("slaves_closed") or 0
+                    ),
+                    "slaves_failed": int(
+                        mirror_counts.get("slaves_failed") or 0
+                    ),
                 }
             )
 
         logger.info(
-            "Single-leg close trade=%s %s exit=%.4f realized=%.4f open_left=%s basket_closed=%s",
+            "Single-leg close trade=%s %s exit=%.4f realized=%.4f "
+            "open_left=%s basket_closed=%s mirror=%s",
             trade_id,
             leg_key,
             float(leg.exit_premium or 0.0),
             realized,
             open_count,
             basket_closed,
+            mirror_counts,
         )
 
         return {
@@ -2429,6 +2548,9 @@ async def close_single_leg(
             "open_legs_remaining": open_count,
             "basket_closed": basket_closed,
             "basket_number": trade.basket_number,
+            "slaves_total": int(mirror_counts.get("slaves_total") or 0),
+            "slaves_closed": int(mirror_counts.get("slaves_closed") or 0),
+            "slaves_failed": int(mirror_counts.get("slaves_failed") or 0),
         }
     finally:
         await client.close()

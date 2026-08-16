@@ -1601,6 +1601,332 @@ class MirrorEngine:
                 finally:
                     await client.close()
 
+    async def mirror_leg_close(
+        self,
+        master_trade_id: int,
+        leg_type: str,
+        product_id: int,
+    ) -> dict[str, int]:
+        """
+        Close a single leg (call or put) on every non-closed slave.
+
+        Live-position targeting for product_id, reduce_only close, then verify
+        that product is flat. Does NOT close the whole basket (use mirror_exit).
+        """
+        leg = str(leg_type).lower().strip()
+        target_pid = int(product_id or 0)
+        slaves_total = 0
+        slaves_closed = 0
+        slaves_failed = 0
+
+        if target_pid <= 0 or leg not in ("call", "put"):
+            logger.warning(
+                "[MIRROR_LEG_CLOSE] Trade#%s invalid leg=%s product_id=%s",
+                master_trade_id,
+                leg,
+                target_pid,
+            )
+            result = {
+                "slaves_total": 0,
+                "slaves_closed": 0,
+                "slaves_failed": 0,
+            }
+            logger.info(
+                "[MIRROR_LEG_CLOSE] trade_id=%s leg=%s product_id=%s "
+                "slaves_total=%s slaves_closed=%s slaves_failed=%s",
+                master_trade_id,
+                leg,
+                target_pid,
+                0,
+                0,
+                0,
+            )
+            return result
+
+        with self.db_factory() as db:
+            slave_trades = (
+                db.query(SlaveTrade)
+                .filter(
+                    SlaveTrade.master_trade_id == int(master_trade_id),
+                    SlaveTrade.status != "closed",
+                )
+                .all()
+            )
+            slaves_total = len(slave_trades)
+            logger.info(
+                "[MIRROR_LEG_CLOSE] Trade#%s closing %s product=%s on "
+                "%s non-closed slaves",
+                master_trade_id,
+                leg,
+                target_pid,
+                slaves_total,
+            )
+
+            for slave_trade in slave_trades:
+                slave = (
+                    db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == slave_trade.slave_account_id)
+                    .first()
+                )
+                if not slave or not slave.is_active:
+                    slaves_failed += 1
+                    continue
+
+                ok = await self._mirror_leg_close_to_slave(
+                    slave=slave,
+                    slave_trade=slave_trade,
+                    leg_type=leg,
+                    product_id=target_pid,
+                    db=db,
+                )
+                if ok:
+                    slaves_closed += 1
+                else:
+                    slaves_failed += 1
+
+        result = {
+            "slaves_total": slaves_total,
+            "slaves_closed": slaves_closed,
+            "slaves_failed": slaves_failed,
+        }
+        logger.info(
+            "[MIRROR_LEG_CLOSE] trade_id=%s leg=%s product_id=%s "
+            "slaves_total=%s slaves_closed=%s slaves_failed=%s",
+            master_trade_id,
+            leg,
+            target_pid,
+            result["slaves_total"],
+            result["slaves_closed"],
+            result["slaves_failed"],
+        )
+        return result
+
+    async def _mirror_leg_close_to_slave(
+        self,
+        slave: SlaveAccount,
+        slave_trade: SlaveTrade,
+        leg_type: str,
+        product_id: int,
+        db: Any,
+    ) -> bool:
+        """
+        Close one product on one slave. Returns True if verified flat (or
+        already flat / virtual).
+        """
+        leg = str(leg_type).lower()
+        target_pid = int(product_id)
+
+        if is_virtual_slave_trade(slave, slave_trade):
+            logger.info(
+                "[MIRROR_LEG_CLOSE] VIRTUAL slave='%s' leg=%s — DB only",
+                slave.name,
+                leg,
+            )
+            if leg == "call":
+                slave_trade.call_order_id = "VIRTUAL_CLOSED"
+                slave_trade.call_sl_order_id = None
+            else:
+                slave_trade.put_order_id = "VIRTUAL_CLOSED"
+                slave_trade.put_sl_order_id = None
+            slave_trade.last_updated = get_ist_now()
+            db.commit()
+            return True
+
+        client = self._get_slave_client(slave)
+        try:
+            # Cancel leg-specific legacy SL if present
+            sl_id = (
+                slave_trade.call_sl_order_id
+                if leg == "call"
+                else slave_trade.put_sl_order_id
+            )
+            if sl_id:
+                try:
+                    await client.cancel_order(int(sl_id))
+                except Exception as exc:
+                    logger.warning(
+                        "[MIRROR_LEG_CLOSE] SL cancel failed slave='%s': %s",
+                        slave.name,
+                        exc,
+                    )
+                if leg == "call":
+                    slave_trade.call_sl_order_id = None
+                else:
+                    slave_trade.put_sl_order_id = None
+
+            try:
+                live_positions = await client.get_option_positions()
+                fetch_ok = True
+            except Exception as pos_exc:
+                fetch_ok = False
+                live_positions = []
+                logger.error(
+                    "[MIRROR_LEG_CLOSE] slave='%s' get_option_positions "
+                    "FAILED: %s — not treating as flat",
+                    slave.name,
+                    pos_exc,
+                )
+
+            if not fetch_ok:
+                slave_trade.last_error = (
+                    f"leg_close_failed: positions fetch failed for {leg} "
+                    f"product={target_pid}"
+                )[:500]
+                slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+                slave_trade.last_updated = get_ist_now()
+                db.commit()
+                logger.critical(
+                    "[MIRROR_LEG_CLOSE] slave='%s' exit_failed fetch "
+                    "leg=%s product_id=%s",
+                    slave.name,
+                    leg,
+                    target_pid,
+                )
+                return False
+
+            live_size = self._position_size_for_product(
+                live_positions, target_pid
+            )
+            logger.info(
+                "[MIRROR_LEG_CLOSE] slave='%s' stage=pre_close "
+                "product_id=%s live_size=%s",
+                slave.name,
+                target_pid,
+                live_size,
+            )
+
+            if live_size is None or live_size == 0:
+                logger.info(
+                    "[MIRROR_LEG_CLOSE] slave='%s' already_flat product=%s",
+                    slave.name,
+                    target_pid,
+                )
+            else:
+                close_size = max(1, abs(int(live_size)))
+                is_long = float(live_size) > 0
+                try:
+                    await client.close_position(
+                        product_id=target_pid,
+                        size=close_size,
+                        is_long=is_long,
+                    )
+                except Exception as close_exc:
+                    # Retry without reduce_only path via place_order
+                    side = "sell" if is_long else "buy"
+                    try:
+                        await client.place_order(
+                            product_id=target_pid,
+                            size=close_size,
+                            side=side,
+                            reduce_only=True,
+                        )
+                    except Exception as retry_exc:
+                        logger.error(
+                            "[MIRROR_LEG_CLOSE] slave='%s' close FAILED "
+                            "product=%s: %s / %s",
+                            slave.name,
+                            target_pid,
+                            close_exc,
+                            retry_exc,
+                        )
+                        slave_trade.last_error = (
+                            f"leg_close_failed: {leg} product={target_pid} "
+                            f"{retry_exc}"
+                        )[:500]
+                        slave_trade.error_count = (
+                            int(slave_trade.error_count or 0) + 1
+                        )
+                        slave_trade.last_updated = get_ist_now()
+                        db.commit()
+                        return False
+
+                await asyncio.sleep(2)
+
+            try:
+                verify_positions = await client.get_option_positions()
+                verify_ok = True
+            except Exception as verify_exc:
+                verify_ok = False
+                verify_positions = []
+                logger.critical(
+                    "[MIRROR_LEG_CLOSE] slave='%s' VERIFY fetch FAILED: %s",
+                    slave.name,
+                    verify_exc,
+                )
+
+            still = (
+                self._position_size_for_product(verify_positions, target_pid)
+                if verify_ok
+                else None
+            )
+            logger.info(
+                "[MIRROR_LEG_CLOSE] slave='%s' stage=post_close "
+                "product_id=%s expected=0 actual_size=%s verify_ok=%s",
+                slave.name,
+                target_pid,
+                still,
+                verify_ok,
+            )
+
+            if (not verify_ok) or (
+                still is not None and abs(float(still)) > 0
+            ):
+                msg = (
+                    f"leg_close_failed: {leg} product={target_pid} "
+                    f"still_size={still} verify_ok={verify_ok}"
+                )
+                logger.critical(
+                    "[MIRROR_LEG_CLOSE] slave='%s' %s",
+                    slave.name,
+                    msg,
+                )
+                slave_trade.last_error = msg[:500]
+                slave_trade.error_count = (
+                    int(slave_trade.error_count or 0) + 1
+                )
+                slave_trade.last_updated = get_ist_now()
+                db.commit()
+                return False
+
+            if leg == "call":
+                slave_trade.call_sl_order_id = None
+            else:
+                slave_trade.put_sl_order_id = None
+            slave_trade.last_error = None
+            slave_trade.last_updated = get_ist_now()
+            db.commit()
+            logger.info(
+                "[MIRROR_LEG_CLOSE] slave='%s' %s product=%s verified flat",
+                slave.name,
+                leg,
+                target_pid,
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "[MIRROR_LEG_CLOSE] slave='%s' exception: %s",
+                slave.name,
+                exc,
+                exc_info=True,
+            )
+            try:
+                slave_trade.last_error = (
+                    f"leg_close_failed: exception {exc}"
+                )[:500]
+                slave_trade.error_count = (
+                    int(slave_trade.error_count or 0) + 1
+                )
+                slave_trade.last_updated = get_ist_now()
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            return False
+        finally:
+            await client.close()
+
     async def mirror_exit(
         self,
         master_trade_id: int,
