@@ -811,6 +811,45 @@ class AdjustmentExecutor:
                     or 0.0
                 )
 
+                from backend.core.delta_sl import compute_bracket_sl
+
+                conv_uni_sl = float(
+                    getattr(trade, "universal_sl_pct", None) or 200.0
+                )
+                conv_sl, conv_sl_limit = compute_bracket_sl(
+                    new_other_fill,
+                    conv_uni_sl,
+                    master_mark=float(new_other_target or 0),
+                    leg=str(other_leg.leg_type),
+                    trade_id=int(trade.id),
+                )
+                conv_sl_order_id: str | None = None
+                if (
+                    not bool(getattr(trade, "is_demo", False))
+                    and conv_sl > 0
+                ):
+                    try:
+                        stop_res = await delta_client.place_stop_order(
+                            product_id=int(new_other_plan.new_product_id),
+                            size=int(other_leg.quantity),
+                            side="buy",
+                            stop_price=conv_sl,
+                        )
+                        conv_sl_order_id = (
+                            str(
+                                stop_res.get("order_id")
+                                or stop_res.get("id")
+                                or ""
+                            )
+                            or None
+                        )
+                    except Exception as sl_exc:
+                        logger.critical(
+                            "Conversion fill-based stop FAILED trade=%s: %s",
+                            trade.id,
+                            sl_exc,
+                        )
+
                 now_utc = datetime.now(timezone.utc)
 
                 # Close old other leg in DB
@@ -858,6 +897,8 @@ class AdjustmentExecutor:
                     delta_order_id=str(new_other_result.order_id or ""),
                     order_sent_price=new_other_sent,
                     entry_spread_usd=new_other_spread,
+                    sl_trigger_price=float(conv_sl) if conv_sl > 0 else None,
+                    delta_sl_order_id=conv_sl_order_id,
                 )
                 db_session.add(new_other_leg)
                 accumulate_entry_spread_on_trade(trade, new_other_spread)
@@ -956,6 +997,9 @@ class AdjustmentExecutor:
                                 new_other_strike=float(new_other_plan.new_strike),
                                 other_leg_type=str(other_leg.leg_type),
                                 master_qty=int(triggered_leg.quantity),
+                                master_bracket_sl=(
+                                    float(conv_sl) if conv_sl > 0 else None
+                                ),
                             )
                         )
                 except Exception as exc:
@@ -1095,10 +1139,8 @@ class AdjustmentExecutor:
                 else:
                     logger.info("[AUDIT] Triggered leg closed on Delta")
 
-            # Step 5: Enter new leg with bracket SL attached at placement time.
-            # Bracket SL confirmed working on Delta Exchange India
-            # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
-            # Bracket auto-cancels when position is closed (any reason)
+            # Step 5: Enter new leg WITHOUT provisional bracket.
+            # After fill, compute canonical SL from MASTER fill and attach stop.
             uni_sl = float(getattr(trade, "universal_sl_pct", None) or 200.0)
             try:
                 expected_new_entry = float(
@@ -1108,10 +1150,6 @@ class AdjustmentExecutor:
                 expected_new_entry = float(other_premium)
             if expected_new_entry <= 0:
                 expected_new_entry = float(other_premium)
-            bracket_sl_price = round(expected_new_entry * (uni_sl / 100.0), 2)
-            bracket_sl_limit = (
-                round(bracket_sl_price * 1.05, 2) if bracket_sl_price > 0 else None
-            )
             if trade_is_demo:
                 entry_result = await _demo_mark_order_result(
                     delta_client,
@@ -1124,8 +1162,6 @@ class AdjustmentExecutor:
                     quantity=int(triggered_leg.quantity),
                     delta_client=delta_client,
                     symbol_for_fallback=str(plan.new_symbol),
-                    bracket_sl_price=bracket_sl_price if bracket_sl_price > 0 else None,
-                    bracket_sl_limit=bracket_sl_limit,
                 )
             if not entry_result.success:
                 other_leg_type = (
@@ -1203,23 +1239,49 @@ class AdjustmentExecutor:
                 trade = db_session.merge(trade)
                 db_session.refresh(trade)
 
-            # Steps 6–8: Update DB on full success
-            # BOTH legs reset trigger baseline after a successful adjustment:
-            #   triggered → new fill price
-            #   untouched → Best Offer at adjustment time (re-fetched, no mark)
-            now_utc = datetime.now(timezone.utc)
-            old_strike = float(triggered_leg.strike)
-            # Accounting entry for closed leg (true fill) — before any baseline reset
-            old_entry_fill = float(triggered_leg.initial_premium)
-            old_exit_premium = float(exit_result.filled_price or 0.0)
             new_entry_premium = float(entry_result.filled_price or 0.0)
 
-            # Display SL: prefer fill-based trigger; fall back to pre-order estimate
-            display_sl = (
-                round(new_entry_premium * (uni_sl / 100.0), 2)
-                if new_entry_premium > 0
-                else bracket_sl_price
+            from backend.core.delta_sl import compute_bracket_sl
+
+            bracket_sl_price, bracket_sl_limit = compute_bracket_sl(
+                new_entry_premium if new_entry_premium > 0 else expected_new_entry,
+                uni_sl,
+                master_mark=expected_new_entry,
+                leg=str(triggered_leg_type),
+                trade_id=int(trade.id),
             )
+            display_sl = bracket_sl_price
+            new_sl_order_id: str | None = None
+            if (
+                not trade_is_demo
+                and bracket_sl_price > 0
+                and int(plan.new_product_id) > 0
+            ):
+                try:
+                    stop_res = await delta_client.place_stop_order(
+                        product_id=int(plan.new_product_id),
+                        size=int(triggered_leg.quantity),
+                        side="buy",
+                        stop_price=bracket_sl_price,
+                    )
+                    new_sl_order_id = (
+                        str(stop_res.get("order_id") or stop_res.get("id") or "")
+                        or None
+                    )
+                except Exception as sl_exc:
+                    logger.critical(
+                        "Adjustment fill-based stop FAILED trade=%s: %s "
+                        "(stop=%.2f)",
+                        trade.id,
+                        sl_exc,
+                        bracket_sl_price,
+                    )
+
+            # Steps 6–8: Update DB on full success
+            now_utc = datetime.now(timezone.utc)
+            old_strike = float(triggered_leg.strike)
+            old_entry_fill = float(triggered_leg.initial_premium)
+            old_exit_premium = float(exit_result.filled_price or 0.0)
 
             triggered_leg.exit_premium = old_exit_premium
             triggered_leg.exit_time = now_utc
@@ -1267,7 +1329,7 @@ class AdjustmentExecutor:
                     else None
                 ),
                 sl_trigger_price=float(display_sl) if display_sl > 0 else None,
-                delta_sl_order_id=None,  # bracket has no separate stop-order ID
+                delta_sl_order_id=new_sl_order_id,
                 is_bot_managed=True,
             )
             db_session.add(new_leg)
@@ -1386,6 +1448,10 @@ class AdjustmentExecutor:
             committed_new_product_id = int(plan.new_product_id)
             committed_new_strike = float(plan.new_strike)
             committed_new_entry = float(new_entry_premium)
+            committed_bracket_sl = float(display_sl) if display_sl > 0 else None
+            committed_bracket_sl_limit = (
+                float(bracket_sl_limit) if bracket_sl_limit > 0 else None
+            )
             committed_old_strike = float(old_strike)
             committed_order_id = (
                 str(entry_result.order_id)
@@ -1499,7 +1565,7 @@ class AdjustmentExecutor:
                             sl_trigger_price=(
                                 float(display_sl) if display_sl > 0 else None
                             ),
-                            delta_sl_order_id=None,
+                            delta_sl_order_id=new_sl_order_id,
                             is_bot_managed=True,
                         )
                         db_session.add(new_leg)
@@ -1624,6 +1690,8 @@ class AdjustmentExecutor:
                 new_product_id=committed_new_product_id,
                 new_symbol=committed_new_symbol,
                 quantity=committed_triggered_qty,
+                master_bracket_sl=committed_bracket_sl,
+                master_bracket_sl_limit=committed_bracket_sl_limit,
             )
         except AdjustmentError as exc:
             logger.error("Adjustment failed trade=%s: %s", getattr(trade, "id", "?"), exc)

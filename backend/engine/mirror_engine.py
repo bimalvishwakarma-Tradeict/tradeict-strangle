@@ -447,11 +447,16 @@ class MirrorEngine:
         master_put_fill: float,
         expiry_date: Any,
         underlying: str,
+        master_bracket_sl_call: float | None = None,
+        master_bracket_sl_put: float | None = None,
     ) -> None:
         """
         Mirror a new trade entry on all active slave accounts.
         Called right after master trade is placed successfully.
         Non-fatal: if one slave fails, others continue.
+
+        master_bracket_sl_* are ABSOLUTE stop prices from the master's fill —
+        slaves must use them verbatim (never recompute from slave fill/mark).
         """
         with self.db_factory() as db:
             slaves = get_active_slave_accounts(db)
@@ -481,6 +486,8 @@ class MirrorEngine:
                     expiry_date=expiry_date,
                     underlying=underlying,
                     db=db,
+                    master_bracket_sl_call=master_bracket_sl_call,
+                    master_bracket_sl_put=master_bracket_sl_put,
                 )
 
     async def _mirror_entry_to_slave(
@@ -500,6 +507,8 @@ class MirrorEngine:
         expiry_date: Any,
         underlying: str,
         db: Any,
+        master_bracket_sl_call: float | None = None,
+        master_bracket_sl_put: float | None = None,
     ) -> None:
         # Fetch master + fresh slave capital for capital-based qty calculation
         master_margin_used: float | None = None
@@ -775,20 +784,36 @@ class MirrorEngine:
                     exc,
                 )
 
-            # Bracket SL from master's universal_sl_pct (default 200%)
+            # Canonical ABSOLUTE bracket SL from master fill — never slave fill/mark.
+            from backend.core.delta_sl import compute_bracket_sl
+
             uni_sl = self._master_universal_sl_pct(db, int(master_trade_id))
-            call_baseline = float(master_call_fill or 0.0)
-            put_baseline = float(master_put_fill or 0.0)
-            call_sl = (
-                round(call_baseline * (uni_sl / 100.0), 2)
-                if call_baseline > 0
-                else None
-            )
-            put_sl = (
-                round(put_baseline * (uni_sl / 100.0), 2)
-                if put_baseline > 0
-                else None
-            )
+            if master_bracket_sl_call is not None and float(master_bracket_sl_call) > 0:
+                call_sl = round(float(master_bracket_sl_call), 2)
+                call_sl_limit = round(call_sl * 1.05, 2)
+            else:
+                call_sl, call_sl_limit = compute_bracket_sl(
+                    float(master_call_fill or 0.0),
+                    uni_sl,
+                    leg="call",
+                    trade_id=int(master_trade_id),
+                )
+                if call_sl <= 0:
+                    call_sl = None  # type: ignore[assignment]
+                    call_sl_limit = None  # type: ignore[assignment]
+            if master_bracket_sl_put is not None and float(master_bracket_sl_put) > 0:
+                put_sl = round(float(master_bracket_sl_put), 2)
+                put_sl_limit = round(put_sl * 1.05, 2)
+            else:
+                put_sl, put_sl_limit = compute_bracket_sl(
+                    float(master_put_fill or 0.0),
+                    uni_sl,
+                    leg="put",
+                    trade_id=int(master_trade_id),
+                )
+                if put_sl <= 0:
+                    put_sl = None  # type: ignore[assignment]
+                    put_sl_limit = None  # type: ignore[assignment]
 
             # Place call order on slave (bracket SL attached)
             call_order = await client.place_order(
@@ -796,9 +821,7 @@ class MirrorEngine:
                 size=slave_qty,
                 side="sell",
                 bracket_stop_loss_price=call_sl,
-                bracket_stop_loss_limit_price=(
-                    round(call_sl * 1.05, 2) if call_sl else None
-                ),
+                bracket_stop_loss_limit_price=call_sl_limit,
             )
             call_fill = float(
                 await client.resolve_fill_price(
@@ -818,6 +841,16 @@ class MirrorEngine:
                 call_order_id,
                 call_sl,
             )
+            log_and_buffer(
+                "BRACKET_SL",
+                int(master_trade_id),
+                {
+                    "leg": "call",
+                    "slave": slave.name,
+                    "stop_price": call_sl,
+                    "source": "master_absolute",
+                },
+            )
 
             # Place put order on slave (bracket SL attached)
             put_order = await client.place_order(
@@ -825,9 +858,7 @@ class MirrorEngine:
                 size=slave_qty,
                 side="sell",
                 bracket_stop_loss_price=put_sl,
-                bracket_stop_loss_limit_price=(
-                    round(put_sl * 1.05, 2) if put_sl else None
-                ),
+                bracket_stop_loss_limit_price=put_sl_limit,
             )
             put_fill = float(
                 await client.resolve_fill_price(
@@ -846,6 +877,16 @@ class MirrorEngine:
                 put_fill,
                 put_order_id,
                 put_sl,
+            )
+            log_and_buffer(
+                "BRACKET_SL",
+                int(master_trade_id),
+                {
+                    "leg": "put",
+                    "slave": slave.name,
+                    "stop_price": put_sl,
+                    "source": "master_absolute",
+                },
             )
 
             # Verify positions landed on slave Delta
@@ -899,8 +940,13 @@ class MirrorEngine:
                 master_trade_id=int(master_trade_id),
                 call_order_id=call_order_id or None,
                 put_order_id=put_order_id or None,
-                call_sl_order_id=None,  # bracket has no separate stop-order ID
-                put_sl_order_id=None,
+                # Audit: store absolute master stop (not a live order id)
+                call_sl_order_id=(
+                    f"ABS:{float(call_sl):.2f}" if call_sl else None
+                ),
+                put_sl_order_id=(
+                    f"ABS:{float(put_sl):.2f}" if put_sl else None
+                ),
                 actual_quantity=slave_qty,
                 call_fill_price=call_fill,
                 put_fill_price=put_fill,
@@ -966,10 +1012,13 @@ class MirrorEngine:
         new_strike: float,
         master_qty: int,
         universal_sl_pct: float | None = None,
+        master_bracket_sl: float | None = None,
     ) -> None:
         """
         Mirror an adjustment on all slaves.
         Close old leg, open new leg — atomic verify-close-verify.
+
+        master_bracket_sl: absolute stop from master's new-leg fill (verbatim).
         """
         with self.db_factory() as db:
             uni_sl = float(universal_sl_pct) if universal_sl_pct else 0.0
@@ -988,13 +1037,18 @@ class MirrorEngine:
             log_and_buffer(
                 "MIRROR_ADJ_ENGINE",
                 master_trade_id,
-                {"slaves_found": len(slave_trades)},
+                {
+                    "slaves_found": len(slave_trades),
+                    "master_bracket_sl": master_bracket_sl,
+                },
             )
             logger.info(
-                "[MIRROR_ADJ_ENGINE] Trade#%s slaves found=%s uni_sl=%.1f%%",
+                "[MIRROR_ADJ_ENGINE] Trade#%s slaves found=%s uni_sl=%.1f%% "
+                "master_bracket_sl=%s",
                 master_trade_id,
                 len(slave_trades),
                 uni_sl,
+                master_bracket_sl,
             )
 
             if not slave_trades:
@@ -1032,6 +1086,7 @@ class MirrorEngine:
                     new_strike=new_strike,
                     db=db,
                     universal_sl_pct=uni_sl,
+                    master_bracket_sl=master_bracket_sl,
                 )
 
     def _master_universal_sl_pct(
@@ -1076,6 +1131,7 @@ class MirrorEngine:
         new_strike: float,
         db: Any,
         universal_sl_pct: float = 200.0,
+        master_bracket_sl: float | None = None,
     ) -> None:
         # Virtual mode: track adjustment in DB but don't place real orders
         if bool(getattr(slave, "is_virtual", False)):
@@ -1098,8 +1154,16 @@ class MirrorEngine:
                     leg = str(triggered_leg_type).lower()
                     if leg == "call":
                         st.call_order_id = "VIRTUAL"
+                        if master_bracket_sl and float(master_bracket_sl) > 0:
+                            st.call_sl_order_id = (
+                                f"ABS:{float(master_bracket_sl):.2f}"
+                            )
                     else:
                         st.put_order_id = "VIRTUAL"
+                        if master_bracket_sl and float(master_bracket_sl) > 0:
+                            st.put_sl_order_id = (
+                                f"ABS:{float(master_bracket_sl):.2f}"
+                            )
                     virt_db.commit()
             return
 
@@ -1114,18 +1178,23 @@ class MirrorEngine:
 
         try:
             # Cancel legacy separate SL only if present (bracket auto-cancels)
+            # ABS:* tags are audit markers, not live order ids.
             if leg == "call" and slave_trade.call_sl_order_id:
-                try:
-                    await client.cancel_order(int(slave_trade.call_sl_order_id))
-                    slave_trade.call_sl_order_id = None
-                except Exception as exc:
-                    logger.warning("Slave SL cancel failed: %s", exc)
+                oid = str(slave_trade.call_sl_order_id)
+                if not oid.startswith("ABS:"):
+                    try:
+                        await client.cancel_order(int(oid))
+                        slave_trade.call_sl_order_id = None
+                    except Exception as exc:
+                        logger.warning("Slave SL cancel failed: %s", exc)
             elif leg == "put" and slave_trade.put_sl_order_id:
-                try:
-                    await client.cancel_order(int(slave_trade.put_sl_order_id))
-                    slave_trade.put_sl_order_id = None
-                except Exception as exc:
-                    logger.warning("Slave SL cancel failed: %s", exc)
+                oid = str(slave_trade.put_sl_order_id)
+                if not oid.startswith("ABS:"):
+                    try:
+                        await client.cancel_order(int(oid))
+                        slave_trade.put_sl_order_id = None
+                    except Exception as exc:
+                        logger.warning("Slave SL cancel failed: %s", exc)
 
             # --- a. Live positions ---
             live_positions = await client.get_option_positions()
@@ -1226,28 +1295,19 @@ class MirrorEngine:
                 else stored_qty
             )
 
-            # --- d. Open new leg; bracket SL from mark or post-fill ---
-            expected_fill = 0.0
-            try:
-                expected_fill = float(
-                    await client.get_mark_price(new_symbol)
-                )
-            except Exception as mark_exc:
-                logger.warning(
-                    "[MIRROR_ADJ] slave='%s' get_mark_price(%s) failed: %s "
-                    "— will set bracket SL after fill or skip",
-                    slave.name,
-                    new_symbol,
-                    mark_exc,
-                )
-                expected_fill = 0.0
-
+            # --- d. Open new leg; bracket SL = master's absolute stop ---
             new_sl = None
             new_sl_limit = None
-            if expected_fill > 0:
-                new_sl = round(expected_fill * (uni_sl / 100.0), 2)
-                new_sl_limit = (
-                    round(new_sl * 1.05, 2) if new_sl > 0 else None
+            if master_bracket_sl is not None and float(master_bracket_sl) > 0:
+                new_sl = round(float(master_bracket_sl), 2)
+                new_sl_limit = round(new_sl * 1.05, 2)
+            else:
+                # Fallback only if caller omitted absolute — still from mark
+                # is wrong; leave None and log CRITICAL.
+                logger.critical(
+                    "[BRACKET_SL] slave='%s' mirror_adjustment missing "
+                    "master_bracket_sl — placing without bracket",
+                    slave.name,
                 )
 
             new_order = await client.place_order(
@@ -1265,33 +1325,27 @@ class MirrorEngine:
             )
             new_order_id = self._order_id(new_order)
 
-            # If mark failed but we have a fill, log that SL was skipped
-            if expected_fill <= 0:
-                if new_fill > 0:
-                    logger.warning(
-                        "[MIRROR_ADJ] slave='%s' bracket SL skipped "
-                        "(no mark); new fill=$%.2f — no old-leg fallback",
-                        slave.name,
-                        new_fill,
-                    )
-                else:
-                    logger.warning(
-                        "[MIRROR_ADJ] slave='%s' bracket SL skipped "
-                        "(no mark and no fill yet)",
-                        slave.name,
-                    )
-
             logger.info(
                 "Slave '%s' opened new %s: strike=%s fill=%s id=%s "
-                "bracket_sl=%s (uni_sl=%.1f%%) qty=%s",
+                "bracket_sl=%s (master_absolute) qty=%s",
                 slave.name,
                 leg,
                 new_strike,
                 new_fill,
                 new_order_id,
                 new_sl,
-                uni_sl,
                 entry_qty,
+            )
+            log_and_buffer(
+                "BRACKET_SL",
+                int(slave_trade.master_trade_id),
+                {
+                    "leg": leg,
+                    "slave": slave.name,
+                    "stop_price": new_sl,
+                    "source": "master_absolute",
+                    "stage": "adjustment",
+                },
             )
 
             await asyncio.sleep(2)
@@ -1344,12 +1398,16 @@ class MirrorEngine:
 
             if leg == "call":
                 slave_trade.call_order_id = new_order_id or None
-                slave_trade.call_sl_order_id = None
+                slave_trade.call_sl_order_id = (
+                    f"ABS:{float(new_sl):.2f}" if new_sl else None
+                )
                 if new_fill > 0:
                     slave_trade.call_fill_price = new_fill
             else:
                 slave_trade.put_order_id = new_order_id or None
-                slave_trade.put_sl_order_id = None
+                slave_trade.put_sl_order_id = (
+                    f"ABS:{float(new_sl):.2f}" if new_sl else None
+                )
                 if new_fill > 0:
                     slave_trade.put_fill_price = new_fill
 
@@ -1410,12 +1468,15 @@ class MirrorEngine:
         new_other_strike: float,
         other_leg_type: str,
         master_qty: int,
+        master_bracket_sl: float | None = None,
     ) -> None:
         """
         AUDIT-7: Mirror conversion-mode entry to slaves.
 
         1) BUY long hedge (no bracket SL)
         2) Close old other short + open new other short
+
+        master_bracket_sl: absolute stop from master's new-other fill.
         """
         with self.db_factory() as db:
             slave_trades = (
@@ -1434,11 +1495,13 @@ class MirrorEngine:
                 return
 
             logger.info(
-                "Mirroring conversion to %s slaves: hedge=%s other=%s→%s",
+                "Mirroring conversion to %s slaves: hedge=%s other=%s→%s "
+                "master_bracket_sl=%s",
                 len(slave_trades),
                 hedge_symbol,
                 old_other_product_id,
                 new_other_product_id,
+                master_bracket_sl,
             )
 
             for slave_trade in slave_trades:
@@ -1474,37 +1537,27 @@ class MirrorEngine:
                         side="buy",
                     )
 
-                    # 3) Open new other short (bracket SL = master universal_sl_pct)
-                    uni_sl = self._master_universal_sl_pct(
-                        db, int(master_trade_id)
-                    )
-                    expected_fill = 0.0
-                    try:
-                        expected_fill = float(
-                            await client.get_mark_price(new_other_symbol)
-                        )
-                    except Exception as mark_exc:
-                        logger.warning(
-                            "[MIRROR_CONV] slave='%s' mark failed for %s: %s "
-                            "— skip bracket SL (no old-leg fallback)",
+                    # 3) Open new other short — absolute master bracket SL
+                    new_sl = None
+                    new_sl_limit = None
+                    if (
+                        master_bracket_sl is not None
+                        and float(master_bracket_sl) > 0
+                    ):
+                        new_sl = round(float(master_bracket_sl), 2)
+                        new_sl_limit = round(new_sl * 1.05, 2)
+                    else:
+                        logger.critical(
+                            "[BRACKET_SL] slave='%s' conversion missing "
+                            "master_bracket_sl — placing without bracket",
                             slave.name,
-                            new_other_symbol,
-                            mark_exc,
                         )
-                        expected_fill = 0.0
-                    new_sl = (
-                        round(expected_fill * (uni_sl / 100.0), 2)
-                        if expected_fill > 0
-                        else None
-                    )
                     new_order = await client.place_order(
                         product_id=int(new_other_product_id),
                         size=qty,
                         side="sell",
                         bracket_stop_loss_price=new_sl,
-                        bracket_stop_loss_limit_price=(
-                            round(new_sl * 1.05, 2) if new_sl else None
-                        ),
+                        bracket_stop_loss_limit_price=new_sl_limit,
                     )
                     new_fill = float(
                         await client.resolve_fill_price(
@@ -1513,14 +1566,17 @@ class MirrorEngine:
                         or 0.0
                     )
                     new_order_id = self._order_id(new_order)
+                    abs_tag = (
+                        f"ABS:{float(new_sl):.2f}" if new_sl else None
+                    )
                     if leg == "call":
                         slave_trade.call_order_id = new_order_id or None
-                        slave_trade.call_sl_order_id = None
+                        slave_trade.call_sl_order_id = abs_tag
                         if new_fill > 0:
                             slave_trade.call_fill_price = new_fill
                     else:
                         slave_trade.put_order_id = new_order_id or None
-                        slave_trade.put_sl_order_id = None
+                        slave_trade.put_sl_order_id = abs_tag
                         if new_fill > 0:
                             slave_trade.put_fill_price = new_fill
 
@@ -1529,9 +1585,22 @@ class MirrorEngine:
                     slave.last_connected_at = get_ist_now()
                     db.commit()
                     logger.info(
-                        "✅ Slave '%s' conversion mirrored (hedge + %s replace)",
+                        "✅ Slave '%s' conversion mirrored (hedge + %s replace) "
+                        "bracket_sl=%s",
                         slave.name,
                         leg,
+                        new_sl,
+                    )
+                    log_and_buffer(
+                        "BRACKET_SL",
+                        int(master_trade_id),
+                        {
+                            "leg": leg,
+                            "slave": slave.name,
+                            "stop_price": new_sl,
+                            "source": "master_absolute",
+                            "stage": "conversion",
+                        },
                     )
                 except Exception as exc:
                     logger.error(

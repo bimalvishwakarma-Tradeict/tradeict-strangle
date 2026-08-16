@@ -477,18 +477,37 @@ async def copy_master_trade_to_slave(
         )
 
     uni_sl = float(getattr(state.trade, "universal_sl_pct", None) or 200.0)
-    call_base = float(
-        getattr(call_leg, "trigger_baseline_premium", None)
-        or getattr(call_leg, "initial_premium", 0)
-        or 0
-    )
-    put_base = float(
-        getattr(put_leg, "trigger_baseline_premium", None)
-        or getattr(put_leg, "initial_premium", 0)
-        or 0
-    )
-    call_sl = round(call_base * (uni_sl / 100.0), 2) if call_base > 0 else None
-    put_sl = round(put_base * (uni_sl / 100.0), 2) if put_base > 0 else None
+    # Prefer master's stored absolute stop; else compute from master fill.
+    from backend.core.delta_sl import compute_bracket_sl
+
+    call_sl = getattr(call_leg, "sl_trigger_price", None)
+    put_sl = getattr(put_leg, "sl_trigger_price", None)
+    if call_sl is None or float(call_sl) <= 0:
+        call_base = float(
+            getattr(call_leg, "initial_premium", 0) or 0
+        )
+        call_sl, _ = compute_bracket_sl(
+            call_base,
+            uni_sl,
+            leg="call",
+            trade_id=int(master_trade_id),
+        )
+        call_sl = call_sl if call_sl > 0 else None
+    else:
+        call_sl = round(float(call_sl), 2)
+    if put_sl is None or float(put_sl) <= 0:
+        put_base = float(
+            getattr(put_leg, "initial_premium", 0) or 0
+        )
+        put_sl, _ = compute_bracket_sl(
+            put_base,
+            uni_sl,
+            leg="put",
+            trade_id=int(master_trade_id),
+        )
+        put_sl = put_sl if put_sl > 0 else None
+    else:
+        put_sl = round(float(put_sl), 2)
 
     underlying = str(getattr(state.trade, "underlying", "") or "")
     call_symbol = str(getattr(call_leg, "symbol", "") or "")
@@ -518,7 +537,7 @@ async def copy_master_trade_to_slave(
             or 0.0
         )
         if call_fill <= 0:
-            call_fill = call_base
+            call_fill = float(getattr(call_leg, "initial_premium", 0) or 0)
         call_order_id = str(
             call_order.get("order_id") or call_order.get("id") or ""
         ) or None
@@ -539,7 +558,7 @@ async def copy_master_trade_to_slave(
             or 0.0
         )
         if put_fill <= 0:
-            put_fill = put_base
+            put_fill = float(getattr(put_leg, "initial_premium", 0) or 0)
         put_order_id = str(
             put_order.get("order_id") or put_order.get("id") or ""
         ) or None
@@ -549,8 +568,12 @@ async def copy_master_trade_to_slave(
             master_trade_id=master_trade_id,
             call_order_id=call_order_id,
             put_order_id=put_order_id,
-            call_sl_order_id=None,
-            put_sl_order_id=None,
+            call_sl_order_id=(
+                f"ABS:{float(call_sl):.2f}" if call_sl else None
+            ),
+            put_sl_order_id=(
+                f"ABS:{float(put_sl):.2f}" if put_sl else None
+            ),
             actual_quantity=slave_qty,
             call_fill_price=call_fill,
             put_fill_price=put_fill,

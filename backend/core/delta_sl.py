@@ -7,14 +7,105 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Master fill vs mark: beyond this relative gap, fall back to mark × uni_sl.
+_BRACKET_SL_ANOMALY_RATIO = 0.35
+
+
+def compute_bracket_sl(
+    master_fill_price: float,
+    universal_sl_pct: float,
+    *,
+    master_mark: float | None = None,
+    leg: str = "",
+    trade_id: int | None = None,
+) -> tuple[float, float]:
+    """
+    Canonical exchange bracket SL from the MASTER'S actual fill.
+
+    stop = master_fill × (universal_sl_pct / 100)
+    limit = stop × 1.05
+
+    If |fill − mark| / mark > 35%, log CRITICAL and fall back to mark × uni_sl
+    so one bad fill cannot push a wrong stop onto every slave.
+
+    Returns (stop_price, stop_limit_price). Either may be 0.0 when invalid.
+    """
+    fill = float(master_fill_price or 0.0)
+    mark = float(master_mark or 0.0) if master_mark is not None else 0.0
+    pct = float(universal_sl_pct or 200.0)
+    use_price = fill
+    anomaly = False
+
+    if fill > 0 and mark > 0 and abs(fill - mark) / mark > _BRACKET_SL_ANOMALY_RATIO:
+        anomaly = True
+        use_price = mark
+        msg = (
+            f"[BRACKET_SL_ANOMALY] trade_id={trade_id} leg={leg} "
+            f"master_fill={fill:.4f} master_mark={mark:.4f} "
+            f"ratio={abs(fill - mark) / mark:.3f} — falling back to mark × "
+            f"{pct:.1f}%"
+        )
+        logger.critical(msg)
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "BRACKET_SL_ANOMALY",
+                int(trade_id or 0),
+                {
+                    "leg": leg,
+                    "master_fill": round(fill, 4),
+                    "master_mark": round(mark, 4),
+                    "uni_sl_pct": pct,
+                    "fallback": "mark",
+                },
+            )
+        except Exception:
+            pass
+
+    if use_price <= 0 or pct <= 0:
+        return 0.0, 0.0
+
+    stop = round(use_price * (pct / 100.0), 2)
+    limit = round(stop * 1.05, 2) if stop > 0 else 0.0
+
+    try:
+        from backend.core.bot_logger import log_and_buffer
+
+        log_and_buffer(
+            "BRACKET_SL",
+            int(trade_id or 0),
+            {
+                "leg": leg or "?",
+                "master_fill": round(fill, 4),
+                "master_mark": round(mark, 4) if mark > 0 else None,
+                "uni_sl_pct": pct,
+                "stop_price": stop,
+                "stop_limit_price": limit,
+                "anomaly_fallback": anomaly,
+            },
+        )
+    except Exception:
+        pass
+    logger.info(
+        "[BRACKET_SL] leg=%s master_fill=%.4f uni_sl_pct=%.1f "
+        "stop_price=%.2f stop_limit_price=%.2f",
+        leg or "?",
+        fill,
+        pct,
+        stop,
+        limit,
+    )
+    return stop, limit
+
 
 def compute_sl_trigger_price(baseline_premium: float, universal_sl_pct: float) -> float:
-    """SL trigger = baseline × (universal_sl_pct / 100)."""
-    base = float(baseline_premium or 0.0)
-    pct = float(universal_sl_pct or 200.0)
-    if base <= 0 or pct <= 0:
-        return 0.0
-    return round(base * (pct / 100.0), 2)
+    """SL trigger = baseline × (universal_sl_pct / 100). Delegates to compute_bracket_sl."""
+    stop, _limit = compute_bracket_sl(
+        float(baseline_premium or 0.0),
+        float(universal_sl_pct or 200.0),
+    )
+    return stop
 
 
 async def cancel_leg_sl_order(

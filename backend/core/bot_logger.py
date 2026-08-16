@@ -63,6 +63,8 @@ _IMPORTANT_EVENTS = frozenset(
         "MIRROR_EXIT",
         "SLAVE_SWEEP",
         "DB_AUDIT_SKIP",
+        "BRACKET_SL",
+        "BRACKET_SL_ANOMALY",
     }
 )
 
@@ -173,6 +175,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ENTRY_GUARD_BLOCK",
         "PARTIAL_ADJUSTMENT",
         "INTEGRITY_NAKED",
+        "BRACKET_SL_ANOMALY",
     ):
         bot_log.error(msg)
     elif event_type in (
@@ -213,6 +216,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MIRROR_ADJ_VERIFY",
         "MIRROR_EXIT",
         "SLAVE_SWEEP",
+        "BRACKET_SL",
     ):
         bot_log.info(msg)
     elif event_type in (

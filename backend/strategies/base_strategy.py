@@ -71,6 +71,9 @@ class AdjustmentResult:
     new_product_id: int | None = None
     new_symbol: str | None = None
     quantity: int | None = None
+    # Absolute bracket SL from master fill — slaves must use verbatim
+    master_bracket_sl: float | None = None
+    master_bracket_sl_limit: float | None = None
 
 
 class BaseStrategy(ABC):

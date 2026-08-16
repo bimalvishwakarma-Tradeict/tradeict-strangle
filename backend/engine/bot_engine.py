@@ -3476,6 +3476,13 @@ class BotEngine:
                                     )
                                     or 200.0
                                 ),
+                                master_bracket_sl=(
+                                    float(result.master_bracket_sl)
+                                    if getattr(
+                                        result, "master_bracket_sl", None
+                                    )
+                                    else None
+                                ),
                             )
                             log_and_buffer(
                                 "MIRROR_ADJ_CALLED",
@@ -4201,11 +4208,27 @@ class BotEngine:
         put_sl_px = getattr(trade_state.put_leg, "sl_trigger_price", None)
         call_sl_id = getattr(trade_state.call_leg, "delta_sl_order_id", None)
         put_sl_id = getattr(trade_state.put_leg, "delta_sl_order_id", None)
-        # Fallback estimate if order not stored yet
+        # Fallback estimate if order not stored yet — still from master fill baseline
         if call_sl_px is None or float(call_sl_px or 0) <= 0:
-            call_sl_px = round(call_base * (uni_sl / 100.0), 4) if call_base > 0 else None
+            from backend.core.delta_sl import compute_bracket_sl
+
+            call_sl_px, _ = compute_bracket_sl(
+                float(call_base or 0),
+                uni_sl,
+                leg="call",
+                trade_id=int(trade_state.trade_id),
+            )
+            call_sl_px = call_sl_px if call_sl_px > 0 else None
         if put_sl_px is None or float(put_sl_px or 0) <= 0:
-            put_sl_px = round(put_base * (uni_sl / 100.0), 4) if put_base > 0 else None
+            from backend.core.delta_sl import compute_bracket_sl
+
+            put_sl_px, _ = compute_bracket_sl(
+                float(put_base or 0),
+                uni_sl,
+                leg="put",
+                trade_id=int(trade_state.trade_id),
+            )
+            put_sl_px = put_sl_px if put_sl_px > 0 else None
 
         trade = trade_state.trade
         target_usd = float(getattr(trade, "profit_target_usd", 0) or 0)

@@ -645,7 +645,7 @@ async def _persist_strangle_trade(
             if call_sl_trigger_price is not None
             else None
         ),
-        delta_sl_order_id=None,  # bracket has no separate stop-order ID
+        delta_sl_order_id=None,
         entry_fee_usd=(
             abs(float(call_entry_fee)) if call_entry_fee is not None else None
         ),
@@ -742,23 +742,21 @@ async def initiate_trade(
 
         is_demo = bool(getattr(payload, "is_demo", False))
 
-        # Bracket SL confirmed working on Delta Exchange India
-        # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
-        # Bracket auto-cancels when position is closed (any reason)
-        # No orphan stop orders remain after trade exit
-        #
-        # Prefer frontend entry-premium hints; fall back to live mark.
-        call_baseline_for_sl = float(getattr(payload, "call_entry_premium", 0) or 0)
-        put_baseline_for_sl = float(getattr(payload, "put_entry_premium", 0) or 0)
-        if call_baseline_for_sl <= 0:
-            call_baseline_for_sl = float(await client.get_mark_price(payload.call_symbol))
-        if put_baseline_for_sl <= 0:
-            put_baseline_for_sl = float(await client.get_mark_price(payload.put_symbol))
+        # Prefer frontend entry-premium hints as MARK reference for anomaly check;
+        # canonical SL is computed from actual fill after each leg fills.
+        call_mark_for_sl = float(getattr(payload, "call_entry_premium", 0) or 0)
+        put_mark_for_sl = float(getattr(payload, "put_entry_premium", 0) or 0)
+        if call_mark_for_sl <= 0:
+            call_mark_for_sl = float(await client.get_mark_price(payload.call_symbol))
+        if put_mark_for_sl <= 0:
+            put_mark_for_sl = float(await client.get_mark_price(payload.put_symbol))
 
-        call_sl_trigger_price = round(call_baseline_for_sl * (uni_sl / 100.0), 2)
-        put_sl_trigger_price = round(put_baseline_for_sl * (uni_sl / 100.0), 2)
-        call_sl_limit = round(call_sl_trigger_price * 1.05, 2)
-        put_sl_limit = round(put_sl_trigger_price * 1.05, 2)
+        call_sl_trigger_price = 0.0
+        put_sl_trigger_price = 0.0
+        call_sl_limit = 0.0
+        put_sl_limit = 0.0
+        call_sl_order_id: str | None = None
+        put_sl_order_id: str | None = None
 
         call_result = None
         put_result = None
@@ -794,9 +792,9 @@ async def initiate_trade(
                     await client.get_mark_price(payload.put_symbol)
                 )
             if call_fill_price <= 0:
-                call_fill_price = float(call_baseline_for_sl or 0)
+                call_fill_price = float(call_mark_for_sl or 0)
             if put_fill_price <= 0:
-                put_fill_price = float(put_baseline_for_sl or 0)
+                put_fill_price = float(put_mark_for_sl or 0)
             if call_fill_price <= 0 or put_fill_price <= 0:
                 raise HTTPException(
                     status_code=502,
@@ -816,15 +814,15 @@ async def initiate_trade(
                 put_order_id,
             )
         else:
-            # --- Step 1: Place CALL ---
+            from backend.core.delta_sl import compute_bracket_sl
+
+            # --- Step 1: Place CALL (no provisional bracket) ---
             logger.info("Step 1: Placing call order %s", payload.call_symbol)
             call_result = await bot_engine.order_executor.sell_option(
                 product_id=int(payload.call_product_id),
                 quantity=int(payload.quantity),
                 delta_client=client,
                 symbol_for_fallback=payload.call_symbol,
-                bracket_sl_price=call_sl_trigger_price,
-                bracket_sl_limit=call_sl_limit,
             )
             if not call_result.success:
                 raise HTTPException(
@@ -859,6 +857,31 @@ async def initiate_trade(
                     ),
                 )
             logger.info("Step 3: Call fill price: %s", call_fill_price)
+            call_sl_trigger_price, call_sl_limit = compute_bracket_sl(
+                call_fill_price,
+                uni_sl,
+                master_mark=call_mark_for_sl,
+                leg="call",
+                trade_id=None,
+            )
+            if call_sl_trigger_price > 0:
+                try:
+                    stop_res = await client.place_stop_order(
+                        product_id=int(payload.call_product_id),
+                        size=int(payload.quantity),
+                        side="buy",
+                        stop_price=call_sl_trigger_price,
+                    )
+                    call_sl_order_id = (
+                        str(stop_res.get("order_id") or stop_res.get("id") or "")
+                        or None
+                    )
+                except Exception as sl_exc:
+                    logger.critical(
+                        "Call fill-based stop FAILED: %s (stop=%.2f)",
+                        sl_exc,
+                        call_sl_trigger_price,
+                    )
             await _verify_leg_on_delta(
                 client,
                 product_id=int(payload.call_product_id),
@@ -873,8 +896,6 @@ async def initiate_trade(
                 quantity=int(payload.quantity),
                 delta_client=client,
                 symbol_for_fallback=payload.put_symbol,
-                bracket_sl_price=put_sl_trigger_price,
-                bracket_sl_limit=put_sl_limit,
             )
             if not put_result.success:
                 logger.critical(
@@ -920,12 +941,58 @@ async def initiate_trade(
                     ),
                 )
             logger.info("Step 6: Put fill price: %s", put_fill_price)
+            put_sl_trigger_price, put_sl_limit = compute_bracket_sl(
+                put_fill_price,
+                uni_sl,
+                master_mark=put_mark_for_sl,
+                leg="put",
+                trade_id=None,
+            )
+            if put_sl_trigger_price > 0:
+                try:
+                    stop_res = await client.place_stop_order(
+                        product_id=int(payload.put_product_id),
+                        size=int(payload.quantity),
+                        side="buy",
+                        stop_price=put_sl_trigger_price,
+                    )
+                    put_sl_order_id = (
+                        str(stop_res.get("order_id") or stop_res.get("id") or "")
+                        or None
+                    )
+                except Exception as sl_exc:
+                    logger.critical(
+                        "Put fill-based stop FAILED: %s (stop=%.2f)",
+                        sl_exc,
+                        put_sl_trigger_price,
+                    )
             await _verify_leg_on_delta(
                 client,
                 product_id=int(payload.put_product_id),
                 leg_label="Put",
                 order_id=put_order_id,
             )
+
+        # Demo / post-fill: ensure canonical SL from master fills
+        if is_demo or call_sl_trigger_price <= 0 or put_sl_trigger_price <= 0:
+            from backend.core.delta_sl import compute_bracket_sl
+
+            if call_sl_trigger_price <= 0:
+                call_sl_trigger_price, call_sl_limit = compute_bracket_sl(
+                    call_fill_price,
+                    uni_sl,
+                    master_mark=call_mark_for_sl,
+                    leg="call",
+                    trade_id=None,
+                )
+            if put_sl_trigger_price <= 0:
+                put_sl_trigger_price, put_sl_limit = compute_bracket_sl(
+                    put_fill_price,
+                    uni_sl,
+                    master_mark=put_mark_for_sl,
+                    leg="put",
+                    trade_id=None,
+                )
 
         # --- Step 7–8: Save to DB ---
         logger.info("Step 7: Saving to DB%s...", " (DEMO)" if is_demo else "")
@@ -954,14 +1021,18 @@ async def initiate_trade(
                     if put_result is not None and put_result.commission is not None
                     else (0.0 if is_demo else None)
                 ),
-                call_sent_price=call_baseline_for_sl,
-                put_sent_price=put_baseline_for_sl,
+                call_sent_price=call_mark_for_sl,
+                put_sent_price=put_mark_for_sl,
             )
             logger.info(
                 "Step 8: Trade saved, id=%s is_demo=%s",
                 trade.id,
                 is_demo,
             )
+            if call_sl_order_id or put_sl_order_id:
+                call_leg.delta_sl_order_id = call_sl_order_id
+                put_leg.delta_sl_order_id = put_sl_order_id
+                db.commit()
         except Exception as exc:
             db.rollback()
             logger.critical(
@@ -1076,6 +1147,16 @@ async def initiate_trade(
                         master_put_fill=float(put_fill_price),
                         expiry_date=trade.expiry_date,
                         underlying=str(underlying),
+                        master_bracket_sl_call=(
+                            float(call_sl_trigger_price)
+                            if call_sl_trigger_price and call_sl_trigger_price > 0
+                            else None
+                        ),
+                        master_bracket_sl_put=(
+                            float(put_sl_trigger_price)
+                            if put_sl_trigger_price and put_sl_trigger_price > 0
+                            else None
+                        ),
                     )
                 )
                 logger.info("Mirror task queued for trade %s", trade.id)
@@ -1181,9 +1262,21 @@ async def register_existing_trade(
     # Emergency register: positions already open — cannot attach bracket SL
     # to existing shorts. Store display trigger prices only (no separate
     # stop_loss_order placement — those orphan after close).
+    from backend.core.delta_sl import compute_bracket_sl
+
     uni_sl = float(getattr(trade, "universal_sl_pct", None) or 200.0)
-    call_sl = round(float(payload.call_entry_premium) * (uni_sl / 100.0), 2)
-    put_sl = round(float(payload.put_entry_premium) * (uni_sl / 100.0), 2)
+    call_sl, _ = compute_bracket_sl(
+        float(payload.call_entry_premium),
+        uni_sl,
+        leg="call",
+        trade_id=int(trade.id),
+    )
+    put_sl, _ = compute_bracket_sl(
+        float(payload.put_entry_premium),
+        uni_sl,
+        leg="put",
+        trade_id=int(trade.id),
+    )
     call_leg.sl_trigger_price = call_sl if call_sl > 0 else None
     put_leg.sl_trigger_price = put_sl if put_sl > 0 else None
     call_leg.delta_sl_order_id = None

@@ -547,20 +547,16 @@ class AutoTradeEngine:
             tp_pct = float(settings.tp_pct or 50.0)
             sl_pct = float(settings.sl_pct or 100.0)
             universal_sl_pct = float(settings.universal_sl_pct or 200.0)
-            # Bracket SL confirmed working on Delta Exchange India
-            # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
-            # Bracket auto-cancels when position is closed (any reason)
-            # Use expected mark before fill (bracket must be set at order time).
-            call_sl_trigger_price = round(
-                call_mark * (universal_sl_pct / 100.0), 2
-            )
-            put_sl_trigger_price = round(
-                put_mark * (universal_sl_pct / 100.0), 2
-            )
-            call_sl_limit = round(call_sl_trigger_price * 1.05, 2)
-            put_sl_limit = round(put_sl_trigger_price * 1.05, 2)
+            # Bracket SL is computed AFTER fill from master fill (canonical).
+            # Do not attach quote/mark-based brackets on the entry order.
+            call_sl_trigger_price = 0.0
+            put_sl_trigger_price = 0.0
+            call_sl_limit = 0.0
+            put_sl_limit = 0.0
+            call_sl_order_id: str | None = None
+            put_sl_order_id: str | None = None
 
-            # --- Place CALL ---
+            # --- Place CALL (no bracket — attach fill-based stop after fill) ---
             logger.info(
                 "Placing CALL: %s qty=%s", straddle["call_symbol"], qty
             )
@@ -569,10 +565,6 @@ class AutoTradeEngine:
                 quantity=qty,
                 delta_client=client,
                 symbol_for_fallback=str(straddle["call_symbol"]),
-                bracket_sl_price=(
-                    call_sl_trigger_price if call_sl_trigger_price > 0 else None
-                ),
-                bracket_sl_limit=call_sl_limit if call_sl_trigger_price > 0 else None,
             )
             if not call_result.success:
                 raise RuntimeError(
@@ -597,17 +589,35 @@ class AutoTradeEngine:
             logger.info(
                 "Call filled @ %s order_id=%s", call_fill, call_order_id
             )
-            # Bracket SL was set from mark (must attach at order time).
-            # Warn if fill drifted >10% from mark — SL may fire early/late.
-            if call_mark > 0 and abs(call_fill - call_mark) / call_mark > 0.10:
-                logger.warning(
-                    "Call fill %.2f deviated >10%% from mark %.2f. "
-                    "Bracket SL trigger %.2f may not match 220%% of fill %.2f",
-                    call_fill,
-                    call_mark,
-                    call_sl_trigger_price,
-                    call_fill * universal_sl_pct / 100.0,
-                )
+
+            from backend.core.delta_sl import compute_bracket_sl
+
+            call_sl_trigger_price, call_sl_limit = compute_bracket_sl(
+                call_fill,
+                universal_sl_pct,
+                master_mark=call_mark,
+                leg="call",
+                trade_id=None,
+            )
+            if call_sl_trigger_price > 0:
+                try:
+                    stop_res = await client.place_stop_order(
+                        product_id=int(straddle["call_product_id"]),
+                        size=qty,
+                        side="buy",
+                        stop_price=call_sl_trigger_price,
+                    )
+                    call_sl_order_id = (
+                        str(stop_res.get("order_id") or stop_res.get("id") or "")
+                        or None
+                    )
+                except Exception as sl_exc:
+                    logger.critical(
+                        "Call fill-based stop place FAILED: %s "
+                        "(stop=%.2f) — position unprotected until retry",
+                        sl_exc,
+                        call_sl_trigger_price,
+                    )
 
             # --- Place PUT ---
             logger.info("Placing PUT: %s qty=%s", straddle["put_symbol"], qty)
@@ -616,10 +626,6 @@ class AutoTradeEngine:
                 quantity=qty,
                 delta_client=client,
                 symbol_for_fallback=str(straddle["put_symbol"]),
-                bracket_sl_price=(
-                    put_sl_trigger_price if put_sl_trigger_price > 0 else None
-                ),
-                bracket_sl_limit=put_sl_limit if put_sl_trigger_price > 0 else None,
             )
             if not put_result.success:
                 raise RuntimeError(
@@ -633,15 +639,6 @@ class AutoTradeEngine:
                 logger.warning(
                     "Put fill unavailable, using mark: %.4f", put_fill
                 )
-            if put_mark > 0 and abs(put_fill - put_mark) / put_mark > 0.10:
-                logger.warning(
-                    "Put fill %.2f deviated >10%% from mark %.2f. "
-                    "Bracket SL trigger %.2f may not match 220%% of fill %.2f",
-                    put_fill,
-                    put_mark,
-                    put_sl_trigger_price,
-                    put_fill * universal_sl_pct / 100.0,
-                )
             put_order_id = (
                 str(put_result.order_id)
                 if put_result.order_id is not None
@@ -653,6 +650,33 @@ class AutoTradeEngine:
                 else None
             )
             logger.info("Put filled @ %s order_id=%s", put_fill, put_order_id)
+
+            put_sl_trigger_price, put_sl_limit = compute_bracket_sl(
+                put_fill,
+                universal_sl_pct,
+                master_mark=put_mark,
+                leg="put",
+                trade_id=None,
+            )
+            if put_sl_trigger_price > 0:
+                try:
+                    stop_res = await client.place_stop_order(
+                        product_id=int(straddle["put_product_id"]),
+                        size=qty,
+                        side="buy",
+                        stop_price=put_sl_trigger_price,
+                    )
+                    put_sl_order_id = (
+                        str(stop_res.get("order_id") or stop_res.get("id") or "")
+                        or None
+                    )
+                except Exception as sl_exc:
+                    logger.critical(
+                        "Put fill-based stop place FAILED: %s "
+                        "(stop=%.2f) — position unprotected until retry",
+                        sl_exc,
+                        put_sl_trigger_price,
+                    )
 
             # TP/SL locked to initial deployment premium (actual fills)
             # initial_max_profit never changes after trade entry
@@ -746,7 +770,7 @@ class AutoTradeEngine:
                 sl_trigger_price=float(call_sl_trigger_price)
                 if call_sl_trigger_price and call_sl_trigger_price > 0
                 else None,
-                delta_sl_order_id=None,  # bracket has no separate stop-order ID
+                delta_sl_order_id=call_sl_order_id,
             )
             put_leg = Leg(
                 trade_id=trade.id,
@@ -769,7 +793,7 @@ class AutoTradeEngine:
                 sl_trigger_price=float(put_sl_trigger_price)
                 if put_sl_trigger_price and put_sl_trigger_price > 0
                 else None,
-                delta_sl_order_id=None,  # bracket has no separate stop-order ID
+                delta_sl_order_id=put_sl_order_id,
             )
             accumulate_entry_spread_on_trade(trade, call_entry_spread)
             accumulate_entry_spread_on_trade(trade, put_entry_spread)
@@ -886,6 +910,16 @@ class AutoTradeEngine:
                             master_put_fill=float(put_fill),
                             expiry_date=expiry_date,
                             underlying=str(settings.underlying),
+                            master_bracket_sl_call=(
+                                float(call_sl_trigger_price)
+                                if call_sl_trigger_price > 0
+                                else None
+                            ),
+                            master_bracket_sl_put=(
+                                float(put_sl_trigger_price)
+                                if put_sl_trigger_price > 0
+                                else None
+                            ),
                         )
                     )
                     logger.info("Mirror task queued for auto trade %s", trade.id)
