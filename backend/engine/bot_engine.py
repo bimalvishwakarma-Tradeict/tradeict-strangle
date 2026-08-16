@@ -3085,6 +3085,14 @@ class BotEngine:
                                 new_symbol=new_sym,
                                 new_strike=new_stk,
                                 master_qty=qty,
+                                universal_sl_pct=float(
+                                    getattr(
+                                        trade_state.trade,
+                                        "universal_sl_pct",
+                                        None,
+                                    )
+                                    or 200.0
+                                ),
                             )
                             log_and_buffer(
                                 "MIRROR_ADJ_CALLED",

@@ -767,13 +767,20 @@ class MirrorEngine:
                     exc,
                 )
 
-            # Bracket SL confirmed working on Delta Exchange India
-            # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
-            # Default 200% of master fill (slave fill unknown until after place)
+            # Bracket SL from master's universal_sl_pct (default 200%)
+            uni_sl = self._master_universal_sl_pct(db, int(master_trade_id))
             call_baseline = float(master_call_fill or 0.0)
             put_baseline = float(master_put_fill or 0.0)
-            call_sl = round(call_baseline * 2.0, 2) if call_baseline > 0 else None
-            put_sl = round(put_baseline * 2.0, 2) if put_baseline > 0 else None
+            call_sl = (
+                round(call_baseline * (uni_sl / 100.0), 2)
+                if call_baseline > 0
+                else None
+            )
+            put_sl = (
+                round(put_baseline * (uni_sl / 100.0), 2)
+                if put_baseline > 0
+                else None
+            )
 
             # Place call order on slave (bracket SL attached)
             call_order = await client.place_order(
@@ -950,12 +957,17 @@ class MirrorEngine:
         new_symbol: str,
         new_strike: float,
         master_qty: int,
+        universal_sl_pct: float | None = None,
     ) -> None:
         """
         Mirror an adjustment on all slaves.
-        Close old leg, open new leg with same product_id.
+        Close old leg, open new leg — atomic verify-close-verify.
         """
         with self.db_factory() as db:
+            uni_sl = float(universal_sl_pct) if universal_sl_pct else 0.0
+            if uni_sl <= 0:
+                uni_sl = self._master_universal_sl_pct(db, master_trade_id)
+
             slave_trades = (
                 db.query(SlaveTrade)
                 .filter(
@@ -971,9 +983,10 @@ class MirrorEngine:
                 {"slaves_found": len(slave_trades)},
             )
             logger.info(
-                "[MIRROR_ADJ_ENGINE] Trade#%s slaves found=%s",
+                "[MIRROR_ADJ_ENGINE] Trade#%s slaves found=%s uni_sl=%.1f%%",
                 master_trade_id,
                 len(slave_trades),
+                uni_sl,
             )
 
             if not slave_trades:
@@ -1010,7 +1023,39 @@ class MirrorEngine:
                     new_symbol=new_symbol,
                     new_strike=new_strike,
                     db=db,
+                    universal_sl_pct=uni_sl,
                 )
+
+    def _master_universal_sl_pct(
+        self, db: Any, master_trade_id: int
+    ) -> float:
+        try:
+            row = (
+                db.query(Trade)
+                .filter(Trade.id == int(master_trade_id))
+                .first()
+            )
+            return float(getattr(row, "universal_sl_pct", None) or 200.0)
+        except Exception:
+            return 200.0
+
+    @staticmethod
+    def _position_size_for_product(
+        positions: list[dict[str, Any]], product_id: int
+    ) -> float | None:
+        """Return live signed size for product_id, or None if absent."""
+        wanted = int(product_id)
+        for pos in positions or []:
+            try:
+                pid = int(pos.get("product_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid == wanted:
+                try:
+                    return float(pos.get("size") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+        return None
 
     async def _mirror_adjustment_to_slave(
         self,
@@ -1022,6 +1067,7 @@ class MirrorEngine:
         new_symbol: str,
         new_strike: float,
         db: Any,
+        universal_sl_pct: float = 200.0,
     ) -> None:
         # Virtual mode: track adjustment in DB but don't place real orders
         if bool(getattr(slave, "is_virtual", False)):
@@ -1041,8 +1087,6 @@ class MirrorEngine:
                     .first()
                 )
                 if st:
-                    # No live slave fill in virtual mode — keep existing fills
-                    # and mark the adjusted leg order as VIRTUAL
                     leg = str(triggered_leg_type).lower()
                     if leg == "call":
                         st.call_order_id = "VIRTUAL"
@@ -1052,8 +1096,13 @@ class MirrorEngine:
             return
 
         client = self._get_slave_client(slave)
-        qty = max(1, int(slave_trade.actual_quantity or 1))
+        stored_qty = max(1, int(slave_trade.actual_quantity or 1))
         leg = str(triggered_leg_type).lower()
+        uni_sl = float(universal_sl_pct or 200.0)
+        if uni_sl <= 0:
+            uni_sl = 200.0
+        old_pid = int(old_product_id)
+        new_pid = int(new_product_id)
 
         try:
             # Cancel legacy separate SL only if present (bracket auto-cancels)
@@ -1070,41 +1119,135 @@ class MirrorEngine:
                 except Exception as exc:
                     logger.warning("Slave SL cancel failed: %s", exc)
 
-            # Close old leg (buy back) — bracket SL on that position auto-cancels
-            close_order = await client.place_order(
-                product_id=int(old_product_id),
-                size=qty,
-                side="buy",
+            # --- a. Live positions ---
+            live_positions = await client.get_option_positions()
+            live_size = self._position_size_for_product(
+                live_positions, old_pid
             )
             logger.info(
-                "Slave '%s' closed %s: order_id=%s",
+                "[MIRROR_ADJ_VERIFY] slave='%s' stage=pre_close "
+                "product_id=%s live_size=%s stored_qty=%s",
                 slave.name,
-                leg,
-                self._order_id(close_order),
+                old_pid,
+                live_size,
+                stored_qty,
+            )
+            log_and_buffer(
+                "MIRROR_ADJ_VERIFY",
+                int(slave_trade.master_trade_id),
+                {
+                    "slave": slave.name,
+                    "stage": "pre_close",
+                    "product_id": old_pid,
+                    "live_size": live_size,
+                    "stored_qty": stored_qty,
+                },
             )
 
-            # Open new leg with bracket SL (200% of expected fill / mark)
+            # --- b/c. Close old leg with reduce_only using LIVE size ---
+            if live_size is None or live_size == 0:
+                logger.info(
+                    "[MIRROR_ADJ_SKIP] slave='%s' already_flat "
+                    "old_product=%s — skip close, open new leg",
+                    slave.name,
+                    old_pid,
+                )
+            else:
+                close_size = max(1, abs(int(live_size)))
+                is_long = float(live_size) > 0
+                close_order = await client.close_position(
+                    product_id=old_pid,
+                    size=close_size,
+                    is_long=is_long,
+                )
+                logger.info(
+                    "[MIRROR_ADJ_VERIFY] slave='%s' stage=close_sent "
+                    "product_id=%s size=%s is_long=%s order_id=%s",
+                    slave.name,
+                    old_pid,
+                    close_size,
+                    is_long,
+                    self._order_id(close_order),
+                )
+
+                await asyncio.sleep(2)
+                post_close = await client.get_option_positions()
+                still = self._position_size_for_product(post_close, old_pid)
+                logger.info(
+                    "[MIRROR_ADJ_VERIFY] slave='%s' stage=post_close "
+                    "product_id=%s expected=0 actual_size=%s",
+                    slave.name,
+                    old_pid,
+                    still,
+                )
+                log_and_buffer(
+                    "MIRROR_ADJ_VERIFY",
+                    int(slave_trade.master_trade_id),
+                    {
+                        "slave": slave.name,
+                        "stage": "post_close",
+                        "product_id": old_pid,
+                        "actual_size": still,
+                    },
+                )
+                if still is not None and abs(float(still)) > 0:
+                    msg = (
+                        f"adjust_close_failed: old product {old_pid} "
+                        f"still open size={still} after close"
+                    )
+                    logger.critical(
+                        "[MIRROR_ADJ_VERIFY] slave='%s' %s — ABORT new leg",
+                        slave.name,
+                        msg,
+                    )
+                    slave_trade.status = "adjust_close_failed"
+                    slave_trade.last_error = msg[:500]
+                    slave_trade.error_count = (
+                        int(slave_trade.error_count or 0) + 1
+                    )
+                    slave_trade.last_updated = get_ist_now()
+                    slave.connection_status = "error"
+                    slave.last_error = msg[:500]
+                    db.commit()
+                    return
+
+            # Close size for new entry: prefer live abs size, else stored
+            entry_qty = (
+                max(1, abs(int(live_size)))
+                if live_size is not None and live_size != 0
+                else stored_qty
+            )
+
+            # --- d. Open new leg; bracket SL from mark or post-fill ---
             expected_fill = 0.0
             try:
                 expected_fill = float(
                     await client.get_mark_price(new_symbol)
                 )
-            except Exception:
-                expected_fill = float(
-                    (slave_trade.call_fill_price or 0)
-                    if leg == "call"
-                    else (slave_trade.put_fill_price or 0)
+            except Exception as mark_exc:
+                logger.warning(
+                    "[MIRROR_ADJ] slave='%s' get_mark_price(%s) failed: %s "
+                    "— will set bracket SL after fill or skip",
+                    slave.name,
+                    new_symbol,
+                    mark_exc,
                 )
-            new_sl = round(expected_fill * 2.0, 2) if expected_fill > 0 else None
+                expected_fill = 0.0
+
+            new_sl = None
+            new_sl_limit = None
+            if expected_fill > 0:
+                new_sl = round(expected_fill * (uni_sl / 100.0), 2)
+                new_sl_limit = (
+                    round(new_sl * 1.05, 2) if new_sl > 0 else None
+                )
 
             new_order = await client.place_order(
-                product_id=int(new_product_id),
-                size=qty,
+                product_id=new_pid,
+                size=entry_qty,
                 side="sell",
                 bracket_stop_loss_price=new_sl,
-                bracket_stop_loss_limit_price=(
-                    round(new_sl * 1.05, 2) if new_sl else None
-                ),
+                bracket_stop_loss_limit_price=new_sl_limit,
             )
             new_fill = float(
                 await client.resolve_fill_price(
@@ -1114,15 +1257,82 @@ class MirrorEngine:
             )
             new_order_id = self._order_id(new_order)
 
+            # If mark failed but we have a fill, log that SL was skipped
+            if expected_fill <= 0:
+                if new_fill > 0:
+                    logger.warning(
+                        "[MIRROR_ADJ] slave='%s' bracket SL skipped "
+                        "(no mark); new fill=$%.2f — no old-leg fallback",
+                        slave.name,
+                        new_fill,
+                    )
+                else:
+                    logger.warning(
+                        "[MIRROR_ADJ] slave='%s' bracket SL skipped "
+                        "(no mark and no fill yet)",
+                        slave.name,
+                    )
+
             logger.info(
-                "Slave '%s' opened new %s: strike=%s fill=%s id=%s bracket_sl=%s",
+                "Slave '%s' opened new %s: strike=%s fill=%s id=%s "
+                "bracket_sl=%s (uni_sl=%.1f%%) qty=%s",
                 slave.name,
                 leg,
                 new_strike,
                 new_fill,
                 new_order_id,
                 new_sl,
+                uni_sl,
+                entry_qty,
             )
+
+            await asyncio.sleep(2)
+            post_entry = await client.get_option_positions()
+            new_live = self._position_size_for_product(post_entry, new_pid)
+            logger.info(
+                "[MIRROR_ADJ_VERIFY] slave='%s' stage=post_entry "
+                "product_id=%s expected_short_qty=%s actual_size=%s",
+                slave.name,
+                new_pid,
+                entry_qty,
+                new_live,
+            )
+            log_and_buffer(
+                "MIRROR_ADJ_VERIFY",
+                int(slave_trade.master_trade_id),
+                {
+                    "slave": slave.name,
+                    "stage": "post_entry",
+                    "product_id": new_pid,
+                    "expected_qty": entry_qty,
+                    "actual_size": new_live,
+                },
+            )
+
+            if new_live is None or abs(float(new_live)) <= 0:
+                msg = (
+                    f"partial_adjustment: old leg {old_pid} closed but "
+                    f"new product {new_pid} missing on Delta"
+                )
+                logger.critical(
+                    "[MIRROR_ADJ_VERIFY] slave='%s' %s",
+                    slave.name,
+                    msg,
+                )
+                slave_trade.status = "partial_adjustment"
+                slave_trade.last_error = msg[:500]
+                slave_trade.error_count = (
+                    int(slave_trade.error_count or 0) + 1
+                )
+                slave_trade.last_updated = get_ist_now()
+                if leg == "call":
+                    slave_trade.call_order_id = new_order_id or None
+                else:
+                    slave_trade.put_order_id = new_order_id or None
+                slave.connection_status = "error"
+                slave.last_error = msg[:500]
+                db.commit()
+                return
 
             if leg == "call":
                 slave_trade.call_order_id = new_order_id or None
@@ -1135,23 +1345,49 @@ class MirrorEngine:
                 if new_fill > 0:
                     slave_trade.put_fill_price = new_fill
 
+            # Keep actual_quantity synced to live entry size
+            slave_trade.actual_quantity = entry_qty
+            slave_trade.status = "active"
+            slave_trade.last_error = None
+            slave_trade.last_updated = get_ist_now()
             slave.last_error = None
             slave.connection_status = "connected"
             slave.last_connected_at = get_ist_now()
             db.commit()
-            logger.info("✅ Slave '%s' adjustment mirrored", slave.name)
+            logger.info(
+                "✅ Slave '%s' adjustment mirrored (atomic verify OK)",
+                slave.name,
+            )
 
         except Exception as exc:
             logger.error(
-                "❌ Slave '%s' adjustment FAILED: %s", slave.name, exc
+                "❌ Slave '%s' adjustment FAILED: %s",
+                slave.name,
+                exc,
+                exc_info=True,
             )
             try:
                 db.rollback()
             except Exception:
                 pass
-            slave_trade.last_error = str(exc)[:500]
-            slave_trade.error_count = int(slave_trade.error_count or 0) + 1
-            db.commit()
+            # Prefer partial if we likely closed old but failed before verify
+            try:
+                slave_trade.status = "partial_adjustment"
+                slave_trade.last_error = (
+                    f"partial_adjustment: exception during adjust: {exc}"
+                )[:500]
+                slave_trade.error_count = (
+                    int(slave_trade.error_count or 0) + 1
+                )
+                slave_trade.last_updated = get_ist_now()
+                slave.connection_status = "error"
+                slave.last_error = str(exc)[:500]
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
         finally:
             await client.close()
 
@@ -1230,16 +1466,28 @@ class MirrorEngine:
                         side="buy",
                     )
 
-                    # 3) Open new other short (with bracket SL like normal adj)
+                    # 3) Open new other short (bracket SL = master universal_sl_pct)
+                    uni_sl = self._master_universal_sl_pct(
+                        db, int(master_trade_id)
+                    )
                     expected_fill = 0.0
                     try:
                         expected_fill = float(
                             await client.get_mark_price(new_other_symbol)
                         )
-                    except Exception:
+                    except Exception as mark_exc:
+                        logger.warning(
+                            "[MIRROR_CONV] slave='%s' mark failed for %s: %s "
+                            "— skip bracket SL (no old-leg fallback)",
+                            slave.name,
+                            new_other_symbol,
+                            mark_exc,
+                        )
                         expected_fill = 0.0
                     new_sl = (
-                        round(expected_fill * 2.0, 2) if expected_fill > 0 else None
+                        round(expected_fill * (uni_sl / 100.0), 2)
+                        if expected_fill > 0
+                        else None
                     )
                     new_order = await client.place_order(
                         product_id=int(new_other_product_id),
@@ -1360,18 +1608,25 @@ class MirrorEngine:
         may differ from entry). Hint product_ids are logged for diagnosis only.
         """
         with self.db_factory() as db:
+            # Also close broken/partial slaves so master exit never leaves
+            # one-legged or stuck adjust states open on Delta.
+            _exit_statuses = (
+                "active",
+                "partial_adjustment",
+                "adjust_close_failed",
+            )
             slave_trades = (
                 db.query(SlaveTrade)
                 .filter(
                     SlaveTrade.master_trade_id == master_trade_id,
-                    SlaveTrade.status == "active",
+                    SlaveTrade.status.in_(_exit_statuses),
                 )
                 .all()
             )
 
             if not slave_trades:
                 logger.info(
-                    "[MIRROR_EXIT] Trade#%s — no active slave_trades "
+                    "[MIRROR_EXIT] Trade#%s — no open/partial slave_trades "
                     "(call=%s put=%s reason=%s)",
                     master_trade_id,
                     call_product_id,
@@ -1382,13 +1637,15 @@ class MirrorEngine:
 
             logger.info(
                 "[MIRROR_EXIT] Trade#%s mirroring to %s slaves: "
-                "reason=%s hint_call=%s hint_put=%s hint_hedge=%s",
+                "reason=%s hint_call=%s hint_put=%s hint_hedge=%s "
+                "statuses=%s",
                 master_trade_id,
                 len(slave_trades),
                 reason,
                 call_product_id,
                 put_product_id,
                 hedge_product_id,
+                [str(st.status) for st in slave_trades],
             )
 
             for slave_trade in slave_trades:
@@ -1435,7 +1692,13 @@ class MirrorEngine:
                         SlaveTrade.slave_account_id == slave.id,
                         SlaveTrade.master_trade_id
                         == slave_trade.master_trade_id,
-                        SlaveTrade.status == "active",
+                        SlaveTrade.status.in_(
+                            (
+                                "active",
+                                "partial_adjustment",
+                                "adjust_close_failed",
+                            )
+                        ),
                     )
                     .first()
                 )
@@ -1847,9 +2110,10 @@ class MirrorEngine:
         Periodic check (every 5 monitor cycles):
 
         1. Active SlaveTrades should still have open options — else mark closed.
-        2. Error SlaveTrades: if master still ACTIVE → retry mirror once;
-           if master CLOSED → force slave_trade closed (unblock future entries).
-        3. Virtual/paper SlaveTrades are never closed here.
+        2. Error / partial_adjustment / adjust_close_failed: alert + retry
+           (entry errors only); if master CLOSED → force slave_trade closed.
+        3. Naked one-legged short while master has two opens → CRITICAL.
+        4. Virtual/paper SlaveTrades are never closed here.
         """
         with self.db_factory() as db:
             master = (
@@ -1863,7 +2127,22 @@ class MirrorEngine:
                 == TradeStatus.ACTIVE.value
             )
 
-            # --- Reconcile error / blocked rows for this master ---
+            from backend.models import Leg
+
+            master_open_legs = 0
+            if master_active:
+                master_open_legs = (
+                    db.query(Leg)
+                    .filter(
+                        Leg.trade_id == int(master_trade_id),
+                        Leg.status == "open",
+                        Leg.is_bot_managed.is_(True),
+                        Leg.leg_type.in_(("call", "put")),
+                    )
+                    .count()
+                )
+
+            # --- Reconcile error / blocked / adjust-failure rows ---
             problem_trades = (
                 db.query(SlaveTrade)
                 .filter(
@@ -1872,6 +2151,8 @@ class MirrorEngine:
                         (
                             "error",
                             "partial",
+                            "partial_adjustment",
+                            "adjust_close_failed",
                             "blocked_foreign_position",
                             "skipped_low_capital",
                         )
@@ -1887,6 +2168,31 @@ class MirrorEngine:
                 )
                 if not master_active:
                     prior_status = str(st.status)
+                    # Broken adjust states may still have live Delta legs —
+                    # attempt live exit before clearing the DB row.
+                    if (
+                        prior_status
+                        in ("partial_adjustment", "adjust_close_failed")
+                        and slave is not None
+                        and not is_virtual_slave_trade(slave, st)
+                    ):
+                        try:
+                            await self._mirror_exit_to_slave(
+                                slave=slave,
+                                slave_trade=st,
+                                call_product_id=0,
+                                put_product_id=0,
+                                reason="reconcile_master_closed",
+                                db=db,
+                            )
+                        except Exception as exit_exc:
+                            logger.critical(
+                                "[SLAVE_RECONCILE] live exit failed "
+                                "slave_trade=%s status=%s: %s",
+                                st.id,
+                                prior_status,
+                                exit_exc,
+                            )
                     if self._close_slave_trade(
                         slave,
                         st,
@@ -1909,7 +2215,24 @@ class MirrorEngine:
                         )
                     continue
 
-                # Master still active — retry mirror once for retriable errors
+                # Master still active — surface adjust failures every cycle
+                if st.status in (
+                    "partial_adjustment",
+                    "adjust_close_failed",
+                ):
+                    logger.critical(
+                        "[SLAVE_INTEGRITY] slave_trade=%s slave='%s' "
+                        "status=%s last_error=%s — not healthy active; "
+                        "needs manual review or master exit",
+                        st.id,
+                        getattr(slave, "name", "?"),
+                        st.status,
+                        (st.last_error or "")[:200],
+                    )
+                    # Do NOT auto-retry entry: would double exposure.
+                    continue
+
+                # Retry mirror once for retriable entry errors
                 err = str(st.last_error or "")
                 already_retried = "[RETRY_DONE]" in err
                 err_count = int(st.error_count or 0)
@@ -1924,8 +2247,6 @@ class MirrorEngine:
                     continue
                 if is_virtual_slave_trade(slave, st):
                     continue
-
-                from backend.models import Leg
 
                 call_leg = (
                     db.query(Leg)
@@ -1994,7 +2315,7 @@ class MirrorEngine:
                         retry_exc,
                     )
 
-            # --- Existing: active book must still have positions ---
+            # --- Active book: empty / naked one-legged ---
             slave_trades = (
                 db.query(SlaveTrade)
                 .filter(
@@ -2047,11 +2368,50 @@ class MirrorEngine:
                         ):
                             slave_trade.last_updated = get_ist_now()
                             db.commit()
+                        continue
+
+                    # Count distinct short option products (size < 0)
+                    short_pids: set[int] = set()
+                    for pos in slave_positions:
+                        try:
+                            size = float(pos.get("size") or 0)
+                            pid = int(pos.get("product_id") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if size < 0 and pid > 0:
+                            short_pids.add(pid)
+
+                    if (
+                        master_open_legs >= 2
+                        and len(short_pids) == 1
+                    ):
+                        msg = (
+                            f"naked_one_leg: slave has {len(short_pids)} "
+                            f"short product(s) {sorted(short_pids)} while "
+                            f"master has {master_open_legs} open legs"
+                        )
+                        logger.critical(
+                            "[SLAVE_INTEGRITY] slave='%s' slave_trade=%s %s",
+                            slave.name,
+                            slave_trade.id,
+                            msg,
+                        )
+                        slave_trade.status = "partial_adjustment"
+                        slave_trade.last_error = msg[:500]
+                        slave_trade.error_count = (
+                            int(slave_trade.error_count or 0) + 1
+                        )
+                        slave_trade.last_updated = get_ist_now()
+                        slave.connection_status = "error"
+                        slave.last_error = msg[:500]
+                        db.commit()
                     else:
                         logger.debug(
-                            "Slave '%s' integrity OK: %s option positions",
+                            "Slave '%s' integrity OK: %s option positions "
+                            "(%s shorts)",
                             slave.name,
                             len(slave_positions),
+                            len(short_pids),
                         )
                 except Exception as exc:
                     logger.warning(
