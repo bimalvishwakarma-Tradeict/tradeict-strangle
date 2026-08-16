@@ -797,7 +797,6 @@ class BotEngine:
 
         from backend.core.delta_sl import cancel_leg_sl_order
         from backend.engine.trade_reconcile import book_leg_close
-        from backend.models import SlaveAccount, SlaveTrade
 
         now_utc = datetime.now(timezone.utc)
         closed_n = 0
@@ -831,50 +830,10 @@ class BotEngine:
                     leg.exit_premium = 0.0
                 closed_n += 1
 
-            if trade is not None:
-                trade.status = TradeStatus.CLOSED.value
-                trade.exit_reason = ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value
-                trade.exit_time = get_ist_now()
-                if trade.realized_pnl is None:
-                    trade.realized_pnl = float(
-                        getattr(trade_state, "last_delta_mtm", 0) or 0
-                    )
-
-            # Mark active slave trades closed (no close orders — likely gone too)
-            # Never auto-close virtual/paper SlaveTrades here.
-            from backend.engine.mirror_engine import is_virtual_slave_trade
-
-            slave_trades = (
-                db.query(SlaveTrade)
-                .filter(
-                    SlaveTrade.master_trade_id == trade_id,
-                    SlaveTrade.status == "active",
-                )
-                .all()
-            )
-            closed_slave_n = 0
-            for st in slave_trades:
-                slave_acc = (
-                    db.query(SlaveAccount)
-                    .filter(SlaveAccount.id == st.slave_account_id)
-                    .first()
-                )
-                if is_virtual_slave_trade(slave_acc, st):
-                    logger.warning(
-                        "Skipping auto-close of virtual SlaveTrade %s "
-                        "(manual master close trade=%s)",
-                        st.id,
-                        trade_id,
-                    )
-                    continue
-                st.status = "closed"
-                closed_slave_n += 1
-            if closed_slave_n:
-                logger.info(
-                    "Marked %s slave trade(s) closed for manual-closed "
-                    "master trade %s",
-                    closed_slave_n,
-                    trade_id,
+            # Preserve realized_pnl fallback; Trade.status / exit_* owned by funnel
+            if trade is not None and trade.realized_pnl is None:
+                trade.realized_pnl = float(
+                    getattr(trade_state, "last_delta_mtm", 0) or 0
                 )
 
             try:
@@ -888,23 +847,21 @@ class BotEngine:
                 db.rollback()
 
         logger.info(
-            "[MANUAL_CLOSE] Trade %s marked closed. %s legs updated in DB.",
+            "[MANUAL_CLOSE] Trade %s master legs booked in DB (%s). "
+            "Routing slaves + Trade.status through close_master_trade.",
             trade_id,
             closed_n,
         )
 
-        self.position_tracker.mark_closed(trade_id)
-        await ws_manager.broadcast(
-            {
-                "type": "TRADE_CLOSED",
-                "trade_id": trade_id,
-                "reason": ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value,
-                "message": "Trade was closed directly on Delta Exchange",
-            }
-        )
-        self._maybe_schedule_auto_reentry(
-            str(getattr(trade_state.trade, "underlying", "") or "")
-        )
+        # Mirror slaves + set Trade.status / mark_closed via single funnel
+        with self.db_factory() as db:
+            await self.close_master_trade(
+                trade_id=trade_id,
+                reason=ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value,
+                db=db,
+                skip_master_legs=True,
+                trade_state=trade_state,
+            )
 
     async def _emergency_close_remaining_leg(
         self, trade_state: TradeState, leg_to_close: str
@@ -999,7 +956,6 @@ class BotEngine:
 
         from backend.core.delta_sl import cancel_leg_sl_order
         from backend.engine.trade_reconcile import book_leg_close
-        from backend.models import SlaveTrade
 
         now_utc = datetime.now(timezone.utc)
         close_ok = False
@@ -1140,43 +1096,10 @@ class BotEngine:
                     leftover.exit_time = get_ist_now()
                     leftover.exit_premium = exit_px
 
-            if trade is not None:
-                trade.status = TradeStatus.CLOSED.value
-                trade.exit_reason = (
-                    ExitReason.SL_TRIGGERED_EMERGENCY_CLOSE.value
+            if trade is not None and trade.realized_pnl is None:
+                trade.realized_pnl = float(
+                    getattr(trade_state, "last_delta_mtm", 0) or 0
                 )
-                trade.exit_time = get_ist_now()
-                if trade.realized_pnl is None:
-                    trade.realized_pnl = float(
-                        getattr(trade_state, "last_delta_mtm", 0) or 0
-                    )
-
-            slave_trades = (
-                db.query(SlaveTrade)
-                .filter(
-                    SlaveTrade.master_trade_id == trade_id,
-                    SlaveTrade.status == "active",
-                )
-                .all()
-            )
-            from backend.engine.mirror_engine import is_virtual_slave_trade
-            from backend.models import SlaveAccount as _SlaveAccount
-
-            for st in slave_trades:
-                slave_acc = (
-                    db.query(_SlaveAccount)
-                    .filter(_SlaveAccount.id == st.slave_account_id)
-                    .first()
-                )
-                if is_virtual_slave_trade(slave_acc, st):
-                    logger.warning(
-                        "Skipping auto-close of virtual SlaveTrade %s "
-                        "(emergency master close trade=%s)",
-                        st.id,
-                        trade_id,
-                    )
-                    continue
-                st.status = "closed"
 
             try:
                 db.commit()
@@ -1202,7 +1125,16 @@ class BotEngine:
             else:
                 logger.info("[EMERGENCY_CLOSE] All legs closed in DB")
 
-        self.position_tracker.mark_closed(trade_id)
+        # Mirror slaves + Trade.status / mark_closed via funnel (master legs done)
+        with self.db_factory() as db:
+            await self.close_master_trade(
+                trade_id=trade_id,
+                reason=ExitReason.SL_TRIGGERED_EMERGENCY_CLOSE.value,
+                db=db,
+                skip_master_legs=True,
+                trade_state=trade_state,
+            )
+
         await ws_manager.broadcast(
             {
                 "type": "ERROR",
@@ -1217,25 +1149,12 @@ class BotEngine:
                 "severity": "WARNING" if close_ok else "CRITICAL",
             }
         )
-        await ws_manager.broadcast(
-            {
-                "type": "TRADE_CLOSED",
-                "trade_id": trade_id,
-                "reason": ExitReason.SL_TRIGGERED_EMERGENCY_CLOSE.value,
-                "final_pnl": float(
-                    getattr(trade_state, "last_delta_mtm", 0) or 0
-                ),
-            }
-        )
         logger.info(
             "[EMERGENCY_CLOSE] Complete for trade %s. "
             "remaining_leg_close: success=%s fill=%s",
             trade_id,
             close_ok,
             filled,
-        )
-        self._maybe_schedule_auto_reentry(
-            str(getattr(trade_state.trade, "underlying", "") or "")
         )
 
     def _maybe_schedule_auto_reentry(self, underlying: str) -> None:
