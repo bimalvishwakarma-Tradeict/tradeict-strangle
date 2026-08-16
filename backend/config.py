@@ -35,6 +35,8 @@ ADJUSTMENT_COOLDOWN_MINUTES = 3
 # Delta India BTC options: PnL USD = premium_diff * size * contract_value
 # (API unrealized_pnl for short options is WRONG — see compute_signed_upnl)
 OPTIONS_CONTRACT_VALUE: float = float(os.getenv("OPTIONS_CONTRACT_VALUE", "0.001"))
+# Hard ceiling on mirrored slave lot size (prevents runaway capital-based qty)
+MAX_SLAVE_QTY: int = int(os.getenv("MAX_SLAVE_QTY", "100"))
 # Delta India options trading fee (market/taker) — estimate only; paid fees come from API
 OPTION_FEE_RATE: float = float(os.getenv("OPTION_FEE_RATE", "0.00010"))  # 0.010% of notional
 PREMIUM_CAP_RATE: float = float(os.getenv("PREMIUM_CAP_RATE", "0.035"))  # 3.5% of premium

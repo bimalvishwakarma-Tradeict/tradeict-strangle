@@ -18,6 +18,7 @@ from backend.core.encryption import decrypt
 from backend.core.time_utils import get_ist_now
 from backend.database import SessionLocal, get_active_slave_accounts
 from backend.models import SlaveAccount, SlaveTrade, Trade
+from backend.config import MAX_SLAVE_QTY, TradeStatus
 
 logger = logging.getLogger(__name__)
 
@@ -99,18 +100,19 @@ class MirrorEngine:
 
         Two modes:
         1. Fixed multiplier mode (capital_based_qty=False, default):
-           slave_qty = master_qty × qty_multiplier
+           slave_qty = master_qty × qty_multiplier  (then capped at MAX_SLAVE_QTY)
 
         2. Capital-based mode (capital_based_qty=True):
-           effective_capital = min(user_allocated_capital, slave_available)
-           master_ratio = master_margin_used / master_total_capital
-           per_lot_cost_usd = master_margin_used / master_qty
-           slave_margin_to_use = effective_capital × master_ratio
-           slave_qty = max(1, round(slave_margin_to_use / per_lot_cost_usd))
+           LIVE balance is mandatory for real slaves.
+           effective_capital = min(user_allocated_capital, live_balance)
+           Never size from declared capital alone.
+           Returns 0 when capital is insufficient (caller must skip, not place).
 
-           All values in USD. Falls back to fixed multiplier if capital
-           data is unavailable.
+        Hard ceiling: MAX_SLAVE_QTY (config) on every path.
         """
+        max_qty = max(1, int(MAX_SLAVE_QTY))
+        mq = max(0, int(master_qty or 0))
+
         if (
             slave is not None
             and bool(getattr(slave, "capital_based_qty", False))
@@ -118,62 +120,302 @@ class MirrorEngine:
             and master_margin_used_usd > 0
             and master_total_capital_usd is not None
             and master_total_capital_usd > 0
-            and master_qty > 0
+            and mq > 0
         ):
             user_allocated = float(
                 getattr(slave, "user_allocated_capital", None) or 0
             )
-
-            # Get slave available balance (fresh from API or cached)
-            slave_available = (
+            is_virtual = bool(getattr(slave, "is_virtual", False))
+            live = (
                 float(slave_available_usd)
                 if slave_available_usd is not None
-                else float(getattr(slave, "balance_usd", 0) or 0)
+                else 0.0
             )
 
-            # Effective capital = min(what user allocated, what is actually available)
-            if user_allocated > 0 and slave_available > 0:
-                effective_capital = min(user_allocated, slave_available)
-            elif user_allocated > 0:
-                effective_capital = user_allocated
-            else:
-                effective_capital = slave_available
-
-            if effective_capital > 0:
-                master_ratio = (
-                    master_margin_used_usd / master_total_capital_usd
-                )
-                per_lot_cost_usd = master_margin_used_usd / master_qty
-                slave_margin_to_use = effective_capital * master_ratio
-
-                if per_lot_cost_usd > 0:
-                    calculated_qty = max(
-                        1,
-                        round(slave_margin_to_use / per_lot_cost_usd),
-                    )
-                else:
-                    calculated_qty = master_qty
-
-                logger.info(
-                    "Capital-based qty: master_total=$%.2f master_used=$%.2f "
-                    "master_qty=%s master_ratio=%.3f per_lot=$%.4f "
-                    "slave_allocated=$%.2f slave_available=$%.2f "
-                    "effective=$%.2f slave_margin=$%.2f → slave_qty=%s",
-                    master_total_capital_usd,
-                    master_margin_used_usd,
-                    master_qty,
-                    master_ratio,
-                    per_lot_cost_usd,
+            # Real slaves: refuse allocated-only sizing when live balance missing
+            if not is_virtual and live <= 0:
+                logger.warning(
+                    "[SLAVE_SIZING] account_id=%s allocated=%.2f "
+                    "live_balance=%.2f — refuse sizing without live balance",
+                    getattr(slave, "id", None),
                     user_allocated,
-                    slave_available,
-                    effective_capital,
-                    slave_margin_to_use,
-                    calculated_qty,
+                    live,
                 )
-                return int(calculated_qty)
+                return 0
 
-        # Fallback: fixed multiplier
-        return max(1, int(round(float(master_qty) * float(multiplier))))
+            if is_virtual:
+                # Paper: allocated (or cached live) is the simulated bankroll
+                effective_capital = (
+                    user_allocated if user_allocated > 0 else live
+                )
+            elif user_allocated > 0:
+                effective_capital = min(user_allocated, live)
+            else:
+                effective_capital = live
+
+            if effective_capital <= 0:
+                logger.info(
+                    "[SLAVE_SIZING] account_id=%s allocated=%.2f "
+                    "live_balance=%.2f effective=0 → qty=0",
+                    getattr(slave, "id", None),
+                    user_allocated,
+                    live,
+                )
+                return 0
+
+            master_ratio = master_margin_used_usd / master_total_capital_usd
+            per_lot_cost_usd = master_margin_used_usd / mq
+            slave_margin_to_use = effective_capital * master_ratio
+
+            if per_lot_cost_usd <= 0:
+                calculated_qty = 0
+            else:
+                calculated_qty = int(
+                    round(slave_margin_to_use / per_lot_cost_usd)
+                )
+
+            # Do NOT force max(1, ...) — insufficient capital must skip
+            final_qty = max(0, min(calculated_qty, max_qty))
+            logger.info(
+                "[SLAVE_SIZING] account_id=%s allocated=%.2f "
+                "live_balance=%.2f effective=%.2f "
+                "master_used=%.2f per_lot=%.4f → final_qty=%s "
+                "(raw=%s cap=%s)",
+                getattr(slave, "id", None),
+                user_allocated,
+                live,
+                effective_capital,
+                master_margin_used_usd,
+                per_lot_cost_usd,
+                final_qty,
+                calculated_qty,
+                max_qty,
+            )
+            return int(final_qty)
+
+        # Fallback: fixed multiplier (unchanged semantics), plus hard ceiling
+        if mq <= 0:
+            return 0
+        calculated_qty = max(1, int(round(float(mq) * float(multiplier or 1.0))))
+        final_qty = min(calculated_qty, max_qty)
+        if slave is not None:
+            logger.info(
+                "[SLAVE_SIZING] account_id=%s mode=multiplier "
+                "master_qty=%s mult=%.3f → final_qty=%s (cap=%s)",
+                getattr(slave, "id", None),
+                mq,
+                float(multiplier or 1.0),
+                final_qty,
+                max_qty,
+            )
+        return int(final_qty)
+
+    def _fit_qty_to_margin(
+        self,
+        slave_qty: int,
+        *,
+        live_balance: float,
+        master_margin_used_usd: float | None,
+        master_qty: int,
+        call_fill: float = 0.0,
+        put_fill: float = 0.0,
+    ) -> int:
+        """
+        Reduce qty until estimated margin ≤ 90% of live balance.
+        Returns 0 if even 1 lot does not fit.
+        """
+        from backend.config import OPTIONS_CONTRACT_VALUE
+
+        qty = max(0, int(slave_qty or 0))
+        if qty <= 0:
+            return 0
+        balance = float(live_balance or 0.0)
+        if balance <= 0:
+            return 0
+
+        mq = max(1, int(master_qty or 1))
+        if master_margin_used_usd is not None and master_margin_used_usd > 0:
+            per_lot = float(master_margin_used_usd) / mq
+        else:
+            # Conservative fallback: premium notional × 5 as rough margin proxy
+            prem = float(call_fill or 0) + float(put_fill or 0)
+            per_lot = max(
+                prem * float(OPTIONS_CONTRACT_VALUE) * 5.0,
+                1.0,
+            )
+
+        headroom = balance * 0.9
+        while qty >= 1:
+            required = per_lot * qty
+            if required <= headroom:
+                break
+            qty -= 1
+
+        if qty < int(slave_qty or 0):
+            logger.info(
+                "[SLAVE_MARGIN_PRECHECK] reduced qty %s → %s "
+                "(per_lot=$%.4f headroom=$%.2f balance=$%.2f)",
+                slave_qty,
+                qty,
+                per_lot,
+                headroom,
+                balance,
+            )
+        return max(0, qty)
+
+    async def _resolve_entry_conflicts(
+        self,
+        slave: SlaveAccount,
+        client: DeltaClient,
+        conflicting: list[dict[str, Any]],
+        call_product_id: int,
+        put_product_id: int,
+        master_trade_id: int,
+        db: Any,
+    ) -> str:
+        """
+        Resolve option positions that block a new mirror entry.
+
+        Returns:
+          'cleared' — conflicts closed; proceed with entry
+          'foreign' — unknown/user positions; do not touch
+          'failed'  — close attempt failed
+        """
+        conflicting_pids = set()
+        for pos in conflicting:
+            try:
+                conflicting_pids.add(int(pos.get("product_id") or 0))
+            except (TypeError, ValueError):
+                continue
+        conflicting_pids.discard(0)
+        if not conflicting_pids:
+            return "cleared"
+
+        from backend.models import Leg
+
+        # Prior bot-managed slave trades on this account (any non-closed)
+        prior = (
+            db.query(SlaveTrade)
+            .filter(
+                SlaveTrade.slave_account_id == int(slave.id),
+                SlaveTrade.status.in_(
+                    ("active", "error", "partial", "blocked_foreign_position")
+                ),
+            )
+            .all()
+        )
+
+        bot_owned_pids: set[int] = set()
+        owning_trades: list[SlaveTrade] = []
+        for st in prior:
+            leg_rows = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == int(st.master_trade_id),
+                    Leg.is_bot_managed.is_(True),
+                )
+                .all()
+            )
+            st_pids = {
+                int(getattr(lg, "product_id", 0) or 0) for lg in leg_rows
+            }
+            st_pids.discard(0)
+            overlap = conflicting_pids & st_pids
+            if overlap:
+                bot_owned_pids |= overlap
+                owning_trades.append(st)
+
+        # Also treat same-master leftover from a failed prior attempt as bot-owned
+        if conflicting_pids & {int(call_product_id), int(put_product_id)}:
+            for st in prior:
+                if int(st.master_trade_id) == int(master_trade_id):
+                    bot_owned_pids |= (
+                        conflicting_pids
+                        & {int(call_product_id), int(put_product_id)}
+                    )
+                    if st not in owning_trades:
+                        owning_trades.append(st)
+
+        foreign_pids = conflicting_pids - bot_owned_pids
+        if foreign_pids:
+            logger.warning(
+                "[SLAVE_CONFLICT_RESOLVE] slave='%s' branch=foreign "
+                "foreign_pids=%s bot_owned=%s — skip entry",
+                slave.name,
+                sorted(foreign_pids),
+                sorted(bot_owned_pids),
+            )
+            return "foreign"
+
+        logger.info(
+            "[SLAVE_CONFLICT_RESOLVE] slave='%s' branch=bot_stale "
+            "closing_pids=%s owning_slave_trades=%s",
+            slave.name,
+            sorted(conflicting_pids),
+            [int(st.id) for st in owning_trades],
+        )
+
+        # Close each conflicting position (reduce_only preferred)
+        for pos in conflicting:
+            try:
+                pid = int(pos.get("product_id") or 0)
+                size = float(pos.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0 or size == 0:
+                continue
+            close_size = max(1, abs(int(size)))
+            side = "buy" if size < 0 else "sell"
+            try:
+                await client.place_order(
+                    product_id=pid,
+                    size=close_size,
+                    side=side,
+                    reduce_only=True,
+                )
+            except Exception as close_exc:
+                try:
+                    await client.place_order(
+                        product_id=pid,
+                        size=close_size,
+                        side=side,
+                    )
+                except Exception as retry_exc:
+                    logger.error(
+                        "[SLAVE_CONFLICT_RESOLVE] slave='%s' close FAILED "
+                        "pid=%s: %s / %s",
+                        slave.name,
+                        pid,
+                        close_exc,
+                        retry_exc,
+                    )
+                    return "failed"
+            logger.info(
+                "[SLAVE_CONFLICT_RESOLVE] slave='%s' closed pid=%s "
+                "size=%s side=%s",
+                slave.name,
+                pid,
+                close_size,
+                side,
+            )
+
+        for st in owning_trades:
+            if str(st.status).lower() == "closed":
+                continue
+            note = (
+                f"auto_closed_stale_conflict→new_master={master_trade_id}"
+            )
+            self._close_slave_trade(
+                slave,
+                st,
+                reason=note,
+                allow_virtual=False,
+            )
+            st.last_error = note[:500]
+            st.last_updated = get_ist_now()
+
+        db.commit()
+        return "cleared"
 
     @staticmethod
     def _order_id(order_result: dict[str, Any] | None) -> str:
@@ -297,61 +539,57 @@ class MirrorEngine:
             except Exception as cap_err:
                 logger.warning("Master capital fetch failed: %s", cap_err)
 
-            # Fetch fresh slave balance from Delta API
-            # (virtual/paper slaves have no real wallet — use allocated/cached)
-            if bool(getattr(slave, "is_virtual", False)):
-                allocated = float(
-                    getattr(slave, "user_allocated_capital", None) or 0
-                )
-                cached = float(getattr(slave, "balance_usd", 0) or 0)
-                slave_fresh_available = (
-                    allocated if allocated > 0 else cached
-                )
-                logger.info(
-                    "Slave '%s' virtual capital: available=$%.2f "
-                    "(no Delta wallet fetch)",
-                    slave.name,
-                    slave_fresh_available,
-                )
-            else:
+        # Always fetch live slave balance for sizing / margin headroom
+        # (virtual/paper slaves have no real wallet — use allocated/cached)
+        if bool(getattr(slave, "is_virtual", False)):
+            allocated = float(
+                getattr(slave, "user_allocated_capital", None) or 0
+            )
+            cached = float(getattr(slave, "balance_usd", 0) or 0)
+            slave_fresh_available = allocated if allocated > 0 else cached
+            logger.info(
+                "Slave '%s' virtual capital: available=$%.2f "
+                "(no Delta wallet fetch)",
+                slave.name,
+                slave_fresh_available,
+            )
+        else:
+            try:
+                slave_client = self._get_slave_client(slave)
                 try:
-                    slave_client = self._get_slave_client(slave)
-                    try:
-                        slave_wallet = await slave_client.get_wallet_balance()
-                        slave_fresh_available = float(
-                            slave_wallet.get("available_balance", 0) or 0
-                        )
-                        logger.info(
-                            "Slave '%s' fresh balance: available=$%.2f",
-                            slave.name,
-                            slave_fresh_available,
-                        )
-                        # Update cached balance in DB
-                        with self.db_factory() as upd_db:
-                            from backend.models import SlaveAccount as SA
-
-                            s = (
-                                upd_db.query(SA)
-                                .filter(SA.id == slave.id)
-                                .first()
-                            )
-                            if s:
-                                s.balance_usd = float(
-                                    slave_wallet.get("balance_usdt", 0) or 0
-                                )
-                                upd_db.commit()
-                    finally:
-                        await slave_client.close()
-                except Exception as bal_err:
-                    logger.warning(
-                        "Slave '%s' balance fetch failed, using cached: %s",
-                        slave.name,
-                        bal_err,
-                    )
-                    # Fallback to cached balance
+                    slave_wallet = await slave_client.get_wallet_balance()
                     slave_fresh_available = float(
-                        getattr(slave, "balance_usd", 0) or 0
+                        slave_wallet.get("available_balance", 0) or 0
                     )
+                    logger.info(
+                        "Slave '%s' fresh balance: available=$%.2f",
+                        slave.name,
+                        slave_fresh_available,
+                    )
+                    with self.db_factory() as upd_db:
+                        from backend.models import SlaveAccount as SA
+
+                        s = (
+                            upd_db.query(SA)
+                            .filter(SA.id == slave.id)
+                            .first()
+                        )
+                        if s:
+                            s.balance_usd = float(
+                                slave_wallet.get("balance_usdt", 0) or 0
+                            )
+                            upd_db.commit()
+                finally:
+                    await slave_client.close()
+            except Exception as bal_err:
+                logger.warning(
+                    "Slave '%s' balance fetch failed, using cached: %s",
+                    slave.name,
+                    bal_err,
+                )
+                slave_fresh_available = float(
+                    getattr(slave, "balance_usd", 0) or 0
+                )
 
         # Use master_call_qty as the lot size for capital-based scaling
         slave_qty = self._calc_qty(
@@ -362,6 +600,46 @@ class MirrorEngine:
             master_total_capital_usd=master_total_capital,
             slave_available_usd=slave_fresh_available,
         )
+
+        # Margin headroom: never let Delta be the first insufficient_margin gate
+        live_for_margin = float(
+            slave_fresh_available
+            if slave_fresh_available is not None
+            else (getattr(slave, "balance_usd", 0) or 0)
+        )
+        if not bool(getattr(slave, "is_virtual", False)) and slave_qty > 0:
+            slave_qty = self._fit_qty_to_margin(
+                slave_qty,
+                live_balance=live_for_margin,
+                master_margin_used_usd=master_margin_used,
+                master_qty=int(master_call_qty),
+                call_fill=float(master_call_fill or 0),
+                put_fill=float(master_put_fill or 0),
+            )
+
+        if slave_qty < 1:
+            msg = (
+                f"skipped_low_capital: live=${live_for_margin:.2f} "
+                f"allocated=${float(getattr(slave, 'user_allocated_capital', 0) or 0):.2f}"
+            )
+            logger.warning(
+                "[SLAVE_SIZING] slave='%s' master_trade=%s — %s "
+                "(no order placed)",
+                slave.name,
+                master_trade_id,
+                msg,
+            )
+            skip_trade = SlaveTrade(
+                slave_account_id=int(slave.id),
+                master_trade_id=int(master_trade_id),
+                actual_quantity=0,
+                status="skipped_low_capital",
+                last_error=msg[:500],
+                error_count=0,
+            )
+            db.add(skip_trade)
+            db.commit()
+            return
 
         logger.info(
             "Mirroring to slave '%s': master_qty=%s × %s = slave_qty=%s "
@@ -406,7 +684,7 @@ class MirrorEngine:
 
         client = self._get_slave_client(slave)
         try:
-            # Guard: skip if slave already holds these products
+            # Guard: resolve leftover bot positions; never block forever
             try:
                 slave_positions = await client.get_option_positions()
                 wanted = {int(call_product_id), int(put_product_id)}
@@ -424,25 +702,64 @@ class MirrorEngine:
                         for p in conflicting
                     ]
                     logger.warning(
-                        "Slave '%s' already has conflicting positions: %s. "
-                        "Skipping mirror entry.",
+                        "Slave '%s' conflicting positions: %s — resolving",
                         slave.name,
                         symbols,
                     )
-                    slave_trade = SlaveTrade(
-                        slave_account_id=int(slave.id),
+                    resolve = await self._resolve_entry_conflicts(
+                        slave=slave,
+                        client=client,
+                        conflicting=conflicting,
+                        call_product_id=int(call_product_id),
+                        put_product_id=int(put_product_id),
                         master_trade_id=int(master_trade_id),
-                        actual_quantity=slave_qty,
-                        status="error",
-                        last_error="Conflicting positions already exist on slave",
-                        error_count=1,
+                        db=db,
                     )
-                    db.add(slave_trade)
-                    slave.connection_status = "error"
-                    slave.last_error = "Conflicting positions already exist on slave"
-                    slave.updated_at = get_ist_now()
-                    db.commit()
-                    return
+                    if resolve == "foreign":
+                        slave_trade = SlaveTrade(
+                            slave_account_id=int(slave.id),
+                            master_trade_id=int(master_trade_id),
+                            actual_quantity=slave_qty,
+                            status="blocked_foreign_position",
+                            last_error=(
+                                "blocked_foreign_position: unknown option "
+                                f"positions on slave {symbols}"
+                            )[:500],
+                            error_count=1,
+                        )
+                        db.add(slave_trade)
+                        slave.connection_status = "error"
+                        slave.last_error = (
+                            "blocked_foreign_position — not auto-closing "
+                            "user-owned positions"
+                        )[:500]
+                        slave.updated_at = get_ist_now()
+                        db.commit()
+                        return
+                    if resolve == "failed":
+                        slave_trade = SlaveTrade(
+                            slave_account_id=int(slave.id),
+                            master_trade_id=int(master_trade_id),
+                            actual_quantity=slave_qty,
+                            status="error",
+                            last_error=(
+                                "conflict_close_failed: could not clear "
+                                f"stale positions {symbols}"
+                            )[:500],
+                            error_count=1,
+                        )
+                        db.add(slave_trade)
+                        slave.connection_status = "error"
+                        slave.last_error = "conflict_close_failed"[:500]
+                        slave.updated_at = get_ist_now()
+                        db.commit()
+                        return
+                    # cleared — continue with entry
+                    logger.info(
+                        "[SLAVE_CONFLICT_RESOLVE] slave='%s' cleared — "
+                        "proceeding with mirror entry",
+                        slave.name,
+                    )
             except Exception as exc:
                 logger.warning(
                     "Slave '%s' position check failed: %s — continuing",
@@ -1527,12 +1844,157 @@ class MirrorEngine:
 
     async def check_slave_integrity(self, master_trade_id: int) -> None:
         """
-        Periodic check: active SlaveTrades should still have open options
-        on the slave account. Mark closed if the slave book is empty.
+        Periodic check (every 5 monitor cycles):
 
-        Virtual/paper SlaveTrades are never closed here.
+        1. Active SlaveTrades should still have open options — else mark closed.
+        2. Error SlaveTrades: if master still ACTIVE → retry mirror once;
+           if master CLOSED → force slave_trade closed (unblock future entries).
+        3. Virtual/paper SlaveTrades are never closed here.
         """
         with self.db_factory() as db:
+            master = (
+                db.query(Trade)
+                .filter(Trade.id == int(master_trade_id))
+                .first()
+            )
+            master_active = bool(
+                master is not None
+                and str(getattr(master, "status", "")).lower()
+                == TradeStatus.ACTIVE.value
+            )
+
+            # --- Reconcile error / blocked rows for this master ---
+            problem_trades = (
+                db.query(SlaveTrade)
+                .filter(
+                    SlaveTrade.master_trade_id == int(master_trade_id),
+                    SlaveTrade.status.in_(
+                        (
+                            "error",
+                            "partial",
+                            "blocked_foreign_position",
+                            "skipped_low_capital",
+                        )
+                    ),
+                )
+                .all()
+            )
+            for st in problem_trades:
+                slave = (
+                    db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == st.slave_account_id)
+                    .first()
+                )
+                if not master_active:
+                    prior_status = str(st.status)
+                    if self._close_slave_trade(
+                        slave,
+                        st,
+                        reason="reconcile_master_closed",
+                        allow_virtual=bool(
+                            slave and getattr(slave, "is_virtual", False)
+                        ),
+                    ):
+                        st.last_error = (
+                            f"reconcile: master #{master_trade_id} closed — "
+                            f"cleared prior status={prior_status}"
+                        )[:500]
+                        st.last_updated = get_ist_now()
+                        db.commit()
+                        logger.info(
+                            "[SLAVE_RECONCILE] slave_trade=%s force-closed "
+                            "(master #%s not active)",
+                            st.id,
+                            master_trade_id,
+                        )
+                    continue
+
+                # Master still active — retry mirror once for retriable errors
+                err = str(st.last_error or "")
+                already_retried = "[RETRY_DONE]" in err
+                err_count = int(st.error_count or 0)
+                retriable = (
+                    not already_retried
+                    and err_count <= 1
+                    and st.status in ("error", "partial")
+                    and "blocked_foreign" not in err
+                    and "skipped_low_capital" not in err
+                )
+                if not retriable or slave is None or not slave.is_active:
+                    continue
+                if is_virtual_slave_trade(slave, st):
+                    continue
+
+                from backend.models import Leg
+
+                call_leg = (
+                    db.query(Leg)
+                    .filter(
+                        Leg.trade_id == int(master_trade_id),
+                        Leg.leg_type == "call",
+                        Leg.status == "open",
+                        Leg.is_bot_managed.is_(True),
+                    )
+                    .first()
+                )
+                put_leg = (
+                    db.query(Leg)
+                    .filter(
+                        Leg.trade_id == int(master_trade_id),
+                        Leg.leg_type == "put",
+                        Leg.status == "open",
+                        Leg.is_bot_managed.is_(True),
+                    )
+                    .first()
+                )
+                if call_leg is None or put_leg is None:
+                    continue
+
+                logger.info(
+                    "[SLAVE_RECONCILE] retrying mirror once for "
+                    "slave_trade=%s slave='%s' master=#%s",
+                    st.id,
+                    slave.name,
+                    master_trade_id,
+                )
+                st.last_error = (f"[RETRY_DONE] prior: {err}")[:500]
+                st.error_count = err_count + 1
+                st.status = "closed"  # clear slot so new entry can record
+                st.last_updated = get_ist_now()
+                db.commit()
+
+                try:
+                    await self._mirror_entry_to_slave(
+                        slave=slave,
+                        master_trade_id=int(master_trade_id),
+                        call_product_id=int(call_leg.product_id),
+                        put_product_id=int(put_leg.product_id),
+                        master_call_qty=int(call_leg.quantity or 1),
+                        master_put_qty=int(put_leg.quantity or 1),
+                        master_call_strike=float(call_leg.strike or 0),
+                        master_put_strike=float(put_leg.strike or 0),
+                        master_call_symbol=str(call_leg.symbol or ""),
+                        master_put_symbol=str(put_leg.symbol or ""),
+                        master_call_fill=float(
+                            call_leg.initial_premium or 0
+                        ),
+                        master_put_fill=float(
+                            put_leg.initial_premium or 0
+                        ),
+                        expiry_date=getattr(master, "expiry_date", None),
+                        underlying=str(
+                            getattr(master, "underlying", "") or ""
+                        ),
+                        db=db,
+                    )
+                except Exception as retry_exc:
+                    logger.warning(
+                        "[SLAVE_RECONCILE] retry failed slave_trade=%s: %s",
+                        st.id,
+                        retry_exc,
+                    )
+
+            # --- Existing: active book must still have positions ---
             slave_trades = (
                 db.query(SlaveTrade)
                 .filter(

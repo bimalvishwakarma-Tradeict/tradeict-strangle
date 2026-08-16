@@ -386,7 +386,95 @@ async def copy_master_trade_to_slave(
 
     master_qty = max(1, int(getattr(call_leg, "quantity", 1) or 1))
     mult = float(slave.qty_multiplier or 1.0)
-    slave_qty = max(1, int(round(master_qty * mult)))
+
+    # Live-balance-aware sizing (same rules as mirror_engine)
+    from backend.config import MAX_SLAVE_QTY
+    from backend.engine.mirror_engine import MirrorEngine
+
+    me = MirrorEngine()
+    live_available = 0.0
+    master_margin_used = None
+    master_total_capital = None
+    if not bool(getattr(slave, "is_virtual", False)):
+        try:
+            bal_client = DeltaClient(
+                decrypt(slave.api_key_encrypted),
+                decrypt(slave.api_secret_encrypted),
+            )
+            try:
+                wallet = await bal_client.get_wallet_balance()
+                live_available = float(
+                    wallet.get("available_balance", 0) or 0
+                )
+                slave.balance_usd = float(
+                    wallet.get("balance_usdt", 0) or 0
+                )
+            finally:
+                await bal_client.close()
+        except Exception as bal_exc:
+            logger.warning(
+                "Copy-trade balance fetch failed slave=%s: %s",
+                slave.name,
+                bal_exc,
+            )
+            live_available = float(getattr(slave, "balance_usd", 0) or 0)
+
+    if bool(getattr(slave, "capital_based_qty", False)):
+        try:
+            from backend.models import Account
+
+            master_acc = (
+                db.query(Account)
+                .filter(Account.is_active.is_(True))
+                .order_by(Account.id.asc())
+                .first()
+            )
+            if master_acc:
+                mclient = DeltaClient(
+                    decrypt(master_acc.api_key_encrypted),
+                    decrypt(master_acc.api_secret_encrypted),
+                )
+                try:
+                    mw = await mclient.get_wallet_balance()
+                    master_total_capital = float(
+                        mw.get("balance_usdt", 0) or 0
+                    )
+                    master_available = float(
+                        mw.get("available_balance", 0) or 0
+                    )
+                    master_margin_used = max(
+                        0.0, master_total_capital - master_available
+                    )
+                finally:
+                    await mclient.close()
+        except Exception as m_exc:
+            logger.warning("Copy-trade master capital fetch failed: %s", m_exc)
+
+    slave_qty = me._calc_qty(
+        master_qty,
+        mult,
+        slave=slave,
+        master_margin_used_usd=master_margin_used,
+        master_total_capital_usd=master_total_capital,
+        slave_available_usd=live_available,
+    )
+    if not bool(getattr(slave, "is_virtual", False)) and slave_qty > 0:
+        slave_qty = me._fit_qty_to_margin(
+            slave_qty,
+            live_balance=live_available,
+            master_margin_used_usd=master_margin_used,
+            master_qty=master_qty,
+            call_fill=float(getattr(call_leg, "initial_premium", 0) or 0),
+            put_fill=float(getattr(put_leg, "initial_premium", 0) or 0),
+        )
+    if slave_qty < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"skipped_low_capital: live=${live_available:.2f} "
+                f"(MAX_SLAVE_QTY={MAX_SLAVE_QTY})"
+            ),
+        )
 
     uni_sl = float(getattr(state.trade, "universal_sl_pct", None) or 200.0)
     call_base = float(
