@@ -8,7 +8,6 @@ from typing import Any
 
 from backend.config import ExitReason, TradeStatus
 from backend.core.delta_client import short_leg_realized_pnl
-from backend.core.time_utils import get_ist_now
 from backend.models import Leg, Trade
 
 logger = logging.getLogger(__name__)
@@ -89,14 +88,20 @@ def finalize_trade_if_flat(
     trade: Any,
     exit_reason: str = ExitReason.MANUAL_LEG_CLOSE.value,
 ) -> bool:
-    """If no open bot legs remain, mark trade closed. Returns True if closed."""
+    """
+    If no open bot legs remain, signal that the trade should be closed.
+
+    Does NOT set Trade.status / exit_time / exit_reason — the caller must run
+    close_master_trade (or equivalent funnel). Ensures realized_pnl is non-null.
+    Returns True when the basket is flat and ready for funnel close.
+    """
     if count_open_bot_legs(db, trade.id) > 0:
         return False
-    trade.status = TradeStatus.CLOSED.value
-    trade.exit_time = get_ist_now()
-    trade.exit_reason = exit_reason
     if trade.realized_pnl is None:
         trade.realized_pnl = 0.0
+    # Stash intended reason on the row only if empty — funnel will set it
+    if not getattr(trade, "exit_reason", None):
+        trade.exit_reason = exit_reason
     return True
 
 
@@ -105,34 +110,31 @@ def heal_zombie_active_trades(
     position_tracker: Any | None = None,
 ) -> list[int]:
     """
-    ACTIVE trades with zero open bot-managed legs → mark closed.
-    Also drops them from the in-memory tracker when provided.
-    Returns closed trade ids.
+    Detect ACTIVE trades with zero open bot-managed legs.
+
+    Does NOT set Trade.status or remove from the tracker — the caller must run
+    close_master_trade for each id. Returns trade ids pending funnel close.
     """
-    closed_ids: list[int] = []
+    pending_ids: list[int] = []
     actives = (
         db.query(Trade).filter(Trade.status == TradeStatus.ACTIVE.value).all()
     )
     for trade in actives:
         if count_open_bot_legs(db, trade.id) > 0:
             continue
-        trade.status = TradeStatus.CLOSED.value
-        if trade.exit_time is None:
-            trade.exit_time = get_ist_now()
-        if not trade.exit_reason:
-            trade.exit_reason = ExitReason.MANUAL_LEG_CLOSE.value
         if trade.realized_pnl is None:
             trade.realized_pnl = 0.0
-        closed_ids.append(int(trade.id))
-        if position_tracker is not None:
-            position_tracker.mark_closed(int(trade.id))
+        if not trade.exit_reason:
+            trade.exit_reason = ExitReason.MANUAL_LEG_CLOSE.value
+        pending_ids.append(int(trade.id))
         logger.warning(
-            "Healed zombie ACTIVE trade id=%s (no open bot legs) → closed",
+            "Detected zombie ACTIVE trade id=%s (no open bot legs) — "
+            "pending funnel close (not marking CLOSED here)",
             trade.id,
         )
-    if closed_ids:
+    if pending_ids:
         db.commit()
-    return closed_ids
+    return pending_ids
 
 
 async def reconcile_open_legs_with_delta(
@@ -142,59 +144,101 @@ async def reconcile_open_legs_with_delta(
     position_tracker: Any | None = None,
 ) -> dict[str, Any]:
     """
-    Align DB open legs with Delta sizes.
+    Align DB open legs with Delta sizes (detector only).
 
     Returns:
       {
-        "fully_closed": [trade_id, ...],
+        "fully_closed": [trade_id, ...],   # pending funnel close — NOT yet CLOSED
+        "close_reasons": {trade_id: reason_str, ...},
         "naked_risk": [
           {"trade_id": int, "remaining": "call"|"put", "missing": "call"|"put"},
           ...
         ],
       }
 
+    Does NOT set Trade.status. Caller must run close_master_trade for each id
+    in fully_closed. Does NOT remove trades from the position tracker.
+
     IMPORTANT: If a 2-leg basket has exactly one leg flat on Delta, we do NOT
     mark it closed here and leave a naked remaining leg. Instead we return
     naked_risk so the bot can emergency-close the remaining leg + cancel SLs.
     """
-    fully_closed = heal_zombie_active_trades(db, position_tracker)
+    fully_closed: list[int] = []
+    close_reasons: dict[int, str] = {}
+
+    for tid in heal_zombie_active_trades(db, position_tracker):
+        tid_i = int(tid)
+        if tid_i not in fully_closed:
+            fully_closed.append(tid_i)
+        row = db.query(Trade).filter(Trade.id == tid_i).first()
+        close_reasons[tid_i] = str(
+            getattr(row, "exit_reason", None)
+            or ExitReason.MANUAL_LEG_CLOSE.value
+        )
+
     naked_risk: list[dict[str, Any]] = []
 
-    # Drop tracker entries already CLOSED in DB (stale after external close)
+    # Detect tracker entries that are already flat / non-ACTIVE in DB —
+    # queue for funnel; do not mark CLOSED or drop from tracker here.
     if position_tracker is not None:
         for state in list(position_tracker.get_all_active()):
             row = db.query(Trade).filter(Trade.id == state.trade_id).first()
             if row is None:
+                # Orphan tracker entry — drop only; nothing to funnel
                 position_tracker.mark_closed(state.trade_id)
                 continue
             open_n = count_open_bot_legs(db, state.trade_id)
-            if (
-                str(row.status).lower() != TradeStatus.ACTIVE.value
-                or open_n == 0
-            ):
-                if str(row.status).lower() == TradeStatus.ACTIVE.value and open_n == 0:
-                    row.status = TradeStatus.CLOSED.value
-                    if row.exit_time is None:
-                        row.exit_time = get_ist_now()
+            status_l = str(row.status).lower()
+            if status_l != TradeStatus.ACTIVE.value or open_n == 0:
+                if status_l == TradeStatus.ACTIVE.value and open_n == 0:
+                    if row.realized_pnl is None:
+                        row.realized_pnl = 0.0
                     if not row.exit_reason:
                         row.exit_reason = ExitReason.MANUAL_LEG_CLOSE.value
                     db.commit()
-                if state.trade_id not in fully_closed:
-                    fully_closed.append(int(state.trade_id))
-                position_tracker.mark_closed(int(state.trade_id))
-                logger.info(
-                    "Removed flat/closed trade %s from tracker",
-                    state.trade_id,
-                )
+                    tid_i = int(state.trade_id)
+                    if tid_i not in fully_closed:
+                        fully_closed.append(tid_i)
+                    close_reasons[tid_i] = str(
+                        row.exit_reason
+                        or ExitReason.MANUAL_LEG_CLOSE.value
+                    )
+                    logger.info(
+                        "Reconcile: trade %s ACTIVE+flat — pending funnel close",
+                        state.trade_id,
+                    )
+                elif status_l != TradeStatus.ACTIVE.value:
+                    # Already closed in DB somehow — still ensure funnel mirrors
+                    tid_i = int(state.trade_id)
+                    if tid_i not in fully_closed:
+                        fully_closed.append(tid_i)
+                    close_reasons[tid_i] = str(
+                        getattr(row, "exit_reason", None)
+                        or ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value
+                    )
+                    logger.info(
+                        "Reconcile: trade %s already %s in DB — "
+                        "pending funnel for slave mirror",
+                        state.trade_id,
+                        row.status,
+                    )
 
     if client is None:
-        return {"fully_closed": fully_closed, "naked_risk": naked_risk}
+        return {
+            "fully_closed": fully_closed,
+            "close_reasons": close_reasons,
+            "naked_risk": naked_risk,
+        }
 
     try:
         positions = await client.get_positions()
     except Exception as exc:
         logger.warning("Delta positions fetch failed during reconcile: %s", exc)
-        return {"fully_closed": fully_closed, "naked_risk": naked_risk}
+        return {
+            "fully_closed": fully_closed,
+            "close_reasons": close_reasons,
+            "naked_risk": naked_risk,
+        }
 
     size_by_pid: dict[int, int] = {}
     mark_by_pid: dict[int, float] = {}
@@ -260,7 +304,10 @@ async def reconcile_open_legs_with_delta(
 
         # AUDIT-6: naked-risk uses short call/put only — hedge_* is an extra long
         def _is_short_leg(leg: Any) -> bool:
-            return str(getattr(leg, "leg_type", "") or "").lower() in ("call", "put")
+            return str(getattr(leg, "leg_type", "") or "").lower() in (
+                "call",
+                "put",
+            )
 
         short_open = [leg for leg in open_legs if _is_short_leg(leg)]
         short_flat = [leg for leg in flat_legs if _is_short_leg(leg)]
@@ -292,7 +339,9 @@ async def reconcile_open_legs_with_delta(
             exit_px = mark_by_pid.get(pid, 0.0)
             if exit_px <= 0:
                 try:
-                    exit_px = float(await client.get_mark_price(str(leg.symbol)))
+                    exit_px = float(
+                        await client.get_mark_price(str(leg.symbol))
+                    )
                 except Exception:
                     exit_px = float(leg.initial_premium or 0.0)
             # Cancel orphan SL for this externally closed leg
@@ -332,10 +381,16 @@ async def reconcile_open_legs_with_delta(
                 else ExitReason.MANUAL_LEG_CLOSE.value
             )
             if finalize_trade_if_flat(db=db, trade=trade, exit_reason=reason):
-                if int(trade.id) not in fully_closed:
-                    fully_closed.append(int(trade.id))
-                if position_tracker is not None:
-                    position_tracker.mark_closed(int(trade.id))
+                tid_i = int(trade.id)
+                if tid_i not in fully_closed:
+                    fully_closed.append(tid_i)
+                close_reasons[tid_i] = reason
+                logger.info(
+                    "Reconcile: trade %s flat after booking — "
+                    "pending funnel close reason=%s",
+                    trade.id,
+                    reason,
+                )
             elif position_tracker is not None:
                 all_legs = (
                     db.query(Leg)
@@ -347,13 +402,21 @@ async def reconcile_open_legs_with_delta(
                 )
                 call_leg, put_leg = pick_call_put_legs(all_legs)
                 state = position_tracker.get(int(trade.id))
-                if state is not None and call_leg is not None and put_leg is not None:
+                if (
+                    state is not None
+                    and call_leg is not None
+                    and put_leg is not None
+                ):
                     state.call_leg = call_leg
                     state.put_leg = put_leg
                     state.trade = trade
             db.commit()
 
-    return {"fully_closed": fully_closed, "naked_risk": naked_risk}
+    return {
+        "fully_closed": fully_closed,
+        "close_reasons": close_reasons,
+        "naked_risk": naked_risk,
+    }
 
 
 def next_basket_number(db: Any, account_id: int) -> int:

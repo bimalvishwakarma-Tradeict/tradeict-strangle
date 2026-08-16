@@ -389,16 +389,50 @@ class BotEngine:
                             client=self.delta_client,
                             position_tracker=self.position_tracker,
                         )
-                    closed_ids = list(recon.get("fully_closed") or [])
-                    for tid in closed_ids:
-                        await ws_manager.broadcast(
-                            {
-                                "type": "TRADE_CLOSED",
-                                "trade_id": tid,
-                                "reason": ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value,
-                                "message": "Basket closed — Delta size flat",
-                            }
-                        )
+                        closed_ids = list(recon.get("fully_closed") or [])
+                        close_reasons = dict(recon.get("close_reasons") or {})
+                        for tid in closed_ids:
+                            tid_i = int(tid)
+                            reason = str(
+                                close_reasons.get(tid_i)
+                                or ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value
+                            )
+                            funnel = await self.close_master_trade(
+                                trade_id=tid_i,
+                                reason=reason,
+                                db=db,
+                                skip_master_legs=True,
+                                trade_state=self.position_tracker.get(tid_i),
+                            )
+                            slaves_closed = int(
+                                funnel.get("slaves_closed") or 0
+                            )
+                            slaves_failed = int(
+                                funnel.get("slaves_failed") or 0
+                            )
+                            if slaves_failed > 0:
+                                logger.critical(
+                                    "[EXIT_FUNNEL] reconcile close trade=%s "
+                                    "reason=%s slaves_failed=%s "
+                                    "slaves_closed=%s — exit_failed rows "
+                                    "left for retry sweep",
+                                    tid_i,
+                                    reason,
+                                    slaves_failed,
+                                    slaves_closed,
+                                )
+                            await ws_manager.broadcast(
+                                {
+                                    "type": "TRADE_CLOSED",
+                                    "trade_id": tid_i,
+                                    "reason": reason,
+                                    "message": (
+                                        "Basket closed — Delta size flat"
+                                    ),
+                                    "slaves_closed": slaves_closed,
+                                    "slaves_failed": slaves_failed,
+                                }
+                            )
                     for alert in recon.get("naked_risk") or []:
                         tid = int(alert["trade_id"])
                         remaining = str(alert["remaining"])
@@ -1865,6 +1899,167 @@ class BotEngine:
                     exc,
                 )
 
+    async def _close_master_trade_db_only(
+        self,
+        trade_id: int,
+        reason: str,
+        db: Any,
+    ) -> dict[str, int]:
+        """
+        Funnel path when TradeState is gone (reconcile / external close).
+
+        a. mirror_exit
+        b. skip master legs (already flat)
+        c. set Trade.status + exit_reason + exit_time
+        d. mark_closed
+        e. return slave counts
+        """
+        from backend.models import SlaveTrade as _SlaveTradeExit
+
+        trade_id = int(trade_id)
+        slaves_total = 0
+        slaves_closed = 0
+        slaves_failed = 0
+        pre_slave_ids: set[int] = set()
+
+        logger.info(
+            "[EXIT_START] Trade %s: reason=%s (db-only funnel, no TradeState)",
+            trade_id,
+            reason,
+        )
+
+        # Resolve hint product ids from remaining/closed legs
+        call_pid = 0
+        put_pid = 0
+        hedge_pid = None
+        with self.db_factory() as load_db:
+            legs = (
+                load_db.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_id,
+                    Leg.is_bot_managed.is_(True),
+                )
+                .all()
+            )
+            for leg in legs:
+                lt = str(getattr(leg, "leg_type", "") or "").lower()
+                pid = int(getattr(leg, "product_id", 0) or 0)
+                if lt == "call" and pid > 0:
+                    call_pid = pid
+                elif lt == "put" and pid > 0:
+                    put_pid = pid
+                elif (
+                    bool(getattr(leg, "is_long", False))
+                    or lt.startswith("hedge")
+                ) and pid > 0:
+                    hedge_pid = pid
+
+        try:
+            pre_slave_rows = (
+                db.query(_SlaveTradeExit)
+                .filter(
+                    _SlaveTradeExit.master_trade_id == trade_id,
+                    _SlaveTradeExit.status != "closed",
+                )
+                .all()
+            )
+            slaves_total = len(pre_slave_rows)
+            pre_slave_ids = {int(st.id) for st in pre_slave_rows}
+        except Exception as slave_count_exc:
+            logger.warning(
+                "[EXIT_FUNNEL] pre-mirror slave count failed: %s",
+                slave_count_exc,
+            )
+
+        try:
+            import backend.engine.mirror_engine as mirror_module
+
+            me = mirror_module.mirror_engine or self.mirror_engine
+            if me is not None:
+                await me.mirror_exit(
+                    master_trade_id=trade_id,
+                    call_product_id=call_pid,
+                    put_product_id=put_pid,
+                    reason=reason,
+                    hedge_product_id=hedge_pid,
+                )
+                logger.info(
+                    "[MIRROR_EXIT] Awaited complete for trade %s (db-only)",
+                    trade_id,
+                )
+            else:
+                logger.warning(
+                    "[MIRROR_EXIT] mirror_engine is None — slaves not closed "
+                    "for trade %s",
+                    trade_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[MIRROR_EXIT] Failed for trade %s (non-fatal): %s",
+                trade_id,
+                exc,
+                exc_info=True,
+            )
+
+        try:
+            db.expire_all()
+            if pre_slave_ids:
+                post_rows = (
+                    db.query(_SlaveTradeExit)
+                    .filter(_SlaveTradeExit.id.in_(pre_slave_ids))
+                    .all()
+                )
+                slaves_closed = sum(
+                    1 for st in post_rows if str(st.status) == "closed"
+                )
+                slaves_failed = max(0, slaves_total - slaves_closed)
+        except Exception as slave_post_exc:
+            logger.warning(
+                "[EXIT_FUNNEL] post-mirror slave count failed: %s",
+                slave_post_exc,
+            )
+            slaves_failed = slaves_total
+
+        status = self._status_for_reason(reason)
+        trade_row = db.query(Trade).filter(Trade.id == trade_id).first()
+        if trade_row is not None:
+            trade_row.status = status
+            trade_row.exit_time = get_ist_now()
+            trade_row.exit_reason = reason
+            if trade_row.realized_pnl is None:
+                trade_row.realized_pnl = 0.0
+            trade_row.in_conversion_mode = False
+            db.commit()
+        else:
+            logger.error(
+                "[EXIT_FUNNEL] trade_id=%s missing Trade row in db-only path",
+                trade_id,
+            )
+
+        self.position_tracker.mark_closed(trade_id)
+        self._maybe_schedule_auto_reentry(
+            str(getattr(trade_row, "underlying", "") or "")
+            if trade_row is not None
+            else ""
+        )
+
+        result = {
+            "slaves_total": slaves_total,
+            "slaves_closed": slaves_closed,
+            "slaves_failed": slaves_failed,
+            "master_legs_closed": 0,
+        }
+        logger.info(
+            "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
+            "slaves_closed=%s slaves_failed=%s",
+            trade_id,
+            reason,
+            result["slaves_total"],
+            result["slaves_closed"],
+            result["slaves_failed"],
+        )
+        return result
+
     async def close_master_trade(
         self,
         trade_id: int,
@@ -1893,6 +2088,14 @@ class BotEngine:
         if trade_state is None:
             trade_state = self.position_tracker.get(int(trade_id))
         if trade_state is None:
+            # Reconcile / external close may leave no in-memory state.
+            # With skip_master_legs we still mirror slaves + set Trade.status.
+            if skip_master_legs:
+                return await self._close_master_trade_db_only(
+                    trade_id=int(trade_id),
+                    reason=reason,
+                    db=db,
+                )
             logger.error(
                 "[EXIT_FUNNEL] trade_id=%s reason=%s — no TradeState in tracker",
                 trade_id,
