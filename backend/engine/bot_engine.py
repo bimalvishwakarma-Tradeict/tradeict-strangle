@@ -3538,6 +3538,87 @@ class BotEngine:
                         trade_id,
                         err,
                     )
+
+                    # Mirror: close the same runaway leg on every slave.
+                    # Do NOT open a replacement — master has none either.
+                    old_pid = int(
+                        getattr(result, "old_product_id", None)
+                        or old_product_id
+                        or 0
+                    )
+                    try:
+                        import backend.engine.mirror_engine as mirror_module
+
+                        me = (
+                            mirror_module.mirror_engine or self.mirror_engine
+                        )
+                        if me is None:
+                            logger.critical(
+                                "[MIRROR_PARTIAL_ADJ] trade=%s mirror_engine "
+                                "is None — slaves still hold %s leg",
+                                trade_id,
+                                triggered,
+                            )
+                        elif old_pid <= 0:
+                            logger.critical(
+                                "[MIRROR_PARTIAL_ADJ] trade=%s missing "
+                                "old_product_id — cannot mirror leg close",
+                                trade_id,
+                            )
+                        else:
+                            mirror_counts = await me.mirror_leg_close(
+                                master_trade_id=trade_id,
+                                leg_type=triggered,
+                                product_id=old_pid,
+                                success_status="partial",
+                                failure_status="exit_failed",
+                            )
+                            logger.info(
+                                "[MIRROR_PARTIAL_ADJ] master_trade_id=%s "
+                                "leg=%s product_id=%s slaves_total=%s "
+                                "slaves_closed=%s slaves_failed=%s",
+                                trade_id,
+                                triggered,
+                                old_pid,
+                                mirror_counts.get("slaves_total"),
+                                mirror_counts.get("slaves_closed"),
+                                mirror_counts.get("slaves_failed"),
+                            )
+                            log_and_buffer(
+                                "MIRROR_PARTIAL_ADJ",
+                                trade_id,
+                                {
+                                    "leg": triggered,
+                                    "product_id": old_pid,
+                                    "slaves_total": mirror_counts.get(
+                                        "slaves_total"
+                                    ),
+                                    "slaves_closed": mirror_counts.get(
+                                        "slaves_closed"
+                                    ),
+                                    "slaves_failed": mirror_counts.get(
+                                        "slaves_failed"
+                                    ),
+                                },
+                            )
+                            if int(
+                                mirror_counts.get("slaves_failed") or 0
+                            ) > 0:
+                                logger.critical(
+                                    "[MIRROR_PARTIAL_ADJ] trade=%s leg=%s "
+                                    "slaves_failed=%s still hold runaway leg",
+                                    trade_id,
+                                    triggered,
+                                    mirror_counts.get("slaves_failed"),
+                                )
+                    except Exception as mirror_exc:
+                        logger.critical(
+                            "[MIRROR_PARTIAL_ADJ] trade=%s FAILED: %s",
+                            trade_id,
+                            mirror_exc,
+                            exc_info=True,
+                        )
+
                     await self._push_error(
                         trade_id,
                         err,

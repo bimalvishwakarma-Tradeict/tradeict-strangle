@@ -1606,12 +1606,18 @@ class MirrorEngine:
         master_trade_id: int,
         leg_type: str,
         product_id: int,
+        *,
+        success_status: str | None = None,
+        failure_status: str | None = None,
     ) -> dict[str, int]:
         """
         Close a single leg (call or put) on every non-closed slave.
 
         Live-position targeting for product_id, reduce_only close, then verify
         that product is flat. Does NOT close the whole basket (use mirror_exit).
+
+        Optional success_status / failure_status update SlaveTrade.status after
+        each per-slave attempt (e.g. partial adj → 'partial' / 'exit_failed').
         """
         leg = str(leg_type).lower().strip()
         target_pid = int(product_id or 0)
@@ -1670,6 +1676,10 @@ class MirrorEngine:
                 )
                 if not slave or not slave.is_active:
                     slaves_failed += 1
+                    if failure_status:
+                        slave_trade.status = failure_status
+                        slave_trade.last_updated = get_ist_now()
+                        db.commit()
                     continue
 
                 ok = await self._mirror_leg_close_to_slave(
@@ -1678,6 +1688,8 @@ class MirrorEngine:
                     leg_type=leg,
                     product_id=target_pid,
                     db=db,
+                    success_status=success_status,
+                    failure_status=failure_status,
                 )
                 if ok:
                     slaves_closed += 1
@@ -1708,6 +1720,9 @@ class MirrorEngine:
         leg_type: str,
         product_id: int,
         db: Any,
+        *,
+        success_status: str | None = None,
+        failure_status: str | None = None,
     ) -> bool:
         """
         Close one product on one slave. Returns True if verified flat (or
@@ -1715,6 +1730,28 @@ class MirrorEngine:
         """
         leg = str(leg_type).lower()
         target_pid = int(product_id)
+
+        def _mark_failure(msg: str) -> None:
+            slave_trade.last_error = msg[:500]
+            slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+            slave_trade.last_updated = get_ist_now()
+            if failure_status:
+                slave_trade.status = failure_status
+                slave.connection_status = "error"
+                slave.last_error = msg[:500]
+            db.commit()
+
+        def _mark_success() -> None:
+            if success_status:
+                slave_trade.status = success_status
+                slave_trade.last_error = (
+                    f"partial: closed {leg} product={target_pid} "
+                    f"(one-legged, matching master)"
+                )[:500]
+            else:
+                slave_trade.last_error = None
+            slave_trade.last_updated = get_ist_now()
+            db.commit()
 
         if is_virtual_slave_trade(slave, slave_trade):
             logger.info(
@@ -1728,8 +1765,7 @@ class MirrorEngine:
             else:
                 slave_trade.put_order_id = "VIRTUAL_CLOSED"
                 slave_trade.put_sl_order_id = None
-            slave_trade.last_updated = get_ist_now()
-            db.commit()
+            _mark_success()
             return True
 
         client = self._get_slave_client(slave)
@@ -1768,20 +1804,16 @@ class MirrorEngine:
                 )
 
             if not fetch_ok:
-                slave_trade.last_error = (
+                msg = (
                     f"leg_close_failed: positions fetch failed for {leg} "
                     f"product={target_pid}"
-                )[:500]
-                slave_trade.error_count = int(slave_trade.error_count or 0) + 1
-                slave_trade.last_updated = get_ist_now()
-                db.commit()
-                logger.critical(
-                    "[MIRROR_LEG_CLOSE] slave='%s' exit_failed fetch "
-                    "leg=%s product_id=%s",
-                    slave.name,
-                    leg,
-                    target_pid,
                 )
+                logger.critical(
+                    "[MIRROR_LEG_CLOSE] slave='%s' %s",
+                    slave.name,
+                    msg,
+                )
+                _mark_failure(msg)
                 return False
 
             live_size = self._position_size_for_product(
@@ -1811,7 +1843,7 @@ class MirrorEngine:
                         is_long=is_long,
                     )
                 except Exception as close_exc:
-                    # Retry without reduce_only path via place_order
+                    # Retry with reduce_only place_order
                     side = "sell" if is_long else "buy"
                     try:
                         await client.place_order(
@@ -1821,6 +1853,10 @@ class MirrorEngine:
                             reduce_only=True,
                         )
                     except Exception as retry_exc:
+                        msg = (
+                            f"leg_close_failed: {leg} product={target_pid} "
+                            f"{retry_exc}"
+                        )
                         logger.error(
                             "[MIRROR_LEG_CLOSE] slave='%s' close FAILED "
                             "product=%s: %s / %s",
@@ -1829,15 +1865,12 @@ class MirrorEngine:
                             close_exc,
                             retry_exc,
                         )
-                        slave_trade.last_error = (
-                            f"leg_close_failed: {leg} product={target_pid} "
-                            f"{retry_exc}"
-                        )[:500]
-                        slave_trade.error_count = (
-                            int(slave_trade.error_count or 0) + 1
+                        logger.critical(
+                            "[MIRROR_LEG_CLOSE] slave='%s' %s",
+                            slave.name,
+                            msg,
                         )
-                        slave_trade.last_updated = get_ist_now()
-                        db.commit()
+                        _mark_failure(msg)
                         return False
 
                 await asyncio.sleep(2)
@@ -1880,26 +1913,20 @@ class MirrorEngine:
                     slave.name,
                     msg,
                 )
-                slave_trade.last_error = msg[:500]
-                slave_trade.error_count = (
-                    int(slave_trade.error_count or 0) + 1
-                )
-                slave_trade.last_updated = get_ist_now()
-                db.commit()
+                _mark_failure(msg)
                 return False
 
             if leg == "call":
                 slave_trade.call_sl_order_id = None
             else:
                 slave_trade.put_sl_order_id = None
-            slave_trade.last_error = None
-            slave_trade.last_updated = get_ist_now()
-            db.commit()
+            _mark_success()
             logger.info(
-                "[MIRROR_LEG_CLOSE] slave='%s' %s product=%s verified flat",
+                "[MIRROR_LEG_CLOSE] slave='%s' %s product=%s verified flat%s",
                 slave.name,
                 leg,
                 target_pid,
+                f" status={success_status}" if success_status else "",
             )
             return True
         except Exception as exc:
@@ -1910,14 +1937,7 @@ class MirrorEngine:
                 exc_info=True,
             )
             try:
-                slave_trade.last_error = (
-                    f"leg_close_failed: exception {exc}"
-                )[:500]
-                slave_trade.error_count = (
-                    int(slave_trade.error_count or 0) + 1
-                )
-                slave_trade.last_updated = get_ist_now()
-                db.commit()
+                _mark_failure(f"leg_close_failed: exception {exc}")
             except Exception:
                 try:
                     db.rollback()
