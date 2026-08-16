@@ -2527,15 +2527,345 @@ class MirrorEngine:
                 finally:
                     await client.close()
 
+    # After this many consecutive close failures, only retry every Nth sweep
+    _SWEEP_BACKOFF_AFTER = 3
+    _SWEEP_BACKOFF_EVERY = 6  # generations between retries once backed off
+
+    async def sweep_open_slave_trades(self) -> dict[str, int]:
+        """
+        DB-driven integrity sweep — independent of position_tracker.
+
+        Queries every SlaveTrade with status != 'closed', groups by master,
+        and recovers orphans under CLOSED masters via live Delta closes.
+        ACTIVE masters keep the existing per-trade integrity checks.
+        """
+        self._sweep_generation = int(
+            getattr(self, "_sweep_generation", 0) or 0
+        ) + 1
+        gen = self._sweep_generation
+
+        rows_scanned = 0
+        closed_ok = 0
+        close_failed = 0
+        unreachable = 0
+        skipped_backoff = 0
+
+        with self.db_factory() as db:
+            open_rows = (
+                db.query(SlaveTrade)
+                .filter(SlaveTrade.status != "closed")
+                .all()
+            )
+            rows_scanned = len(open_rows)
+
+            by_master: dict[int, list[SlaveTrade]] = {}
+            for st in open_rows:
+                mid = int(st.master_trade_id)
+                by_master.setdefault(mid, []).append(st)
+
+            for master_trade_id, slave_trades in by_master.items():
+                master = (
+                    db.query(Trade)
+                    .filter(Trade.id == int(master_trade_id))
+                    .first()
+                )
+                master_active = bool(
+                    master is not None
+                    and str(getattr(master, "status", "")).lower()
+                    == TradeStatus.ACTIVE.value
+                )
+
+                # Skip demo masters for active-path checks
+                if master_active and bool(
+                    getattr(master, "is_demo", False)
+                ):
+                    continue
+
+                if master_active:
+                    # Existing ACTIVE behaviour (naked-leg + entry retry)
+                    await self.check_slave_integrity(int(master_trade_id))
+                    continue
+
+                # Master CLOSED (or missing) — recover live positions
+                for st in slave_trades:
+                    slave = (
+                        db.query(SlaveAccount)
+                        .filter(SlaveAccount.id == st.slave_account_id)
+                        .first()
+                    )
+                    if slave is None:
+                        close_failed += 1
+                        continue
+
+                    if is_virtual_slave_trade(slave, st):
+                        logger.warning(
+                            "[SLAVE_SWEEP] skip virtual slave_trade=%s "
+                            "master=#%s",
+                            st.id,
+                            master_trade_id,
+                        )
+                        continue
+
+                    err_count = int(st.error_count or 0)
+                    if err_count >= self._SWEEP_BACKOFF_AFTER:
+                        # Back off: only attempt every Nth generation
+                        if gen % self._SWEEP_BACKOFF_EVERY != 0:
+                            skipped_backoff += 1
+                            if (
+                                err_count == self._SWEEP_BACKOFF_AFTER
+                                or err_count % 10 == 0
+                            ):
+                                logger.critical(
+                                    "[SLAVE_SWEEP] slave_trade=%s slave='%s' "
+                                    "backed off error_count=%s — will retry "
+                                    "every %s sweeps",
+                                    st.id,
+                                    slave.name,
+                                    err_count,
+                                    self._SWEEP_BACKOFF_EVERY,
+                                )
+                            continue
+
+                    outcome = await self._recover_slave_under_closed_master(
+                        slave=slave,
+                        slave_trade=st,
+                        master_trade_id=int(master_trade_id),
+                        db=db,
+                    )
+                    if outcome == "closed_ok":
+                        closed_ok += 1
+                    elif outcome == "unreachable":
+                        unreachable += 1
+                    elif outcome == "close_failed":
+                        close_failed += 1
+
+        logger.info(
+            "[SLAVE_SWEEP] rows_scanned=%s closed_ok=%s close_failed=%s "
+            "unreachable=%s skipped_backoff=%s generation=%s",
+            rows_scanned,
+            closed_ok,
+            close_failed,
+            unreachable,
+            skipped_backoff,
+            gen,
+        )
+        return {
+            "rows_scanned": rows_scanned,
+            "closed_ok": closed_ok,
+            "close_failed": close_failed,
+            "unreachable": unreachable,
+            "skipped_backoff": skipped_backoff,
+        }
+
+    async def _recover_slave_under_closed_master(
+        self,
+        slave: SlaveAccount,
+        slave_trade: SlaveTrade,
+        master_trade_id: int,
+        db: Any,
+    ) -> str:
+        """
+        Fetch live positions; if flat mark closed; else reduce_only close,
+        verify, mark closed only on success. Returns outcome label.
+        """
+        from backend.models import Leg
+
+        client = self._get_slave_client(slave)
+        try:
+            try:
+                live_positions = await client.get_option_positions()
+            except Exception as pos_exc:
+                slave_trade.status = "exit_failed"
+                slave_trade.last_error = (
+                    f"sweep_unreachable: get_option_positions: {pos_exc}"
+                )[:500]
+                slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+                slave_trade.last_updated = get_ist_now()
+                slave.connection_status = "error"
+                slave.last_error = str(pos_exc)[:500]
+                db.commit()
+                logger.critical(
+                    "[SLAVE_SWEEP] slave='%s' slave_trade=%s UNREACHABLE: %s",
+                    slave.name,
+                    slave_trade.id,
+                    pos_exc,
+                )
+                return "unreachable"
+
+            # Prefer master leg product_ids; else close entire live option book
+            master_pids: set[int] = set()
+            for lg in (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == int(master_trade_id),
+                    Leg.is_bot_managed.is_(True),
+                )
+                .all()
+            ):
+                try:
+                    pid = int(getattr(lg, "product_id", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if pid > 0:
+                    master_pids.add(pid)
+
+            live_nonzero: list[dict[str, Any]] = []
+            for pos in live_positions or []:
+                try:
+                    pid = int(pos.get("product_id") or 0)
+                    size = float(pos.get("size") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if pid <= 0 or abs(size) <= 0:
+                    continue
+                # Close master's products if known; otherwise whole book.
+                # Always include shorts (adjusted legs may drift from master).
+                if master_pids:
+                    if pid in master_pids or size < 0:
+                        live_nonzero.append(pos)
+                else:
+                    live_nonzero.append(pos)
+
+            if not live_nonzero:
+                if self._close_slave_trade(
+                    slave,
+                    slave_trade,
+                    reason="sweep_verified_flat",
+                    allow_virtual=False,
+                ):
+                    slave_trade.last_error = None
+                    slave_trade.last_updated = get_ist_now()
+                    db.commit()
+                    logger.info(
+                        "[SLAVE_SWEEP] slave='%s' slave_trade=%s verified "
+                        "flat → closed (master #%s)",
+                        slave.name,
+                        slave_trade.id,
+                        master_trade_id,
+                    )
+                    return "closed_ok"
+                return "close_failed"
+
+            # Attempt real closes
+            for pos in live_nonzero:
+                pid = int(pos.get("product_id") or 0)
+                size = float(pos.get("size") or 0)
+                close_size = max(1, abs(int(size)))
+                is_long = size > 0
+                try:
+                    await client.close_position(
+                        product_id=pid,
+                        size=close_size,
+                        is_long=is_long,
+                    )
+                    logger.info(
+                        "[SLAVE_SWEEP] slave='%s' closed product=%s "
+                        "size=%s is_long=%s",
+                        slave.name,
+                        pid,
+                        close_size,
+                        is_long,
+                    )
+                except Exception as close_exc:
+                    side = "sell" if is_long else "buy"
+                    try:
+                        await client.place_order(
+                            product_id=pid,
+                            size=close_size,
+                            side=side,
+                            reduce_only=True,
+                        )
+                    except Exception as retry_exc:
+                        logger.error(
+                            "[SLAVE_SWEEP] slave='%s' close FAILED "
+                            "product=%s: %s / %s",
+                            slave.name,
+                            pid,
+                            close_exc,
+                            retry_exc,
+                        )
+
+            await asyncio.sleep(2)
+            try:
+                verify = await client.get_option_positions()
+            except Exception as verify_exc:
+                slave_trade.status = "exit_failed"
+                slave_trade.last_error = (
+                    f"sweep_verify_unreachable: {verify_exc}"
+                )[:500]
+                slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+                slave_trade.last_updated = get_ist_now()
+                db.commit()
+                logger.critical(
+                    "[SLAVE_SWEEP] slave='%s' verify UNREACHABLE: %s",
+                    slave.name,
+                    verify_exc,
+                )
+                return "unreachable"
+
+            remaining: list[dict[str, Any]] = []
+            for pos in verify or []:
+                try:
+                    pid = int(pos.get("product_id") or 0)
+                    size = float(pos.get("size") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if pid <= 0 or abs(size) <= 0:
+                    continue
+                # Any leftover option size blocks closed for a dedicated slave
+                remaining.append({"product_id": pid, "size": size})
+
+            if remaining:
+                slave_trade.status = "exit_failed"
+                slave_trade.last_error = (
+                    f"sweep_close_failed: remaining={remaining}"
+                )[:500]
+                slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+                slave_trade.last_updated = get_ist_now()
+                slave.connection_status = "error"
+                slave.last_error = slave_trade.last_error
+                db.commit()
+                logger.critical(
+                    "[SLAVE_SWEEP] slave='%s' slave_trade=%s still has "
+                    "positions after close: %s",
+                    slave.name,
+                    slave_trade.id,
+                    remaining,
+                )
+                return "close_failed"
+
+            if self._close_slave_trade(
+                slave,
+                slave_trade,
+                reason="sweep_closed_ok",
+                allow_virtual=False,
+            ):
+                slave_trade.last_error = None
+                slave_trade.last_updated = get_ist_now()
+                db.commit()
+                logger.info(
+                    "[SLAVE_SWEEP] slave='%s' slave_trade=%s closed OK "
+                    "(master #%s)",
+                    slave.name,
+                    slave_trade.id,
+                    master_trade_id,
+                )
+                return "closed_ok"
+            return "close_failed"
+        finally:
+            await client.close()
+
     async def check_slave_integrity(self, master_trade_id: int) -> None:
         """
-        Periodic check (every 5 monitor cycles):
+        ACTIVE-master integrity checks (called from sweep_open_slave_trades):
 
         1. Active SlaveTrades should still have open options — else mark closed.
-        2. Error / partial_adjustment / adjust_close_failed / exit_failed:
-           alert + retry (entry errors only); if master CLOSED → force close.
+        2. Error / partial rows: alert + limited entry retry.
         3. Naked one-legged short while master has two opens → CRITICAL.
         4. Virtual/paper SlaveTrades are never closed here.
+
+        Closed-master recovery lives in sweep_open_slave_trades /
+        _recover_slave_under_closed_master (must verify Delta first).
         """
         with self.db_factory() as db:
             master = (
@@ -2548,21 +2878,22 @@ class MirrorEngine:
                 and str(getattr(master, "status", "")).lower()
                 == TradeStatus.ACTIVE.value
             )
+            if not master_active:
+                # Closed masters are handled by the DB sweep recover path
+                return
 
             from backend.models import Leg
 
-            master_open_legs = 0
-            if master_active:
-                master_open_legs = (
-                    db.query(Leg)
-                    .filter(
-                        Leg.trade_id == int(master_trade_id),
-                        Leg.status == "open",
-                        Leg.is_bot_managed.is_(True),
-                        Leg.leg_type.in_(("call", "put")),
-                    )
-                    .count()
+            master_open_legs = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == int(master_trade_id),
+                    Leg.status == "open",
+                    Leg.is_bot_managed.is_(True),
+                    Leg.leg_type.in_(("call", "put")),
                 )
+                .count()
+            )
 
             # --- Reconcile error / blocked / adjust/exit-failure rows ---
             problem_trades = (
@@ -2589,58 +2920,6 @@ class MirrorEngine:
                     .filter(SlaveAccount.id == st.slave_account_id)
                     .first()
                 )
-                if not master_active:
-                    prior_status = str(st.status)
-                    # Broken adjust/exit states may still have live Delta legs —
-                    # attempt live exit before clearing the DB row.
-                    if (
-                        prior_status
-                        in (
-                            "partial_adjustment",
-                            "adjust_close_failed",
-                            "exit_failed",
-                        )
-                        and slave is not None
-                        and not is_virtual_slave_trade(slave, st)
-                    ):
-                        try:
-                            await self._mirror_exit_to_slave(
-                                slave=slave,
-                                slave_trade=st,
-                                call_product_id=0,
-                                put_product_id=0,
-                                reason="reconcile_master_closed",
-                                db=db,
-                            )
-                        except Exception as exit_exc:
-                            logger.critical(
-                                "[SLAVE_RECONCILE] live exit failed "
-                                "slave_trade=%s status=%s: %s",
-                                st.id,
-                                prior_status,
-                                exit_exc,
-                            )
-                    if self._close_slave_trade(
-                        slave,
-                        st,
-                        reason="reconcile_master_closed",
-                        allow_virtual=bool(
-                            slave and getattr(slave, "is_virtual", False)
-                        ),
-                    ):
-                        st.last_error = (
-                            f"reconcile: master #{master_trade_id} closed — "
-                            f"cleared prior status={prior_status}"
-                        )[:500]
-                        st.last_updated = get_ist_now()
-                        db.commit()
-                        logger.info(
-                            "[SLAVE_RECONCILE] slave_trade=%s force-closed "
-                            "(master #%s not active)",
-                            st.id,
-                            master_trade_id,
-                        )
-                    continue
 
                 # Master still active — surface adjust/exit failures every cycle
                 if st.status in (
@@ -2657,7 +2936,6 @@ class MirrorEngine:
                         st.status,
                         (st.last_error or "")[:200],
                     )
-                    # Do NOT auto-retry entry: would double exposure.
                     continue
 
                 # Retry mirror once for retriable entry errors

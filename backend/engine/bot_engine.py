@@ -469,6 +469,19 @@ class BotEngine:
             logger.info("Active trades in tracker: %s", count)
             self._last_trade_count = count
 
+        # DB-driven slave sweep — runs even when the tracker is empty so
+        # exit_failed / orphan SlaveTrades under closed masters still recover.
+        self._cycle_count = int(getattr(self, "_cycle_count", 0) or 0) + 1
+        if self._cycle_count % 5 == 0:
+            try:
+                import backend.engine.mirror_engine as mirror_mod
+
+                me = mirror_mod.mirror_engine or self.mirror_engine
+                if me is not None:
+                    await me.sweep_open_slave_trades()
+            except Exception as exc:
+                logger.warning("Slave integrity cycle failed: %s", exc)
+
         if count == 0:
             return
 
@@ -503,24 +516,6 @@ class BotEngine:
                     exc,
                     exc_info=True,
                 )
-
-        # Every 5th cycle, verify slave positions still match active SlaveTrades
-        # Skip demo masters — their virtual slaves have no real Delta positions.
-        self._cycle_count = int(getattr(self, "_cycle_count", 0) or 0) + 1
-        if self._cycle_count % 5 == 0:
-            try:
-                import backend.engine.mirror_engine as mirror_mod
-
-                me = mirror_mod.mirror_engine or self.mirror_engine
-                if me is not None:
-                    for state in self.position_tracker.get_all_active():
-                        if bool(getattr(state.trade, "is_demo", False)):
-                            continue
-                        asyncio.create_task(
-                            me.check_slave_integrity(state.trade_id)
-                        )
-            except Exception as exc:
-                logger.warning("Slave integrity cycle failed: %s", exc)
 
     def _active_product_ids_from_positions(
         self, positions: list[dict[str, Any]]

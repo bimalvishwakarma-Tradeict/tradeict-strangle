@@ -133,7 +133,8 @@ async def verify_db_consistency(
             db.commit()
             fixes += 1
 
-        # CHECK 4: SlaveTrades still active for closed master trades
+        # CHECK 4: Non-closed SlaveTrades under a non-ACTIVE master.
+        # NEVER flip status in DB alone — verify/close live Delta positions first.
         closed_trade_ids = [
             int(t.id)
             for t in db.query(Trade)
@@ -146,10 +147,12 @@ async def verify_db_consistency(
                 db.query(SlaveTrade)
                 .filter(
                     SlaveTrade.master_trade_id.in_(closed_trade_ids),
-                    SlaveTrade.status == "active",
+                    SlaveTrade.status != "closed",
                 )
                 .all()
             )
+            from backend.core.delta_client import DeltaClient
+            from backend.core.encryption import decrypt
             from backend.engine.mirror_engine import is_virtual_slave_trade
 
             closed_orphans = 0
@@ -163,23 +166,175 @@ async def verify_db_consistency(
                     logger.warning(
                         "[DB_AUDIT] Skipping auto-close of virtual "
                         "SlaveTrade %s (master Trade %s closed) — "
-                        "leave status=active until intentional exit",
+                        "leave status=%s until intentional exit",
                         st.id,
                         st.master_trade_id,
+                        st.status,
                     )
                     warnings += 1
                     continue
-                logger.warning(
-                    "[DB_AUDIT] SlaveTrade %s is 'active' but master "
-                    "Trade %s is closed. Fixing.",
-                    st.id,
-                    st.master_trade_id,
+                if slave is None:
+                    logger.critical(
+                        "[DB_AUDIT] SlaveTrade %s has no SlaveAccount — "
+                        "leaving status=%s untouched",
+                        st.id,
+                        st.status,
+                    )
+                    warnings += 1
+                    continue
+
+                client = DeltaClient(
+                    decrypt(slave.api_key_encrypted),
+                    decrypt(slave.api_secret_encrypted),
                 )
-                st.status = "closed"
-                closed_orphans += 1
-                fixes += 1
+                try:
+                    try:
+                        positions = await client.get_option_positions()
+                    except Exception as api_exc:
+                        logger.critical(
+                            "[DB_AUDIT] Slave '%s' SlaveTrade %s — Delta "
+                            "unreachable at startup (%s). Leaving status=%s "
+                            "untouched (will not erase live-position record).",
+                            slave.name,
+                            st.id,
+                            api_exc,
+                            st.status,
+                        )
+                        warnings += 1
+                        continue
+
+                    live: list[dict[str, Any]] = []
+                    for pos in positions or []:
+                        try:
+                            pid = int(pos.get("product_id") or 0)
+                            size = float(pos.get("size") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if pid > 0 and abs(size) > 0:
+                            live.append(pos)
+
+                    if live:
+                        logger.warning(
+                            "[DB_AUDIT] Slave '%s' SlaveTrade %s has %s live "
+                            "option positions under closed master %s — "
+                            "attempting reduce_only close",
+                            slave.name,
+                            st.id,
+                            len(live),
+                            st.master_trade_id,
+                        )
+                        for pos in live:
+                            pid = int(pos.get("product_id") or 0)
+                            size = float(pos.get("size") or 0)
+                            close_size = max(1, abs(int(size)))
+                            is_long = size > 0
+                            try:
+                                await client.close_position(
+                                    product_id=pid,
+                                    size=close_size,
+                                    is_long=is_long,
+                                )
+                            except Exception as close_exc:
+                                side = "sell" if is_long else "buy"
+                                try:
+                                    await client.place_order(
+                                        product_id=pid,
+                                        size=close_size,
+                                        side=side,
+                                        reduce_only=True,
+                                    )
+                                except Exception as retry_exc:
+                                    logger.critical(
+                                        "[DB_AUDIT] Slave '%s' close FAILED "
+                                        "pid=%s: %s / %s — leaving "
+                                        "status=exit_failed",
+                                        slave.name,
+                                        pid,
+                                        close_exc,
+                                        retry_exc,
+                                    )
+                                    st.status = "exit_failed"
+                                    st.last_error = (
+                                        f"db_audit_close_failed: {retry_exc}"
+                                    )[:500]
+                                    st.error_count = (
+                                        int(st.error_count or 0) + 1
+                                    )
+                                    st.last_updated = get_ist_now()
+                                    db.commit()
+                                    warnings += 1
+                                    break
+                        else:
+                            # All closes attempted — re-verify
+                            try:
+                                verify = await client.get_option_positions()
+                            except Exception as verify_exc:
+                                logger.critical(
+                                    "[DB_AUDIT] Slave '%s' verify unreachable "
+                                    "after close (%s) — leaving status=%s",
+                                    slave.name,
+                                    verify_exc,
+                                    st.status,
+                                )
+                                warnings += 1
+                                continue
+                            still = [
+                                p
+                                for p in (verify or [])
+                                if abs(float(p.get("size") or 0)) > 0
+                            ]
+                            if still:
+                                logger.critical(
+                                    "[DB_AUDIT] Slave '%s' still has %s "
+                                    "positions after close — status=exit_failed",
+                                    slave.name,
+                                    len(still),
+                                )
+                                st.status = "exit_failed"
+                                st.last_error = (
+                                    f"db_audit_still_open: {len(still)} positions"
+                                )[:500]
+                                st.error_count = int(st.error_count or 0) + 1
+                                st.last_updated = get_ist_now()
+                                db.commit()
+                                warnings += 1
+                            else:
+                                st.status = "closed"
+                                st.last_error = None
+                                st.last_updated = get_ist_now()
+                                closed_orphans += 1
+                                fixes += 1
+                                db.commit()
+                                logger.warning(
+                                    "[DB_AUDIT] SlaveTrade %s closed after "
+                                    "verified Delta flat (master %s)",
+                                    st.id,
+                                    st.master_trade_id,
+                                )
+                    else:
+                        # Verified empty book — safe to mark closed
+                        logger.warning(
+                            "[DB_AUDIT] SlaveTrade %s status=%s under closed "
+                            "master %s — Delta book empty, marking closed",
+                            st.id,
+                            st.status,
+                            st.master_trade_id,
+                        )
+                        st.status = "closed"
+                        st.last_error = None
+                        st.last_updated = get_ist_now()
+                        closed_orphans += 1
+                        fixes += 1
+                        db.commit()
+                finally:
+                    await client.close()
+
             if closed_orphans:
-                db.commit()
+                logger.info(
+                    "[DB_AUDIT] CHECK 4 closed %s orphan SlaveTrade rows "
+                    "after Delta verification",
+                    closed_orphans,
+                )
 
         # CHECK 5: Duplicate active trades for same underlying
         duplicates = (
