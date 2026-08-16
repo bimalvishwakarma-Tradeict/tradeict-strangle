@@ -568,12 +568,8 @@ async def copy_master_trade_to_slave(
             master_trade_id=master_trade_id,
             call_order_id=call_order_id,
             put_order_id=put_order_id,
-            call_sl_order_id=(
-                f"ABS:{float(call_sl):.2f}" if call_sl else None
-            ),
-            put_sl_order_id=(
-                f"ABS:{float(put_sl):.2f}" if put_sl else None
-            ),
+            call_sl_order_id=None,
+            put_sl_order_id=None,
             actual_quantity=slave_qty,
             call_fill_price=call_fill,
             put_fill_price=put_fill,

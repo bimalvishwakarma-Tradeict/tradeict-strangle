@@ -742,8 +742,14 @@ async def initiate_trade(
 
         is_demo = bool(getattr(payload, "is_demo", False))
 
-        # Prefer frontend entry-premium hints as MARK reference for anomaly check;
-        # canonical SL is computed from actual fill after each leg fills.
+        # Chicken-and-egg: bracket must ship WITH the entry order before fill.
+        # Attach mark × uni_sl at place; after fill try amend to fill-derived.
+        # If amend fails, mark-derived stays canonical for master AND slaves.
+        from backend.core.delta_sl import (
+            compute_bracket_sl,
+            finalize_bracket_sl_after_fill,
+        )
+
         call_mark_for_sl = float(getattr(payload, "call_entry_premium", 0) or 0)
         put_mark_for_sl = float(getattr(payload, "put_entry_premium", 0) or 0)
         if call_mark_for_sl <= 0:
@@ -751,12 +757,24 @@ async def initiate_trade(
         if put_mark_for_sl <= 0:
             put_mark_for_sl = float(await client.get_mark_price(payload.put_symbol))
 
-        call_sl_trigger_price = 0.0
-        put_sl_trigger_price = 0.0
-        call_sl_limit = 0.0
-        put_sl_limit = 0.0
-        call_sl_order_id: str | None = None
-        put_sl_order_id: str | None = None
+        call_prov_sl, call_prov_limit = compute_bracket_sl(
+            call_mark_for_sl,
+            uni_sl,
+            master_mark=call_mark_for_sl,
+            leg="call",
+            trade_id=None,
+        )
+        put_prov_sl, put_prov_limit = compute_bracket_sl(
+            put_mark_for_sl,
+            uni_sl,
+            master_mark=put_mark_for_sl,
+            leg="put",
+            trade_id=None,
+        )
+        call_sl_trigger_price = float(call_prov_sl)
+        put_sl_trigger_price = float(put_prov_sl)
+        call_sl_limit = float(call_prov_limit)
+        put_sl_limit = float(put_prov_limit)
 
         call_result = None
         put_result = None
@@ -806,23 +824,51 @@ async def initiate_trade(
             ts = int(_time.time())
             call_order_id = f"DEMO-CALL-{ts}"
             put_order_id = f"DEMO-PUT-{ts}"
+            # Demo: resolve canonical from fill vs mark without exchange amend
+            call_sl_trigger_price, call_sl_limit = await finalize_bracket_sl_after_fill(
+                None,
+                entry_order_id=None,
+                product_id=0,
+                mark_price=call_mark_for_sl,
+                fill_price=call_fill_price,
+                universal_sl_pct=uni_sl,
+                provisional_stop=call_prov_sl,
+                provisional_limit=call_prov_limit,
+                leg="call",
+                trade_id=None,
+            )
+            put_sl_trigger_price, put_sl_limit = await finalize_bracket_sl_after_fill(
+                None,
+                entry_order_id=None,
+                product_id=0,
+                mark_price=put_mark_for_sl,
+                fill_price=put_fill_price,
+                universal_sl_pct=uni_sl,
+                provisional_stop=put_prov_sl,
+                provisional_limit=put_prov_limit,
+                leg="put",
+                trade_id=None,
+            )
             logger.info(
-                "[DEMO] Virtual fills: call=%s put=%s call_id=%s put_id=%s",
+                "[DEMO] Virtual fills: call=%s put=%s call_id=%s put_id=%s "
+                "bracket_sl call=%s put=%s",
                 call_fill_price,
                 put_fill_price,
                 call_order_id,
                 put_order_id,
+                call_sl_trigger_price,
+                put_sl_trigger_price,
             )
         else:
-            from backend.core.delta_sl import compute_bracket_sl
-
-            # --- Step 1: Place CALL (no provisional bracket) ---
+            # --- Step 1: Place CALL with inline bracket (mark-derived) ---
             logger.info("Step 1: Placing call order %s", payload.call_symbol)
             call_result = await bot_engine.order_executor.sell_option(
                 product_id=int(payload.call_product_id),
                 quantity=int(payload.quantity),
                 delta_client=client,
                 symbol_for_fallback=payload.call_symbol,
+                bracket_sl_price=call_prov_sl if call_prov_sl > 0 else None,
+                bracket_sl_limit=call_prov_limit if call_prov_sl > 0 else None,
             )
             if not call_result.success:
                 raise HTTPException(
@@ -857,31 +903,18 @@ async def initiate_trade(
                     ),
                 )
             logger.info("Step 3: Call fill price: %s", call_fill_price)
-            call_sl_trigger_price, call_sl_limit = compute_bracket_sl(
-                call_fill_price,
-                uni_sl,
-                master_mark=call_mark_for_sl,
+            call_sl_trigger_price, call_sl_limit = await finalize_bracket_sl_after_fill(
+                client,
+                entry_order_id=call_order_id,
+                product_id=int(payload.call_product_id),
+                mark_price=call_mark_for_sl,
+                fill_price=call_fill_price,
+                universal_sl_pct=uni_sl,
+                provisional_stop=call_prov_sl,
+                provisional_limit=call_prov_limit,
                 leg="call",
                 trade_id=None,
             )
-            if call_sl_trigger_price > 0:
-                try:
-                    stop_res = await client.place_stop_order(
-                        product_id=int(payload.call_product_id),
-                        size=int(payload.quantity),
-                        side="buy",
-                        stop_price=call_sl_trigger_price,
-                    )
-                    call_sl_order_id = (
-                        str(stop_res.get("order_id") or stop_res.get("id") or "")
-                        or None
-                    )
-                except Exception as sl_exc:
-                    logger.critical(
-                        "Call fill-based stop FAILED: %s (stop=%.2f)",
-                        sl_exc,
-                        call_sl_trigger_price,
-                    )
             await _verify_leg_on_delta(
                 client,
                 product_id=int(payload.call_product_id),
@@ -889,13 +922,15 @@ async def initiate_trade(
                 order_id=call_order_id,
             )
 
-            # --- Step 4: Place PUT ---
+            # --- Step 4: Place PUT with inline bracket (mark-derived) ---
             logger.info("Step 4: Placing put order %s", payload.put_symbol)
             put_result = await bot_engine.order_executor.sell_option(
                 product_id=int(payload.put_product_id),
                 quantity=int(payload.quantity),
                 delta_client=client,
                 symbol_for_fallback=payload.put_symbol,
+                bracket_sl_price=put_prov_sl if put_prov_sl > 0 else None,
+                bracket_sl_limit=put_prov_limit if put_prov_sl > 0 else None,
             )
             if not put_result.success:
                 logger.critical(
@@ -941,58 +976,24 @@ async def initiate_trade(
                     ),
                 )
             logger.info("Step 6: Put fill price: %s", put_fill_price)
-            put_sl_trigger_price, put_sl_limit = compute_bracket_sl(
-                put_fill_price,
-                uni_sl,
-                master_mark=put_mark_for_sl,
+            put_sl_trigger_price, put_sl_limit = await finalize_bracket_sl_after_fill(
+                client,
+                entry_order_id=put_order_id,
+                product_id=int(payload.put_product_id),
+                mark_price=put_mark_for_sl,
+                fill_price=put_fill_price,
+                universal_sl_pct=uni_sl,
+                provisional_stop=put_prov_sl,
+                provisional_limit=put_prov_limit,
                 leg="put",
                 trade_id=None,
             )
-            if put_sl_trigger_price > 0:
-                try:
-                    stop_res = await client.place_stop_order(
-                        product_id=int(payload.put_product_id),
-                        size=int(payload.quantity),
-                        side="buy",
-                        stop_price=put_sl_trigger_price,
-                    )
-                    put_sl_order_id = (
-                        str(stop_res.get("order_id") or stop_res.get("id") or "")
-                        or None
-                    )
-                except Exception as sl_exc:
-                    logger.critical(
-                        "Put fill-based stop FAILED: %s (stop=%.2f)",
-                        sl_exc,
-                        put_sl_trigger_price,
-                    )
             await _verify_leg_on_delta(
                 client,
                 product_id=int(payload.put_product_id),
                 leg_label="Put",
                 order_id=put_order_id,
             )
-
-        # Demo / post-fill: ensure canonical SL from master fills
-        if is_demo or call_sl_trigger_price <= 0 or put_sl_trigger_price <= 0:
-            from backend.core.delta_sl import compute_bracket_sl
-
-            if call_sl_trigger_price <= 0:
-                call_sl_trigger_price, call_sl_limit = compute_bracket_sl(
-                    call_fill_price,
-                    uni_sl,
-                    master_mark=call_mark_for_sl,
-                    leg="call",
-                    trade_id=None,
-                )
-            if put_sl_trigger_price <= 0:
-                put_sl_trigger_price, put_sl_limit = compute_bracket_sl(
-                    put_fill_price,
-                    uni_sl,
-                    master_mark=put_mark_for_sl,
-                    leg="put",
-                    trade_id=None,
-                )
 
         # --- Step 7–8: Save to DB ---
         logger.info("Step 7: Saving to DB%s...", " (DEMO)" if is_demo else "")
@@ -1029,10 +1030,6 @@ async def initiate_trade(
                 trade.id,
                 is_demo,
             )
-            if call_sl_order_id or put_sl_order_id:
-                call_leg.delta_sl_order_id = call_sl_order_id
-                put_leg.delta_sl_order_id = put_sl_order_id
-                db.commit()
         except Exception as exc:
             db.rollback()
             logger.critical(

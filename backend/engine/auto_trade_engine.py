@@ -547,24 +547,44 @@ class AutoTradeEngine:
             tp_pct = float(settings.tp_pct or 50.0)
             sl_pct = float(settings.sl_pct or 100.0)
             universal_sl_pct = float(settings.universal_sl_pct or 200.0)
-            # Bracket SL is computed AFTER fill from master fill (canonical).
-            # Do not attach quote/mark-based brackets on the entry order.
-            call_sl_trigger_price = 0.0
-            put_sl_trigger_price = 0.0
-            call_sl_limit = 0.0
-            put_sl_limit = 0.0
-            call_sl_order_id: str | None = None
-            put_sl_order_id: str | None = None
+            # Chicken-and-egg: bracket must ship WITH the entry order before
+            # fill exists. Attach mark × uni_sl now; after fill try amend to
+            # fill-derived. If amend fails, mark-derived stays canonical for
+            # master AND slaves so they still match exactly.
+            from backend.core.delta_sl import (
+                compute_bracket_sl,
+                finalize_bracket_sl_after_fill,
+            )
 
-            # --- Place CALL (no bracket — attach fill-based stop after fill) ---
+            call_prov_sl, call_prov_limit = compute_bracket_sl(
+                call_mark,
+                universal_sl_pct,
+                master_mark=call_mark,
+                leg="call",
+                trade_id=None,
+            )
+            put_prov_sl, put_prov_limit = compute_bracket_sl(
+                put_mark,
+                universal_sl_pct,
+                master_mark=put_mark,
+                leg="put",
+                trade_id=None,
+            )
+
+            # --- Place CALL (bracket SL attached inline) ---
             logger.info(
-                "Placing CALL: %s qty=%s", straddle["call_symbol"], qty
+                "Placing CALL: %s qty=%s bracket_sl=%s",
+                straddle["call_symbol"],
+                qty,
+                call_prov_sl,
             )
             call_result = await self.order_executor.sell_option(
                 product_id=int(straddle["call_product_id"]),
                 quantity=qty,
                 delta_client=client,
                 symbol_for_fallback=str(straddle["call_symbol"]),
+                bracket_sl_price=call_prov_sl if call_prov_sl > 0 else None,
+                bracket_sl_limit=call_prov_limit if call_prov_sl > 0 else None,
             )
             if not call_result.success:
                 raise RuntimeError(
@@ -589,43 +609,35 @@ class AutoTradeEngine:
             logger.info(
                 "Call filled @ %s order_id=%s", call_fill, call_order_id
             )
-
-            from backend.core.delta_sl import compute_bracket_sl
-
-            call_sl_trigger_price, call_sl_limit = compute_bracket_sl(
-                call_fill,
-                universal_sl_pct,
-                master_mark=call_mark,
-                leg="call",
-                trade_id=None,
+            call_sl_trigger_price, call_sl_limit = (
+                await finalize_bracket_sl_after_fill(
+                    client,
+                    entry_order_id=call_order_id,
+                    product_id=int(straddle["call_product_id"]),
+                    mark_price=call_mark,
+                    fill_price=call_fill,
+                    universal_sl_pct=universal_sl_pct,
+                    provisional_stop=call_prov_sl,
+                    provisional_limit=call_prov_limit,
+                    leg="call",
+                    trade_id=None,
+                )
             )
-            if call_sl_trigger_price > 0:
-                try:
-                    stop_res = await client.place_stop_order(
-                        product_id=int(straddle["call_product_id"]),
-                        size=qty,
-                        side="buy",
-                        stop_price=call_sl_trigger_price,
-                    )
-                    call_sl_order_id = (
-                        str(stop_res.get("order_id") or stop_res.get("id") or "")
-                        or None
-                    )
-                except Exception as sl_exc:
-                    logger.critical(
-                        "Call fill-based stop place FAILED: %s "
-                        "(stop=%.2f) — position unprotected until retry",
-                        sl_exc,
-                        call_sl_trigger_price,
-                    )
 
-            # --- Place PUT ---
-            logger.info("Placing PUT: %s qty=%s", straddle["put_symbol"], qty)
+            # --- Place PUT (bracket SL attached inline) ---
+            logger.info(
+                "Placing PUT: %s qty=%s bracket_sl=%s",
+                straddle["put_symbol"],
+                qty,
+                put_prov_sl,
+            )
             put_result = await self.order_executor.sell_option(
                 product_id=int(straddle["put_product_id"]),
                 quantity=qty,
                 delta_client=client,
                 symbol_for_fallback=str(straddle["put_symbol"]),
+                bracket_sl_price=put_prov_sl if put_prov_sl > 0 else None,
+                bracket_sl_limit=put_prov_limit if put_prov_sl > 0 else None,
             )
             if not put_result.success:
                 raise RuntimeError(
@@ -650,33 +662,20 @@ class AutoTradeEngine:
                 else None
             )
             logger.info("Put filled @ %s order_id=%s", put_fill, put_order_id)
-
-            put_sl_trigger_price, put_sl_limit = compute_bracket_sl(
-                put_fill,
-                universal_sl_pct,
-                master_mark=put_mark,
-                leg="put",
-                trade_id=None,
+            put_sl_trigger_price, put_sl_limit = (
+                await finalize_bracket_sl_after_fill(
+                    client,
+                    entry_order_id=put_order_id,
+                    product_id=int(straddle["put_product_id"]),
+                    mark_price=put_mark,
+                    fill_price=put_fill,
+                    universal_sl_pct=universal_sl_pct,
+                    provisional_stop=put_prov_sl,
+                    provisional_limit=put_prov_limit,
+                    leg="put",
+                    trade_id=None,
+                )
             )
-            if put_sl_trigger_price > 0:
-                try:
-                    stop_res = await client.place_stop_order(
-                        product_id=int(straddle["put_product_id"]),
-                        size=qty,
-                        side="buy",
-                        stop_price=put_sl_trigger_price,
-                    )
-                    put_sl_order_id = (
-                        str(stop_res.get("order_id") or stop_res.get("id") or "")
-                        or None
-                    )
-                except Exception as sl_exc:
-                    logger.critical(
-                        "Put fill-based stop place FAILED: %s "
-                        "(stop=%.2f) — position unprotected until retry",
-                        sl_exc,
-                        put_sl_trigger_price,
-                    )
 
             # TP/SL locked to initial deployment premium (actual fills)
             # initial_max_profit never changes after trade entry
@@ -770,7 +769,7 @@ class AutoTradeEngine:
                 sl_trigger_price=float(call_sl_trigger_price)
                 if call_sl_trigger_price and call_sl_trigger_price > 0
                 else None,
-                delta_sl_order_id=call_sl_order_id,
+                delta_sl_order_id=None,  # bracket — no separate stop order id
             )
             put_leg = Leg(
                 trade_id=trade.id,
@@ -793,7 +792,7 @@ class AutoTradeEngine:
                 sl_trigger_price=float(put_sl_trigger_price)
                 if put_sl_trigger_price and put_sl_trigger_price > 0
                 else None,
-                delta_sl_order_id=put_sl_order_id,
+                delta_sl_order_id=None,  # bracket — no separate stop order id
             )
             accumulate_entry_spread_on_trade(trade, call_entry_spread)
             accumulate_entry_spread_on_trade(trade, put_entry_spread)

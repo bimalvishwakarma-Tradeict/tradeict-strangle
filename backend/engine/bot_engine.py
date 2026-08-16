@@ -2117,6 +2117,16 @@ class BotEngine:
             else ""
         )
 
+        try:
+            from backend.api.routes_account import cleanup_orphan_sl_orders
+
+            with self.db_factory() as orphan_db:
+                await cleanup_orphan_sl_orders(orphan_db, trade_id=trade_id)
+        except Exception as orphan_exc:
+            logger.warning(
+                "[ORPHAN_SL] db-only post-exit sweep failed: %s", orphan_exc
+            )
+
         result = {
             "slaves_total": slaves_total,
             "slaves_closed": slaves_closed,
@@ -2893,6 +2903,27 @@ class BotEngine:
         except Exception as webhook_exc:
             logger.warning(
                 "[EARNER_WEBHOOK] Setup failed: %s", webhook_exc
+            )
+
+        # Per-exit orphan standalone SL sweep (master + slaves).
+        # Live-position stops (e.g. Trade#65 mid-trade) are kept until flat.
+        try:
+            from backend.api.routes_account import cleanup_orphan_sl_orders
+
+            with self.db_factory() as orphan_db:
+                orphan_summary = await cleanup_orphan_sl_orders(
+                    orphan_db, trade_id=trade_id
+                )
+            logger.info(
+                "[ORPHAN_SL] post-exit sweep trade=%s cancelled=%s kept=%s",
+                trade_id,
+                orphan_summary.get("cancelled"),
+                orphan_summary.get("kept"),
+            )
+        except Exception as orphan_exc:
+            logger.warning(
+                "[ORPHAN_SL] post-exit sweep failed (non-fatal): %s",
+                orphan_exc,
             )
 
         result = {

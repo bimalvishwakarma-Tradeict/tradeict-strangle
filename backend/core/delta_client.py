@@ -781,6 +781,39 @@ class DeltaClient:
             "raw": result if isinstance(result, dict) else {},
         }
 
+    async def edit_bracket_order(
+        self,
+        order_id: int | str,
+        product_id: int,
+        bracket_stop_loss_price: float,
+        bracket_stop_loss_limit_price: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        PUT /v2/orders/bracket — amend bracket SL attached to an order/position.
+
+        After an IOC market fill the parent order is often no longer editable;
+        callers must treat failure as non-fatal and keep the provisional price.
+        """
+        stop_px = round(float(bracket_stop_loss_price), 2)
+        limit_px = (
+            round(float(bracket_stop_loss_limit_price), 2)
+            if bracket_stop_loss_limit_price is not None
+            else round(stop_px * 1.05, 2)
+        )
+        body = {
+            "id": int(order_id),
+            "product_id": int(product_id),
+            "bracket_stop_loss_price": str(stop_px),
+            "bracket_stop_loss_limit_price": str(limit_px),
+        }
+        result = await self._request(
+            "PUT",
+            "/v2/orders/bracket",
+            body=body,
+            timeout=ORDER_TIMEOUT_SECONDS,
+        )
+        return result if isinstance(result, dict) else {"result": result}
+
     async def get_open_stop_orders(self) -> list[dict[str, Any]]:
         """
         Fetch open stop-loss orders for this account.
@@ -988,14 +1021,14 @@ class DeltaClient:
         stop_price: float,
     ) -> dict[str, Any]:
         """
-        POST /v2/orders — stop-loss limit order (buy-to-close short options).
+        DEPRECATED — DO NOT CALL from production paths.
 
-        Confirmed Delta India format:
-          order_type=limit_order
-          stop_order_type=stop_loss_order
-          stop_price + limit_price (buy: +5%, sell: -5%)
-          time_in_force=gtc
-          (no reduce_only)
+        Standalone stop orders orphan when the position closes (no reduce_only)
+        and can open unwanted positions later. Attach bracket_stop_loss_price /
+        bracket_stop_loss_limit_price on the entry order instead.
+
+        Kept only so orphan-cleanup / historical tooling can still reference the
+        API shape. New code must never call this.
         """
         stop_px = round(float(stop_price), 2)
         if str(side).lower() == "buy":

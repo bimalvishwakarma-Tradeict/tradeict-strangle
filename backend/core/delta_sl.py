@@ -108,15 +108,92 @@ def compute_sl_trigger_price(baseline_premium: float, universal_sl_pct: float) -
     return stop
 
 
+async def finalize_bracket_sl_after_fill(
+    delta_client: Any,
+    *,
+    entry_order_id: str | int | None,
+    product_id: int,
+    mark_price: float,
+    fill_price: float,
+    universal_sl_pct: float,
+    provisional_stop: float,
+    provisional_limit: float,
+    leg: str = "",
+    trade_id: int | None = None,
+) -> tuple[float, float]:
+    """
+    After an entry fill, prefer fill-derived bracket SL; amend if needed.
+
+    Chicken-and-egg: bracket must ship WITH the opening order before any fill
+    exists, so callers attach mark × uni_sl at place time (provisional_*).
+    Once the fill is known we compute fill-derived via compute_bracket_sl and
+    try PUT /v2/orders/bracket to amend. IOC parents are often already filled
+    and not editable — on amend failure we KEEP the mark-derived provisional
+    as the canonical absolute price for master AND slaves so they still match.
+    """
+    fill_stop, fill_limit = compute_bracket_sl(
+        float(fill_price or 0.0),
+        float(universal_sl_pct or 200.0),
+        master_mark=float(mark_price or 0.0),
+        leg=leg,
+        trade_id=trade_id,
+    )
+    prov_stop = float(provisional_stop or 0.0)
+    prov_limit = float(provisional_limit or 0.0)
+    if fill_stop <= 0:
+        return prov_stop, prov_limit
+    if prov_stop <= 0 or abs(fill_stop - prov_stop) < 0.01:
+        return fill_stop, fill_limit
+
+    if entry_order_id is None or int(product_id or 0) <= 0 or delta_client is None:
+        logger.warning(
+            "[BRACKET_SL] cannot amend leg=%s — keeping mark-derived %.2f",
+            leg,
+            prov_stop,
+        )
+        return prov_stop, prov_limit
+
+    try:
+        await delta_client.edit_bracket_order(
+            order_id=entry_order_id,
+            product_id=int(product_id),
+            bracket_stop_loss_price=fill_stop,
+            bracket_stop_loss_limit_price=fill_limit,
+        )
+        logger.info(
+            "[BRACKET_SL] amended leg=%s order=%s mark_stop=%.2f → fill_stop=%.2f",
+            leg,
+            entry_order_id,
+            prov_stop,
+            fill_stop,
+        )
+        return fill_stop, fill_limit
+    except Exception as amend_exc:
+        logger.warning(
+            "[BRACKET_SL] amend failed leg=%s order=%s (%s) — "
+            "keeping mark-derived %.2f as canonical for master+slaves",
+            leg,
+            entry_order_id,
+            amend_exc,
+            prov_stop,
+        )
+        return prov_stop, prov_limit
+
+
 async def cancel_leg_sl_order(
     delta_client: Any,
     leg: Any,
     *,
     clear_fields: bool = True,
 ) -> bool:
-    """Cancel Delta SL order for a leg. Returns True if cancel attempted successfully."""
+    """Cancel legacy standalone Delta SL order for a leg (brackets have none)."""
     oid = getattr(leg, "delta_sl_order_id", None)
     if not oid:
+        return True
+    # ABS: audit tags from a prior regression — not real order ids
+    if str(oid).startswith("ABS:"):
+        if clear_fields:
+            leg.delta_sl_order_id = None
         return True
     try:
         await delta_client.cancel_order(int(oid))
@@ -127,7 +204,6 @@ async def cancel_leg_sl_order(
         )
         if clear_fields:
             leg.delta_sl_order_id = None
-            # keep sl_trigger_price until replaced (caller may overwrite)
         return True
     except Exception as exc:
         logger.warning(
@@ -148,22 +224,17 @@ async def place_leg_sl_order(
     quantity: int | None = None,
 ) -> dict[str, Any]:
     """
-    Place buy-to-close stop-market SL on Delta for a short option leg.
+    Legacy hook — standalone stop orders are FORBIDDEN.
 
-    Never raises — returns {success, order_id, stop_price, error}.
-    On success updates leg.delta_sl_order_id and leg.sl_trigger_price.
+    Bracket SL must be attached on the entry order. This never calls
+    place_stop_order. If the leg already has a bracket (sl_trigger_price set,
+    no delta_sl_order_id), returns success for display refresh only.
     """
     stop_px = compute_sl_trigger_price(baseline_premium, universal_sl_pct)
-    qty = abs(int(quantity if quantity is not None else getattr(leg, "quantity", 0) or 0))
-    product_id = int(getattr(leg, "product_id", 0) or 0)
     leg_type = str(getattr(leg, "leg_type", "?") or "?")
 
-    # Bracket-based mode: when the leg was placed with bracket SL attached,
-    # we already persist `sl_trigger_price` for display and there is no
-    # separate stop-loss order to place/refresh.
     if (
-        getattr(leg, "delta_order_id", None)
-        and getattr(leg, "sl_trigger_price", None) is not None
+        getattr(leg, "sl_trigger_price", None) is not None
         and not getattr(leg, "delta_sl_order_id", None)
     ):
         return {
@@ -173,61 +244,20 @@ async def place_leg_sl_order(
             "error": None,
         }
 
-    if stop_px <= 0 or qty <= 0 or product_id <= 0:
-        msg = (
-            f"Invalid SL params leg={leg_type} stop={stop_px} "
-            f"qty={qty} product_id={product_id}"
-        )
-        logger.warning(msg)
-        return {"success": False, "order_id": None, "stop_price": stop_px, "error": msg}
-
-    try:
-        result = await delta_client.place_stop_order(
-            product_id=product_id,
-            size=qty,
-            side="buy",
-            stop_price=stop_px,
-        )
-        order_id = result.get("order_id")
-        if order_id is None:
-            msg = f"Delta SL place returned no order_id for {leg_type}"
-            logger.warning(msg)
-            return {
-                "success": False,
-                "order_id": None,
-                "stop_price": stop_px,
-                "error": msg,
-            }
-        leg.delta_sl_order_id = str(order_id)
+    msg = (
+        f"place_leg_sl_order refused for {leg_type}: "
+        "use bracket SL on the entry order (no standalone stops)"
+    )
+    logger.warning(msg)
+    if stop_px > 0:
         leg.sl_trigger_price = float(stop_px)
-        logger.info(
-            "Delta SL order placed: leg=%s trigger=%s order_id=%s "
-            "baseline=%s pct=%s",
-            leg_type,
-            stop_px,
-            order_id,
-            baseline_premium,
-            universal_sl_pct,
-        )
-        return {
-            "success": True,
-            "order_id": str(order_id),
-            "stop_price": float(stop_px),
-            "error": None,
-        }
-    except Exception as exc:
-        logger.warning(
-            "Delta SL order failed for %s (trade continues): %s",
-            leg_type,
-            exc,
-            exc_info=True,
-        )
-        return {
-            "success": False,
-            "order_id": None,
-            "stop_price": stop_px,
-            "error": str(exc),
-        }
+    leg.delta_sl_order_id = None
+    return {
+        "success": False,
+        "order_id": None,
+        "stop_price": stop_px,
+        "error": msg,
+    }
 
 
 async def refresh_leg_sl_order(

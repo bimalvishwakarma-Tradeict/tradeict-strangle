@@ -940,13 +940,8 @@ class MirrorEngine:
                 master_trade_id=int(master_trade_id),
                 call_order_id=call_order_id or None,
                 put_order_id=put_order_id or None,
-                # Audit: store absolute master stop (not a live order id)
-                call_sl_order_id=(
-                    f"ABS:{float(call_sl):.2f}" if call_sl else None
-                ),
-                put_sl_order_id=(
-                    f"ABS:{float(put_sl):.2f}" if put_sl else None
-                ),
+                call_sl_order_id=None,  # bracket — no separate stop order id
+                put_sl_order_id=None,
                 actual_quantity=slave_qty,
                 call_fill_price=call_fill,
                 put_fill_price=put_fill,
@@ -1154,16 +1149,8 @@ class MirrorEngine:
                     leg = str(triggered_leg_type).lower()
                     if leg == "call":
                         st.call_order_id = "VIRTUAL"
-                        if master_bracket_sl and float(master_bracket_sl) > 0:
-                            st.call_sl_order_id = (
-                                f"ABS:{float(master_bracket_sl):.2f}"
-                            )
                     else:
                         st.put_order_id = "VIRTUAL"
-                        if master_bracket_sl and float(master_bracket_sl) > 0:
-                            st.put_sl_order_id = (
-                                f"ABS:{float(master_bracket_sl):.2f}"
-                            )
                     virt_db.commit()
             return
 
@@ -1178,23 +1165,22 @@ class MirrorEngine:
 
         try:
             # Cancel legacy separate SL only if present (bracket auto-cancels)
-            # ABS:* tags are audit markers, not live order ids.
             if leg == "call" and slave_trade.call_sl_order_id:
                 oid = str(slave_trade.call_sl_order_id)
                 if not oid.startswith("ABS:"):
                     try:
                         await client.cancel_order(int(oid))
-                        slave_trade.call_sl_order_id = None
                     except Exception as exc:
                         logger.warning("Slave SL cancel failed: %s", exc)
+                slave_trade.call_sl_order_id = None
             elif leg == "put" and slave_trade.put_sl_order_id:
                 oid = str(slave_trade.put_sl_order_id)
                 if not oid.startswith("ABS:"):
                     try:
                         await client.cancel_order(int(oid))
-                        slave_trade.put_sl_order_id = None
                     except Exception as exc:
                         logger.warning("Slave SL cancel failed: %s", exc)
+                slave_trade.put_sl_order_id = None
 
             # --- a. Live positions ---
             live_positions = await client.get_option_positions()
@@ -1398,16 +1384,12 @@ class MirrorEngine:
 
             if leg == "call":
                 slave_trade.call_order_id = new_order_id or None
-                slave_trade.call_sl_order_id = (
-                    f"ABS:{float(new_sl):.2f}" if new_sl else None
-                )
+                slave_trade.call_sl_order_id = None
                 if new_fill > 0:
                     slave_trade.call_fill_price = new_fill
             else:
                 slave_trade.put_order_id = new_order_id or None
-                slave_trade.put_sl_order_id = (
-                    f"ABS:{float(new_sl):.2f}" if new_sl else None
-                )
+                slave_trade.put_sl_order_id = None
                 if new_fill > 0:
                     slave_trade.put_fill_price = new_fill
 
@@ -1566,17 +1548,14 @@ class MirrorEngine:
                         or 0.0
                     )
                     new_order_id = self._order_id(new_order)
-                    abs_tag = (
-                        f"ABS:{float(new_sl):.2f}" if new_sl else None
-                    )
                     if leg == "call":
                         slave_trade.call_order_id = new_order_id or None
-                        slave_trade.call_sl_order_id = abs_tag
+                        slave_trade.call_sl_order_id = None
                         if new_fill > 0:
                             slave_trade.call_fill_price = new_fill
                     else:
                         slave_trade.put_order_id = new_order_id or None
-                        slave_trade.put_sl_order_id = abs_tag
+                        slave_trade.put_sl_order_id = None
                         if new_fill > 0:
                             slave_trade.put_fill_price = new_fill
 

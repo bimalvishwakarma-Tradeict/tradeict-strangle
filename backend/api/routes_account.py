@@ -26,27 +26,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/account", tags=["account"])
 
-async def cleanup_orphan_sl_orders(db: Session) -> dict[str, Any]:
+async def _protected_product_ids_for_master(db: Session, client: DeltaClient) -> set[int]:
     """
-    Cancel open Delta stop-loss orders that are NOT for any currently-open
-    bot-managed leg in our DB.
+    Product ids that still have a live short/bot position — do NOT cancel their
+    standalone stop orders yet (e.g. Trade#65 while still open).
     """
-    account = (
-        db.query(Account)
-        .filter(Account.is_active.is_(True))
-        .order_by(Account.id.asc())
-        .first()
-    )
-    if account is None:
-        return {
-            "success": True,
-            "skipped": True,
-            "reason": "No active account",
-            "cancelled": 0,
-            "kept": 0,
-        }
-
-    active_product_ids: set[int] = {
+    protected: set[int] = {
         int(row[0])
         for row in (
             db.query(Leg.product_id)
@@ -55,86 +40,306 @@ async def cleanup_orphan_sl_orders(db: Session) -> dict[str, Any]:
         )
         if row and row[0]
     }
+    try:
+        for pos in await client.get_positions():
+            size = int(pos.get("size") or 0)
+            pid = int(pos.get("product_id") or 0)
+            if size != 0 and pid > 0:
+                protected.add(pid)
+    except Exception as exc:
+        logger.warning("Orphan SL: master positions fetch failed: %s", exc)
+    return protected
 
-    client = DeltaClient(
-        decrypt(account.api_key_encrypted),
-        decrypt(account.api_secret_encrypted),
-    )
 
+async def _protected_product_ids_for_slave(
+    db: Session,
+    client: DeltaClient,
+    slave_id: int,
+) -> set[int]:
+    """Keep stops for products still open on the slave or linked via active SlaveTrade."""
+    from backend.models import SlaveTrade
+
+    protected: set[int] = set()
+    try:
+        for pos in await client.get_positions():
+            size = int(pos.get("size") or 0)
+            pid = int(pos.get("product_id") or 0)
+            if size != 0 and pid > 0:
+                protected.add(pid)
+    except Exception as exc:
+        logger.warning(
+            "Orphan SL: slave %s positions fetch failed: %s", slave_id, exc
+        )
+
+    active_master_ids = [
+        int(row[0])
+        for row in (
+            db.query(SlaveTrade.master_trade_id)
+            .filter(
+                SlaveTrade.slave_account_id == int(slave_id),
+                SlaveTrade.status == "active",
+            )
+            .all()
+        )
+        if row and row[0]
+    ]
+    if active_master_ids:
+        for row in (
+            db.query(Leg.product_id)
+            .filter(
+                Leg.trade_id.in_(active_master_ids),
+                Leg.status == "open",
+                Leg.is_bot_managed.is_(True),
+            )
+            .all()
+        ):
+            if row and row[0]:
+                protected.add(int(row[0]))
+    return protected
+
+
+async def _cancel_orphan_stops_on_client(
+    client: DeltaClient,
+    *,
+    account_label: str,
+    protected_product_ids: set[int],
+    trade_id: int = 0,
+) -> dict[str, int]:
+    """Cancel open standalone stop_loss orders whose product is flat."""
+    cancelled = 0
+    already_gone = 0
+    kept = 0
+    errors = 0
     try:
         orders = await client.get_open_stop_orders()
-        cancelled = 0
-        already_gone = 0
-        kept = 0
-        errors = 0
+    except Exception as exc:
+        logger.warning(
+            "Orphan SL: list open stops failed for %s: %s", account_label, exc
+        )
+        return {
+            "cancelled": 0,
+            "already_gone": 0,
+            "kept": 0,
+            "errors": 1,
+        }
 
-        for order in orders:
-            product_id = order.get("product_id")
-            order_id = order.get("id") or order.get("order_id")
-            symbol = order.get("product_symbol", "")
+    for order in orders:
+        product_id = order.get("product_id")
+        order_id = order.get("id") or order.get("order_id")
+        symbol = (
+            order.get("product_symbol")
+            or order.get("symbol")
+            or ""
+        )
+        try:
+            pid = int(product_id) if product_id is not None else 0
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 0 or order_id is None:
+            kept += 1
+            continue
+
+        if pid in protected_product_ids:
+            kept += 1
+            logger.info(
+                "Keeping live-position SL: account=%s %s order=%s",
+                account_label,
+                symbol,
+                order_id,
+            )
+            continue
+
+        try:
+            order_id_int = int(order_id)
+            await client.cancel_order(order_id_int)
+            cancelled += 1
+            logger.info(
+                "[ORPHAN_SL_CANCELLED] order_id=%s symbol=%s account=%s",
+                order_id_int,
+                symbol,
+                account_label,
+            )
             try:
-                pid = int(product_id) if product_id is not None else 0
-            except (TypeError, ValueError):
-                pid = 0
-            if pid <= 0 or order_id is None:
-                kept += 1
-                continue
+                from backend.core.bot_logger import log_and_buffer
 
-            if pid not in active_product_ids:
-                try:
-                    order_id_int = int(order_id)
-                    await client.cancel_order(order_id_int)
-                    cancelled += 1
-                    logger.info(
-                        "Cancelled orphan SL: %s order=%s",
-                        symbol,
-                        order_id_int,
-                    )
-                except DeltaAPIError as e:
-                    status_code = int(getattr(e, "status_code", 0) or 0)
-                    if status_code == 404:
-                        already_gone += 1
-                        logger.info(
-                            "SL already gone: %s order=%s",
-                            symbol,
-                            order_id,
-                        )
-                    else:
-                        errors += 1
-                        logger.warning(
-                            "Could not cancel %s order=%s: status=%s msg=%s",
-                            symbol,
-                            order_id,
-                            status_code,
-                            str(e),
-                        )
-                except Exception as exc:
-                    errors += 1
-                    logger.warning(
-                        "Cancel error %s order=%s: %s",
-                        symbol,
-                        order_id,
-                        exc,
-                    )
+                log_and_buffer(
+                    "ORPHAN_SL_CANCELLED",
+                    int(trade_id or 0),
+                    {
+                        "order_id": order_id_int,
+                        "symbol": symbol,
+                        "account": account_label,
+                        "product_id": pid,
+                    },
+                )
+            except Exception:
+                pass
+        except DeltaAPIError as e:
+            status_code = int(getattr(e, "status_code", 0) or 0)
+            if status_code == 404:
+                already_gone += 1
             else:
-                kept += 1
-                logger.info(
-                    "Keeping active SL: %s order=%s",
+                errors += 1
+                logger.warning(
+                    "Could not cancel orphan SL %s order=%s: status=%s msg=%s",
                     symbol,
                     order_id,
+                    status_code,
+                    str(e),
                 )
+        except Exception as exc:
+            errors += 1
+            logger.warning(
+                "Cancel error %s order=%s: %s",
+                symbol,
+                order_id,
+                exc,
+            )
 
+    return {
+        "cancelled": cancelled,
+        "already_gone": already_gone,
+        "kept": kept,
+        "errors": errors,
+    }
+
+
+async def cleanup_orphan_sl_orders(
+    db: Session,
+    *,
+    trade_id: int = 0,
+) -> dict[str, Any]:
+    """
+    Cancel open standalone stop-loss orders that are NOT tied to a live position.
+
+    Sweeps the master account and every non-virtual slave. Stops whose product
+    still has an open position (or open bot-managed leg) are kept — e.g.
+    Trade#65's standalone SLs stay until that position is flat.
+    """
+    total_cancelled = 0
+    total_kept = 0
+    total_errors = 0
+    total_gone = 0
+    accounts_swept = 0
+
+    account = (
+        db.query(Account)
+        .filter(Account.is_active.is_(True))
+        .order_by(Account.id.asc())
+        .first()
+    )
+    if account is not None:
+        client = DeltaClient(
+            decrypt(account.api_key_encrypted),
+            decrypt(account.api_secret_encrypted),
+        )
+        try:
+            protected = await _protected_product_ids_for_master(db, client)
+            stats = await _cancel_orphan_stops_on_client(
+                client,
+                account_label=f"master:{account.name}",
+                protected_product_ids=protected,
+                trade_id=trade_id,
+            )
+            accounts_swept += 1
+            total_cancelled += stats["cancelled"]
+            total_kept += stats["kept"]
+            total_errors += stats["errors"]
+            total_gone += stats["already_gone"]
+            # Clear stale delta_sl_order_id on closed legs
+            if stats["cancelled"] > 0:
+                closed_legs = (
+                    db.query(Leg)
+                    .filter(
+                        Leg.status != "open",
+                        Leg.delta_sl_order_id.isnot(None),
+                    )
+                    .all()
+                )
+                for leg in closed_legs:
+                    leg.delta_sl_order_id = None
+                db.commit()
+        finally:
+            await client.close()
+
+    try:
+        from backend.models import SlaveAccount, SlaveTrade
+
+        slaves = (
+            db.query(SlaveAccount)
+            .filter(
+                SlaveAccount.is_active.is_(True),
+                SlaveAccount.is_virtual.is_(False),
+            )
+            .order_by(SlaveAccount.id.asc())
+            .all()
+        )
+    except Exception as exc:
+        logger.warning("Orphan SL: slave list failed: %s", exc)
+        slaves = []
+
+    for slave in slaves:
+        client = DeltaClient(
+            decrypt(slave.api_key_encrypted),
+            decrypt(slave.api_secret_encrypted),
+        )
+        try:
+            protected = await _protected_product_ids_for_slave(
+                db, client, int(slave.id)
+            )
+            stats = await _cancel_orphan_stops_on_client(
+                client,
+                account_label=f"slave:{slave.name}",
+                protected_product_ids=protected,
+                trade_id=trade_id,
+            )
+            accounts_swept += 1
+            total_cancelled += stats["cancelled"]
+            total_kept += stats["kept"]
+            total_errors += stats["errors"]
+            total_gone += stats["already_gone"]
+            if stats["cancelled"] > 0:
+                for st in (
+                    db.query(SlaveTrade)
+                    .filter(
+                        SlaveTrade.slave_account_id == int(slave.id),
+                        SlaveTrade.status != "active",
+                    )
+                    .all()
+                ):
+                    # Clear legacy standalone ids and ABS: audit fakes
+                    for field in ("call_sl_order_id", "put_sl_order_id"):
+                        oid = getattr(st, field, None)
+                        if oid:
+                            setattr(st, field, None)
+                db.commit()
+        except Exception as exc:
+            total_errors += 1
+            logger.warning(
+                "Orphan SL sweep failed for slave %s: %s", slave.name, exc
+            )
+        finally:
+            await client.close()
+
+    if account is None and accounts_swept == 0:
         return {
             "success": True,
-            "skipped": False,
-            "cancelled": cancelled,
-            "already_gone": already_gone,
-            "kept": kept,
-            "errors": errors,
-            "active_product_count": len(active_product_ids),
+            "skipped": True,
+            "reason": "No active account",
+            "cancelled": 0,
+            "kept": 0,
         }
-    finally:
-        await client.close()
+
+    return {
+        "success": True,
+        "skipped": False,
+        "cancelled": total_cancelled,
+        "already_gone": total_gone,
+        "kept": total_kept,
+        "errors": total_errors,
+        "accounts_swept": accounts_swept,
+        "active_product_count": total_kept,
+    }
 
 
 @router.post("/connect", response_model=AccountConnectResponse)

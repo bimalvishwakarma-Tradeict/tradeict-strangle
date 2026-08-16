@@ -53,8 +53,37 @@ def test_anomaly_falls_back_to_mark() -> None:
     assert round(stop, 2) == 22.0  # 10.0 × 2.20
 
 
+def test_no_production_calls_place_stop_order() -> None:
+    """
+    Regression guard: standalone stop orders must never be placed.
+
+    place_stop_order may exist on DeltaClient but no production module may
+    call it. Bracket SL on the entry order is the only allowed path.
+    """
+    import re
+
+    backend = Path(__file__).resolve().parent.parent
+    call_pat = re.compile(r"\.place_stop_order\s*\(")
+    offenders: list[str] = []
+    for path in backend.rglob("*.py"):
+        if "tests" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for i, line in enumerate(text.splitlines(), start=1):
+            if call_pat.search(line):
+                offenders.append(
+                    f"{path.relative_to(backend)}:{i}: {line.strip()}"
+                )
+
+    assert not offenders, (
+        "Standalone place_stop_order must not be called:\n"
+        + "\n".join(offenders)
+    )
+
+
 if __name__ == "__main__":
     test_trade64_call_fill_based()
     test_trade64_put_fill_based()
     test_anomaly_falls_back_to_mark()
+    test_no_production_calls_place_stop_order()
     print("ALL PASSED")
