@@ -171,8 +171,8 @@ def main() -> None:
     assert action.should_adjust is False
     print("Test 5 PASSED: Hold — no action ✅")
 
-    # Test 6: Settling skips all exits
-    trade = make_trade(tp_usd=30)
+    # Test 6: Settling skips TP / adjust, but NOT stop loss
+    trade = make_trade(tp_usd=30, sl_usd=60)
     from backend.core.time_utils import get_ist_now
     from datetime import timedelta as td
 
@@ -185,12 +185,32 @@ def main() -> None:
             50.0,
             50.0,
             db,
-            net_mtm=35.0,
+            net_mtm=35.0,  # would hit TP if not settling
+            gross_mtm_for_sl=0.0,
         )
     )
     assert action.should_exit is False
     assert action.should_adjust is False
-    print("Test 6 PASSED: Settling skips exits ✅")
+    print("Test 6 PASSED: Settling skips TP/adjust ✅")
+
+    # Test 6b: STOPLOSS fires even while settling
+    trade = make_trade(tp_usd=30, sl_usd=0.01)
+    trade.monitoring_starts_at = get_ist_now() + td(minutes=5)
+    action = asyncio.run(
+        strategy.on_tick(
+            trade,
+            make_leg(150),
+            make_leg(150),
+            50.0,
+            50.0,
+            db,
+            net_mtm=-0.02,
+            gross_mtm_for_sl=-0.051,
+        )
+    )
+    assert action.should_exit is True
+    assert action.exit_reason == "STOPLOSS"
+    print("Test 6b PASSED: Settling does NOT suppress STOPLOSS ✅")
 
     print("\n✅ ALL EXIT LOGIC TESTS PASSED")
 

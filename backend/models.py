@@ -73,7 +73,8 @@ class Trade(Base):
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # P&L / adjustment checks only run after this timestamp (settling period)
+    # P&L: entry settling only (ENTRY_SETTLING_SECONDS). Set once at entry;
+    # never pushed forward on adjustment/conversion. STOPLOSS ignores this.
     monitoring_starts_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

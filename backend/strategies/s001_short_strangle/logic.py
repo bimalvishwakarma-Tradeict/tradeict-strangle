@@ -336,15 +336,14 @@ class ShortStrangleStrategy(BaseStrategy):
         """
         Evaluate exits then adjustment triggers (exact priority):
 
-        a. settling → no action
-        b. Net MTM >= profit_target → PROFIT_TARGET
-        c. Gross MTM for SL <= -stoploss → STOPLOSS
-           (gross + cumulative entry spread so SL room is not eaten by fill spread)
+        a. STOPLOSS — ALWAYS evaluated (settling never suppresses it)
+        b. settling → skip PROFIT_TARGET and adjustment only
+        c. Net MTM >= profit_target → PROFIT_TARGET
         d. pre-expiry window → PRE_EXPIRY
         e. adjustment trigger + decision (Net MTM > 0 → close, else adjust)
         f. HOLD
 
-        When ``net_mtm`` is provided (from bot_engine), use it for b/e.
+        When ``net_mtm`` is provided (from bot_engine), use it for TP / adjust.
         Otherwise compute via compute_net_mtm (gross − fees − slip).
         """
         logger.info(
@@ -381,15 +380,9 @@ class ShortStrangleStrategy(BaseStrategy):
         else:
             total_pnl = calculated_pnl
 
-        # a. SETTLING PERIOD: Don't check P&L / adjust for first N minutes
         settling = get_settling_info(getattr(trade, "monitoring_starts_at", None))
-        if settling["is_settling"]:
-            logger.info(
-                "Trade %s settling... %sm remaining before P&L checks",
-                getattr(trade, "id", "?"),
-                settling["settling_minutes_left"],
-            )
-            return TradeAction(current_pnl=total_pnl)
+        is_settling = bool(settling.get("is_settling"))
+        trade_id = int(getattr(trade, "id", 0) or 0)
 
         # Decision Net MTM (passed in from bot_engine, or computed here)
         if net_mtm is not None:
@@ -427,9 +420,9 @@ class ShortStrangleStrategy(BaseStrategy):
         sl_limit = abs(float(trade.stoploss_usd or 0.0))
         tp_limit = float(trade.profit_target_usd or 0.0)
 
-        # b. Profit target (Net MTM — fees/slippage deducted)
-        should_exit_profit = decision_pnl >= tp_limit
-        # c. Stop loss (Gross MTM for SL ONLY — never net_mtm)
+        # Profit target (Net MTM) — skipped while settling
+        should_exit_profit = (not is_settling) and decision_pnl >= tp_limit
+        # Stop loss (Gross MTM for SL) — NEVER suppressed by settling
         should_exit_sl = sl_limit > 0 and sl_mtm <= -sl_limit
 
         # Explicit audit: prove SL decision is not based on net
@@ -442,6 +435,59 @@ class ShortStrangleStrategy(BaseStrategy):
                 sl_limit,
                 sl_mtm,
             )
+
+        # STOPLOSS first and always — settling cannot block it
+        if should_exit_sl:
+            if is_settling:
+                logger.warning(
+                    "[SETTLING_BYPASS] trade_id=%s check=stoploss "
+                    "gross_mtm_for_sl=%.4f limit=%.4f",
+                    trade_id,
+                    sl_mtm,
+                    sl_limit,
+                )
+                try:
+                    from backend.core.bot_logger import log_and_buffer
+
+                    log_and_buffer(
+                        "SETTLING_BYPASS",
+                        trade_id,
+                        {
+                            "check": "stoploss",
+                            "gross_mtm_for_sl": round(sl_mtm, 4),
+                            "stoploss": round(sl_limit, 4),
+                            "minutes_left": settling.get("settling_minutes_left"),
+                        },
+                    )
+                except Exception:
+                    pass
+            logger.info(
+                "Trade %s: gross_mtm=%.2f gross_mtm_for_sl=%.2f net_mtm=%.2f | "
+                "target=%s | sl=%s | action=EXIT STOPLOSS "
+                "(gross_mtm_for_sl<=-stoploss; settling=%s)",
+                getattr(trade, "id", "?"),
+                total_pnl,
+                sl_mtm,
+                decision_pnl,
+                trade.profit_target_usd,
+                sl_limit,
+                is_settling,
+            )
+            return TradeAction(
+                should_exit=True,
+                exit_reason="STOPLOSS",
+                current_pnl=decision_pnl,
+            )
+
+        # Entry settling: skip TP and adjustment only
+        if is_settling:
+            logger.info(
+                "Trade %s settling... %sm remaining — "
+                "TP/adjust skipped (SL still active)",
+                getattr(trade, "id", "?"),
+                settling["settling_minutes_left"],
+            )
+            return TradeAction(current_pnl=total_pnl)
 
         if should_exit_profit:
             logger.info(
@@ -458,24 +504,6 @@ class ShortStrangleStrategy(BaseStrategy):
             return TradeAction(
                 should_exit=True,
                 exit_reason="PROFIT_TARGET",
-                current_pnl=decision_pnl,
-            )
-
-        if should_exit_sl:
-            logger.info(
-                "Trade %s: gross_mtm=%.2f gross_mtm_for_sl=%.2f net_mtm=%.2f | "
-                "target=%s | sl=%s | action=EXIT STOPLOSS "
-                "(gross_mtm_for_sl<=-stoploss; net_mtm NOT used for SL)",
-                getattr(trade, "id", "?"),
-                total_pnl,
-                sl_mtm,
-                decision_pnl,
-                trade.profit_target_usd,
-                sl_limit,
-            )
-            return TradeAction(
-                should_exit=True,
-                exit_reason="STOPLOSS",
                 current_pnl=decision_pnl,
             )
 

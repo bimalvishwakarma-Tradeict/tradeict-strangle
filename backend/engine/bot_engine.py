@@ -21,7 +21,6 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.config import (
-    ADJUSTMENT_COOLDOWN_MINUTES,
     MONITORING_INTERVAL_SECONDS,
     OPTIONS_CONTRACT_VALUE,
     ExitReason,
@@ -35,7 +34,6 @@ from backend.core.time_utils import (
     get_hours_to_expiry,
     get_ist_now,
     get_settling_info,
-    settling_ends_at,
 )
 from backend.core.ws_manager import ws_manager
 from backend.database import SessionLocal
@@ -3541,7 +3539,7 @@ class BotEngine:
                 )
             if result.success:
                 self._reload_legs(trade_state)
-                # Pause exits/adjusts so new-leg ask settles (stops cascade)
+                # monitoring_starts_at is entry-only — do not push on adjust
                 self._apply_adjustment_cooldown(trade_state)
                 # Delta UPNL stale right after adjust — avoid false exits
                 trade_state.last_delta_mtm = 0.0
@@ -3555,7 +3553,8 @@ class BotEngine:
                         "new_strike": float(result.new_strike or 0),
                         "old_premium": round(old_premium, 2),
                         "new_premium": round(float(result.premium_collected or 0), 2),
-                        "cooldown_minutes": ADJUSTMENT_COOLDOWN_MINUTES,
+                        "cooldown_minutes": 0,
+
                     },
                 )
 
@@ -4055,24 +4054,16 @@ class BotEngine:
 
     def _apply_adjustment_cooldown(self, trade_state: TradeState) -> None:
         """
-        After a successful adjust, block further adjust/exit for N minutes.
+        No-op for monitoring_starts_at.
 
-        Without this, the next monitor tick can re-trigger immediately because:
-        - new fill baseline is low while ask is still elevated, or
-        - nearer-OTM replacements (now forbidden) leave premium hot.
+        Post-adjustment settling was removed: an adjustment means the trade is
+        under stress, so suspending STOPLOSS (via pushing monitoring_starts_at)
+        is unsafe. monitoring_starts_at is set once at entry only.
         """
-        starts = settling_ends_at(minutes=ADJUSTMENT_COOLDOWN_MINUTES)
-        trade_state.trade.monitoring_starts_at = starts
-        with self.db_factory() as db:
-            row = db.query(Trade).filter(Trade.id == trade_state.trade_id).first()
-            if row is not None:
-                row.monitoring_starts_at = starts
-                db.commit()
         logger.info(
-            "Trade %s adjustment cooldown until %s (%sm)",
+            "Trade %s adjustment done — monitoring_starts_at unchanged "
+            "(no post-adjust settling; SL remains active)",
             trade_state.trade_id,
-            starts.isoformat(),
-            ADJUSTMENT_COOLDOWN_MINUTES,
         )
 
     def _reload_legs(self, trade_state: TradeState) -> None:

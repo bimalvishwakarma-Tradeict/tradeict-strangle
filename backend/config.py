@@ -26,11 +26,14 @@ EXPIRY_HOUR = 17
 EXPIRY_MINUTE = 30
 PRE_EXPIRY_MINUTES = 15
 MONITORING_INTERVAL_SECONDS = 30
-# After registration, skip target/SL/adjustment until this many minutes pass
-SETTLING_PERIOD_MINUTES = 5
-# After bot-placed orders, fill prices are accurate — shorter settle window
-SETTLING_PERIOD_AFTER_PLACE_MINUTES = 2
-# After an adjustment, pause target/SL/adjust so premiums settle (stops cascades)
+# Entry-only settling window (seconds). Set once at trade entry; never reset
+# after adjustment/conversion. STOPLOSS ignores this window entirely.
+ENTRY_SETTLING_SECONDS: int = int(os.getenv("ENTRY_SETTLING_SECONDS", "60"))
+# Legacy aliases (minutes) — prefer ENTRY_SETTLING_SECONDS for bot-placed entries
+SETTLING_PERIOD_MINUTES = max(1, (ENTRY_SETTLING_SECONDS + 59) // 60)
+SETTLING_PERIOD_AFTER_PLACE_MINUTES = max(1, (ENTRY_SETTLING_SECONDS + 59) // 60)
+# Deprecated: post-adjustment settling via monitoring_starts_at is removed.
+# Kept for log compatibility only; do not use to push monitoring_starts_at.
 ADJUSTMENT_COOLDOWN_MINUTES = 3
 # Delta India BTC options: PnL USD = premium_diff * size * contract_value
 # (API unrealized_pnl for short options is WRONG — see compute_signed_upnl)

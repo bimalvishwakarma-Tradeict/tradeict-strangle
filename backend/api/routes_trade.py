@@ -25,7 +25,6 @@ from backend.core.time_utils import (
     get_hours_to_expiry,
     get_ist_now,
     get_settling_info,
-    settling_ends_at,
     settling_ends_at_after_place,
 )
 from backend.core.ws_manager import ws_manager
@@ -1247,7 +1246,7 @@ async def register_existing_trade(
     account = _get_active_account(db)
     await _ensure_no_active_trade(db, account, underlying)
 
-    monitoring_starts = settling_ends_at(get_ist_now())
+    monitoring_starts = settling_ends_at_after_place(get_ist_now())
     trade, call_leg, put_leg = await _persist_strangle_trade(
         db=db,
         account=account,

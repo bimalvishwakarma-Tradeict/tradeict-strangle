@@ -12,11 +12,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.config import (
+    ENTRY_SETTLING_SECONDS,
     EXPIRY_HOUR,
     EXPIRY_MINUTE,
     IST,
     PRE_EXPIRY_MINUTES,
-    SETTLING_PERIOD_AFTER_PLACE_MINUTES,
     SETTLING_PERIOD_MINUTES,
 )
 
@@ -30,22 +30,23 @@ def settling_ends_at(
     from_time: datetime | None = None,
     *,
     minutes: int | None = None,
+    seconds: int | None = None,
 ) -> datetime:
-    """Return IST timestamp when P&L monitoring may begin."""
+    """Return IST timestamp when P&L monitoring may begin (TP / adjust only)."""
     base = from_time if from_time is not None else get_ist_now()
     if base.tzinfo is None:
         base = IST.localize(base)
     else:
         base = base.astimezone(IST)
+    if seconds is not None:
+        return base + timedelta(seconds=int(seconds))
     wait = SETTLING_PERIOD_MINUTES if minutes is None else int(minutes)
     return base + timedelta(minutes=wait)
 
 
 def settling_ends_at_after_place(from_time: datetime | None = None) -> datetime:
-    """Shorter settle window after bot-placed fills (accurate premiums)."""
-    return settling_ends_at(
-        from_time, minutes=SETTLING_PERIOD_AFTER_PLACE_MINUTES
-    )
+    """Entry settling window after bot-placed fills (ENTRY_SETTLING_SECONDS)."""
+    return settling_ends_at(from_time, seconds=ENTRY_SETTLING_SECONDS)
 
 
 def get_settling_info(monitoring_starts_at: datetime | None) -> dict:

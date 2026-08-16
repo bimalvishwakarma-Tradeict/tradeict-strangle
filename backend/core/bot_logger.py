@@ -70,6 +70,8 @@ _IMPORTANT_EVENTS = frozenset(
         "EXIT_SKIP",
         "LEG_BOOK_SKIP",
         "PNL_SANITY_FAIL",
+        "SETTLING",
+        "SETTLING_BYPASS",
     }
 )
 
@@ -209,6 +211,8 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "EXIT_CLOSE",
         "EXIT_FUNNEL",
         "POSITION_CHECK",
+        "SETTLING",
+        "SETTLING_BYPASS",
         "TP_SL_LOCKED",
         "ENTRY_GUARD_PASS",
         "POSITION_VERIFIED",
