@@ -32,6 +32,26 @@ class AdjustmentError(Exception):
     """Raised for adjustment precondition failures (missing legs, etc.)."""
 
 
+def compute_adjustment_target_premium(
+    untouched_leg_offer: float,
+    triggered_baseline: float,
+    triggered_offer: float,
+) -> tuple[float, float]:
+    """
+    Documented adjustment match target (offer prices only).
+
+    loss = max(0, triggered_offer - trigger_baseline)
+    target_new_premium = untouched_leg_offer + loss
+
+    Returns (target_new_premium, loss).
+    """
+    unt = float(untouched_leg_offer or 0.0)
+    base = float(triggered_baseline or 0.0)
+    offer = float(triggered_offer or 0.0)
+    loss = max(0.0, offer - base)
+    return unt + loss, loss
+
+
 async def _demo_mark_order_result(
     delta_client: Any,
     symbol: str,
@@ -185,7 +205,7 @@ class AdjustmentExecutor:
                 logger.error(msg)
                 return AdjustmentResult(success=False, error_message=msg)
 
-            # Untouched leg's Best Offer at adjust time — strike match target.
+            # Untouched leg's Best Offer at adjust time — strike match base.
             # NEVER use mark — depressed mark resets baseline too low.
             other_premium = await _resolve_offer_price(
                 delta_client,
@@ -198,25 +218,8 @@ class AdjustmentExecutor:
                     f"{other_leg.symbol} (no mark fallback)"
                 )
 
-            # Cap match target at 2× other-leg entry (prevent runaway premiums).
             # Keep other_premium as LIVE offer for conversion / cover checks.
-            other_leg_entry = float(other_leg.initial_premium or 0.0)
             other_leg_current_offer = float(other_premium)
-            if other_leg_entry > 0:
-                target_premium = min(
-                    other_leg_current_offer, other_leg_entry * 2.0
-                )
-            else:
-                target_premium = other_leg_current_offer
-            logger.info(
-                "[ADJ_TARGET_PREMIUM] Trade#%s other_leg_offer=%.2f "
-                "other_leg_entry=%.2f cap=%.2f target=%.2f",
-                trade.id,
-                other_leg_current_offer,
-                other_leg_entry,
-                other_leg_entry * 2.0 if other_leg_entry > 0 else 0.0,
-                target_premium,
-            )
 
             triggered_baseline = float(
                 getattr(triggered_leg, "trigger_baseline_premium", None)
@@ -230,11 +233,54 @@ class AdjustmentExecutor:
                 or other_leg.initial_premium
                 or 0.0
             )
+
+            # Triggered leg Best Offer — loss component (never mark).
+            triggered_current_offer = await _resolve_offer_price(
+                delta_client,
+                str(triggered_leg.symbol),
+                keep_if_missing=None,
+            )
+            if triggered_current_offer <= 0:
+                triggered_current_offer = float(triggered_baseline or 0.0)
+
+            # Documented rule:
+            #   target = untouched_offer + max(0, triggered_offer - baseline)
+            target_premium, loss_premium = compute_adjustment_target_premium(
+                untouched_leg_offer=other_leg_current_offer,
+                triggered_baseline=triggered_baseline,
+                triggered_offer=triggered_current_offer,
+            )
+            logger.info(
+                "[ADJUSTMENT_TARGET] trade_id=%s leg=%s "
+                "untouched_offer=%.4f triggered_baseline=%.4f "
+                "triggered_offer=%.4f loss=%.4f target_new_premium=%.4f",
+                trade.id,
+                triggered_leg_type,
+                other_leg_current_offer,
+                triggered_baseline,
+                triggered_current_offer,
+                loss_premium,
+                target_premium,
+            )
+            log_and_buffer(
+                "ADJUSTMENT_TARGET",
+                trade.id,
+                {
+                    "leg": triggered_leg_type,
+                    "untouched_offer": round(other_leg_current_offer, 4),
+                    "triggered_baseline": round(triggered_baseline, 4),
+                    "triggered_offer": round(triggered_current_offer, 4),
+                    "loss": round(loss_premium, 4),
+                    "target_new_premium": round(target_premium, 4),
+                },
+            )
+
             logger.info(
                 "[ADJUSTMENT_START] Trade %s "
                 "triggered_leg=%s strike=%s product_id=%s "
                 "trigger_baseline=%s other_leg_offer=%s "
-                "other_leg_old_baseline=%s",
+                "other_leg_old_baseline=%s target_new_premium=%s "
+                "loss=%s",
                 trade.id,
                 triggered_leg_type,
                 triggered_leg.strike,
@@ -242,6 +288,8 @@ class AdjustmentExecutor:
                 triggered_baseline,
                 other_premium,
                 other_old_baseline,
+                target_premium,
+                loss_premium,
             )
 
             # Load AutoTradeSettings early (conversion + premium cover loss)
@@ -267,27 +315,15 @@ class AdjustmentExecutor:
                 _conversion_mode_enabled = True
                 _premium_cover_loss = False
 
-            # Premium Cover Loss: target = realized loss on triggered leg
-            # (proxy exit fill = current offer; fallback = trigger baseline)
+            # Premium Cover Loss: optional override (entry-based, not baseline).
             triggered_entry_price = float(triggered_leg.initial_premium or 0)
-            triggered_current_offer = await _resolve_offer_price(
-                delta_client,
-                str(triggered_leg.symbol),
-                keep_if_missing=None,
-            )
-            if triggered_current_offer <= 0:
-                triggered_current_offer = float(
-                    triggered_leg.trigger_baseline_premium
-                    or triggered_leg.initial_premium
-                    or 0
-                )
-            cover_target_premium = None  # default = standard other-leg match
+            cover_target_premium = None  # default = standard untouched+loss
             if _premium_cover_loss and triggered_current_offer > triggered_entry_price:
                 realized_loss_premium = (
                     triggered_current_offer - triggered_entry_price
                 )
-                # Never go below other_leg_offer (never worse than standard)
-                cover_target_premium = max(realized_loss_premium, other_premium)
+                # Never go below standard target (untouched + baseline loss)
+                cover_target_premium = max(realized_loss_premium, target_premium)
                 log_and_buffer(
                     "PREMIUM_COVER_LOSS_TARGET",
                     trade.id,
@@ -300,6 +336,7 @@ class AdjustmentExecutor:
                             realized_loss_premium, 2
                         ),
                         "other_leg_offer": round(other_premium, 2),
+                        "standard_target": round(target_premium, 2),
                         "cover_target": round(cover_target_premium, 2),
                         "mode": "premium_cover_loss",
                     },
@@ -310,6 +347,7 @@ class AdjustmentExecutor:
                     trade.id,
                     {
                         "other_leg_offer": round(other_premium, 2),
+                        "standard_target": round(target_premium, 2),
                         "mode": "standard_fallback",
                         "reason": "no realized loss on triggered leg",
                     },
