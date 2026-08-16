@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import func
 
-from backend.config import TradeStatus
+from backend.config import IST, TradeStatus
 from backend.core.time_utils import get_ist_now
 from backend.models import Leg, SlaveAccount, SlaveTrade, Trade
 
@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 
 # Exit reason written when we close a zombie ACTIVE trade with zero open legs.
 DB_CONSISTENCY_FIX_NO_LEGS = "DB_CONSISTENCY_FIX_NO_LEGS"
+_EXIT_TIME_GRACE_SECONDS = 60.0
+
+
+def _as_ist(dt: Any) -> Any:
+    """Normalize naive/aware datetimes to IST for age comparisons."""
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is None:
+        return IST.localize(dt)
+    return dt.astimezone(IST)
 
 
 async def verify_db_consistency(
@@ -47,15 +57,81 @@ async def verify_db_consistency(
             )
 
             if len(open_legs) == 0:
+                # Race guard: a live exit may still be committing.
+                exit_time = getattr(trade, "exit_time", None)
+                if exit_time is not None:
+                    try:
+                        et = _as_ist(exit_time)
+                        age_s = (get_ist_now() - et).total_seconds()
+                        if age_s < _EXIT_TIME_GRACE_SECONDS:
+                            logger.info(
+                                "[DB_AUDIT_SKIP] trade_id=%s recent "
+                                "exit_time age_s=%.1f — grace period",
+                                trade.id,
+                                age_s,
+                            )
+                            try:
+                                from backend.core.bot_logger import log_and_buffer
+
+                                log_and_buffer(
+                                    "DB_AUDIT_SKIP",
+                                    int(trade.id),
+                                    {
+                                        "reason": "exit_time_grace",
+                                        "age_s": round(age_s, 1),
+                                        "existing_reason": str(
+                                            getattr(trade, "exit_reason", None)
+                                            or ""
+                                        ),
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            continue
+                    except Exception as grace_exc:
+                        logger.warning(
+                            "[DB_AUDIT] grace check failed trade=%s: %s",
+                            trade.id,
+                            grace_exc,
+                        )
+
+                existing_reason = str(
+                    getattr(trade, "exit_reason", None) or ""
+                ).strip()
+                existing_pnl = getattr(trade, "realized_pnl", None)
+
                 logger.critical(
                     "[DB_AUDIT] Trade %s is 'active' but has NO open legs! "
                     "Marking closed.",
                     trade.id,
                 )
                 trade.status = TradeStatus.CLOSED.value
-                trade.exit_reason = DB_CONSISTENCY_FIX_NO_LEGS
-                trade.exit_time = get_ist_now()
-                if trade.realized_pnl is None:
+                if existing_reason:
+                    logger.info(
+                        "[DB_AUDIT_SKIP] trade_id=%s existing_reason=%s "
+                        "— preserving exit_reason",
+                        trade.id,
+                        existing_reason,
+                    )
+                    try:
+                        from backend.core.bot_logger import log_and_buffer
+
+                        log_and_buffer(
+                            "DB_AUDIT_SKIP",
+                            int(trade.id),
+                            {
+                                "reason": "existing_exit_reason",
+                                "existing_reason": existing_reason,
+                            },
+                        )
+                    except Exception:
+                        pass
+                else:
+                    trade.exit_reason = DB_CONSISTENCY_FIX_NO_LEGS
+                if trade.exit_time is None:
+                    trade.exit_time = get_ist_now()
+                # Never overwrite a non-null realized_pnl
+                if existing_pnl is None:
                     trade.realized_pnl = 0.0
                 db.commit()
                 fixes += 1

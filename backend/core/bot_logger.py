@@ -35,6 +35,7 @@ _IMPORTANT_EVENTS = frozenset(
         "EXIT_COMPLETE",
         "EXIT_DONE",
         "EXIT_FAIL",
+        "EXIT_FUNNEL",
         "ERROR",
         "NAKED_POSITION",
         "EMERGENCY_CLOSE",
@@ -58,6 +59,10 @@ _IMPORTANT_EVENTS = frozenset(
         "MIRROR_ADJ_SKIP",
         "MIRROR_ADJ_FAIL",
         "MIRROR_ADJ_ENGINE",
+        "MIRROR_ADJ_VERIFY",
+        "MIRROR_EXIT",
+        "SLAVE_SWEEP",
+        "DB_AUDIT_SKIP",
     }
 )
 
@@ -184,6 +189,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ORPHAN_DETECTED",
         "CONVERSION_HOLD",
         "PARTIAL_ENTRY_CLEANUP_FAILED",
+        "DB_AUDIT_SKIP",
     ):
         bot_log.warning(msg)
     elif event_type in (
@@ -192,6 +198,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "EXIT_COMPLETE",
         "EXIT_VERIFY",
         "EXIT_CLOSE",
+        "EXIT_FUNNEL",
         "POSITION_CHECK",
         "TP_SL_LOCKED",
         "ENTRY_GUARD_PASS",
@@ -203,6 +210,9 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MIRROR_ADJ_PRE",
         "MIRROR_ADJ_CALLED",
         "MIRROR_ADJ_ENGINE",
+        "MIRROR_ADJ_VERIFY",
+        "MIRROR_EXIT",
+        "SLAVE_SWEEP",
     ):
         bot_log.info(msg)
     elif event_type in (

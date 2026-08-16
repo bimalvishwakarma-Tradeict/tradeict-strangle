@@ -1974,6 +1974,20 @@ class MirrorEngine:
             )
 
             if not slave_trades:
+                log_and_buffer(
+                    "MIRROR_EXIT",
+                    int(master_trade_id),
+                    {
+                        "stage": "no_slaves",
+                        "reason": reason,
+                        "slaves_total": 0,
+                        "hint_call": int(call_product_id or 0),
+                        "hint_put": int(put_product_id or 0),
+                        "hint_hedge": int(hedge_product_id or 0)
+                        if hedge_product_id
+                        else None,
+                    },
+                )
                 logger.info(
                     "[MIRROR_EXIT] Trade#%s — no non-closed slave_trades "
                     "(call=%s put=%s reason=%s)",
@@ -1984,6 +1998,21 @@ class MirrorEngine:
                 )
                 return
 
+            log_and_buffer(
+                "MIRROR_EXIT",
+                int(master_trade_id),
+                {
+                    "stage": "start",
+                    "reason": reason,
+                    "slaves_total": len(slave_trades),
+                    "hint_call": int(call_product_id or 0),
+                    "hint_put": int(put_product_id or 0),
+                    "hint_hedge": int(hedge_product_id or 0)
+                    if hedge_product_id
+                    else None,
+                    "statuses": [str(st.status) for st in slave_trades],
+                },
+            )
             logger.info(
                 "[MIRROR_EXIT] Trade#%s mirroring to %s slaves: "
                 "reason=%s hint_call=%s hint_put=%s hint_hedge=%s "
@@ -2668,6 +2697,18 @@ class MirrorEngine:
             unreachable,
             skipped_backoff,
             gen,
+        )
+        log_and_buffer(
+            "SLAVE_SWEEP",
+            0,
+            {
+                "rows_scanned": rows_scanned,
+                "closed_ok": closed_ok,
+                "close_failed": close_failed,
+                "unreachable": unreachable,
+                "skipped_backoff": skipped_backoff,
+                "generation": gen,
+            },
         )
         return {
             "rows_scanned": rows_scanned,

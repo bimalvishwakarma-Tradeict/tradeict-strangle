@@ -479,7 +479,25 @@ class BotEngine:
                 me = mirror_mod.mirror_engine or self.mirror_engine
                 if me is not None:
                     await me.sweep_open_slave_trades()
+                else:
+                    log_and_buffer(
+                        "SLAVE_SWEEP",
+                        0,
+                        {
+                            "note": "mirror_engine_none",
+                            "rows_scanned": 0,
+                            "closed_ok": 0,
+                            "close_failed": 0,
+                            "unreachable": 0,
+                            "skipped_backoff": 0,
+                        },
+                    )
             except Exception as exc:
+                log_and_buffer(
+                    "SLAVE_SWEEP",
+                    0,
+                    {"note": "sweep_exception", "error": str(exc)},
+                )
                 logger.warning("Slave integrity cycle failed: %s", exc)
 
         if count == 0:
@@ -1894,6 +1912,26 @@ class BotEngine:
                     exc,
                 )
 
+    @staticmethod
+    def _emit_exit_funnel(
+        trade_id: int,
+        reason: str,
+        result: dict[str, int],
+        *,
+        note: str | None = None,
+    ) -> None:
+        """Emit [EXIT_FUNNEL] via bot_activity (same path as EXIT_START/VERIFY)."""
+        details: dict[str, Any] = {
+            "reason": reason,
+            "slaves_total": int(result.get("slaves_total") or 0),
+            "slaves_closed": int(result.get("slaves_closed") or 0),
+            "slaves_failed": int(result.get("slaves_failed") or 0),
+            "master_legs_closed": int(result.get("master_legs_closed") or 0),
+        }
+        if note:
+            details["note"] = note
+        log_and_buffer("EXIT_FUNNEL", int(trade_id), details)
+
     async def _close_master_trade_db_only(
         self,
         trade_id: int,
@@ -1917,6 +1955,11 @@ class BotEngine:
         slaves_failed = 0
         pre_slave_ids: set[int] = set()
 
+        log_and_buffer(
+            "EXIT_START",
+            trade_id,
+            {"reason": reason, "path": "db_only"},
+        )
         logger.info(
             "[EXIT_START] Trade %s: reason=%s (db-only funnel, no TradeState)",
             trade_id,
@@ -1978,17 +2021,41 @@ class BotEngine:
                     reason=reason,
                     hedge_product_id=hedge_pid,
                 )
-                logger.info(
-                    "[MIRROR_EXIT] Awaited complete for trade %s (db-only)",
+                log_and_buffer(
+                    "MIRROR_EXIT",
                     trade_id,
+                    {
+                        "stage": "awaited_complete",
+                        "path": "db_only",
+                        "reason": reason,
+                    },
                 )
             else:
+                log_and_buffer(
+                    "MIRROR_EXIT",
+                    trade_id,
+                    {
+                        "stage": "engine_none",
+                        "path": "db_only",
+                        "reason": reason,
+                    },
+                )
                 logger.warning(
                     "[MIRROR_EXIT] mirror_engine is None — slaves not closed "
                     "for trade %s",
                     trade_id,
                 )
         except Exception as exc:
+            log_and_buffer(
+                "MIRROR_EXIT",
+                trade_id,
+                {
+                    "stage": "failed",
+                    "path": "db_only",
+                    "reason": reason,
+                    "error": str(exc),
+                },
+            )
             logger.warning(
                 "[MIRROR_EXIT] Failed for trade %s (non-fatal): %s",
                 trade_id,
@@ -2026,6 +2093,18 @@ class BotEngine:
             trade_row.in_conversion_mode = False
             db.commit()
         else:
+            log_and_buffer(
+                "EXIT_FUNNEL",
+                trade_id,
+                {
+                    "reason": reason,
+                    "note": "missing_trade_row_db_only",
+                    "slaves_total": slaves_total,
+                    "slaves_closed": slaves_closed,
+                    "slaves_failed": slaves_failed,
+                    "master_legs_closed": 0,
+                },
+            )
             logger.error(
                 "[EXIT_FUNNEL] trade_id=%s missing Trade row in db-only path",
                 trade_id,
@@ -2044,15 +2123,7 @@ class BotEngine:
             "slaves_failed": slaves_failed,
             "master_legs_closed": 0,
         }
-        logger.info(
-            "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
-            "slaves_closed=%s slaves_failed=%s",
-            trade_id,
-            reason,
-            result["slaves_total"],
-            result["slaves_closed"],
-            result["slaves_failed"],
-        )
+        self._emit_exit_funnel(trade_id, reason, result, note="db_only")
         return result
 
     async def close_master_trade(
@@ -2102,14 +2173,11 @@ class BotEngine:
                 "slaves_failed": 0,
                 "master_legs_closed": 0,
             }
-            logger.info(
-                "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
-                "slaves_closed=%s slaves_failed=%s",
-                trade_id,
+            self._emit_exit_funnel(
+                int(trade_id),
                 reason,
-                result["slaves_total"],
-                result["slaves_closed"],
-                result["slaves_failed"],
+                result,
+                note="no_trade_state",
             )
             return result
 
@@ -2300,16 +2368,39 @@ class BotEngine:
                         int(hedge_pid) if hedge_pid else None
                     ),
                 )
-                logger.info(
-                    "[MIRROR_EXIT] Awaited complete for trade %s", trade_id
+                log_and_buffer(
+                    "MIRROR_EXIT",
+                    trade_id,
+                    {
+                        "stage": "awaited_complete",
+                        "reason": reason,
+                        "slaves_total": slaves_total,
+                    },
                 )
             else:
+                log_and_buffer(
+                    "MIRROR_EXIT",
+                    trade_id,
+                    {
+                        "stage": "engine_none",
+                        "reason": reason,
+                    },
+                )
                 logger.warning(
                     "[MIRROR_EXIT] mirror_engine is None — slaves not closed "
                     "for trade %s",
                     trade_id,
                 )
         except Exception as exc:
+            log_and_buffer(
+                "MIRROR_EXIT",
+                trade_id,
+                {
+                    "stage": "failed",
+                    "reason": reason,
+                    "error": str(exc),
+                },
+            )
             logger.warning(
                 "[MIRROR_EXIT] Failed for trade %s (non-fatal): %s",
                 trade_id,
@@ -2346,6 +2437,15 @@ class BotEngine:
         trade_is_demo = bool(getattr(trade, "is_demo", False))
 
         if skip_master_legs:
+            log_and_buffer(
+                "EXIT_FUNNEL",
+                trade_id,
+                {
+                    "reason": reason,
+                    "note": "skip_master_legs",
+                    "slaves_total": slaves_total,
+                },
+            )
             logger.info(
                 "[EXIT_FUNNEL] trade_id=%s skip_master_legs=True — "
                 "skipping Delta master leg closes",
@@ -2517,14 +2617,8 @@ class BotEngine:
                     "slaves_failed": slaves_failed,
                     "master_legs_closed": master_legs_closed,
                 }
-                logger.info(
-                    "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
-                    "slaves_closed=%s slaves_failed=%s",
-                    trade_id,
-                    reason,
-                    result["slaves_total"],
-                    result["slaves_closed"],
-                    result["slaves_failed"],
+                self._emit_exit_funnel(
+                    trade_id, reason, result, note="exit_order_hard_fail"
                 )
                 return result
 
@@ -2552,20 +2646,14 @@ class BotEngine:
                     "slaves_failed": slaves_failed,
                     "master_legs_closed": master_legs_closed,
                 }
-                logger.info(
-                    "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
-                    "slaves_closed=%s slaves_failed=%s",
-                    trade_id,
-                    reason,
-                    result["slaves_total"],
-                    result["slaves_closed"],
-                    result["slaves_failed"],
+                self._emit_exit_funnel(
+                    trade_id, reason, result, note="db_trade_missing"
                 )
                 return result
 
             booked_ids: set[int] = set()
             for leg_mem in all_open_legs:
-                leg_db = exit_exit_db.query(Leg).filter(Leg.id == leg_mem.id).first()
+                leg_db = exit_db.query(Leg).filter(Leg.id == leg_mem.id).first()
                 if leg_db is None or str(leg_db.status).lower() != "open":
                     continue
                 res = close_results.get(int(leg_mem.id))
@@ -2813,15 +2901,7 @@ class BotEngine:
             "slaves_failed": slaves_failed,
             "master_legs_closed": master_legs_closed,
         }
-        logger.info(
-            "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
-            "slaves_closed=%s slaves_failed=%s",
-            trade_id,
-            reason,
-            result["slaves_total"],
-            result["slaves_closed"],
-            result["slaves_failed"],
-        )
+        self._emit_exit_funnel(trade_id, reason, result)
         return result
 
     async def _exit_trade(
