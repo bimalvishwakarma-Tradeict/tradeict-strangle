@@ -1661,6 +1661,9 @@ class MirrorEngine:
         """
         Close a single leg (call or put) on every non-closed slave.
 
+        Used for partial-adjustment cleanup only. UI "Exit Basket (Call/Put)"
+        goes through close_master_trade → mirror_exit (full basket), not here.
+
         Live-position targeting for product_id, reduce_only close, then verify
         that product is flat. Does NOT close the whole basket (use mirror_exit).
 

@@ -926,8 +926,9 @@ class BotEngine:
         self, trade_state: TradeState, leg_to_close: str
     ) -> None:
         """
-        One leg is missing (SL likely triggered).
-        Close the remaining leg immediately to avoid naked exposure.
+        One leg is missing on Delta while DB still says open (naked risk).
+        Close the remaining leg immediately — reason is INTEGRITY_NAKED_CLOSE,
+        not a stop-loss event.
         """
         trade_id = trade_state.trade_id
         remaining = str(leg_to_close).lower().strip()
@@ -1202,7 +1203,7 @@ class BotEngine:
         with self.db_factory() as db:
             await self.close_master_trade(
                 trade_id=trade_id,
-                reason=ExitReason.SL_TRIGGERED_EMERGENCY_CLOSE.value,
+                reason=ExitReason.INTEGRITY_NAKED_CLOSE.value,
                 db=db,
                 skip_master_legs=True,
                 trade_state=trade_state,
@@ -1213,8 +1214,8 @@ class BotEngine:
                 "type": "ERROR",
                 "trade_id": trade_id,
                 "message": (
-                    f"⚠️ Delta SL triggered on {missing} leg! "
-                    f"Emergency closed {remaining} to prevent naked position. "
+                    f"⚠️ Naked risk: {missing} leg missing on Delta. "
+                    f"Closed remaining {remaining} leg to protect the basket. "
                     f"Trade fully closed."
                     + ("" if close_ok else " (close may need manual check)")
                 ),

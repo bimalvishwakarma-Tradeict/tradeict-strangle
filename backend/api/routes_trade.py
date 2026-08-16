@@ -2409,7 +2409,13 @@ async def close_single_leg(
     leg_type: str,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Close only one bot-managed leg (call or put). Basket stays active until both closed."""
+    """
+    UI "Exit Basket (Call/Put)" — always closes the ENTIRE basket via the
+    exit funnel. A one-legged basket is never a valid resting state.
+    ``leg_type`` is audit-only (which button the user clicked).
+    """
+    from backend.core.bot_logger import log_and_buffer
+
     leg_key = leg_type.lower().strip()
     if leg_key not in {"call", "put"}:
         raise HTTPException(status_code=400, detail="leg_type must be call or put")
@@ -2418,279 +2424,168 @@ async def close_single_leg(
     if trade is None:
         raise HTTPException(status_code=404, detail=f"Trade {trade_id} not found")
 
-    leg = (
-        db.query(Leg)
-        .filter(
-            Leg.trade_id == trade_id,
-            Leg.leg_type == leg_key,
-            Leg.status == "open",
-            Leg.is_bot_managed.is_(True),
+    status = str(trade.status or "").lower()
+    if status != TradeStatus.ACTIVE.value:
+        msg = "This basket was already closed"
+        log_and_buffer(
+            "LEG_CLOSE_RESULT",
+            int(trade_id),
+            {
+                "clicked_leg": leg_key,
+                "ok": True,
+                "already_closed": True,
+                "message": msg,
+                "exit_reason": getattr(trade, "exit_reason", None),
+            },
         )
-        .first()
-    )
-    if leg is None:
-        raise HTTPException(status_code=404, detail=f"Open {leg_key} leg not found")
-
-    product_id = int(leg.product_id or 0)
-
-    # Mirror this leg on slaves BEFORE closing the master leg
-    mirror_counts: dict[str, int] = {
-        "slaves_total": 0,
-        "slaves_closed": 0,
-        "slaves_failed": 0,
-    }
-    try:
-        import backend.engine.mirror_engine as mirror_module
-
-        me = mirror_module.mirror_engine
-        if me is not None and product_id > 0:
-            mirror_counts = await me.mirror_leg_close(
-                master_trade_id=int(trade_id),
-                leg_type=leg_key,
-                product_id=product_id,
-            )
-            if int(mirror_counts.get("slaves_failed") or 0) > 0:
-                logger.critical(
-                    "[MIRROR_LEG_CLOSE] trade=%s leg=%s slaves_failed=%s "
-                    "slaves_closed=%s",
-                    trade_id,
-                    leg_key,
-                    mirror_counts.get("slaves_failed"),
-                    mirror_counts.get("slaves_closed"),
-                )
-    except Exception as mirror_exc:
-        logger.warning(
-            "[MIRROR_LEG_CLOSE] Failed trade=%s leg=%s: %s",
-            trade_id,
-            leg_key,
-            mirror_exc,
-            exc_info=True,
-        )
-
-    account = _get_active_account(db)
-    client = _build_delta_client(account)
-    try:
-        leg_exists = False
-        if product_id > 0:
-            leg_exists = await client.verify_position_exists(product_id)
-
-        if not leg_exists:
-            logger.warning(
-                "Leg %s not on Delta. Marking closed in DB only.",
-                leg.symbol,
-            )
-            from backend.engine.trade_reconcile import (
-                book_leg_close,
-                recompute_trade_realized_pnl,
-                resolve_external_exit_fill,
-            )
-
-            exit_px = await resolve_external_exit_fill(client, leg)
-            realized = book_leg_close(
-                leg=leg,
-                trade=trade,
-                exit_premium=exit_px,
-            )
-            recompute_trade_realized_pnl(db, trade)
-            basket_closed = finalize_trade_if_flat(
-                db=db,
-                trade=trade,
-                exit_reason=ExitReason.MANUAL_LEG_CLOSE.value,
-            )
-            db.commit()
-            db.refresh(trade)
-            db.refresh(leg)
-            open_count = count_open_bot_legs(db, trade_id)
-            if basket_closed or open_count == 0:
-                funnel = await bot_engine.close_master_trade(
-                    trade_id=int(trade_id),
-                    reason=ExitReason.MANUAL_LEG_CLOSE.value,
-                    db=db,
-                    skip_master_legs=True,
-                    trade_state=bot_engine.position_tracker.get(trade_id),
-                )
-                if int(funnel.get("slaves_failed") or 0) > 0:
-                    logger.critical(
-                        "[EXIT_FUNNEL] single-leg basket close trade=%s "
-                        "slaves_failed=%s",
-                        trade_id,
-                        funnel.get("slaves_failed"),
-                    )
-                await ws_manager.broadcast(
-                    {
-                        "type": "TRADE_CLOSED",
-                        "trade_id": trade_id,
-                        "reason": ExitReason.MANUAL_LEG_CLOSE.value,
-                        "final_pnl": float(trade.realized_pnl or 0.0),
-                        "message": f"Basket closed after closing {leg_key}",
-                        "slaves_closed": int(
-                            funnel.get("slaves_closed") or 0
-                        ),
-                        "slaves_failed": int(
-                            funnel.get("slaves_failed") or 0
-                        ),
-                    }
-                )
-                basket_closed = True
-            return {
-                "success": True,
-                "message": (
-                    "Leg already gone from Delta, marked closed in DB"
-                ),
-                "closed_at_price": float(exit_px or 0.0),
-                "leg_type": leg_key,
-                "leg_realized_pnl": realized,
-                "trade_realized_pnl": float(trade.realized_pnl or 0.0),
-                "open_legs_remaining": open_count,
-                "basket_closed": basket_closed,
-                "basket_number": trade.basket_number,
-                "slaves_total": int(mirror_counts.get("slaves_total") or 0),
-                "slaves_closed": int(mirror_counts.get("slaves_closed") or 0),
-                "slaves_failed": int(mirror_counts.get("slaves_failed") or 0),
-            }
-
-        result = await bot_engine.order_executor.close_leg(leg, client)
-        if not result.success:
-            raise HTTPException(
-                status_code=502,
-                detail=result.error or f"Failed to close {leg_key} leg",
-            )
-
-        realized = book_leg_close(
-            leg=leg,
-            trade=trade,
-            exit_premium=(
-                float(result.filled_price)
-                if result.filled_price is not None
-                and float(result.filled_price) > 0
-                else None
-            ),
-            exit_fee_usd=(
-                float(result.commission)
-                if result.commission is not None
-                else None
-            ),
-            exit_order_id=(
-                str(result.order_id) if result.order_id is not None else None
-            ),
-        )
-        from backend.engine.trade_reconcile import recompute_trade_realized_pnl
-
-        recompute_trade_realized_pnl(db, trade)
-        basket_closed = finalize_trade_if_flat(
-            db=db,
-            trade=trade,
-            exit_reason=ExitReason.MANUAL_LEG_CLOSE.value,
-        )
-        db.commit()
-        db.refresh(trade)
-        db.refresh(leg)
-
-        open_count = count_open_bot_legs(db, trade_id)
-        all_legs = (
-            db.query(Leg)
-            .filter(Leg.trade_id == trade_id, Leg.is_bot_managed.is_(True))
-            .all()
-        )
-        call_leg, put_leg = pick_call_put_legs(all_legs)
-
-        if basket_closed or open_count == 0:
-            # Never finalize master while slaves still hold legs — funnel closes them
-            funnel = await bot_engine.close_master_trade(
-                trade_id=int(trade_id),
-                reason=ExitReason.MANUAL_LEG_CLOSE.value,
-                db=db,
-                skip_master_legs=True,
-                trade_state=bot_engine.position_tracker.get(trade_id),
-            )
-            if int(funnel.get("slaves_failed") or 0) > 0:
-                logger.critical(
-                    "[EXIT_FUNNEL] single-leg basket close trade=%s "
-                    "slaves_failed=%s",
-                    trade_id,
-                    funnel.get("slaves_failed"),
-                )
-            await ws_manager.broadcast(
-                {
-                    "type": "TRADE_CLOSED",
-                    "trade_id": trade_id,
-                    "reason": ExitReason.MANUAL_LEG_CLOSE.value,
-                    "final_pnl": float(trade.realized_pnl or 0.0),
-                    "message": f"Basket closed after closing {leg_key}",
-                    "slaves_closed": int(funnel.get("slaves_closed") or 0),
-                    "slaves_failed": int(funnel.get("slaves_failed") or 0),
-                }
-            )
-            basket_closed = True
-        elif call_leg is not None and put_leg is not None:
-            bot_engine.position_tracker.update_legs(
-                trade_id, call_leg, put_leg, trade=trade
-            )
-            await ws_manager.broadcast(
-                {
-                    "type": "TRADE_UPDATE",
-                    "trade_id": trade_id,
-                    "basket_number": trade.basket_number,
-                    "status": trade.status,
-                    "realized_pnl": float(trade.realized_pnl or 0.0),
-                    "open_leg_count": open_count,
-                    "leg_history": _basket_leg_history(db, trade_id),
-                    "call_leg": _leg_snapshot(
-                        call_leg,
-                        float(
-                            call_leg.exit_premium
-                            if str(call_leg.status).lower() == "closed"
-                            else call_leg.initial_premium
-                        ),
-                    ),
-                    "put_leg": _leg_snapshot(
-                        put_leg,
-                        float(
-                            put_leg.exit_premium
-                            if str(put_leg.status).lower() == "closed"
-                            else put_leg.initial_premium
-                        ),
-                    ),
-                    "message": f"{leg_key.upper()} closed — basket still active",
-                    "slaves_total": int(
-                        mirror_counts.get("slaves_total") or 0
-                    ),
-                    "slaves_closed": int(
-                        mirror_counts.get("slaves_closed") or 0
-                    ),
-                    "slaves_failed": int(
-                        mirror_counts.get("slaves_failed") or 0
-                    ),
-                }
-            )
-
-        logger.info(
-            "Single-leg close trade=%s %s exit=%.4f realized=%.4f "
-            "open_left=%s basket_closed=%s mirror=%s",
-            trade_id,
-            leg_key,
-            float(leg.exit_premium or 0.0),
-            realized,
-            open_count,
-            basket_closed,
-            mirror_counts,
-        )
-
         return {
             "success": True,
-            "closed_at_price": leg.exit_premium,
-            "leg_type": leg_key,
-            "leg_realized_pnl": realized,
-            "trade_realized_pnl": float(trade.realized_pnl or 0.0),
-            "open_legs_remaining": open_count,
-            "basket_closed": basket_closed,
-            "basket_number": trade.basket_number,
-            "slaves_total": int(mirror_counts.get("slaves_total") or 0),
-            "slaves_closed": int(mirror_counts.get("slaves_closed") or 0),
-            "slaves_failed": int(mirror_counts.get("slaves_failed") or 0),
+            "already_closed": True,
+            "message": msg,
+            "clicked_leg": leg_key,
+            "basket_closed": True,
+            "slaves_total": 0,
+            "slaves_closed": 0,
+            "slaves_failed": 0,
+            "master_legs_closed": 0,
+            "exit_reason": getattr(trade, "exit_reason", None),
+            "final_pnl": float(trade.realized_pnl or 0.0),
         }
-    finally:
-        await client.close()
+
+    # Audit only — does not change which legs close (always both)
+    stamp = f"user_exit_via={leg_key}"
+    existing_notes = str(trade.notes or "").strip()
+    if stamp not in existing_notes:
+        trade.notes = (
+            f"{existing_notes} | {stamp}" if existing_notes else stamp
+        )
+        db.commit()
+
+    logger.info(
+        "[LEG_CLOSE] trade=%s clicked_leg=%s — routing full basket through "
+        "close_master_trade (MANUAL_LEG_CLOSE)",
+        trade_id,
+        leg_key,
+    )
+
+    try:
+        funnel = await bot_engine.close_master_trade(
+            trade_id=int(trade_id),
+            reason=ExitReason.MANUAL_LEG_CLOSE.value,
+            db=db,
+            skip_master_legs=False,
+            trade_state=bot_engine.position_tracker.get(trade_id),
+        )
+    except Exception as exc:
+        logger.critical(
+            "[LEG_CLOSE] Funnel failed trade=%s clicked=%s: %s",
+            trade_id,
+            leg_key,
+            exc,
+            exc_info=True,
+        )
+        log_and_buffer(
+            "LEG_CLOSE_RESULT",
+            int(trade_id),
+            {
+                "clicked_leg": leg_key,
+                "ok": False,
+                "message": str(exc),
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Basket exit failed: {exc}",
+        ) from exc
+
+    skipped = int(funnel.get("skipped") or 0) > 0
+    slaves_total = int(funnel.get("slaves_total") or 0)
+    slaves_closed = int(funnel.get("slaves_closed") or 0)
+    slaves_failed = int(funnel.get("slaves_failed") or 0)
+    master_legs_closed = int(funnel.get("master_legs_closed") or 0)
+
+    db.refresh(trade)
+    if skipped:
+        msg = "This basket was already closed"
+        log_and_buffer(
+            "LEG_CLOSE_RESULT",
+            int(trade_id),
+            {
+                "clicked_leg": leg_key,
+                "ok": True,
+                "already_closed": True,
+                "message": msg,
+                "exit_reason": getattr(trade, "exit_reason", None),
+            },
+        )
+        return {
+            "success": True,
+            "already_closed": True,
+            "message": msg,
+            "clicked_leg": leg_key,
+            "basket_closed": True,
+            "slaves_total": slaves_total,
+            "slaves_closed": slaves_closed,
+            "slaves_failed": slaves_failed,
+            "master_legs_closed": master_legs_closed,
+            "exit_reason": getattr(trade, "exit_reason", None),
+            "final_pnl": float(trade.realized_pnl or 0.0),
+        }
+
+    if slaves_failed > 0:
+        logger.critical(
+            "[LEG_CLOSE] trade=%s slaves_failed=%s after funnel",
+            trade_id,
+            slaves_failed,
+        )
+
+    msg = (
+        f"Basket closed (exit via {leg_key}). "
+        f"Master legs={master_legs_closed}, "
+        f"slaves={slaves_closed}/{slaves_total}"
+    )
+    log_and_buffer(
+        "LEG_CLOSE_RESULT",
+        int(trade_id),
+        {
+            "clicked_leg": leg_key,
+            "ok": True,
+            "message": msg,
+            "slaves_total": slaves_total,
+            "slaves_closed": slaves_closed,
+            "slaves_failed": slaves_failed,
+            "master_legs_closed": master_legs_closed,
+        },
+    )
+
+    await ws_manager.broadcast(
+        {
+            "type": "TRADE_CLOSED",
+            "trade_id": trade_id,
+            "reason": ExitReason.MANUAL_LEG_CLOSE.value,
+            "clicked_leg": leg_key,
+            "final_pnl": float(trade.realized_pnl or 0.0),
+            "message": msg,
+            "slaves_total": slaves_total,
+            "slaves_closed": slaves_closed,
+            "slaves_failed": slaves_failed,
+            "master_legs_closed": master_legs_closed,
+        }
+    )
+
+    return {
+        "success": True,
+        "message": msg,
+        "clicked_leg": leg_key,
+        "basket_closed": True,
+        "slaves_total": slaves_total,
+        "slaves_closed": slaves_closed,
+        "slaves_failed": slaves_failed,
+        "master_legs_closed": master_legs_closed,
+        "exit_reason": ExitReason.MANUAL_LEG_CLOSE.value,
+        "final_pnl": float(trade.realized_pnl or 0.0),
+        "basket_number": trade.basket_number,
+    }
 
 
 @router.patch("/{trade_id}/settings")

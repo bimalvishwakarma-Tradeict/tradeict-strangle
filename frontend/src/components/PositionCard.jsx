@@ -764,12 +764,13 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
     setClosingLeg(leg)
     try {
       const result = await closeLeg(trade.trade_id, leg)
-      const remaining = result?.open_legs_remaining
       setToast({
         type: 'success',
-        message: result?.basket_closed
-          ? `${leg === 'call' ? 'Call' : 'Put'} closed — basket finished`
-          : `${leg === 'call' ? 'Call' : 'Put'} closed — ${remaining ?? 1} leg still open`,
+        message:
+          result?.message ||
+          (result?.already_closed
+            ? 'This basket was already closed'
+            : `Basket closed (exit via ${leg})`),
       })
     } catch (err) {
       setToast({
@@ -1546,7 +1547,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
               className="inline-flex items-center gap-1 rounded-md border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {closingLeg === 'call' && <LoadingSpinner size="sm" />}
-              Close Call
+              Exit Basket (Call)
             </button>
             <button
               type="button"
@@ -1555,7 +1556,7 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
               className="inline-flex items-center gap-1 rounded-md border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {closingLeg === 'put' && <LoadingSpinner size="sm" />}
-              Close Put
+              Exit Basket (Put)
             </button>
           </div>
           {anyOpen && (
@@ -1605,13 +1606,13 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
 
       <ConfirmDialog
         isOpen={Boolean(confirmLeg)}
-        title={`Close ${confirmLeg === 'call' ? 'CALL' : 'PUT'} leg?`}
+        title={`Exit entire basket via ${confirmLeg === 'call' ? 'Call' : 'Put'}?`}
         message={
           confirmLeg === 'call'
-            ? `Close CALL leg at $${fmtStrike(call.strike)} strike at market price?`
-            : `Close PUT leg at $${fmtStrike(put.strike)} strike at market price?`
+            ? `This will close BOTH legs (Call $${fmtStrike(call.strike)} and Put) and all mirrored slave positions. A one-legged basket is never left open.`
+            : `This will close BOTH legs (Put $${fmtStrike(put.strike)} and Call) and all mirrored slave positions. A one-legged basket is never left open.`
         }
-        confirmLabel="Close at Market"
+        confirmLabel="Exit Entire Basket"
         onCancel={() => setConfirmLeg(null)}
         onConfirm={handleConfirmClose}
       />
