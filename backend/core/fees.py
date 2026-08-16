@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from backend.config import (
@@ -13,6 +14,8 @@ from backend.config import (
     OPTIONS_CONTRACT_VALUE,
     PREMIUM_CAP_RATE,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def estimate_option_trading_fee(
@@ -94,10 +97,78 @@ def compute_entry_spread_usd(
     return (sent - fill) * qty * cv
 
 
+def get_entry_spread_for_sl(trade: Any) -> float:
+    """
+    Spread currently added back into gross_mtm_for_stoploss.
+
+    This is the spread of the *latest* entry event only — not cumulative
+    across adjustments. Never used in net_mtm.
+    """
+    val = getattr(trade, "entry_spread_for_sl_usd", None)
+    if val is None:
+        # Pre-migration rows may still only have the legacy column
+        val = getattr(trade, "cumulative_entry_spread_usd", 0.0)
+    return float(val or 0.0)
+
+
+def reset_entry_spread_for_sl(
+    trade: Any,
+    entry_spread_usd: float | None,
+    *,
+    reason: str,
+    leg: str = "",
+) -> float:
+    """
+    SET (do not add) trade.entry_spread_for_sl_usd for the stop-loss add-back.
+
+    Call once per entry event:
+      - trade entry: sum of both opening legs' spreads
+      - adjustment / conversion: spread(s) of the newly opened leg(s) only
+    """
+    old_value = get_entry_spread_for_sl(trade)
+    new_value = abs(float(entry_spread_usd or 0.0))
+    trade.entry_spread_for_sl_usd = new_value
+    trade_id = int(getattr(trade, "id", 0) or 0)
+    logger.info(
+        "[ENTRY_SPREAD_RESET] trade_id=%s leg=%s old_value=%.6f "
+        "new_value=%.6f reason=%s",
+        trade_id,
+        leg or "?",
+        old_value,
+        new_value,
+        reason,
+    )
+    try:
+        from backend.core.bot_logger import log_and_buffer
+
+        log_and_buffer(
+            "ENTRY_SPREAD_RESET",
+            trade_id,
+            {
+                "leg": leg or "?",
+                "old_value": round(old_value, 6),
+                "new_value": round(new_value, 6),
+                "reason": reason,
+            },
+        )
+    except Exception:
+        pass
+    return new_value
+
+
 def accumulate_entry_spread_on_trade(trade: Any, entry_spread_usd: float | None) -> None:
-    """Add abs(leg entry spread) into trade.cumulative_entry_spread_usd."""
-    prior = float(getattr(trade, "cumulative_entry_spread_usd", 0.0) or 0.0)
-    trade.cumulative_entry_spread_usd = prior + abs(float(entry_spread_usd or 0.0))
+    """
+    DEPRECATED — use reset_entry_spread_for_sl.
+
+    Kept as a thin wrapper that SETs (does not accumulate) so any stray caller
+    cannot reintroduce the looser-SL bug.
+    """
+    reset_entry_spread_for_sl(
+        trade,
+        entry_spread_usd,
+        reason="legacy_accumulate_wrapper",
+        leg="?",
+    )
 
 
 def estimate_expected_exit_spread_usd(

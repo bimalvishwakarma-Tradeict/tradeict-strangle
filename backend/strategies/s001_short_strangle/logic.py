@@ -405,21 +405,21 @@ class ShortStrangleStrategy(BaseStrategy):
             )
 
         # Gross MTM for SL: MUST use gross_mtm_for_sl from bot_engine
-        # (gross + cumulative entry spread). NEVER use net_mtm / decision_pnl
+        # (gross + latest entry-event spread). NEVER use net_mtm / decision_pnl
         # for stop-loss — fees + entry spread would false-trigger immediately.
         if gross_mtm_for_sl is not None:
             sl_mtm = float(gross_mtm_for_sl)
         else:
             try:
-                cumulative_entry_spread = float(
-                    getattr(trade, "cumulative_entry_spread_usd", 0.0) or 0.0
-                )
-            except (TypeError, ValueError):
-                cumulative_entry_spread = 0.0
-            sl_mtm = float(total_pnl) + cumulative_entry_spread
+                from backend.core.fees import get_entry_spread_for_sl
+
+                entry_spread_for_sl = get_entry_spread_for_sl(trade)
+            except Exception:
+                entry_spread_for_sl = 0.0
+            sl_mtm = float(total_pnl) + entry_spread_for_sl
             logger.warning(
                 "Trade %s: gross_mtm_for_sl not passed — fallback "
-                "sl_mtm=total_pnl+entry_spread=%.4f (still NOT using net_mtm)",
+                "sl_mtm=total_pnl+entry_spread_for_sl=%.4f (still NOT using net_mtm)",
                 getattr(trade, "id", "?"),
                 sl_mtm,
             )

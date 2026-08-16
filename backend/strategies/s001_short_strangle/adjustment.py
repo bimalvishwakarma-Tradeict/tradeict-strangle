@@ -888,8 +888,8 @@ class AdjustmentExecutor:
 
                 # Create new other leg in DB
                 from backend.core.fees import (
-                    accumulate_entry_spread_on_trade,
                     compute_entry_spread_usd,
+                    reset_entry_spread_for_sl,
                 )
 
                 new_other_sent = float(
@@ -922,7 +922,6 @@ class AdjustmentExecutor:
                     delta_sl_order_id=None,  # bracket — no separate stop id
                 )
                 db_session.add(new_other_leg)
-                accumulate_entry_spread_on_trade(trade, new_other_spread)
 
                 # Hedge is a first-class basket leg (long) — store in Leg table
                 hedge_leg_type = (
@@ -963,7 +962,14 @@ class AdjustmentExecutor:
                     entry_spread_usd=hedge_spread,
                 )
                 db_session.add(hedge_leg_row)
-                accumulate_entry_spread_on_trade(trade, hedge_spread)
+                # Newest conversion entry event = legs opened in this step only
+                reset_entry_spread_for_sl(
+                    trade,
+                    abs(float(new_other_spread or 0.0))
+                    + abs(float(hedge_spread or 0.0)),
+                    reason="conversion",
+                    leg=f"{other_leg.leg_type}+hedge",
+                )
 
                 # Conversion fields kept for backward compat + quick lookup
                 trade.in_conversion_mode = True
@@ -1311,8 +1317,8 @@ class AdjustmentExecutor:
 
             # New leg: entry fill stays forever; baseline starts at fill
             from backend.core.fees import (
-                accumulate_entry_spread_on_trade,
                 compute_entry_spread_usd,
+                reset_entry_spread_for_sl,
             )
 
             new_leg_spread = compute_entry_spread_usd(
@@ -1351,7 +1357,13 @@ class AdjustmentExecutor:
                 is_bot_managed=True,
             )
             db_session.add(new_leg)
-            accumulate_entry_spread_on_trade(trade, new_leg_spread)
+            # SL add-back = this new leg only (do NOT accumulate prior spreads)
+            reset_entry_spread_for_sl(
+                trade,
+                new_leg_spread,
+                reason="adjustment",
+                leg=str(triggered_leg.leg_type),
+            )
 
             # Untouched leg: KEEP original entry; ONLY reset trigger baseline
             # to Best Offer (ask). Soft fallback: mid, then keep existing.
@@ -1587,6 +1599,14 @@ class AdjustmentExecutor:
                             is_bot_managed=True,
                         )
                         db_session.add(new_leg)
+                        from backend.core.fees import reset_entry_spread_for_sl
+
+                        reset_entry_spread_for_sl(
+                            trade,
+                            new_leg_spread,
+                            reason="adjustment",
+                            leg=str(triggered_leg.leg_type),
+                        )
                     else:
                         new_leg = existing_new
 

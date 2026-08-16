@@ -32,7 +32,7 @@ def make_trade(
     trade.expiry_date = date.today() + timedelta(days=3)
     trade.trigger_mode = trigger_mode
     trade.monitoring_starts_at = None
-    trade.cumulative_entry_spread_usd = 0.0
+    trade.entry_spread_for_sl_usd = 0.0
     return trade
 
 

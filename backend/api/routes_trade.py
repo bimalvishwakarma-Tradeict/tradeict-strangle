@@ -581,7 +581,7 @@ async def _persist_strangle_trade(
         realized_pnl=0.0,
         monitoring_starts_at=monitoring_starts,
         basket_number=basket_no,
-        cumulative_entry_spread_usd=0.0,
+        entry_spread_for_sl_usd=0.0,
         is_demo=bool(getattr(payload, "is_demo", False)),
     )
     db.add(trade)
@@ -589,8 +589,8 @@ async def _persist_strangle_trade(
 
     from backend.core.bot_logger import log_tp_sl_locked
     from backend.core.fees import (
-        accumulate_entry_spread_on_trade,
         compute_entry_spread_usd,
+        reset_entry_spread_for_sl,
     )
 
     log_tp_sl_locked(
@@ -679,8 +679,13 @@ async def _persist_strangle_trade(
         order_sent_price=put_sent,
         entry_spread_usd=put_entry_spread,
     )
-    accumulate_entry_spread_on_trade(trade, call_entry_spread)
-    accumulate_entry_spread_on_trade(trade, put_entry_spread)
+    # Newest entry event = both opening legs together
+    reset_entry_spread_for_sl(
+        trade,
+        abs(float(call_entry_spread or 0.0)) + abs(float(put_entry_spread or 0.0)),
+        reason="trade_entry",
+        leg="call+put",
+    )
     db.add(call_leg)
     db.add(put_leg)
 
@@ -1664,6 +1669,7 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
         from backend.core.fees import (
             compute_net_mtm,
             estimate_expected_exit_spread_usd,
+            get_entry_spread_for_sl,
         )
 
         expected_exit_spread = 0.0
@@ -1683,10 +1689,8 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                     quantity=int(leg.quantity or 0),
                 )
 
-        cumulative_entry_spread = float(
-            getattr(state.trade, "cumulative_entry_spread_usd", 0.0) or 0.0
-        )
-        gross_mtm_for_stoploss = float(gross_mtm) + cumulative_entry_spread
+        entry_spread_for_sl = get_entry_spread_for_sl(state.trade)
+        gross_mtm_for_stoploss = float(gross_mtm) + entry_spread_for_sl
 
         slip_fields = compute_net_mtm(
             gross_mtm=gross_mtm,
@@ -1746,7 +1750,7 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "total_pnl": display_total,
             "gross_mtm": gross_mtm,
             "gross_mtm_for_stoploss": round(gross_mtm_for_stoploss, 4),
-            "cumulative_entry_spread": round(cumulative_entry_spread, 4),
+            "entry_spread_for_sl": round(entry_spread_for_sl, 4),
             "expected_exit_spread_usd": round(expected_exit_spread, 4),
             "fees_paid": fees_paid,
             "est_exit_fees": est_exit,

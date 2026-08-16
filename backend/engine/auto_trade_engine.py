@@ -714,7 +714,7 @@ class AutoTradeEngine:
                 slippage_pct=float(settings.slippage_pct or 2.0),
                 basket_number=basket_no,
                 notes="auto_trade",
-                cumulative_entry_spread_usd=0.0,
+                entry_spread_for_sl_usd=0.0,
             )
             db.add(trade)
             db.flush()
@@ -731,8 +731,8 @@ class AutoTradeEngine:
             )
 
             from backend.core.fees import (
-                accumulate_entry_spread_on_trade,
                 compute_entry_spread_usd,
+                reset_entry_spread_for_sl,
             )
 
             call_entry_spread = compute_entry_spread_usd(
@@ -794,8 +794,13 @@ class AutoTradeEngine:
                 else None,
                 delta_sl_order_id=None,  # bracket — no separate stop order id
             )
-            accumulate_entry_spread_on_trade(trade, call_entry_spread)
-            accumulate_entry_spread_on_trade(trade, put_entry_spread)
+            reset_entry_spread_for_sl(
+                trade,
+                abs(float(call_entry_spread or 0.0))
+                + abs(float(put_entry_spread or 0.0)),
+                reason="trade_entry",
+                leg="call+put",
+            )
             db.add(call_leg)
             db.add(put_leg)
 

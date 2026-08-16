@@ -555,15 +555,17 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
   const feesPaid = n(trade.fees_paid)
   const estExitFees = n(trade.est_exit_fees)
   const grossMtm = n(trade.gross_mtm)
-  const cumulativeEntrySpread =
-    trade.cumulative_entry_spread != null && trade.cumulative_entry_spread !== ''
-      ? n(trade.cumulative_entry_spread)
-      : null
+  const entrySpreadForSl =
+    trade.entry_spread_for_sl != null && trade.entry_spread_for_sl !== ''
+      ? n(trade.entry_spread_for_sl)
+      : trade.cumulative_entry_spread != null && trade.cumulative_entry_spread !== ''
+        ? n(trade.cumulative_entry_spread)
+        : null
   const grossMtmForSl =
     trade.gross_mtm_for_stoploss != null && trade.gross_mtm_for_stoploss !== ''
       ? n(trade.gross_mtm_for_stoploss)
-      : cumulativeEntrySpread != null
-        ? grossMtm + cumulativeEntrySpread
+      : entrySpreadForSl != null
+        ? grossMtm + entrySpreadForSl
         : null
   const expectedExitSpread =
     trade.expected_exit_spread_usd != null && trade.expected_exit_spread_usd !== ''
@@ -1045,11 +1047,11 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
             <span className={pnlColor(grossMtm)}>{fmtSignedMoney(grossMtm)}</span>
           </div>
           <div className="flex justify-between text-yellow-300">
-            <span>Entry Spread Diff (cumulative)</span>
+            <span>Entry Spread (for SL)</span>
             <span>
-              {cumulativeEntrySpread == null
+              {entrySpreadForSl == null
                 ? '--'
-                : `-${fmtMoney(Math.abs(cumulativeEntrySpread))}`}
+                : `-${fmtMoney(Math.abs(entrySpreadForSl))}`}
             </span>
           </div>
           <div

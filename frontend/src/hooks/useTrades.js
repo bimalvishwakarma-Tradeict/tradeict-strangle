@@ -387,10 +387,12 @@ export function useTrades() {
             msg.gross_mtm_for_stoploss != null
               ? Number(msg.gross_mtm_for_stoploss)
               : existing.gross_mtm_for_stoploss,
-          cumulative_entry_spread:
-            msg.cumulative_entry_spread != null
-              ? Number(msg.cumulative_entry_spread)
-              : existing.cumulative_entry_spread,
+          entry_spread_for_sl:
+            msg.entry_spread_for_sl != null
+              ? Number(msg.entry_spread_for_sl)
+              : msg.cumulative_entry_spread != null
+                ? Number(msg.cumulative_entry_spread)
+                : existing.entry_spread_for_sl,
           expected_exit_spread_usd:
             msg.expected_exit_spread_usd != null
               ? Number(msg.expected_exit_spread_usd)
@@ -490,7 +492,7 @@ export function useTrades() {
           slippage_amount: trade.slippage_amount,
           total_deductions: trade.total_deductions,
           gross_mtm_for_stoploss: trade.gross_mtm_for_stoploss,
-          cumulative_entry_spread: trade.cumulative_entry_spread,
+          entry_spread_for_sl: trade.entry_spread_for_sl,
           expected_exit_spread_usd: trade.expected_exit_spread_usd,
           last_mtm_update: trade.last_mtm_update,
         })

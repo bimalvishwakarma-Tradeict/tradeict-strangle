@@ -1532,6 +1532,7 @@ class BotEngine:
             compute_net_mtm,
             estimate_expected_exit_spread_usd,
             estimate_option_trading_fee,
+            get_entry_spread_for_sl,
         )
         from backend.models import Leg as LegModel
 
@@ -1575,12 +1576,10 @@ class BotEngine:
                         quantity=int(leg.quantity or 0),
                     )
 
-        # Gross MTM for stoploss: add back entry spread so SL breathing room
-        # is not eaten by execution spread
-        cumulative_entry_spread = float(
-            getattr(trade, "cumulative_entry_spread_usd", 0.0) or 0.0
-        )
-        gross_mtm_for_stoploss = total_pnl + cumulative_entry_spread
+        # Gross MTM for stoploss: add back latest entry-event spread only
+        # (reset on each adjustment — never cumulative across adjusts)
+        entry_spread_for_sl = get_entry_spread_for_sl(trade)
+        gross_mtm_for_stoploss = total_pnl + entry_spread_for_sl
 
         slip_fields = compute_net_mtm(
             gross_mtm=total_pnl,
@@ -1599,7 +1598,7 @@ class BotEngine:
             "put_upnl": round(put_mtm, 4),
             "gross_mtm": round(total_pnl, 4),
             "gross_mtm_for_stoploss": round(gross_mtm_for_stoploss, 4),
-            "cumulative_entry_spread": round(cumulative_entry_spread, 4),
+            "entry_spread_for_sl": round(entry_spread_for_sl, 4),
             "fees_paid": round(fees_paid, 4),
             "est_exit_fees": round(est_exit, 4),
             "expected_exit_spread_usd": round(expected_exit_spread, 4),
@@ -4588,6 +4587,7 @@ class BotEngine:
             compute_net_mtm,
             estimate_expected_exit_spread_usd,
             estimate_option_trading_fee,
+            get_entry_spread_for_sl,
         )
         from backend.models import Leg as LegModel
 
@@ -4664,10 +4664,8 @@ class BotEngine:
                         quantity=int(leg.quantity or 0),
                     )
 
-        cumulative_entry_spread = float(
-            getattr(trade_state.trade, "cumulative_entry_spread_usd", 0.0) or 0.0
-        )
-        gross_mtm_for_stoploss = float(display_total) + cumulative_entry_spread
+        entry_spread_for_sl = get_entry_spread_for_sl(trade_state.trade)
+        gross_mtm_for_stoploss = float(display_total) + entry_spread_for_sl
 
         slip_fields = compute_net_mtm(
             gross_mtm=display_total,
@@ -4721,7 +4719,7 @@ class BotEngine:
             "pnl": delta_mtm,
             "gross_mtm": display_total,
             "gross_mtm_for_stoploss": round(gross_mtm_for_stoploss, 4),
-            "cumulative_entry_spread": round(cumulative_entry_spread, 4),
+            "entry_spread_for_sl": round(entry_spread_for_sl, 4),
             "expected_exit_spread_usd": round(expected_exit_spread, 4),
             "fees_paid": round(fees_paid, 6),
             "est_exit_fees": round(est_exit, 6),

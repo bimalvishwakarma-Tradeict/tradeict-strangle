@@ -118,6 +118,22 @@ def _migrate_schema() -> None:
                         "WHERE cumulative_entry_spread_usd IS NULL"
                     )
                 )
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "entry_spread_for_sl_usd" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN "
+                        "entry_spread_for_sl_usd REAL DEFAULT 0.0"
+                    )
+                )
+                # One-time seed from legacy cumulative column
+                conn.execute(
+                    text(
+                        "UPDATE trades SET entry_spread_for_sl_usd = "
+                        "COALESCE(cumulative_entry_spread_usd, 0.0)"
+                    )
+                )
         # Preserve existing TP/SL $: backfill max from target / (tp_pct/100)
         with engine.begin() as conn:
             conn.execute(
