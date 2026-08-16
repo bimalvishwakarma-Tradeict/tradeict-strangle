@@ -92,6 +92,16 @@ class BotEngine:
         self._cycle_count: int = 0
         # Throttle wrongly-closed leg recovery (trade_id → monotonic ts)
         self._leg_recovery_last_checked: dict[int, float] = {}
+        # Per-master-trade exit locks — prevent dual funnel / overwrite races
+        self._exit_locks: dict[int, asyncio.Lock] = {}
+
+    def _get_exit_lock(self, trade_id: int) -> asyncio.Lock:
+        tid = int(trade_id)
+        lock = self._exit_locks.get(tid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._exit_locks[tid] = lock
+        return lock
 
     async def start(self) -> None:
         self.is_running = True
@@ -843,7 +853,11 @@ class BotEngine:
         )
 
         from backend.core.delta_sl import cancel_leg_sl_order
-        from backend.engine.trade_reconcile import book_leg_close
+        from backend.engine.trade_reconcile import (
+            book_leg_close,
+            recompute_trade_realized_pnl,
+            resolve_external_exit_fill,
+        )
 
         now_utc = datetime.now(timezone.utc)
         closed_n = 0
@@ -864,24 +878,24 @@ class BotEngine:
                         )
                     except Exception as exc:
                         logger.warning("SL cancel failed: %s", exc)
+                exit_px = await resolve_external_exit_fill(
+                    self.delta_client, leg
+                )
                 if trade is not None:
                     book_leg_close(
                         leg=leg,
                         trade=trade,
-                        exit_premium=0.0,
+                        exit_premium=exit_px,
                         exit_time=now_utc,
                     )
                 else:
                     leg.status = "closed"
                     leg.exit_time = get_ist_now()
-                    leg.exit_premium = 0.0
+                    leg.exit_premium = exit_px
                 closed_n += 1
 
-            # Preserve realized_pnl fallback; Trade.status / exit_* owned by funnel
-            if trade is not None and trade.realized_pnl is None:
-                trade.realized_pnl = float(
-                    getattr(trade_state, "last_delta_mtm", 0) or 0
-                )
+            if trade is not None:
+                recompute_trade_realized_pnl(db, trade)
 
             try:
                 db.commit()
@@ -1002,7 +1016,11 @@ class BotEngine:
             return
 
         from backend.core.delta_sl import cancel_leg_sl_order
-        from backend.engine.trade_reconcile import book_leg_close
+        from backend.engine.trade_reconcile import (
+            book_leg_close,
+            recompute_trade_realized_pnl,
+            resolve_external_exit_fill,
+        )
 
         now_utc = datetime.now(timezone.utc)
         close_ok = False
@@ -1038,15 +1056,18 @@ class BotEngine:
             )
             trade = db.query(Trade).filter(Trade.id == trade_id).first()
 
-            # Book missing leg as externally closed
+            # Book missing leg as externally closed — real fill, never 0.0
             if missing_leg is not None and trade is not None:
                 await cancel_leg_sl_order(
                     self.delta_client, missing_leg, clear_fields=True
                 )
+                missing_px = await resolve_external_exit_fill(
+                    self.delta_client, missing_leg
+                )
                 book_leg_close(
                     leg=missing_leg,
                     trade=trade,
-                    exit_premium=0.0,
+                    exit_premium=missing_px,
                     exit_time=now_utc,
                 )
 
@@ -1067,7 +1088,7 @@ class BotEngine:
                         book_leg_close(
                             leg=remaining_leg,
                             trade=trade,
-                            exit_premium=filled,
+                            exit_premium=filled if filled > 0 else None,
                             exit_time=now_utc,
                             exit_fee_usd=(
                                 float(result.commission)
@@ -1097,8 +1118,16 @@ class BotEngine:
                     if trade is not None:
                         remaining_leg.status = "closed"
                         remaining_leg.exit_time = now_utc
-                        remaining_leg.exit_premium = 0.0
-
+                        remaining_leg.exit_premium = None
+                        remaining_leg.realized_pnl = None
+                        note_tag = f"PNL_UNRESOLVED_{remaining}"
+                        prior_notes = str(getattr(trade, "notes", None) or "")
+                        if note_tag not in prior_notes:
+                            trade.notes = (
+                                f"{prior_notes};{note_tag}".strip(";")
+                                if prior_notes
+                                else note_tag
+                            )
             # Close any other open legs (incl. tracked hedge — not treated as orphan)
             other_open = (
                 db.query(Leg)
@@ -1109,7 +1138,7 @@ class BotEngine:
                 is_long = bool(getattr(leftover, "is_long", False)) or str(
                     getattr(leftover, "leg_type", "")
                 ).startswith("hedge")
-                exit_px = 0.0
+                exit_px: float | None = None
                 if self.delta_client is not None:
                     try:
                         if is_long:
@@ -1124,7 +1153,8 @@ class BotEngine:
                                 leftover, self.delta_client
                             )
                         if close_res.success:
-                            exit_px = float(close_res.filled_price or 0)
+                            px = float(close_res.filled_price or 0)
+                            exit_px = px if px > 0 else None
                     except Exception as exc:
                         logger.warning(
                             "Emergency leftover close failed %s: %s",
@@ -1143,10 +1173,8 @@ class BotEngine:
                     leftover.exit_time = get_ist_now()
                     leftover.exit_premium = exit_px
 
-            if trade is not None and trade.realized_pnl is None:
-                trade.realized_pnl = float(
-                    getattr(trade_state, "last_delta_mtm", 0) or 0
-                )
+            if trade is not None:
+                recompute_trade_realized_pnl(db, trade)
 
             try:
                 db.commit()
@@ -2084,11 +2112,37 @@ class BotEngine:
         status = self._status_for_reason(reason)
         trade_row = db.query(Trade).filter(Trade.id == trade_id).first()
         if trade_row is not None:
+            from backend.engine.trade_reconcile import (
+                pnl_sanity_check,
+                recompute_trade_realized_pnl,
+            )
+
             trade_row.status = status
             trade_row.exit_time = get_ist_now()
             trade_row.exit_reason = reason
-            if trade_row.realized_pnl is None:
-                trade_row.realized_pnl = 0.0
+            final_pnl = recompute_trade_realized_pnl(db, trade_row)
+            legs_for_sanity = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_id,
+                    Leg.is_bot_managed.is_(True),
+                )
+                .all()
+            )
+            last_gross = None
+            state = self.position_tracker.get(trade_id)
+            if state is not None:
+                last_gross = float(
+                    getattr(state, "last_delta_mtm", None)
+                    or getattr(state, "last_pnl", None)
+                    or 0
+                )
+            pnl_sanity_check(
+                trade_id=trade_id,
+                realized_pnl=final_pnl,
+                last_gross_mtm=last_gross,
+                legs=legs_for_sanity,
+            )
             trade_row.in_conversion_mode = False
             db.commit()
         else:
@@ -2159,7 +2213,79 @@ class BotEngine:
           c. set Trade.status closed + exit_reason + exit_time
           d. position_tracker.mark_closed
           e. return slave/leg close counts
+
+        Protected by a per-trade asyncio.Lock so a second exit path cannot
+        overwrite fills or double-run the funnel.
         """
+        tid = int(trade_id)
+        lock = self._get_exit_lock(tid)
+        async with lock:
+            # After waiting: if another funnel already closed this trade, skip.
+            with self.db_factory() as check_db:
+                row = (
+                    check_db.query(Trade).filter(Trade.id == tid).first()
+                )
+                if row is not None:
+                    st = str(row.status or "").lower()
+                    if st != TradeStatus.ACTIVE.value:
+                        existing_reason = str(
+                            getattr(row, "exit_reason", None) or ""
+                        )
+                        logger.warning(
+                            "[EXIT_SKIP] trade_id=%s reason=%s "
+                            "existing_reason=%s status=%s — no orders, no DB writes",
+                            tid,
+                            reason,
+                            existing_reason,
+                            st,
+                        )
+                        log_and_buffer(
+                            "EXIT_SKIP",
+                            tid,
+                            {
+                                "reason": reason,
+                                "existing_reason": existing_reason,
+                                "status": st,
+                            },
+                        )
+                        return {
+                            "slaves_total": 0,
+                            "slaves_closed": 0,
+                            "slaves_failed": 0,
+                            "master_legs_closed": 0,
+                            "skipped": 1,
+                        }
+
+            return await self._close_master_trade_locked(
+                trade_id=tid,
+                reason=reason,
+                db=db,
+                skip_master_legs=skip_master_legs,
+                trade_state=trade_state,
+                total_pnl=total_pnl,
+                gross_mtm=gross_mtm,
+                fees_paid=fees_paid,
+                est_exit_fees=est_exit_fees,
+                slippage_amount=slippage_amount,
+                net_mtm=net_mtm,
+            )
+
+    async def _close_master_trade_locked(
+        self,
+        trade_id: int,
+        reason: str,
+        db: Any,
+        skip_master_legs: bool = False,
+        *,
+        trade_state: TradeState | None = None,
+        total_pnl: float | None = None,
+        gross_mtm: float | None = None,
+        fees_paid: float | None = None,
+        est_exit_fees: float | None = None,
+        slippage_amount: float | None = None,
+        net_mtm: float | None = None,
+    ) -> dict[str, int]:
+        """Inner funnel body — caller must already hold the per-trade exit lock."""
         if trade_state is None:
             trade_state = self.position_tracker.get(int(trade_id))
         if trade_state is None:
@@ -2239,9 +2365,12 @@ class BotEngine:
         assert self.delta_client is not None
 
         from backend.core.delta_sl import cancel_leg_sl_order
-        from backend.engine.trade_reconcile import book_leg_close
-
-        # Load ALL open bot-managed legs (call, put, AND hedge)
+        from backend.engine.trade_reconcile import (
+            book_leg_close,
+            pnl_sanity_check,
+            recompute_trade_realized_pnl,
+            resolve_external_exit_fill,
+        )
         with self.db_factory() as load_db:
             all_open_legs = (
                 load_db.query(Leg)
@@ -2666,10 +2795,15 @@ class BotEngine:
                 if leg_db is None or str(leg_db.status).lower() != "open":
                     continue
                 res = close_results.get(int(leg_mem.id))
-                exit_px = float(
-                    (res.filled_price if res is not None and res.success else 0.0)
-                    or 0.0
-                )
+                exit_px: float | None = None
+                if res is not None and res.success:
+                    px = float(res.filled_price or 0.0)
+                    exit_px = px if px > 0 else None
+                if exit_px is None and skip_master_legs:
+                    # Exchange-close / already flat — fetch real fill, never 0.0
+                    exit_px = await resolve_external_exit_fill(
+                        self.delta_client, leg_db
+                    )
                 book_leg_close(
                     leg=leg_db,
                     trade=trade_row,
@@ -2689,10 +2823,10 @@ class BotEngine:
                 booked_ids.add(int(leg_db.id))
                 lt = str(leg_db.leg_type or "").lower()
                 if lt == "call":
-                    call_fill = exit_px
+                    call_fill = float(exit_px or 0.0)
                     call_close = res
                 elif lt == "put":
-                    put_fill = exit_px
+                    put_fill = float(exit_px or 0.0)
                     put_close = res
 
             # True orphans only — hedge_call/hedge_put are tracked, not orphans
@@ -2732,10 +2866,18 @@ class BotEngine:
                     },
                 )
                 for orphan in true_orphans:
+                    existing_px = getattr(orphan, "exit_premium", None)
+                    exit_px = (
+                        float(existing_px)
+                        if existing_px is not None and float(existing_px) > 0
+                        else await resolve_external_exit_fill(
+                            self.delta_client, orphan
+                        )
+                    )
                     book_leg_close(
                         leg=orphan,
                         trade=trade_row,
-                        exit_premium=float(orphan.exit_premium or 0.0),
+                        exit_premium=exit_px,
                         exit_time=now_utc,
                     )
             for leftover in leftover_tracked:
@@ -2744,10 +2886,18 @@ class BotEngine:
                     leftover.symbol,
                     leftover.leg_type,
                 )
+                existing_px = getattr(leftover, "exit_premium", None)
+                exit_px = (
+                    float(existing_px)
+                    if existing_px is not None and float(existing_px) > 0
+                    else await resolve_external_exit_fill(
+                        self.delta_client, leftover
+                    )
+                )
                 book_leg_close(
                     leg=leftover,
                     trade=trade_row,
-                    exit_premium=float(leftover.exit_premium or 0.0),
+                    exit_premium=exit_px,
                     exit_time=now_utc,
                 )
 
@@ -2762,12 +2912,22 @@ class BotEngine:
             trade_row.status = status
             trade_row.exit_time = get_ist_now()
             trade_row.exit_reason = reason
-            final_pnl = float(
-                trade_row.realized_pnl
-                if trade_row.realized_pnl is not None
-                else pnl_now
+            # Single source of truth: sum of closed legs (not incremental paths)
+            final_pnl = recompute_trade_realized_pnl(exit_db, trade_row)
+            all_legs_for_sanity = (
+                exit_db.query(Leg)
+                .filter(
+                    Leg.trade_id == trade_id,
+                    Leg.is_bot_managed.is_(True),
+                )
+                .all()
             )
-            trade_row.realized_pnl = final_pnl
+            pnl_sanity_check(
+                trade_id=trade_id,
+                realized_pnl=final_pnl,
+                last_gross_mtm=gross,
+                legs=all_legs_for_sanity,
+            )
             exit_db.commit()
 
             still_open = (

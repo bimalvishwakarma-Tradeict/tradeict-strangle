@@ -47,21 +47,84 @@ def book_leg_close(
     *,
     leg: Any,
     trade: Any,
-    exit_premium: float,
+    exit_premium: float | None,
     exit_time: datetime | None = None,
     exit_fee_usd: float | None = None,
     exit_order_id: str | None = None,
 ) -> float:
-    """Mark leg closed and add realized USD to leg + trade. Returns leg realized."""
+    """
+    Mark leg closed and set leg.realized_pnl.
+
+    Does NOT mutate trade.realized_pnl — callers must run
+    recompute_trade_realized_pnl() once after all legs are booked.
+
+    Never overwrites an already-closed leg. Never writes exit_premium=0.0
+    (that reads as a free buyback); pass None when the fill is unresolved.
+    """
     from backend.config import OPTIONS_CONTRACT_VALUE
 
+    leg_id = int(getattr(leg, "id", 0) or 0)
+    existing_status = str(getattr(leg, "status", "") or "").lower()
+    if existing_status == "closed":
+        existing_px = getattr(leg, "exit_premium", None)
+        attempted = exit_premium
+        logger.warning(
+            "[LEG_BOOK_SKIP] leg_id=%s existing_exit_premium=%s "
+            "attempted_exit_premium=%s — leaving row untouched",
+            leg_id,
+            existing_px,
+            attempted,
+        )
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "LEG_BOOK_SKIP",
+                int(getattr(trade, "id", 0) or 0),
+                {
+                    "leg_id": leg_id,
+                    "existing_exit_premium": existing_px,
+                    "attempted_exit_premium": attempted,
+                },
+            )
+        except Exception:
+            pass
+        return float(getattr(leg, "realized_pnl", None) or 0.0)
+
     now = exit_time or datetime.now(timezone.utc)
-    exit_px = float(exit_premium or 0.0)
+
+    # Unresolved / invalid fill — close the leg but do not invent a free exit
+    if exit_premium is None or float(exit_premium) <= 0.0:
+        leg.status = "closed"
+        leg.exit_time = now
+        leg.exit_premium = None
+        leg.realized_pnl = None
+        if exit_order_id is not None:
+            leg.exit_order_id = str(exit_order_id)
+        if exit_fee_usd is not None:
+            leg.exit_fee_usd = abs(float(exit_fee_usd))
+        note_tag = f"PNL_UNRESOLVED_{getattr(leg, 'leg_type', 'leg')}"
+        prior_notes = str(getattr(trade, "notes", None) or "")
+        if note_tag not in prior_notes:
+            trade.notes = (
+                f"{prior_notes};{note_tag}".strip(";")
+                if prior_notes
+                else note_tag
+            )
+        logger.critical(
+            "[LEG_BOOK_UNRESOLVED] trade=%s leg_id=%s %s — exit_premium "
+            "unavailable; booked NULL (not 0.0)",
+            getattr(trade, "id", "?"),
+            leg_id,
+            getattr(leg, "leg_type", "?"),
+        )
+        return 0.0
+
+    exit_px = float(exit_premium)
     entry_px = float(leg.initial_premium or 0.0)
     qty = abs(int(leg.quantity or 0))
     cv = float(OPTIONS_CONTRACT_VALUE)
     if bool(getattr(leg, "is_long", False)):
-        # Long hedge: profit = (sell_exit - buy_entry) * qty * cv
         realized = (exit_px - entry_px) * qty * cv
     else:
         realized = short_leg_realized_pnl(
@@ -77,9 +140,139 @@ def book_leg_close(
         leg.exit_order_id = str(exit_order_id)
     if exit_fee_usd is not None:
         leg.exit_fee_usd = abs(float(exit_fee_usd))
-    prior = float(getattr(trade, "realized_pnl", None) or 0.0)
-    trade.realized_pnl = prior + realized
     return realized
+
+
+def recompute_trade_realized_pnl(db: Any, trade: Any) -> float:
+    """
+    Set trade.realized_pnl = sum of closed bot-managed legs' realized_pnl.
+
+    Legs with exit_premium/realized still unresolved (NULL) contribute 0.
+    """
+    legs = (
+        db.query(Leg)
+        .filter(
+            Leg.trade_id == int(trade.id),
+            Leg.is_bot_managed.is_(True),
+        )
+        .all()
+    )
+    total = 0.0
+    for leg in legs:
+        if str(getattr(leg, "status", "") or "").lower() != "closed":
+            continue
+        rp = getattr(leg, "realized_pnl", None)
+        if rp is None:
+            continue
+        total += float(rp)
+    trade.realized_pnl = total
+    return total
+
+
+def pnl_sanity_check(
+    *,
+    trade_id: int,
+    realized_pnl: float,
+    last_gross_mtm: float | None,
+    legs: list[Any] | None = None,
+) -> bool:
+    """
+    Return True if OK. Log CRITICAL [PNL_SANITY_FAIL] when signs disagree.
+    """
+    from backend.config import PNL_SANITY_ABS_TOLERANCE_USD
+
+    tol = float(PNL_SANITY_ABS_TOLERANCE_USD)
+    gross = float(last_gross_mtm) if last_gross_mtm is not None else None
+    realized = float(realized_pnl)
+    if gross is None:
+        return True
+    if abs(gross) < tol or abs(realized) < tol:
+        return True
+    if (gross > 0 and realized > 0) or (gross < 0 and realized < 0):
+        return True
+
+    breakdown = []
+    for leg in legs or []:
+        breakdown.append(
+            {
+                "leg_id": int(getattr(leg, "id", 0) or 0),
+                "leg_type": str(getattr(leg, "leg_type", "")),
+                "entry": getattr(leg, "initial_premium", None),
+                "exit": getattr(leg, "exit_premium", None),
+                "realized": getattr(leg, "realized_pnl", None),
+                "status": getattr(leg, "status", None),
+            }
+        )
+    logger.critical(
+        "[PNL_SANITY_FAIL] trade_id=%s realized_pnl=%.6f "
+        "last_gross_mtm=%.6f legs=%s",
+        trade_id,
+        realized,
+        gross,
+        breakdown,
+    )
+    try:
+        from backend.core.bot_logger import log_and_buffer
+
+        log_and_buffer(
+            "PNL_SANITY_FAIL",
+            int(trade_id),
+            {
+                "realized_pnl": round(realized, 6),
+                "last_gross_mtm": round(gross, 6),
+                "legs": breakdown,
+            },
+        )
+    except Exception:
+        pass
+    return False
+
+
+async def resolve_external_exit_fill(
+    client: Any,
+    leg: Any,
+) -> float | None:
+    """
+    Fetch a real exit fill for a leg closed outside our order flow.
+
+    Order: exit_order_id → product fills since entry_time → None.
+    Never returns 0.0 as a stand-in for 'unknown'.
+    """
+    if client is None:
+        return None
+
+    oid = getattr(leg, "exit_order_id", None) or getattr(leg, "delta_order_id", None)
+    # Prefer a dedicated exit order id when present
+    exit_oid = getattr(leg, "exit_order_id", None)
+    if exit_oid:
+        try:
+            px = float(await client.resolve_fill_price({"id": exit_oid}) or 0.0)
+            if px > 0:
+                return px
+        except Exception as exc:
+            logger.warning(
+                "resolve_external_exit_fill order %s failed: %s", exit_oid, exc
+            )
+
+    pid = int(getattr(leg, "product_id", 0) or 0)
+    if pid <= 0:
+        return None
+
+    entry_time = getattr(leg, "entry_time", None)
+    try:
+        px = await client.get_product_exit_fill_since(
+            product_id=pid,
+            since=entry_time,
+            side="buy",  # buy-to-close short (or sell-to-close long handled inside)
+            is_long=bool(getattr(leg, "is_long", False)),
+        )
+        if px is not None and float(px) > 0:
+            return float(px)
+    except Exception as exc:
+        logger.warning(
+            "resolve_external_exit_fill product %s failed: %s", pid, exc
+        )
+    return None
 
 
 def finalize_trade_if_flat(
@@ -336,14 +529,6 @@ async def reconcile_open_legs_with_delta(
         changed = False
         for leg in flat_legs:
             pid = int(leg.product_id or 0)
-            exit_px = mark_by_pid.get(pid, 0.0)
-            if exit_px <= 0:
-                try:
-                    exit_px = float(
-                        await client.get_mark_price(str(leg.symbol))
-                    )
-                except Exception:
-                    exit_px = float(leg.initial_premium or 0.0)
             # Cancel orphan SL for this externally closed leg
             oid = getattr(leg, "delta_sl_order_id", None)
             if oid:
@@ -360,13 +545,40 @@ async def reconcile_open_legs_with_delta(
                         "Reconcile could not cancel SL %s: %s", oid, exc
                     )
                 leg.delta_sl_order_id = None
+            exit_px = await resolve_external_exit_fill(client, leg)
+            if exit_px is None:
+                # Prefer live mark only as last resort for reconcile booking
+                mark = mark_by_pid.get(pid, 0.0)
+                if mark <= 0:
+                    try:
+                        mark = float(
+                            await client.get_mark_price(str(leg.symbol))
+                        )
+                    except Exception:
+                        mark = 0.0
+                if mark > 0:
+                    exit_px = mark
+                    logger.warning(
+                        "Reconcile trade=%s %s: using mark=%.4f "
+                        "(no fill history)",
+                        trade.id,
+                        leg.leg_type,
+                        mark,
+                    )
+                else:
+                    logger.critical(
+                        "Reconcile trade=%s %s: no fill and no mark — "
+                        "booking exit_premium=NULL",
+                        trade.id,
+                        leg.leg_type,
+                    )
             realized = book_leg_close(
                 leg=leg, trade=trade, exit_premium=exit_px, exit_time=now
             )
             changed = True
             logger.warning(
                 "Reconcile: trade=%s %s strike=%s closed externally "
-                "(Delta size=0) exit=%.2f realized=%.4f",
+                "(Delta size=0) exit=%s realized=%.4f",
                 trade.id,
                 leg.leg_type,
                 leg.strike,
@@ -375,6 +587,7 @@ async def reconcile_open_legs_with_delta(
             )
 
         if changed:
+            recompute_trade_realized_pnl(db, trade)
             reason = (
                 ExitReason.MANUAL_CLOSE_ON_EXCHANGE.value
                 if len(flat_legs) == len(open_legs)

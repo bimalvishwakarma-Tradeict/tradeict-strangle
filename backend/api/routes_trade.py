@@ -2452,11 +2452,19 @@ async def close_single_leg(
                 "Leg %s not on Delta. Marking closed in DB only.",
                 leg.symbol,
             )
+            from backend.engine.trade_reconcile import (
+                book_leg_close,
+                recompute_trade_realized_pnl,
+                resolve_external_exit_fill,
+            )
+
+            exit_px = await resolve_external_exit_fill(client, leg)
             realized = book_leg_close(
                 leg=leg,
                 trade=trade,
-                exit_premium=0.0,
+                exit_premium=exit_px,
             )
+            recompute_trade_realized_pnl(db, trade)
             basket_closed = finalize_trade_if_flat(
                 db=db,
                 trade=trade,
@@ -2502,7 +2510,7 @@ async def close_single_leg(
                 "message": (
                     "Leg already gone from Delta, marked closed in DB"
                 ),
-                "closed_at_price": 0.0,
+                "closed_at_price": float(exit_px or 0.0),
                 "leg_type": leg_key,
                 "leg_realized_pnl": realized,
                 "trade_realized_pnl": float(trade.realized_pnl or 0.0),
@@ -2524,7 +2532,12 @@ async def close_single_leg(
         realized = book_leg_close(
             leg=leg,
             trade=trade,
-            exit_premium=float(result.filled_price or 0.0),
+            exit_premium=(
+                float(result.filled_price)
+                if result.filled_price is not None
+                and float(result.filled_price) > 0
+                else None
+            ),
             exit_fee_usd=(
                 float(result.commission)
                 if result.commission is not None
@@ -2534,6 +2547,9 @@ async def close_single_leg(
                 str(result.order_id) if result.order_id is not None else None
             ),
         )
+        from backend.engine.trade_reconcile import recompute_trade_realized_pnl
+
+        recompute_trade_realized_pnl(db, trade)
         basket_closed = finalize_trade_if_flat(
             db=db,
             trade=trade,

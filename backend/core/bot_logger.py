@@ -67,6 +67,9 @@ _IMPORTANT_EVENTS = frozenset(
         "DB_AUDIT_SKIP",
         "BRACKET_SL",
         "BRACKET_SL_ANOMALY",
+        "EXIT_SKIP",
+        "LEG_BOOK_SKIP",
+        "PNL_SANITY_FAIL",
     }
 )
 
@@ -178,6 +181,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "PARTIAL_ADJUSTMENT",
         "INTEGRITY_NAKED",
         "BRACKET_SL_ANOMALY",
+        "PNL_SANITY_FAIL",
     ):
         bot_log.error(msg)
     elif event_type in (
@@ -212,6 +216,9 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ORPHAN_AUTO_CLOSED",
         "ORPHAN_SL_CANCELLED",
         "ENTRY_SPREAD_RESET",
+        "EXIT_SKIP",
+        "LEG_BOOK_SKIP",
+        "PNL_SANITY_FAIL",
         "PARTIAL_ENTRY_CLEANUP",
         "MIRROR_ADJ_DEBUG",
         "MIRROR_ADJ_PRE",

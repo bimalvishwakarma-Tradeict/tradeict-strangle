@@ -1000,6 +1000,109 @@ class DeltaClient:
                     pass
         return float(total)
 
+    async def get_product_exit_fill_since(
+        self,
+        *,
+        product_id: int,
+        since: Any = None,
+        side: str | None = None,
+        is_long: bool = False,
+    ) -> float | None:
+        """
+        Best-effort exit fill for a product from /v2/fills.
+
+        Prefers fills matching the close side (buy for short, sell for long)
+        after ``since``. Returns None when no usable fill is found — never 0.0.
+        """
+        close_side = str(side or ("sell" if is_long else "buy")).lower()
+        since_ts: float | None = None
+        if since is not None:
+            try:
+                if hasattr(since, "timestamp"):
+                    since_ts = float(since.timestamp())
+                else:
+                    since_ts = float(since)
+            except (TypeError, ValueError):
+                since_ts = None
+
+        try:
+            fills = await self._request(
+                "GET",
+                "/v2/fills",
+                params={
+                    "product_id": int(product_id),
+                    "page_size": 100,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "get_product_exit_fill_since product=%s failed: %s",
+                product_id,
+                exc,
+            )
+            return None
+
+        rows: list[Any]
+        if isinstance(fills, list):
+            rows = fills
+        elif isinstance(fills, dict):
+            maybe = fills.get("result") or fills.get("fills") or []
+            rows = list(maybe) if isinstance(maybe, list) else []
+        else:
+            rows = []
+
+        best_px: float | None = None
+        best_ts = -1.0
+        for fill in rows:
+            if not isinstance(fill, dict):
+                continue
+            try:
+                fpid = int(fill.get("product_id") or 0)
+            except (TypeError, ValueError):
+                fpid = 0
+            if fpid and fpid != int(product_id):
+                continue
+            fside = str(fill.get("side") or "").lower()
+            if fside and fside != close_side:
+                continue
+            try:
+                px = float(
+                    fill.get("price")
+                    or fill.get("fill_price")
+                    or fill.get("avg_fill_price")
+                    or 0
+                )
+            except (TypeError, ValueError):
+                px = 0.0
+            if px <= 0:
+                continue
+            ts_raw = (
+                fill.get("created_at")
+                or fill.get("timestamp")
+                or fill.get("fill_time")
+            )
+            ts = -1.0
+            if ts_raw is not None:
+                try:
+                    if isinstance(ts_raw, (int, float)):
+                        ts = float(ts_raw)
+                        if ts > 1e12:
+                            ts = ts / 1000.0
+                    else:
+                        from datetime import datetime
+
+                        ts = datetime.fromisoformat(
+                            str(ts_raw).replace("Z", "+00:00")
+                        ).timestamp()
+                except Exception:
+                    ts = -1.0
+            if since_ts is not None and ts > 0 and ts < since_ts - 1.0:
+                continue
+            if ts >= best_ts:
+                best_ts = ts
+                best_px = px
+        return best_px
+
     async def cancel_order(self, order_id: int) -> dict[str, Any]:
         """
         DELETE /v2/orders/{order_id}

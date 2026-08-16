@@ -37,6 +37,11 @@ ADJUSTMENT_COOLDOWN_MINUTES = 3
 OPTIONS_CONTRACT_VALUE: float = float(os.getenv("OPTIONS_CONTRACT_VALUE", "0.001"))
 # Hard ceiling on mirrored slave lot size (prevents runaway capital-based qty)
 MAX_SLAVE_QTY: int = int(os.getenv("MAX_SLAVE_QTY", "100"))
+# PNL sanity: flag when booked realized_pnl sign disagrees with last gross_mtm
+# beyond this absolute USD tolerance (near-zero values are ignored)
+PNL_SANITY_ABS_TOLERANCE_USD: float = float(
+    os.getenv("PNL_SANITY_ABS_TOLERANCE_USD", "0.01")
+)
 # Delta India options trading fee (market/taker) — estimate only; paid fees come from API
 OPTION_FEE_RATE: float = float(os.getenv("OPTION_FEE_RATE", "0.00010"))  # 0.010% of notional
 PREMIUM_CAP_RATE: float = float(os.getenv("PREMIUM_CAP_RATE", "0.035"))  # 3.5% of premium

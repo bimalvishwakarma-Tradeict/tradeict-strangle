@@ -205,7 +205,15 @@ async def verify_db_consistency(
                 leg.status = "closed"
                 leg.exit_time = now
                 if leg.exit_premium is None:
-                    leg.exit_premium = 0.0
+                    # Never invent a free exit — leave NULL for manual repair
+                    leg.exit_premium = None
+                    leg.realized_pnl = None
+                    logger.critical(
+                        "[DB_AUDIT] Trade %s orphan leg %s closed with "
+                        "exit_premium=NULL (was open under non-ACTIVE trade)",
+                        trade.id,
+                        leg.symbol,
+                    )
             db.commit()
             fixes += 1
 
