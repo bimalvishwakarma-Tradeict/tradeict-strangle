@@ -1946,18 +1946,57 @@ class BotEngine:
                     exc,
                 )
 
-    async def _exit_trade(
+    async def close_master_trade(
         self,
-        trade_state: TradeState,
+        trade_id: int,
         reason: str,
+        db: Any,
+        skip_master_legs: bool = False,
+        *,
+        trade_state: TradeState | None = None,
         total_pnl: float | None = None,
         gross_mtm: float | None = None,
         fees_paid: float | None = None,
         est_exit_fees: float | None = None,
         slippage_amount: float | None = None,
         net_mtm: float | None = None,
-    ) -> None:
-        trade_id = trade_state.trade_id
+    ) -> dict[str, int]:
+        """
+        Single funnel for closing a master trade.
+
+        Order (do not change):
+          a. await mirror_exit
+          b. close master legs (unless skip_master_legs)
+          c. set Trade.status closed + exit_reason + exit_time
+          d. position_tracker.mark_closed
+          e. return slave/leg close counts
+        """
+        if trade_state is None:
+            trade_state = self.position_tracker.get(int(trade_id))
+        if trade_state is None:
+            logger.error(
+                "[EXIT_FUNNEL] trade_id=%s reason=%s — no TradeState in tracker",
+                trade_id,
+                reason,
+            )
+            result = {
+                "slaves_total": 0,
+                "slaves_closed": 0,
+                "slaves_failed": 0,
+                "master_legs_closed": 0,
+            }
+            logger.info(
+                "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
+                "slaves_closed=%s slaves_failed=%s",
+                trade_id,
+                reason,
+                result["slaves_total"],
+                result["slaves_closed"],
+                result["slaves_failed"],
+            )
+            return result
+
+        trade_id = int(trade_id)
         trade = trade_state.trade
         call_leg_mem = trade_state.call_leg
         put_leg_mem = trade_state.put_leg
@@ -1970,6 +2009,11 @@ class BotEngine:
         fees = float(fees_paid or 0.0) + float(est_exit_fees or 0.0)
         slip = float(slippage_amount or 0.0)
         net = float(net_mtm if net_mtm is not None else pnl_now)
+        slaves_total = 0
+        slaves_closed = 0
+        slaves_failed = 0
+        master_legs_closed = 0
+        pre_slave_ids: set[int] = set()
 
         log_and_buffer(
             "EXIT_START",
@@ -2004,9 +2048,9 @@ class BotEngine:
         from backend.engine.trade_reconcile import book_leg_close
 
         # Load ALL open bot-managed legs (call, put, AND hedge)
-        with self.db_factory() as db:
+        with self.db_factory() as load_db:
             all_open_legs = (
-                db.query(Leg)
+                load_db.query(Leg)
                 .filter(
                     Leg.trade_id == trade_id,
                     Leg.status == "open",
@@ -2015,7 +2059,7 @@ class BotEngine:
                 .all()
             )
             for leg in all_open_legs:
-                db.expunge(leg)
+                load_db.expunge(leg)
 
         hedge_pid = None
         for leg in all_open_legs:
@@ -2071,11 +2115,11 @@ class BotEngine:
         )
 
         # Step 2: Cancel legacy separate SL orders on short legs
-        with self.db_factory() as db:
+        with self.db_factory() as sl_db:
             for leg_mem in all_open_legs:
                 if bool(getattr(leg_mem, "is_long", False)):
                     continue
-                leg_db = db.query(Leg).filter(Leg.id == leg_mem.id).first()
+                leg_db = sl_db.query(Leg).filter(Leg.id == leg_mem.id).first()
                 if leg_db is None:
                     continue
                 if getattr(leg_db, "delta_sl_order_id", None):
@@ -2089,7 +2133,34 @@ class BotEngine:
                         )
                     except Exception as exc:
                         logger.warning("SL cancel failed (non-fatal): %s", exc)
-            db.commit()
+            sl_db.commit()
+
+        # Count eligible slaves before mirror (mirror_exit uses its own session)
+        from backend.models import SlaveTrade as _SlaveTradeExit
+
+        _exit_statuses = (
+            "active",
+            "partial_adjustment",
+            "adjust_close_failed",
+        )
+        try:
+            pre_slave_rows = (
+                db.query(_SlaveTradeExit)
+                .filter(
+                    _SlaveTradeExit.master_trade_id == trade_id,
+                    _SlaveTradeExit.status.in_(_exit_statuses),
+                )
+                .all()
+            )
+            slaves_total = len(pre_slave_rows)
+            pre_slave_ids = {int(st.id) for st in pre_slave_rows}
+        except Exception as slave_count_exc:
+            logger.warning(
+                "[EXIT_FUNNEL] pre-mirror slave count failed: %s",
+                slave_count_exc,
+            )
+            pre_slave_ids = set()
+            slaves_total = 0
 
         # Step 3: Mirror exit to slaves BEFORE closing master (incl. hedge).
         # AWAIT — fire-and-forget left slaves open after adjustments when
@@ -2129,12 +2200,41 @@ class BotEngine:
                 exc_info=True,
             )
 
+        try:
+            db.expire_all()
+            if pre_slave_ids:
+                post_rows = (
+                    db.query(_SlaveTradeExit)
+                    .filter(_SlaveTradeExit.id.in_(pre_slave_ids))
+                    .all()
+                )
+                slaves_closed = sum(
+                    1 for st in post_rows if str(st.status) == "closed"
+                )
+                slaves_failed = max(0, slaves_total - slaves_closed)
+            else:
+                slaves_closed = 0
+                slaves_failed = 0
+        except Exception as slave_post_exc:
+            logger.warning(
+                "[EXIT_FUNNEL] post-mirror slave count failed: %s",
+                slave_post_exc,
+            )
+            slaves_closed = 0
+            slaves_failed = slaves_total
+
         # Step 4: Close ALL open legs on Delta (short=BUY, long hedge=SELL)
         close_results: dict[int, Any] = {}
         hard_fail = False
         trade_is_demo = bool(getattr(trade, "is_demo", False))
 
-        if trade_is_demo:
+        if skip_master_legs:
+            logger.info(
+                "[EXIT_FUNNEL] trade_id=%s skip_master_legs=True — "
+                "skipping Delta master leg closes",
+                trade_id,
+            )
+        elif trade_is_demo:
             from backend.strategies.base_strategy import OrderResult
 
             logger.info(
@@ -2242,56 +2342,74 @@ class BotEngine:
                     )
 
         # Step 5: Wait and verify closes
-        await asyncio.sleep(2 if not trade_is_demo else 0)
-        still_map: dict[str, bool] = {}
-        for leg in all_open_legs:
-            leg_id = int(leg.id)
-            if not exists_map.get(leg_id, False):
-                continue
-            res = close_results.get(leg_id)
-            if res is not None and not res.success:
-                still = await self.delta_client.verify_position_exists(
-                    int(leg.product_id)
-                )
-                label = (
-                    "hedge"
-                    if bool(getattr(leg, "is_long", False))
-                    else str(leg.leg_type)
-                )
-                still_map[label] = still
-                if still:
-                    hard_fail = True
-                    logger.warning(
-                        "[EXIT_VERIFY] %s still visible on Delta after close!",
-                        label,
+        if not skip_master_legs:
+            await asyncio.sleep(2 if not trade_is_demo else 0)
+            still_map: dict[str, bool] = {}
+            for leg in all_open_legs:
+                leg_id = int(leg.id)
+                if not exists_map.get(leg_id, False):
+                    continue
+                res = close_results.get(leg_id)
+                if res is not None and not res.success:
+                    still = await self.delta_client.verify_position_exists(
+                        int(leg.product_id)
                     )
-            else:
-                label = (
-                    "hedge"
-                    if bool(getattr(leg, "is_long", False))
-                    else str(leg.leg_type)
-                )
-                still_map[label] = False
+                    label = (
+                        "hedge"
+                        if bool(getattr(leg, "is_long", False))
+                        else str(leg.leg_type)
+                    )
+                    still_map[label] = still
+                    if still:
+                        hard_fail = True
+                        logger.warning(
+                            "[EXIT_VERIFY] %s still visible on Delta after close!",
+                            label,
+                        )
+                else:
+                    label = (
+                        "hedge"
+                        if bool(getattr(leg, "is_long", False))
+                        else str(leg.leg_type)
+                    )
+                    still_map[label] = False
 
-        log_and_buffer(
-            "EXIT_VERIFY",
-            trade_id,
-            {"stage": "post_exit", "still_open": still_map},
-        )
-
-        if hard_fail:
-            msg = (
-                f"Exit order failure trade={trade_id} "
-                f"still_open={still_map}"
-            )
-            logger.critical(msg)
             log_and_buffer(
-                "EXIT_FAIL",
+                "EXIT_VERIFY",
                 trade_id,
-                {"reason": reason, "error": msg},
+                {"stage": "post_exit", "still_open": still_map},
             )
-            await self._push_error(trade_id, msg, requires_manual_action=True)
-            return
+
+            if hard_fail:
+                msg = (
+                    f"Exit order failure trade={trade_id} "
+                    f"still_open={still_map}"
+                )
+                logger.critical(msg)
+                log_and_buffer(
+                    "EXIT_FAIL",
+                    trade_id,
+                    {"reason": reason, "error": msg},
+                )
+                await self._push_error(
+                    trade_id, msg, requires_manual_action=True
+                )
+                result = {
+                    "slaves_total": slaves_total,
+                    "slaves_closed": slaves_closed,
+                    "slaves_failed": slaves_failed,
+                    "master_legs_closed": master_legs_closed,
+                }
+                logger.info(
+                    "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
+                    "slaves_closed=%s slaves_failed=%s",
+                    trade_id,
+                    reason,
+                    result["slaves_total"],
+                    result["slaves_closed"],
+                    result["slaves_failed"],
+                )
+                return result
 
         # Step 6: Update DB — book closes for all tracked legs
         status = self._status_for_reason(reason)
@@ -2302,8 +2420,8 @@ class BotEngine:
         put_close = None
         final_pnl = pnl_now
 
-        with self.db_factory() as db:
-            trade_row = db.query(Trade).filter(Trade.id == trade_id).first()
+        with self.db_factory() as exit_db:
+            trade_row = exit_db.query(Trade).filter(Trade.id == trade_id).first()
             if trade_row is None:
                 logger.error("Exit DB trade row missing for trade %s", trade_id)
                 log_and_buffer(
@@ -2311,11 +2429,26 @@ class BotEngine:
                     trade_id,
                     {"reason": reason, "error": "DB trade missing"},
                 )
-                return
+                result = {
+                    "slaves_total": slaves_total,
+                    "slaves_closed": slaves_closed,
+                    "slaves_failed": slaves_failed,
+                    "master_legs_closed": master_legs_closed,
+                }
+                logger.info(
+                    "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
+                    "slaves_closed=%s slaves_failed=%s",
+                    trade_id,
+                    reason,
+                    result["slaves_total"],
+                    result["slaves_closed"],
+                    result["slaves_failed"],
+                )
+                return result
 
             booked_ids: set[int] = set()
             for leg_mem in all_open_legs:
-                leg_db = db.query(Leg).filter(Leg.id == leg_mem.id).first()
+                leg_db = exit_exit_db.query(Leg).filter(Leg.id == leg_mem.id).first()
                 if leg_db is None or str(leg_db.status).lower() != "open":
                     continue
                 res = close_results.get(int(leg_mem.id))
@@ -2351,7 +2484,7 @@ class BotEngine:
             # True orphans only — hedge_call/hedge_put are tracked, not orphans
             tracked_types = {"call", "put", "hedge_call", "hedge_put"}
             remaining_open = (
-                db.query(Leg)
+                exit_db.query(Leg)
                 .filter(Leg.trade_id == trade_id, Leg.status == "open")
                 .all()
             )
@@ -2421,10 +2554,10 @@ class BotEngine:
                 else pnl_now
             )
             trade_row.realized_pnl = final_pnl
-            db.commit()
+            exit_db.commit()
 
             still_open = (
-                db.query(Leg)
+                exit_db.query(Leg)
                 .filter(Leg.trade_id == trade_id, Leg.status == "open")
                 .count()
             )
@@ -2440,6 +2573,15 @@ class BotEngine:
                     "[EXIT_VERIFY] All legs closed in DB for trade %s",
                     trade_id,
                 )
+
+        master_legs_closed = sum(
+            1
+            for res in close_results.values()
+            if res is not None and getattr(res, "success", False)
+        )
+        if skip_master_legs:
+            # Legs already flat on Delta — report open-leg count as closed in DB path
+            master_legs_closed = len(all_open_legs)
 
         trade_state.hedge_leg = None
 
@@ -2546,6 +2688,50 @@ class BotEngine:
         except Exception as webhook_exc:
             logger.warning(
                 "[EARNER_WEBHOOK] Setup failed: %s", webhook_exc
+            )
+
+        result = {
+            "slaves_total": slaves_total,
+            "slaves_closed": slaves_closed,
+            "slaves_failed": slaves_failed,
+            "master_legs_closed": master_legs_closed,
+        }
+        logger.info(
+            "[EXIT_FUNNEL] trade_id=%s reason=%s slaves_total=%s "
+            "slaves_closed=%s slaves_failed=%s",
+            trade_id,
+            reason,
+            result["slaves_total"],
+            result["slaves_closed"],
+            result["slaves_failed"],
+        )
+        return result
+
+    async def _exit_trade(
+        self,
+        trade_state: TradeState,
+        reason: str,
+        total_pnl: float | None = None,
+        gross_mtm: float | None = None,
+        fees_paid: float | None = None,
+        est_exit_fees: float | None = None,
+        slippage_amount: float | None = None,
+        net_mtm: float | None = None,
+    ) -> None:
+        """Exit a trade via the single close_master_trade funnel (identical behaviour)."""
+        with self.db_factory() as db:
+            await self.close_master_trade(
+                trade_id=int(trade_state.trade_id),
+                reason=reason,
+                db=db,
+                skip_master_legs=False,
+                trade_state=trade_state,
+                total_pnl=total_pnl,
+                gross_mtm=gross_mtm,
+                fees_paid=fees_paid,
+                est_exit_fees=est_exit_fees,
+                slippage_amount=slippage_amount,
+                net_mtm=net_mtm,
             )
 
     async def _check_conversion_mode_exit(
