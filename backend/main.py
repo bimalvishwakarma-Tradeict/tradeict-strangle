@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes_account import router as account_router
 from backend.api.routes_auto_trade import router as auto_trade_router
+from backend.api.routes_hedge import router as hedge_router
 from backend.api.routes_logs import router as logs_router
 from backend.api.routes_slave import router as slave_router
 from backend.api.routes_strategy import router as strategy_router
@@ -132,6 +133,7 @@ app.include_router(account_router)
 app.include_router(strategy_router)
 app.include_router(trade_router)
 app.include_router(auto_trade_router)
+app.include_router(hedge_router)
 app.include_router(slave_router)
 app.include_router(logs_router)
 try:

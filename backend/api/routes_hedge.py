@@ -1,0 +1,190 @@
+# routes_hedge.py — /api/hedge/* manual hedge lifecycle endpoints
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from backend.core.delta_client import DeltaClient
+from backend.core.encryption import decrypt
+from backend.database import get_db, get_or_create_auto_settings
+from backend.engine.hedge_lifecycle import (
+    HedgeOpenError,
+    get_active_hedge,
+    hedge_to_dict,
+    open_hedge,
+)
+from backend.models import Account
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/hedge", tags=["hedge"])
+
+NO_ACCOUNT_DETAIL = "No account connected. Please add API keys in Settings."
+
+
+class HedgeOpenRequest(BaseModel):
+    """Optional body for POST /api/hedge/open."""
+
+    quantity: int | None = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description="Override lot size for a small live test (default: settings.quantity)",
+    )
+
+
+def _get_active_account(db: Session) -> Account:
+    account = (
+        db.query(Account)
+        .filter(Account.is_active.is_(True))
+        .order_by(Account.id.asc())
+        .first()
+    )
+    if account is None:
+        raise HTTPException(status_code=401, detail=NO_ACCOUNT_DETAIL)
+    return account
+
+
+def _get_delta_client(account: Account) -> DeltaClient:
+    return DeltaClient(
+        decrypt(account.api_key_encrypted),
+        decrypt(account.api_secret_encrypted),
+    )
+
+
+@router.post("/open")
+async def hedge_open(
+    payload: HedgeOpenRequest = HedgeOpenRequest(),
+    quantity: int | None = Query(
+        None,
+        ge=1,
+        le=1000,
+        description="Optional quantity override (also accepted in JSON body)",
+    ),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Manually open the long ATM straddle hedge (test trigger — not auto-trade).
+
+    Refuses if hedge_enabled is False or an active hedge already exists.
+    """
+    settings = get_or_create_auto_settings(db)
+    if not bool(getattr(settings, "hedge_enabled", False)):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "hedge_enabled is False. Enable Hedge Mode in Auto Trade "
+                "settings before opening a hedge."
+            ),
+        )
+
+    account = _get_active_account(db)
+    und = str(settings.underlying or "BTC")
+    existing = get_active_hedge(
+        db, account_id=int(account.id), underlying=und
+    )
+    if existing is not None:
+        return {
+            "success": True,
+            "created": False,
+            "message": (
+                f"Active hedge #{existing.id} already exists for {und} — "
+                "refusing to open a second."
+            ),
+            "hedge": hedge_to_dict(existing),
+        }
+
+    qty_override = None
+    if payload.quantity is not None:
+        qty_override = int(payload.quantity)
+    elif quantity is not None:
+        qty_override = int(quantity)
+
+    if (
+        getattr(settings, "hedge_target_usd", None) is None
+        or float(settings.hedge_target_usd or 0) <= 0
+        or getattr(settings, "hedge_stoploss_usd", None) is None
+        or float(settings.hedge_stoploss_usd or 0) <= 0
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "hedge_target_usd and hedge_stoploss_usd must be set (> 0) "
+                "before opening a hedge."
+            ),
+        )
+
+    client = _get_delta_client(account)
+    try:
+        try:
+            hedge = await open_hedge(
+                account,
+                settings,
+                db,
+                client=client,
+                quantity_override=qty_override,
+            )
+        except HedgeOpenError as exc:
+            logger.critical(
+                "[HEDGE_OPEN_FAIL] stage=%s reason=%s",
+                exc.stage,
+                exc.reason,
+            )
+            body: dict[str, Any] = {
+                "success": False,
+                "created": False,
+                "message": str(exc),
+                "stage": exc.stage,
+                "detail": exc.reason,
+            }
+            if exc.hedge is not None:
+                body["hedge"] = hedge_to_dict(exc.hedge)
+            raise HTTPException(status_code=502, detail=body) from exc
+        except Exception as exc:
+            logger.critical(
+                "[HEDGE_OPEN_FAIL] stage=api reason=%s",
+                exc,
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected hedge open failure: {exc}",
+            ) from exc
+    finally:
+        await client.close()
+
+    return {
+        "success": True,
+        "created": True,
+        "message": (
+            f"Hedge #{hedge.id} opened: {hedge.underlying} "
+            f"{hedge.strike} straddle {hedge.expiry_date} × {hedge.quantity} lot(s)."
+        ),
+        "hedge": hedge_to_dict(hedge),
+    }
+
+
+@router.get("/active")
+async def hedge_active(
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the active hedge for the current auto-trade underlying, if any."""
+    settings = get_or_create_auto_settings(db)
+    account = _get_active_account(db)
+    hedge = get_active_hedge(
+        db,
+        account_id=int(account.id),
+        underlying=str(settings.underlying or "BTC"),
+    )
+    if hedge is None:
+        return {"success": True, "hedge": None, "message": "No active hedge"}
+    return {
+        "success": True,
+        "hedge": hedge_to_dict(hedge),
+        "message": f"Active hedge #{hedge.id}",
+    }
