@@ -635,7 +635,7 @@ class SlaveHedgePosition(Base):
 
 
 class HedgeThetaLog(Base):
-    """Daily theta / IV snapshot for a hedge. Nothing writes yet (schema only)."""
+    """Daily theta / IV snapshot for a hedge (one row per hedge per IST day)."""
 
     __tablename__ = "hedge_theta_log"
     __table_args__ = (

@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.config import OPTIONS_CONTRACT_VALUE
@@ -17,12 +18,13 @@ from backend.core.fees import estimate_option_trading_fee
 from backend.core.hedge_theta import (
     ExpiryNotAvailableError,
     HedgeThetaError,
+    get_hedge_theta,
     migrate_hedge_expiry_mode,
     resolve_hedge_expiry_date,
 )
-from backend.core.time_utils import get_hours_to_expiry, is_pre_expiry_window
+from backend.core.time_utils import get_hours_to_expiry, get_ist_now, is_pre_expiry_window
 from backend.engine.order_executor import OrderExecutor
-from backend.models import Account, AutoTradeSettings, HedgePosition
+from backend.models import Account, AutoTradeSettings, HedgePosition, HedgeThetaLog
 
 logger = logging.getLogger(__name__)
 
@@ -575,6 +577,8 @@ async def open_hedge(
                 "quantity": qty,
             },
         )
+        # Day-1 snapshot so accrual/IV history starts even if bot restarts later today
+        await maybe_log_hedge_theta_snapshot(hedge_row, db, client=client)
         return hedge_row
 
     except HedgeOpenError:
@@ -1138,6 +1142,173 @@ async def evaluate_and_maybe_close_hedge(
         return None
 
 
+async def maybe_log_hedge_theta_snapshot(
+    hedge: HedgePosition,
+    db: Session,
+    *,
+    client: DeltaClient,
+) -> HedgeThetaLog | None:
+    """
+    Write at most one hedge_theta_log row per hedge per IST calendar day.
+
+    Upsert/skip via unique (hedge_id, log_date). Failures are logged and never
+    raise into the open/monitor path.
+    """
+    hid = int(hedge.id)
+    log_date = get_ist_now().date()
+
+    existing = (
+        db.query(HedgeThetaLog)
+        .filter(
+            HedgeThetaLog.hedge_id == hid,
+            HedgeThetaLog.log_date == log_date,
+        )
+        .first()
+    )
+    if existing is not None:
+        return existing
+
+    try:
+        theta = await get_hedge_theta(client, hedge)
+    except HedgeThetaError as exc:
+        logger.warning(
+            "[HEDGE_THETA_LOG] hedge_id=%s fetch failed: %s — skip today",
+            hid,
+            exc,
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "[HEDGE_THETA_LOG] hedge_id=%s unexpected fetch error: %s",
+            hid,
+            exc,
+            exc_info=True,
+        )
+        return None
+
+    call_theta = float(theta.get("call_theta") or 0)
+    put_theta = float(theta.get("put_theta") or 0)
+    total_theta = float(theta.get("total_theta") or 0)
+    spot = float(theta.get("spot") or 0) or None
+    call_iv = float(theta.get("call_iv") or 0) or None
+    put_iv = float(theta.get("put_iv") or 0) or None
+
+    row = HedgeThetaLog(
+        hedge_id=hid,
+        log_date=log_date,
+        call_theta=call_theta,
+        put_theta=put_theta,
+        total_theta=total_theta,
+        spot_price=spot,
+        call_iv=call_iv if call_iv and call_iv > 0 else None,
+        put_iv=put_iv if put_iv and put_iv > 0 else None,
+        created_at=_utc_now(),
+    )
+    db.add(row)
+    try:
+        db.commit()
+        db.refresh(row)
+    except IntegrityError:
+        db.rollback()
+        existing = (
+            db.query(HedgeThetaLog)
+            .filter(
+                HedgeThetaLog.hedge_id == hid,
+                HedgeThetaLog.log_date == log_date,
+            )
+            .first()
+        )
+        return existing
+    except Exception as exc:
+        db.rollback()
+        logger.warning(
+            "[HEDGE_THETA_LOG] hedge_id=%s commit failed: %s",
+            hid,
+            exc,
+            exc_info=True,
+        )
+        return None
+
+    _hedge_log(
+        "HEDGE_THETA_LOG",
+        hid,
+        {
+            "log_date": log_date.isoformat(),
+            "total_theta": round(total_theta, 4),
+            "call_theta": round(call_theta, 4),
+            "put_theta": round(put_theta, 4),
+            "spot": round(float(spot), 2) if spot else None,
+            "call_iv": call_iv,
+            "put_iv": put_iv,
+        },
+    )
+    return row
+
+
+def get_hedge_theta_log_payload(
+    db: Session,
+    *,
+    hedge_id: int,
+) -> dict[str, Any]:
+    """
+    Rows + accrual ESTIMATE for GET /api/hedge/{id}/theta-log.
+
+    theta_accrued_estimate = sum(total_theta) × quantity × CONTRACT_SIZE.
+    This is a sum of daily snapshots — not a measurable cash flow.
+    """
+    hedge = (
+        db.query(HedgePosition).filter(HedgePosition.id == int(hedge_id)).first()
+    )
+    if hedge is None:
+        raise KeyError(f"Hedge #{hedge_id} not found")
+
+    rows = (
+        db.query(HedgeThetaLog)
+        .filter(HedgeThetaLog.hedge_id == int(hedge_id))
+        .order_by(HedgeThetaLog.log_date.asc(), HedgeThetaLog.id.asc())
+        .all()
+    )
+    qty = max(1, int(hedge.quantity or 1))
+    sum_total = float(
+        sum(float(r.total_theta or 0) for r in rows)
+    )
+    accrued = round(sum_total * qty * CONTRACT_SIZE, 6)
+    first_date = rows[0].log_date.isoformat() if rows else None
+    last_date = rows[-1].log_date.isoformat() if rows else None
+
+    return {
+        "success": True,
+        "hedge_id": int(hedge.id),
+        "quantity": qty,
+        "days_logged": len(rows),
+        "first_log_date": first_date,
+        "last_log_date": last_date,
+        "theta_accrued_estimate": accrued,
+        "theta_accrued_is_estimate": True,
+        "theta_accrued_note": (
+            "ESTIMATE only — sum of daily theta snapshots × qty × contract size. "
+            "Not a measurable cash flow. Real hedge P&L combines theta, vega, and delta."
+        ),
+        "contract_size": CONTRACT_SIZE,
+        "sum_total_theta": round(sum_total, 4),
+        "rows": [
+            {
+                "id": int(r.id),
+                "hedge_id": int(r.hedge_id),
+                "log_date": r.log_date.isoformat() if r.log_date else None,
+                "call_theta": r.call_theta,
+                "put_theta": r.put_theta,
+                "total_theta": r.total_theta,
+                "spot_price": r.spot_price,
+                "call_iv": r.call_iv,
+                "put_iv": r.put_iv,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
 async def monitor_active_hedges(
     db: Session,
     *,
@@ -1158,6 +1329,16 @@ async def monitor_active_hedges(
     )
     closed: list[HedgePosition] = []
     for hedge in hedges:
+        try:
+            # Once per IST day — before close evaluation so day N is captured
+            await maybe_log_hedge_theta_snapshot(hedge, db, client=client)
+        except Exception as exc:
+            logger.warning(
+                "[HEDGE_THETA_LOG] monitor hook failed hedge_id=%s: %s",
+                getattr(hedge, "id", "?"),
+                exc,
+                exc_info=True,
+            )
         try:
             result = await evaluate_and_maybe_close_hedge(
                 hedge,

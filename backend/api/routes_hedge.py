@@ -18,6 +18,7 @@ from backend.engine.hedge_lifecycle import (
     VALID_HEDGE_EXIT_REASONS,
     close_hedge,
     get_active_hedge,
+    get_hedge_theta_log_payload,
     hedge_to_dict,
     open_hedge,
 )
@@ -261,6 +262,35 @@ async def hedge_close(
         "realized_pnl": closed.realized_pnl,
         "exit_reason": closed.exit_reason,
     }
+
+
+@router.get("/{hedge_id}/theta-log")
+async def hedge_theta_log(
+    hedge_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Daily theta/IV snapshots for a hedge plus accrued-theta ESTIMATE.
+
+    theta_accrued_estimate is a sum of daily snapshots — not cash P&L.
+    """
+    hedge_row = (
+        db.query(HedgePosition).filter(HedgePosition.id == int(hedge_id)).first()
+    )
+    if hedge_row is None:
+        raise HTTPException(status_code=404, detail=f"Hedge #{hedge_id} not found")
+
+    account = _get_active_account(db)
+    if int(hedge_row.account_id) != int(account.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Hedge does not belong to the active account",
+        )
+
+    try:
+        return get_hedge_theta_log_payload(db, hedge_id=int(hedge_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/active")
