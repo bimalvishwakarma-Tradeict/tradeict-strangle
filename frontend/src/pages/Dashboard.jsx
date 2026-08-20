@@ -963,7 +963,11 @@ export default function Dashboard() {
       <MultiAccountOverview overview={slaveOverview} />
 
       {!loading && activeHedge && (
-        <HedgePanel hedge={activeHedge} onClosed={() => refetch()} />
+        <HedgePanel
+          hedge={activeHedge}
+          onClosed={() => refetch()}
+          onUpdated={() => refetch()}
+        />
       )}
 
       {loading ? (

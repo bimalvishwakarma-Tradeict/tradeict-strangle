@@ -1298,6 +1298,10 @@ export default function AutoTrade() {
               placeholder="Required when ON"
               className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
             />
+            <span className="mt-1 block text-xs text-gray-500">
+              Default for the next hedge open only — edit a live hedge on the
+              Dashboard panel.
+            </span>
           </label>
           <label className="block text-sm text-gray-300">
             Hedge stop loss ($)
@@ -1311,6 +1315,10 @@ export default function AutoTrade() {
               placeholder="Required when ON"
               className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
             />
+            <span className="mt-1 block text-xs text-gray-500">
+              Default for the next hedge open only — edit a live hedge on the
+              Dashboard panel.
+            </span>
           </label>
           <label className="block text-sm text-gray-300 sm:col-span-2">
             Margin buffer (%)

@@ -85,6 +85,7 @@ _IMPORTANT_EVENTS = frozenset(
         "HEDGE_THETA_LOG",
         "HEDGE_GATE",
         "HEDGE_GATE_BLOCK",
+        "HEDGE_SETTINGS_UPDATE",
     }
 )
 

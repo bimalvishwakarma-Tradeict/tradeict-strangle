@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from backend.core.bot_logger import log_and_buffer
 from backend.core.delta_client import DeltaClient
 from backend.core.encryption import decrypt
 from backend.database import get_db, get_or_create_auto_settings
@@ -181,6 +182,104 @@ class HedgeCloseRequest(BaseModel):
         default="HEDGE_MANUAL",
         description="HEDGE_TARGET | HEDGE_STOPLOSS | HEDGE_EXPIRY | HEDGE_MANUAL",
     )
+
+
+class HedgeSettingsUpdate(BaseModel):
+    """Partial update for an open hedge's target / stoploss (USD)."""
+
+    target_usd: float | None = Field(default=None, gt=0)
+    stoploss_usd: float | None = Field(default=None, gt=0)
+
+
+@router.patch("/{hedge_id}/settings")
+async def hedge_update_settings(
+    hedge_id: int,
+    payload: HedgeSettingsUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Update target_usd and/or stoploss_usd on hedge_positions.
+
+    Takes effect on the next hedge monitor cycle (reads the row each tick).
+    Auto Trade settings are defaults for the *next* hedge open only — they do
+    not retro-apply here.
+    """
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No settings provided")
+
+    hedge_row = (
+        db.query(HedgePosition).filter(HedgePosition.id == int(hedge_id)).first()
+    )
+    if hedge_row is None:
+        raise HTTPException(status_code=404, detail=f"Hedge #{hedge_id} not found")
+
+    account = _get_active_account(db)
+    if int(hedge_row.account_id) != int(account.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Hedge does not belong to the active account",
+        )
+
+    status = str(hedge_row.status or "").lower()
+    if status not in {"active", "exit_failed", "partial", "error"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Hedge #{hedge_id} status={status} cannot update settings",
+        )
+
+    updated: dict[str, Any] = {}
+
+    if "target_usd" in updates and updates["target_usd"] is not None:
+        new_val = float(updates["target_usd"])
+        if new_val <= 0:
+            raise HTTPException(status_code=400, detail="target_usd must be > 0")
+        old_val = hedge_row.target_usd
+        hedge_row.target_usd = new_val
+        updated["target_usd"] = new_val
+        log_and_buffer(
+            "HEDGE_SETTINGS_UPDATE",
+            int(hedge_id),
+            {
+                "field": "target_usd",
+                "old_value": old_val,
+                "new_value": new_val,
+            },
+        )
+
+    if "stoploss_usd" in updates and updates["stoploss_usd"] is not None:
+        new_val = float(updates["stoploss_usd"])
+        if new_val <= 0:
+            raise HTTPException(status_code=400, detail="stoploss_usd must be > 0")
+        old_val = hedge_row.stoploss_usd
+        hedge_row.stoploss_usd = new_val
+        updated["stoploss_usd"] = new_val
+        log_and_buffer(
+            "HEDGE_SETTINGS_UPDATE",
+            int(hedge_id),
+            {
+                "field": "stoploss_usd",
+                "old_value": old_val,
+                "new_value": new_val,
+            },
+        )
+
+    if not updated:
+        raise HTTPException(status_code=400, detail="No settings provided")
+
+    db.commit()
+    db.refresh(hedge_row)
+
+    return {
+        "success": True,
+        "hedge_id": int(hedge_row.id),
+        "updated": updated,
+        "hedge": hedge_to_dict(hedge_row),
+        "message": (
+            f"Hedge #{hedge_row.id} settings updated — "
+            "monitor will use new values next cycle"
+        ),
+    }
 
 
 @router.post("/{hedge_id}/close")

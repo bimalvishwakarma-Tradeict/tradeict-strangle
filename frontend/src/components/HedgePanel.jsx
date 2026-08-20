@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import LoadingSpinner from './ui/LoadingSpinner'
-import { closeHedge } from '../services/api'
+import ConfirmDialog from './ui/ConfirmDialog'
+import { closeHedge, updateHedgeSettings } from '../services/api'
 
 function fmtMoney(v, digits = 2) {
   const n = Number(v)
@@ -75,11 +76,15 @@ function avgIv(a, b) {
 /**
  * Live long-hedge panel (spec 5.1). Renders above basket cards.
  */
-export default function HedgePanel({ hedge, onClosed }) {
+export default function HedgePanel({ hedge, onClosed, onUpdated }) {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [done, setDone] = useState(null)
   const [error, setError] = useState('')
+  const [editField, setEditField] = useState(null) // 'target' | 'sl' | null
+  const [editValue, setEditValue] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
+  const [editError, setEditError] = useState('')
 
   if (!hedge) return null
 
@@ -99,6 +104,49 @@ export default function HedgePanel({ hedge, onClosed }) {
     : null
   const accrued = Number(hedge.theta_accrued_estimate)
   const accruedDisplay = Number.isFinite(accrued) ? -Math.abs(accrued) : null
+
+  const openEdit = (field) => {
+    setEditError('')
+    setEditField(field)
+    if (field === 'target') {
+      setEditValue(
+        hedge.target_usd != null && Number.isFinite(Number(hedge.target_usd))
+          ? String(hedge.target_usd)
+          : '',
+      )
+    } else {
+      setEditValue(
+        hedge.stoploss_usd != null &&
+          Number.isFinite(Number(hedge.stoploss_usd))
+          ? String(hedge.stoploss_usd)
+          : '',
+      )
+    }
+  }
+
+  const saveEdit = async () => {
+    if (!editField || editSaving) return
+    const val = Number(editValue)
+    if (!Number.isFinite(val) || val <= 0) {
+      setEditError('Value must be greater than 0')
+      return
+    }
+    setEditSaving(true)
+    setEditError('')
+    try {
+      const payload =
+        editField === 'target'
+          ? { target_usd: val }
+          : { stoploss_usd: val }
+      await updateHedgeSettings(hedge.id, payload)
+      setEditField(null)
+      onUpdated?.()
+    } catch (err) {
+      setEditError(err.message || 'Failed to save')
+    } finally {
+      setEditSaving(false)
+    }
+  }
 
   const handleClose = async () => {
     if (loading) return
@@ -227,8 +275,13 @@ export default function HedgePanel({ hedge, onClosed }) {
           </div>
         </div>
 
-        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-gray-800 pt-3 text-xs text-gray-400">
-          <span>
+        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-gray-800 pt-3 text-xs text-gray-400">
+          <button
+            type="button"
+            onClick={() => openEdit('target')}
+            className="rounded-md border border-transparent px-1.5 py-0.5 text-left hover:border-gray-600 hover:bg-gray-800/80"
+            title="Edit target"
+          >
             Target{' '}
             <span className="text-green-400">
               +${fmtMoney(hedge.target_usd)}
@@ -238,8 +291,16 @@ export default function HedgePanel({ hedge, onClosed }) {
                 ({fmtMoney(hedge.pct_to_target, 1)}%)
               </span>
             )}
-          </span>
-          <span>
+            <span className="ml-1 text-[10px] uppercase text-gray-600">
+              edit
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => openEdit('sl')}
+            className="rounded-md border border-transparent px-1.5 py-0.5 text-left hover:border-gray-600 hover:bg-gray-800/80"
+            title="Edit stop loss"
+          >
             Stop{' '}
             <span className="text-red-400">
               −${fmtMoney(hedge.stoploss_usd)}
@@ -249,7 +310,10 @@ export default function HedgePanel({ hedge, onClosed }) {
                 ({fmtMoney(hedge.pct_to_stop, 1)}%)
               </span>
             )}
-          </span>
+            <span className="ml-1 text-[10px] uppercase text-gray-600">
+              edit
+            </span>
+          </button>
           <span>
             IV entry {fmtIv(entryIv)} · IV now {fmtIv(liveIv)}
           </span>
@@ -341,6 +405,39 @@ export default function HedgePanel({ hedge, onClosed }) {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={Boolean(editField)}
+        title={
+          editField === 'target' ? 'Edit Hedge Target ($)' : 'Edit Hedge Stop Loss ($)'
+        }
+        message={
+          <label className="block text-left text-sm text-gray-300">
+            {editField === 'target'
+              ? 'Profit target in USD (must be > 0). Takes effect next monitor cycle.'
+              : 'Stop loss in USD (must be > 0). Takes effect next monitor cycle.'}
+            <input
+              type="number"
+              min={0.01}
+              step={0.01}
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              className="mt-2 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+            />
+            {editError && (
+              <span className="mt-2 block text-xs text-red-400">{editError}</span>
+            )}
+          </label>
+        }
+        confirmLabel={editSaving ? 'Saving…' : 'Save'}
+        confirmDisabled={editSaving}
+        onCancel={() => {
+          if (editSaving) return
+          setEditField(null)
+          setEditError('')
+        }}
+        onConfirm={saveEdit}
+      />
     </>
   )
 }

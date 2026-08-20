@@ -537,6 +537,10 @@ async def open_hedge(
             put_fill_price=put_fill if put_fill > 0 else None,
             put_entry_fee_usd=put_fee if put_fee > 0 else None,
             entry_time=_utc_now(),
+            # Snapshot Auto Trade defaults at open only. Changing
+            # hedge_target_usd / hedge_stoploss_usd in settings does NOT
+            # retro-apply — edit the live hedge via PATCH /api/hedge/{id}/settings
+            # (Dashboard hedge panel).
             target_usd=(
                 float(settings.hedge_target_usd)
                 if getattr(settings, "hedge_target_usd", None) is not None

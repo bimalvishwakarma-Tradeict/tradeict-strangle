@@ -184,6 +184,15 @@ export const closeHedge = async (hedgeId, reason = 'HEDGE_MANUAL') => {
   }
 }
 
+export const updateHedgeSettings = async (hedgeId, data) => {
+  try {
+    const res = await api.patch(`/api/hedge/${hedgeId}/settings`, data)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to update hedge settings'))
+  }
+}
+
 export const getTrade = async (id) => {
   try {
     const res = await api.get(`/api/trade/${id}`)
