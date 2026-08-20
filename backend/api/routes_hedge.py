@@ -13,12 +13,15 @@ from backend.core.delta_client import DeltaClient
 from backend.core.encryption import decrypt
 from backend.database import get_db, get_or_create_auto_settings
 from backend.engine.hedge_lifecycle import (
+    HedgeCloseError,
     HedgeOpenError,
+    VALID_HEDGE_EXIT_REASONS,
+    close_hedge,
     get_active_hedge,
     hedge_to_dict,
     open_hedge,
 )
-from backend.models import Account
+from backend.models import Account, HedgePosition
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +169,97 @@ async def hedge_open(
             f"{hedge.strike} straddle {hedge.expiry_date} × {hedge.quantity} lot(s)."
         ),
         "hedge": hedge_to_dict(hedge),
+    }
+
+
+class HedgeCloseRequest(BaseModel):
+    """Optional body for POST /api/hedge/{id}/close."""
+
+    reason: str = Field(
+        default="HEDGE_MANUAL",
+        description="HEDGE_TARGET | HEDGE_STOPLOSS | HEDGE_EXPIRY | HEDGE_MANUAL",
+    )
+
+
+@router.post("/{hedge_id}/close")
+async def hedge_close(
+    hedge_id: int,
+    payload: HedgeCloseRequest = HedgeCloseRequest(),
+    reason: str | None = Query(
+        None,
+        description="Override exit reason (default HEDGE_MANUAL)",
+    ),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Manually close a hedge (both legs, verified flat, real fills).
+
+    Default reason: HEDGE_MANUAL. Idempotent if already closed (HEDGE_CLOSE_SKIP).
+    """
+    exit_reason = str(reason or payload.reason or "HEDGE_MANUAL").upper().strip()
+    if exit_reason not in VALID_HEDGE_EXIT_REASONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid reason '{exit_reason}'. "
+                f"Valid: {', '.join(sorted(VALID_HEDGE_EXIT_REASONS))}"
+            ),
+        )
+
+    hedge_row = (
+        db.query(HedgePosition).filter(HedgePosition.id == int(hedge_id)).first()
+    )
+    if hedge_row is None:
+        raise HTTPException(status_code=404, detail=f"Hedge #{hedge_id} not found")
+
+    account = _get_active_account(db)
+    if int(hedge_row.account_id) != int(account.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Hedge does not belong to the active account",
+        )
+
+    client = _get_delta_client(account)
+    try:
+        try:
+            closed = await close_hedge(
+                int(hedge_id),
+                exit_reason,
+                db,
+                client=client,
+            )
+        except HedgeCloseError as exc:
+            body: dict[str, Any] = {
+                "success": False,
+                "message": str(exc),
+                "stage": exc.stage,
+                "detail": exc.reason,
+            }
+            if exc.hedge is not None:
+                body["hedge"] = hedge_to_dict(exc.hedge)
+            raise HTTPException(status_code=502, detail=body) from exc
+        except Exception as exc:
+            logger.critical(
+                "[HEDGE_CLOSE_FAIL] stage=api reason=%s",
+                exc,
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected hedge close failure: {exc}",
+            ) from exc
+    finally:
+        await client.close()
+
+    return {
+        "success": True,
+        "message": (
+            f"Hedge #{closed.id} closed ({closed.exit_reason}). "
+            f"realized_pnl={closed.realized_pnl}"
+        ),
+        "hedge": hedge_to_dict(closed),
+        "realized_pnl": closed.realized_pnl,
+        "exit_reason": closed.exit_reason,
     }
 
 

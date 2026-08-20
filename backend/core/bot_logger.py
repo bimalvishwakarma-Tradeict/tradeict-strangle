@@ -73,6 +73,14 @@ _IMPORTANT_EVENTS = frozenset(
         "PNL_SANITY_FAIL",
         "SETTLING",
         "SETTLING_BYPASS",
+        "HEDGE_OPEN_START",
+        "HEDGE_OPEN_DONE",
+        "HEDGE_OPEN_FAIL",
+        "HEDGE_VERIFY",
+        "HEDGE_CLOSE_START",
+        "HEDGE_CLOSE_DONE",
+        "HEDGE_CLOSE_FAIL",
+        "HEDGE_CLOSE_SKIP",
     }
 )
 

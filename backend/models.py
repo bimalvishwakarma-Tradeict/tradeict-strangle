@@ -509,7 +509,7 @@ class HedgePosition(Base):
     expiry_date: Mapped[date] = mapped_column(Date, nullable=False)
     strike: Mapped[float] = mapped_column(Float, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
-    # active | closed | partial | error
+    # active | closed | partial | error | exit_failed
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
 
     call_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -586,7 +586,7 @@ class SlaveHedgePosition(Base):
     expiry_date: Mapped[date] = mapped_column(Date, nullable=False)
     strike: Mapped[float] = mapped_column(Float, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
-    # active | closed | partial | error
+    # active | closed | partial | error | exit_failed
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
 
     call_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
