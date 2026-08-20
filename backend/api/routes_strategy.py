@@ -311,13 +311,25 @@ async def theta_preview(
     hedge_expiry_dte: int | None = Query(None),
     expiry_dte: int | None = Query(None, ge=0, le=90),
     expiry_date_override: str | None = Query(None),
+    expiry_date: str | None = Query(
+        None,
+        description="Explicit short-basket expiry YYYY-MM-DD (must exist on Delta)",
+    ),
 ) -> dict[str, Any]:
     """
     What theta_based strike selection would pick right now (no orders).
+
+    Hedge supplies CALL-leg theta only. Short strikes come from the SHORT
+    basket expiry chain: call-by-theta, put-by-premium-match.
+    Works with no query params (reads saved auto-trade settings).
     """
+    from datetime import date as date_cls
+
     from backend.core.hedge_theta import (
         CONTRACT_SIZE,
+        ExpiryNotAvailableError,
         HedgeThetaError,
+        assert_expiry_available,
         get_hypothetical_hedge_theta,
         resolve_hedge_expiry_date,
         resolve_short_expiry_date,
@@ -333,6 +345,17 @@ async def theta_preview(
         if theta_multiplier is not None
         else (getattr(settings, "theta_multiplier", None) or 3.0)
     )
+    short_dte = int(
+        expiry_dte
+        if expiry_dte is not None
+        else (settings.expiry_dte if settings.expiry_dte is not None else 1)
+    )
+    short_override = (
+        expiry_date_override
+        if expiry_date_override is not None
+        else getattr(settings, "expiry_date_override", None)
+    )
+
     client = _get_delta_client(db)
     try:
         try:
@@ -358,24 +381,40 @@ async def theta_preview(
             hedge = await get_hypothetical_hedge_theta(
                 client, und, hedge_exp, qty
             )
-            short_exp = await resolve_short_expiry_date(
-                expiry_dte=int(
-                    expiry_dte
-                    if expiry_dte is not None
-                    else (settings.expiry_dte or 1)
-                ),
-                expiry_date_override=(
-                    expiry_date_override
-                    if expiry_date_override is not None
-                    else getattr(settings, "expiry_date_override", None)
-                ),
-            )
+
+            # Explicit ?expiry_date=… always wins and must exist on Delta
+            if expiry_date is not None:
+                try:
+                    short_exp = date_cls.fromisoformat(
+                        str(expiry_date).strip()[:10]
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid expiry date: {expiry_date}",
+                    ) from exc
+            else:
+                short_exp = await resolve_short_expiry_date(
+                    expiry_dte=short_dte,
+                    expiry_date_override=short_override,
+                )
+
+            await assert_expiry_available(client, und, short_exp)
+
             product_u = _resolve_product_underlying(und)
             price_symbol = _resolve_underlying_symbol(und)
             spot = float(await client.get_underlying_price(price_symbol))
             short_chain = await client.get_option_chain(
                 product_u, short_exp.isoformat()
             )
+            if not short_chain:
+                raise HedgeThetaError(
+                    f"Empty option chain for short expiry {short_exp.isoformat()}"
+                )
+        except ExpiryNotAvailableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
         except HedgeThetaError as exc:
             logger.warning("theta-preview unavailable: %s", exc)
             return {
@@ -393,14 +432,15 @@ async def theta_preview(
                 "detail": str(exc),
             }
 
+        hedge_call_theta = abs(float(hedge["call_theta"]))
         hedge_total = float(hedge["total_theta"])
-        required = hedge_total * multiplier
+        required = hedge_call_theta * multiplier
         if required <= 0:
             return {
                 "success": False,
                 "unavailable": True,
                 "message": "unavailable - chain fetch failed",
-                "detail": "hedge total_theta is zero",
+                "detail": "hedge call_theta is zero",
             }
 
         try:
@@ -415,13 +455,33 @@ async def theta_preview(
 
         combined = float(picks["combined_theta"])
         coverage = (combined / hedge_total) if hedge_total > 0 else 0.0
+        short_expiry_str = short_exp.isoformat()
+
+        logger.info(
+            "[STRIKE_SELECT_THETA] hedge_call_theta=%.4f theta_multiplier=%.4f "
+            "required_theta=%.4f short_expiry=%s spot=%.2f "
+            "call=%s put=%s coverage=%.2f hedge_total_theta=%.4f",
+            hedge_call_theta,
+            multiplier,
+            required,
+            short_expiry_str,
+            spot,
+            picks["call"],
+            picks["put"],
+            coverage,
+            hedge_total,
+        )
+
         return {
             "success": True,
             "unavailable": False,
+            "hedge_call_theta": round(hedge_call_theta, 4),
             "hedge_total_theta": round(hedge_total, 4),
+            "theta_multiplier": multiplier,
             "multiplier": multiplier,
             "required_theta": round(required, 4),
-            "short_expiry_date": short_exp.isoformat(),
+            "short_expiry": short_expiry_str,
+            "short_expiry_date": short_expiry_str,
             "hedge_expiry_date": hedge["expiry_date"],
             "call": picks["call"],
             "put": picks["put"],

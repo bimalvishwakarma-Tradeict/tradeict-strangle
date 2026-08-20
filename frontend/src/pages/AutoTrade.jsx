@@ -549,6 +549,7 @@ export default function AutoTrade() {
   }, [orderMarginPerLot, marginBufferPct, hedgePreview])
 
   const buildPreviewParams = useCallback(() => {
+    const dte = Math.max(0, Number(expiryDte) || 1)
     const params = {
       underlying,
       quantity: Math.max(1, Number(quantity) || 1),
@@ -556,7 +557,7 @@ export default function AutoTrade() {
       margin_buffer_pct: Math.min(200, Math.max(0, Number(marginBufferPct) || 50)),
       theta_multiplier: Math.min(20, Math.max(0.01, Number(thetaMultiplier) || 3)),
       target_theta_pct: Math.min(1000, Math.max(10, Number(targetThetaPct) || 150)),
-      expiry_dte: Math.max(0, Number(expiryDte) || 1),
+      expiry_dte: dte,
     }
     if (hedgeExpiryDateOverride) {
       params.hedge_expiry_date_override = hedgeExpiryDateOverride
@@ -564,7 +565,8 @@ export default function AutoTrade() {
     if (hedgeExpiryDte !== '' && hedgeExpiryDte != null) {
       params.hedge_expiry_dte = Number(hedgeExpiryDte)
     }
-    if (selectedExpiryDate) {
+    // Match auto-trade save rules: daily 0/1/2 DTE never send a calendar override
+    if (dte > 2 && selectedExpiryDate) {
       params.expiry_date_override = selectedExpiryDate
     }
     return params
@@ -1488,19 +1490,33 @@ export default function AutoTrade() {
           ) : thetaPreview?.success ? (
             <div className="space-y-1.5 font-mono text-xs text-gray-300">
               <p>
-                Hedge theta today{' '}
+                Short expiry{' '}
                 <span className="text-white">
-                  {Number(thetaPreview.hedge_total_theta).toFixed(2)}
-                </span>
-              </p>
-              <p>
-                Required per leg{' '}
-                <span className="text-white">
-                  {Number(thetaPreview.required_theta).toFixed(2)}
+                  {formatExpiryShort(
+                    thetaPreview.short_expiry || thetaPreview.short_expiry_date,
+                  )}
                 </span>
                 <span className="text-gray-500">
                   {' '}
-                  (×{Number(thetaPreview.multiplier).toFixed(2)})
+                  (spot {Number(thetaPreview.spot).toFixed(0)})
+                </span>
+              </p>
+              <p>
+                Hedge call θ{' '}
+                <span className="text-white">
+                  {Number(
+                    thetaPreview.hedge_call_theta ?? thetaPreview.hedge_total_theta,
+                  ).toFixed(2)}
+                </span>
+                <span className="text-gray-500">
+                  {' '}
+                  × {Number(thetaPreview.theta_multiplier ?? thetaPreview.multiplier).toFixed(2)}
+                </span>
+              </p>
+              <p>
+                Required per call{' '}
+                <span className="text-white">
+                  {Number(thetaPreview.required_theta).toFixed(2)}
                 </span>
               </p>
               <p>
@@ -1513,21 +1529,17 @@ export default function AutoTrade() {
                 {thetaPreview.call?.chain_limit ? (
                   <span className="text-amber-400"> [chain limit]</span>
                 ) : null}
-                {thetaPreview.call?.premium_matched ? (
-                  <span className="text-sky-400"> premium-matched</span>
-                ) : null}
               </p>
               <p>
                 {'              '}PUT{' '}
                 <span className="text-emerald-300">
                   {Math.round(Number(thetaPreview.put?.strike))}
                 </span>{' '}
-                {thetaPreview.put?.premium_matched
-                  ? `(premium-matched, ${formatMoney(thetaPreview.put?.premium)})`
-                  : `(theta ${Number(thetaPreview.put?.theta).toFixed(2)}, ${formatMoney(thetaPreview.put?.premium)})`}
-                {thetaPreview.put?.chain_limit ? (
-                  <span className="text-amber-400"> [chain limit]</span>
-                ) : null}
+                (premium-matched, {formatMoney(thetaPreview.put?.premium)}
+                {thetaPreview.put?.theta != null
+                  ? `, θ ${Number(thetaPreview.put.theta).toFixed(2)}`
+                  : ''}
+                )
               </p>
               <p>
                 Coverage{' '}

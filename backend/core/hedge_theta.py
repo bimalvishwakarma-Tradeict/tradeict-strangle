@@ -21,6 +21,10 @@ class HedgeThetaError(Exception):
     """Chain fetch or strike resolution failed — UI must show unavailable."""
 
 
+class ExpiryNotAvailableError(Exception):
+    """Requested expiry does not exist on Delta — map to HTTP 400."""
+
+
 def _as_date(value: date | datetime | str) -> date:
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
@@ -129,15 +133,50 @@ async def resolve_short_expiry_date(
     expiry_dte: int,
     expiry_date_override: str | None = None,
 ) -> date:
-    """Resolve the short-basket expiry used for theta-based strike preview."""
-    if expiry_date_override:
+    """
+    Resolve the short-basket expiry — same rules as auto_trade_engine.
+
+    Daily 0/1/2 DTE: always compute from expiry_dte (ignore calendar override).
+    Weekly/monthly (dte > 2): use expiry_date_override when it is still valid.
+    """
+    dte = int(expiry_dte if expiry_dte is not None else 1)
+    override = (str(expiry_date_override).strip()[:10] if expiry_date_override else None)
+
+    if override and dte > 2:
         try:
-            d = _as_date(expiry_date_override)
-            if (d - get_ist_now().date()).days > 2:
-                return d
-        except ValueError:
-            pass
-    return get_expiry_date_for_dte(int(expiry_dte))
+            parsed = _as_date(override)
+            today = get_ist_now().date()
+            if parsed >= today:
+                return parsed
+        except ValueError as exc:
+            raise HedgeThetaError(
+                f"Invalid short expiry_date_override: {override}"
+            ) from exc
+
+    return get_expiry_date_for_dte(dte)
+
+
+async def assert_expiry_available(
+    client: DeltaClient,
+    underlying: str,
+    expiry: date,
+) -> None:
+    """Raise ExpiryNotAvailableError if expiry is not listed on Delta."""
+    product_u = underlying.upper().strip()
+    if product_u.endswith("USD") and len(product_u) > 3:
+        product_u = product_u[:-3]
+    try:
+        rows = await client.get_available_expiries(product_u, limit=90)
+    except DeltaAPIError as exc:
+        raise HedgeThetaError(str(exc)) from exc
+    dates = {_as_date(r["date"]) for r in rows}
+    if expiry not in dates:
+        raise ExpiryNotAvailableError(
+            f"Expiry {expiry.isoformat()} is not available on Delta "
+            f"for {product_u}. Available: "
+            f"{', '.join(sorted(d.isoformat() for d in dates)[:12])}"
+            f"{'…' if len(dates) > 12 else ''}"
+        )
 
 
 async def get_hypothetical_hedge_theta(
@@ -272,82 +311,65 @@ def select_theta_based_strikes(
     required_theta: float,
 ) -> dict[str, Any]:
     """
-    Spec 1.3: furthest OTM strike per side with |theta| >= required_theta.
-    Chain-limit → furthest available + premium-match the other side.
+    Call-by-theta / put-by-premium-match on the SHORT expiry chain.
+
+    CALL: OTM only (strike > spot); furthest whose |theta| >= required_theta.
+    PUT:  OTM only (strike < spot); closest premium to the chosen call.
     """
     if not chain or spot <= 0 or required_theta <= 0:
         raise HedgeThetaError(
             "Invalid chain or required_theta for strike selection"
         )
 
-    atm = annotate_atm(chain, float(spot))
-    if atm is None:
-        raise HedgeThetaError("ATM not found for strike selection")
-
     sorted_rows = sorted(chain, key=lambda r: float(r["strike"]))
-    call_rows = [r for r in sorted_rows if float(r["strike"]) >= float(atm)]
-    put_rows = [
-        r for r in reversed(sorted_rows) if float(r["strike"]) <= float(atm)
-    ]
+    call_rows = [r for r in sorted_rows if float(r["strike"]) > float(spot)]
+    put_rows = [r for r in sorted_rows if float(r["strike"]) < float(spot)]
 
-    def _pick(
-        side: str, rows: list[dict[str, Any]]
-    ) -> tuple[dict[str, Any], bool]:
-        last_ok: dict[str, Any] | None = None
-        for row in rows:
-            th = _side_theta(row, side)
-            if th >= required_theta:
-                last_ok = row
-            else:
-                break
-        if last_ok is None:
-            # No strike met the floor — stay at ATM (highest theta), not chain-limit
-            if not rows:
-                raise HedgeThetaError(f"No {side} strikes available")
-            return rows[0], False
-        # Chain limit: every outward strike still qualifies through the last one
-        chain_limit = last_ok is rows[-1]
-        return last_ok, chain_limit
+    if not call_rows:
+        raise HedgeThetaError("No OTM call strikes (strike > spot) on short chain")
+    if not put_rows:
+        raise HedgeThetaError("No OTM put strikes (strike < spot) on short chain")
 
-    call_row, call_limit = _pick("call", call_rows)
-    put_row, put_limit = _pick("put", put_rows)
+    # Walk outward (ascending strike); keep last that still meets required_theta
+    last_ok: dict[str, Any] | None = None
+    for row in call_rows:
+        if _side_theta(row, "call") >= required_theta:
+            last_ok = row
+        else:
+            break
 
-    call_matched = False
-    put_matched = False
+    if last_ok is None:
+        # Nearest OTM already below floor — stay there (not a chain-limit case)
+        call_row = call_rows[0]
+        chain_limit = False
+    else:
+        call_row = last_ok
+        # Ran out of strikes while still meeting the floor
+        chain_limit = last_ok is call_rows[-1]
 
-    if call_limit and not put_limit:
-        target_px = _side_premium(call_row, "call")
-        put_row = min(
-            put_rows,
-            key=lambda r: abs(_side_premium(r, "put") - target_px),
-        )
-        put_matched = True
-        put_limit = False
-    elif put_limit and not call_limit:
-        target_px = _side_premium(put_row, "put")
-        call_row = min(
-            call_rows,
-            key=lambda r: abs(_side_premium(r, "call") - target_px),
-        )
-        call_matched = True
-        call_limit = False
+    call_premium = _side_premium(call_row, "call")
+    if call_premium <= 0:
+        raise HedgeThetaError("Chosen call premium unavailable")
+
+    put_row = min(
+        put_rows,
+        key=lambda r: abs(_side_premium(r, "put") - call_premium),
+    )
 
     call_theta = _side_theta(call_row, "call")
     put_theta = _side_theta(put_row, "put")
     return {
         "call": {
             "strike": float(call_row["strike"]),
-            "premium": round(_side_premium(call_row, "call"), 2),
+            "premium": round(call_premium, 2),
             "theta": round(call_theta, 4),
-            "chain_limit": bool(call_limit),
-            "premium_matched": bool(call_matched),
+            "chain_limit": bool(chain_limit),
         },
         "put": {
             "strike": float(put_row["strike"]),
             "premium": round(_side_premium(put_row, "put"), 2),
             "theta": round(put_theta, 4),
-            "chain_limit": bool(put_limit),
-            "premium_matched": bool(put_matched),
+            "premium_matched": True,
         },
         "combined_theta": round(call_theta + put_theta, 4),
     }
