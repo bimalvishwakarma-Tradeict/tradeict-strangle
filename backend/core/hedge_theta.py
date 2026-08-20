@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from calendar import monthrange
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -31,16 +30,6 @@ def _as_date(value: date | datetime | str) -> date:
     if isinstance(value, datetime):
         return value.date()
     return date.fromisoformat(str(value).strip()[:10])
-
-
-def _last_friday_of_month(year: int, month: int) -> date:
-    last_day = date(year, month, monthrange(year, month)[1])
-    offset = (last_day.weekday() - 4) % 7
-    return last_day.fromordinal(last_day.toordinal() - offset)
-
-
-def _is_monthly_expiry(d: date) -> bool:
-    return d.weekday() == 4 and d == _last_friday_of_month(d.year, d.month)
 
 
 def _pack_theta_result(
@@ -90,6 +79,52 @@ def _pack_theta_result(
     return result
 
 
+LEGACY_HEDGE_EXPIRY_MODES = frozenset({"monthly", "date", "dte"})
+
+
+def is_relative_expiry_key(key: str | None) -> bool:
+    """True for keys like 0dte, week_2, month_1."""
+    k = str(key or "").lower().strip()
+    if not k or k in LEGACY_HEDGE_EXPIRY_MODES:
+        return False
+    if k.endswith("dte") and k[:-3].isdigit():
+        return True
+    if k.startswith("month_") and k.split("_", 1)[-1].isdigit():
+        return True
+    if k.startswith("week_") and k.split("_", 1)[-1].isdigit():
+        return True
+    return False
+
+
+def migrate_hedge_expiry_mode(
+    mode: str | None,
+    *,
+    expiry_dte: int | None = None,
+) -> tuple[str, bool]:
+    """
+    Map legacy hedge_expiry_mode to a relative label key.
+
+    Returns (mode_or_key, needs_repick).
+    - monthly -> month_1
+    - dte -> Ndte when N is known, else needs_repick
+    - date -> stays 'date' with needs_repick=True
+    """
+    raw = str(mode or "month_1").lower().strip()
+    if is_relative_expiry_key(raw):
+        return raw, False
+    if raw == "monthly":
+        return "month_1", False
+    if raw == "dte":
+        if expiry_dte is None:
+            return "dte", True
+        n = int(expiry_dte)
+        return f"{n}dte", False
+    if raw == "date":
+        return "date", True
+    # Unknown — ask user to re-pick
+    return raw, True
+
+
 async def resolve_hedge_expiry_date(
     client: DeltaClient,
     underlying: str,
@@ -98,8 +133,34 @@ async def resolve_hedge_expiry_date(
     expiry_date_override: str | None = None,
     expiry_dte: int | None = None,
 ) -> date:
-    """Resolve hedge expiry from settings (monthly | date | dte)."""
-    mode = str(expiry_mode or "monthly").lower().strip()
+    """
+    Resolve hedge expiry from a relative label key (preferred) or legacy modes.
+
+    Label keys (month_1, week_2, 1dte, …) are resolved fresh against the live
+    Delta expiry list. Never silently substitute a different key's date.
+    """
+    mode = str(expiry_mode or "month_1").lower().strip()
+    migrated, needs_repick = migrate_hedge_expiry_mode(
+        mode, expiry_dte=expiry_dte
+    )
+    if needs_repick and migrated == "date":
+        # Legacy fixed date — still honour the stored calendar date if present,
+        # but callers should surface needs_repick to the UI.
+        if not expiry_date_override:
+            raise ExpiryNotAvailableError(
+                "Hedge expiry is a fixed calendar date that must be re-picked "
+                "as a relative label (e.g. Month 2). No date is stored."
+            )
+        return _as_date(expiry_date_override)
+    if needs_repick:
+        raise ExpiryNotAvailableError(
+            f"Hedge expiry setting '{mode}' is stale — re-pick a labelled "
+            "expiry (e.g. Month 1, Week 2, 1DTE)."
+        )
+
+    mode = migrated
+
+    # Legacy paths kept for any unmigrated callers
     if mode == "date":
         if not expiry_date_override:
             raise HedgeThetaError(
@@ -110,22 +171,34 @@ async def resolve_hedge_expiry_date(
         if expiry_dte is None:
             raise HedgeThetaError("hedge_expiry_dte required for dte mode")
         return get_expiry_date_for_dte(int(expiry_dte))
+    if mode == "monthly":
+        mode = "month_1"
 
-    rows = await client.get_available_expiries(underlying, limit=60)
-    monthlies = [
-        _as_date(r["date"])
-        for r in rows
-        if _is_monthly_expiry(_as_date(r["date"]))
-    ]
-    if not monthlies:
-        if not rows:
-            raise HedgeThetaError("No option expiries available for hedge")
-        return _as_date(rows[-1]["date"])
-    today = get_ist_now().date()
-    future = [d for d in monthlies if d >= today]
-    if not future:
-        return monthlies[-1]
-    return future[0]
+    product_u = underlying.upper().strip()
+    if product_u.endswith("USD") and len(product_u) > 3:
+        product_u = product_u[:-3]
+
+    try:
+        rows = await client.get_available_expiries(product_u, limit=60)
+    except DeltaAPIError as exc:
+        raise HedgeThetaError(str(exc)) from exc
+
+    if not rows:
+        raise ExpiryNotAvailableError(
+            f"No option expiries available on Delta for {product_u}"
+        )
+
+    match = next((r for r in rows if str(r.get("key") or "") == mode), None)
+    if match is None:
+        available = ", ".join(
+            f"{r.get('key')} ({r.get('label')})" for r in rows[:15]
+        )
+        raise ExpiryNotAvailableError(
+            f"Hedge expiry label '{mode}' is not available on Delta for "
+            f"{product_u} right now. Available: {available}"
+            f"{'…' if len(rows) > 15 else ''}"
+        )
+    return _as_date(match["date"])
 
 
 async def resolve_short_expiry_date(

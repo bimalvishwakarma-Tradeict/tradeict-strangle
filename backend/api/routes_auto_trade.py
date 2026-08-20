@@ -64,8 +64,9 @@ class AutoTradeSettingsSchema(BaseModel):
 
     # Hedge mode (config surface only — engine ignores until later steps)
     hedge_enabled: bool = False
-    hedge_expiry_mode: str = "monthly"  # monthly | date | dte
-    hedge_expiry_date_override: str | None = None
+    # Relative label key: month_1 | week_2 | 1dte | … (legacy: monthly|date|dte)
+    hedge_expiry_mode: str = "month_1"
+    hedge_expiry_date_override: str | None = None  # resolved date display only
     hedge_expiry_dte: int | None = Field(default=None, ge=0, le=365)
     hedge_target_usd: float | None = Field(default=None, gt=0)
     hedge_stoploss_usd: float | None = Field(default=None, gt=0)
@@ -94,12 +95,22 @@ class AutoTradeSettingsSchema(BaseModel):
     @field_validator("hedge_expiry_mode")
     @classmethod
     def validate_hedge_expiry_mode(cls, v: str) -> str:
-        normalized = str(v or "monthly").lower().strip()
-        if normalized not in {"monthly", "date", "dte"}:
-            raise ValueError(
-                "hedge_expiry_mode must be 'monthly', 'date', or 'dte'"
-            )
-        return normalized
+        from backend.core.hedge_theta import (
+            LEGACY_HEDGE_EXPIRY_MODES,
+            is_relative_expiry_key,
+            migrate_hedge_expiry_mode,
+        )
+
+        normalized = str(v or "month_1").lower().strip()
+        if is_relative_expiry_key(normalized):
+            return normalized
+        if normalized in LEGACY_HEDGE_EXPIRY_MODES:
+            migrated, _ = migrate_hedge_expiry_mode(normalized)
+            return migrated if migrated != "date" else "date"
+        raise ValueError(
+            "hedge_expiry_mode must be a relative label key "
+            "(e.g. month_1, week_2, 1dte)"
+        )
 
     @field_validator("strike_selection_mode")
     @classmethod
@@ -142,6 +153,28 @@ def _as_ist(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return IST.localize(dt)
     return dt.astimezone(IST)
+
+
+def _hedge_expiry_fields(s: AutoTradeSettings) -> dict[str, Any]:
+    """Migrate legacy hedge expiry modes for API responses."""
+    from backend.core.hedge_theta import migrate_hedge_expiry_mode
+
+    raw_mode = str(getattr(s, "hedge_expiry_mode", None) or "month_1")
+    dte = getattr(s, "hedge_expiry_dte", None)
+    mode, needs_repick = migrate_hedge_expiry_mode(
+        raw_mode,
+        expiry_dte=int(dte) if dte is not None else None,
+    )
+    return {
+        "hedge_expiry_mode": mode,
+        "hedge_expiry_date_override": getattr(
+            s, "hedge_expiry_date_override", None
+        ),
+        "hedge_expiry_dte": (
+            int(dte) if dte is not None else None
+        ),
+        "hedge_expiry_needs_repick": bool(needs_repick),
+    }
 
 
 def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
@@ -209,17 +242,7 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         ),
         "is_demo": bool(getattr(s, "is_demo", False)),
         "hedge_enabled": bool(getattr(s, "hedge_enabled", False)),
-        "hedge_expiry_mode": str(
-            getattr(s, "hedge_expiry_mode", None) or "monthly"
-        ),
-        "hedge_expiry_date_override": getattr(
-            s, "hedge_expiry_date_override", None
-        ),
-        "hedge_expiry_dte": (
-            int(s.hedge_expiry_dte)
-            if getattr(s, "hedge_expiry_dte", None) is not None
-            else None
-        ),
+        **_hedge_expiry_fields(s),
         "hedge_target_usd": (
             float(s.hedge_target_usd)
             if getattr(s, "hedge_target_usd", None) is not None
@@ -365,16 +388,120 @@ async def update_auto_trade_settings(
         settings.is_demo = bool(payload.is_demo)
 
     settings.hedge_enabled = bool(payload.hedge_enabled)
-    settings.hedge_expiry_mode = str(payload.hedge_expiry_mode).lower().strip()
-    settings.hedge_expiry_date_override = (
-        str(payload.hedge_expiry_date_override).strip()[:10]
-        if payload.hedge_expiry_date_override
-        else None
+
+    from backend.core.hedge_theta import (
+        ExpiryNotAvailableError,
+        HedgeThetaError,
+        is_relative_expiry_key,
+        migrate_hedge_expiry_mode,
+        resolve_hedge_expiry_date,
+        resolve_short_expiry_date,
     )
-    settings.hedge_expiry_dte = (
-        int(payload.hedge_expiry_dte)
-        if payload.hedge_expiry_dte is not None
-        else None
+
+    raw_hedge_mode = str(payload.hedge_expiry_mode).lower().strip()
+    migrated_mode, needs_repick = migrate_hedge_expiry_mode(
+        raw_hedge_mode,
+        expiry_dte=(
+            int(payload.hedge_expiry_dte)
+            if payload.hedge_expiry_dte is not None
+            else None
+        ),
+    )
+    if payload.hedge_enabled and (needs_repick or migrated_mode == "date"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Hedge expiry uses a stale fixed date. Re-pick a labelled "
+                "relative expiry (e.g. Month 2, Week 2) before enabling hedge mode."
+            ),
+        )
+    if payload.hedge_enabled and not is_relative_expiry_key(migrated_mode):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid hedge_expiry_mode '{raw_hedge_mode}'. "
+                "Choose a labelled expiry from the dropdown."
+            ),
+        )
+
+    settings.hedge_expiry_mode = migrated_mode
+    settings.hedge_expiry_dte = None  # relative keys replace fixed DTE
+
+    # Resolve live dates and enforce hedge expiry > short basket expiry
+    resolved_hedge_date: str | None = None
+    if payload.hedge_enabled or is_relative_expiry_key(migrated_mode):
+        try:
+            from backend.core.delta_client import DeltaClient
+            from backend.core.encryption import decrypt
+            from backend.models import Account
+
+            account = (
+                db.query(Account)
+                .filter(Account.is_active.is_(True))
+                .order_by(Account.id.asc())
+                .first()
+            )
+            if account is None:
+                if payload.hedge_enabled:
+                    raise HTTPException(
+                        status_code=401,
+                        detail="No account connected. Connect API keys to resolve hedge expiry.",
+                    )
+                client = None
+            else:
+                client = DeltaClient(
+                    decrypt(account.api_key_encrypted),
+                    decrypt(account.api_secret_encrypted),
+                )
+
+            if client is not None:
+                try:
+                    und = settings.underlying.upper().strip()
+                    short_exp = await resolve_short_expiry_date(
+                        expiry_dte=int(settings.expiry_dte or 1),
+                        expiry_date_override=getattr(
+                            settings, "expiry_date_override", None
+                        ),
+                    )
+                    hedge_exp = await resolve_hedge_expiry_date(
+                        client,
+                        und,
+                        expiry_mode=migrated_mode,
+                        expiry_date_override=None,
+                        expiry_dte=None,
+                    )
+                    if hedge_exp <= short_exp:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Hedge expiry ({hedge_exp.isoformat()}) must be "
+                                f"later than the short basket expiry "
+                                f"({short_exp.isoformat()}). Pick a farther labelled "
+                                "expiry (e.g. Month 2)."
+                            ),
+                        )
+                    resolved_hedge_date = hedge_exp.isoformat()
+                finally:
+                    await client.close()
+        except HTTPException:
+            raise
+        except ExpiryNotAvailableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (HedgeThetaError, Exception) as exc:
+            logger.warning("hedge expiry resolve on save failed: %s", exc)
+            if payload.hedge_enabled:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not resolve hedge expiry: {exc}",
+                ) from exc
+
+    settings.hedge_expiry_date_override = (
+        resolved_hedge_date
+        or (
+            str(payload.hedge_expiry_date_override).strip()[:10]
+            if payload.hedge_expiry_date_override
+            else None
+        )
     )
     settings.hedge_target_usd = (
         float(payload.hedge_target_usd)

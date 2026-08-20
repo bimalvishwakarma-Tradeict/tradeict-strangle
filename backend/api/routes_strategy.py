@@ -67,6 +67,12 @@ def _get_delta_client(db: Session) -> DeltaClient:
 @router.get("/expiries", response_model=list[ExpiryItem])
 async def get_expiries(
     underlying: str = Query(..., description="BTC / ETH / XAU"),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=90,
+        description="Max expiries to return (default unchanged for Trade page)",
+    ),
     db: Session = Depends(get_db),
 ) -> list[ExpiryItem]:
     """Return nearest future option expiries for the underlying."""
@@ -74,7 +80,9 @@ async def get_expiries(
     client = _get_delta_client(db)
     try:
         try:
-            rows = await client.get_available_expiries(product_symbol)
+            rows = await client.get_available_expiries(
+                product_symbol, limit=limit
+            )
         except DeltaAPIError as exc:
             logger.error("expiries fetch failed: %s", exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -82,6 +90,7 @@ async def get_expiries(
             ExpiryItem(
                 date=str(row["date"]),
                 label=str(row["label"]),
+                key=str(row["key"]) if row.get("key") else None,
                 unix_ts=int(row.get("unix_ts") or row.get("timestamp") or 0),
             )
             for row in rows
@@ -202,9 +211,11 @@ async def hedge_preview(
     Read-only — never places orders. Errors → unavailable (no stale data).
     """
     from backend.core.hedge_theta import (
+        ExpiryNotAvailableError,
         HedgeThetaError,
         compute_iv_percentile,
         get_hypothetical_hedge_theta,
+        migrate_hedge_expiry_mode,
         resolve_hedge_expiry_date,
     )
     from backend.database import get_or_create_auto_settings
@@ -212,20 +223,24 @@ async def hedge_preview(
     settings = get_or_create_auto_settings(db)
     und = (underlying or str(settings.underlying or "BTC")).upper()
     qty = max(1, int(quantity if quantity is not None else (settings.quantity or 1)))
-    mode = str(
+    raw_mode = str(
         hedge_expiry_mode
         or getattr(settings, "hedge_expiry_mode", None)
-        or "monthly"
-    )
-    date_override = (
-        hedge_expiry_date_override
-        if hedge_expiry_date_override is not None
-        else getattr(settings, "hedge_expiry_date_override", None)
+        or "month_1"
     )
     dte_override = (
         hedge_expiry_dte
         if hedge_expiry_dte is not None
         else getattr(settings, "hedge_expiry_dte", None)
+    )
+    mode, _ = migrate_hedge_expiry_mode(
+        raw_mode,
+        expiry_dte=int(dte_override) if dte_override is not None else None,
+    )
+    date_override = (
+        hedge_expiry_date_override
+        if hedge_expiry_date_override is not None
+        else getattr(settings, "hedge_expiry_date_override", None)
     )
     buffer = float(
         margin_buffer_pct
@@ -245,6 +260,8 @@ async def hedge_preview(
             theta = await get_hypothetical_hedge_theta(
                 client, und, expiry, qty
             )
+        except ExpiryNotAvailableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except HedgeThetaError as exc:
             logger.warning("hedge-preview unavailable: %s", exc)
             return {
@@ -278,6 +295,7 @@ async def hedge_preview(
             "underlying": und,
             "strike": theta["strike"],
             "expiry_date": theta["expiry_date"],
+            "hedge_expiry_mode": mode,
             "quantity": qty,
             "cost_usd": theta["cost_usd"],
             "daily_theta_usd": theta["daily_theta_usd"],
@@ -365,7 +383,7 @@ async def theta_preview(
                 expiry_mode=str(
                     hedge_expiry_mode
                     or getattr(settings, "hedge_expiry_mode", None)
-                    or "monthly"
+                    or "month_1"
                 ),
                 expiry_date_override=(
                     hedge_expiry_date_override
@@ -564,7 +582,7 @@ async def target_preview(
                 expiry_mode=str(
                     hedge_expiry_mode
                     or getattr(settings, "hedge_expiry_mode", None)
-                    or "monthly"
+                    or "month_1"
                 ),
                 expiry_date_override=(
                     hedge_expiry_date_override

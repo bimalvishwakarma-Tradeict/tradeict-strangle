@@ -221,26 +221,34 @@ def get_dte_label(
     Week 1 / Week 2 position can be computed correctly. If None, this
     expiry is treated as Week 1 / Month 1.
     """
-    today = date.today()
+    key = get_expiry_label_key(expiry_date, all_expiry_dates)
+    return _format_expiry_label(expiry_date, key)
+
+
+def get_expiry_label_key(
+    expiry_date: date, all_expiry_dates: list | None = None
+) -> str:
+    """
+    Stable relative key for an expiry (never a calendar date).
+
+    Examples: 0dte, 1dte, 2dte, week_1, week_2, month_1, month_2, 6dte
+    """
+    today = get_ist_now().date()
     days = (expiry_date - today).days
 
-    # Daily expiries: 0, 1, 2 days out
     if days <= 2:
-        return f"{days}DTE ({expiry_date.strftime('%d %b')})"
+        return f"{max(0, days)}dte"
 
-    # Helper: last Friday of a given month
     def _last_friday(d: date) -> date:
         if d.month == 12:
             last_day = date(d.year + 1, 1, 1) - timedelta(days=1)
         else:
             last_day = date(d.year, d.month + 1, 1) - timedelta(days=1)
-        days_back = (last_day.weekday() - 4) % 7  # 4 = Friday
+        days_back = (last_day.weekday() - 4) % 7
         return last_day - timedelta(days=days_back)
 
     is_friday = expiry_date.weekday() == 4
     is_monthly = is_friday and expiry_date == _last_friday(expiry_date)
-
-    # Build sorted reference list for position counting
     ref = sorted(set(all_expiry_dates)) if all_expiry_dates else [expiry_date]
 
     if is_monthly:
@@ -251,7 +259,7 @@ def get_dte_label(
             and d == _last_friday(d)
             and d < expiry_date
         ) + 1
-        return f"Month {month_num} ({expiry_date.strftime('%b %Y')})"
+        return f"month_{month_num}"
 
     if is_friday:
         week_num = sum(
@@ -261,10 +269,21 @@ def get_dte_label(
             and d != _last_friday(d)
             and d < expiry_date
         ) + 1
-        return f"Week {week_num} ({expiry_date.strftime('%d %b')})"
+        return f"week_{week_num}"
 
-    # Non-Friday mid-week (event expiry like US PPI)
-    return f"{days}DTE ({expiry_date.strftime('%d %b')})"
+    return f"{days}dte"
+
+
+def _format_expiry_label(expiry_date: date, key: str) -> str:
+    """Human label for a key + date (matches historical get_dte_label text)."""
+    if key.endswith("dte") and key[:-3].isdigit():
+        prefix = f"{key[:-3]}DTE"
+        return f"{prefix} ({expiry_date.strftime('%d %b')})"
+    if key.startswith("month_"):
+        return f"Month {key.split('_', 1)[1]} ({expiry_date.strftime('%b %Y')})"
+    if key.startswith("week_"):
+        return f"Week {key.split('_', 1)[1]} ({expiry_date.strftime('%d %b')})"
+    return f"{key} ({expiry_date.strftime('%d %b')})"
 
 
 def get_expiry_label(

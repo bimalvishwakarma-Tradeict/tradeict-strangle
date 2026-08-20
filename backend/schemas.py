@@ -45,6 +45,7 @@ class ExpiryItem(BaseModel):
     date: str
     label: str
     unix_ts: int
+    key: str | None = None
 
 
 class OptionChainResponse(BaseModel):

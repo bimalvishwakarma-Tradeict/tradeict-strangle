@@ -708,7 +708,7 @@ def _migrate_schema() -> None:
         }
         hedge_setting_cols = [
             ("hedge_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
-            ("hedge_expiry_mode", "VARCHAR(20) NOT NULL DEFAULT 'monthly'"),
+            ("hedge_expiry_mode", "VARCHAR(30) NOT NULL DEFAULT 'month_1'"),
             ("hedge_expiry_date_override", "VARCHAR(10) DEFAULT NULL"),
             ("hedge_expiry_dte", "INTEGER DEFAULT NULL"),
             ("hedge_target_usd", "FLOAT DEFAULT NULL"),
@@ -733,6 +733,26 @@ def _migrate_schema() -> None:
                         )
                     )
                 at_cols.add(col_name)
+
+        # Migrate legacy hedge_expiry_mode values to relative label keys
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE auto_trade_settings SET hedge_expiry_mode = 'month_1' "
+                    "WHERE hedge_expiry_mode = 'monthly' OR hedge_expiry_mode IS NULL "
+                    "OR hedge_expiry_mode = ''"
+                )
+            )
+            # dte + known hedge_expiry_dte → Ndte
+            conn.execute(
+                text(
+                    "UPDATE auto_trade_settings SET hedge_expiry_mode = "
+                    "printf('%ddte', hedge_expiry_dte), hedge_expiry_dte = NULL "
+                    "WHERE hedge_expiry_mode = 'dte' AND hedge_expiry_dte IS NOT NULL"
+                )
+            )
+            # Widen column if still VARCHAR(20) — SQLite ignores width, no-op OK
+            # Fixed calendar 'date' rows keep mode='date' so UI can flag re-pick
 
     if "hedge_theta_log" not in tables:
         with engine.begin() as conn:

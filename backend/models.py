@@ -326,9 +326,9 @@ class AutoTradeSettings(Base):
     hedge_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
-    # monthly | date | dte
+    # monthly | date | dte  (legacy) — now stores relative keys: month_1, week_2, 1dte
     hedge_expiry_mode: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="monthly"
+        String(30), nullable=False, default="month_1"
     )
     hedge_expiry_date_override: Mapped[str | None] = mapped_column(
         String(10), nullable=True, default=None

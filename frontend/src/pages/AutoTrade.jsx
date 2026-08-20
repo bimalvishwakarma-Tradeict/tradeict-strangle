@@ -97,8 +97,9 @@ function applyStatusToForm(data, setters) {
     Boolean(data.combined_trigger_mode),
   )
   setters.setHedgeEnabled(Boolean(data.hedge_enabled))
-  setters.setHedgeExpiryMode(data.hedge_expiry_mode || 'monthly')
+  setters.setHedgeExpiryMode(data.hedge_expiry_mode || 'month_1')
   setters.setHedgeExpiryDateOverride(data.hedge_expiry_date_override || '')
+  setters.setHedgeExpiryNeedsRepick(Boolean(data.hedge_expiry_needs_repick))
   setters.setHedgeExpiryDte(
     data.hedge_expiry_dte == null ? '' : String(data.hedge_expiry_dte),
   )
@@ -184,8 +185,9 @@ export default function AutoTrade() {
   const [premiumCoverLossEnabled, setPremiumCoverLossEnabled] = useState(false)
   const [combinedTriggerMode, setCombinedTriggerMode] = useState(false)
   const [hedgeEnabled, setHedgeEnabled] = useState(false)
-  const [hedgeExpiryMode, setHedgeExpiryMode] = useState('monthly')
+  const [hedgeExpiryMode, setHedgeExpiryMode] = useState('month_1')
   const [hedgeExpiryDateOverride, setHedgeExpiryDateOverride] = useState('')
+  const [hedgeExpiryNeedsRepick, setHedgeExpiryNeedsRepick] = useState(false)
   const [hedgeExpiryDte, setHedgeExpiryDte] = useState('')
   const [hedgeTargetUsd, setHedgeTargetUsd] = useState('')
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
@@ -234,6 +236,7 @@ export default function AutoTrade() {
       setHedgeEnabled,
       setHedgeExpiryMode,
       setHedgeExpiryDateOverride,
+      setHedgeExpiryNeedsRepick,
       setHedgeExpiryDte,
       setHedgeTargetUsd,
       setHedgeStoplossUsd,
@@ -287,7 +290,7 @@ export default function AutoTrade() {
       setExpiryLoading(true)
       setExpiryError(null)
       try {
-        const data = await getExpiries(u)
+        const data = await getExpiries(u, { limit: 60 })
         const rows = Array.isArray(data) ? data : []
         setExpiryOptions(rows)
         setSelectedExpiryDate((prev) => {
@@ -491,15 +494,13 @@ export default function AutoTrade() {
       premium_cover_loss_enabled: Boolean(premiumCoverLossEnabled),
       combined_trigger_mode: Boolean(combinedTriggerMode),
       hedge_enabled: Boolean(hedgeEnabled),
-      hedge_expiry_mode: hedgeExpiryMode || 'monthly',
+      hedge_expiry_mode: hedgeExpiryMode || 'month_1',
+      // Display-only resolved date — backend re-resolves the label on save
       hedge_expiry_date_override:
-        hedgeExpiryMode === 'date' && hedgeExpiryDateOverride
-          ? hedgeExpiryDateOverride
-          : null,
-      hedge_expiry_dte:
-        hedgeExpiryMode === 'dte' && hedgeExpiryDte !== ''
-          ? Math.max(0, Math.min(365, Number(hedgeExpiryDte) || 0))
-          : null,
+        expiryOptions.find((o) => o.key === hedgeExpiryMode)?.date ||
+        hedgeExpiryDateOverride ||
+        null,
+      hedge_expiry_dte: null,
       hedge_target_usd:
         hedgeTargetUsd === '' || hedgeTargetUsd == null
           ? null
@@ -553,17 +554,11 @@ export default function AutoTrade() {
     const params = {
       underlying,
       quantity: Math.max(1, Number(quantity) || 1),
-      hedge_expiry_mode: hedgeExpiryMode || 'monthly',
+      hedge_expiry_mode: hedgeExpiryMode || 'month_1',
       margin_buffer_pct: Math.min(200, Math.max(0, Number(marginBufferPct) || 50)),
       theta_multiplier: Math.min(20, Math.max(0.01, Number(thetaMultiplier) || 3)),
       target_theta_pct: Math.min(1000, Math.max(10, Number(targetThetaPct) || 150)),
       expiry_dte: dte,
-    }
-    if (hedgeExpiryDateOverride) {
-      params.hedge_expiry_date_override = hedgeExpiryDateOverride
-    }
-    if (hedgeExpiryDte !== '' && hedgeExpiryDte != null) {
-      params.hedge_expiry_dte = Number(hedgeExpiryDte)
     }
     // Match auto-trade save rules: daily 0/1/2 DTE never send a calendar override
     if (dte > 2 && selectedExpiryDate) {
@@ -574,8 +569,6 @@ export default function AutoTrade() {
     underlying,
     quantity,
     hedgeExpiryMode,
-    hedgeExpiryDateOverride,
-    hedgeExpiryDte,
     marginBufferPct,
     thetaMultiplier,
     targetThetaPct,
@@ -1234,45 +1227,65 @@ export default function AutoTrade() {
             hedgeEnabled ? '' : 'pointer-events-none opacity-40'
           }`}
         >
-          <label className="block text-sm text-gray-300">
+          <label className="block text-sm text-gray-300 sm:col-span-2">
             Hedge expiry
-            <select
-              value={hedgeExpiryMode}
-              onChange={(e) => setHedgeExpiryMode(e.target.value)}
-              disabled={!hedgeEnabled}
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
-            >
-              <option value="monthly">Nearest monthly</option>
-              <option value="date">Fixed calendar date</option>
-              <option value="dte">Fixed DTE</option>
-            </select>
+            <div className="mt-1 flex flex-wrap items-center gap-3">
+              <select
+                value={
+                  expiryOptions.some((o) => o.key === hedgeExpiryMode)
+                    ? hedgeExpiryMode
+                    : hedgeExpiryMode === 'date'
+                      ? 'date'
+                      : ''
+                }
+                onChange={(e) => {
+                  const key = e.target.value
+                  setHedgeExpiryMode(key)
+                  setHedgeExpiryNeedsRepick(false)
+                  const row = expiryOptions.find((o) => o.key === key)
+                  setHedgeExpiryDateOverride(row?.date || '')
+                }}
+                disabled={!hedgeEnabled || expiryLoading}
+                className="w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+              >
+                {expiryLoading && (
+                  <option value="">Loading expiries…</option>
+                )}
+                {!expiryLoading && expiryOptions.length === 0 && (
+                  <option value="">No expiries available</option>
+                )}
+                {hedgeExpiryNeedsRepick || hedgeExpiryMode === 'date' ? (
+                  <option value="date" disabled>
+                    Re-pick required (fixed date is stale)
+                  </option>
+                ) : null}
+                {expiryOptions.map((opt) => (
+                  <option key={opt.key || opt.date} value={opt.key || opt.date}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <span className="text-xs text-gray-400">
+                → resolves to{' '}
+                <span className="font-mono text-gray-200">
+                  {expiryOptions.find((o) => o.key === hedgeExpiryMode)?.date ||
+                    hedgePreview?.expiry_date ||
+                    hedgeExpiryDateOverride ||
+                    '--'}
+                </span>
+              </span>
+            </div>
+            <span className="mt-1 block text-xs text-gray-500">
+              Same labelled list as Trade Structure. Stored as a relative key
+              (e.g. month_2) so it never goes stale.
+            </span>
+            {hedgeExpiryNeedsRepick || hedgeExpiryMode === 'date' ? (
+              <span className="mt-1 block text-xs text-amber-400">
+                Your previous hedge expiry was a fixed calendar date. Choose a
+                labelled option (Month / Week / DTE) before enabling hedge mode.
+              </span>
+            ) : null}
           </label>
-          {hedgeExpiryMode === 'date' && (
-            <label className="block text-sm text-gray-300">
-              Hedge expiry date
-              <input
-                type="date"
-                value={hedgeExpiryDateOverride}
-                onChange={(e) => setHedgeExpiryDateOverride(e.target.value)}
-                disabled={!hedgeEnabled}
-                className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
-              />
-            </label>
-          )}
-          {hedgeExpiryMode === 'dte' && (
-            <label className="block text-sm text-gray-300">
-              Hedge DTE
-              <input
-                type="number"
-                min={0}
-                max={365}
-                value={hedgeExpiryDte}
-                onChange={(e) => setHedgeExpiryDte(e.target.value)}
-                disabled={!hedgeEnabled}
-                className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
-              />
-            </label>
-          )}
           <label className="block text-sm text-gray-300">
             Hedge target ($)
             <input

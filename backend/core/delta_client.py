@@ -21,7 +21,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.config import DELTA_EXCHANGE_BASE_URL, IST
-from backend.core.time_utils import get_dte_label, get_ist_now
+from backend.core.time_utils import get_dte_label, get_expiry_label_key, get_ist_now
 
 logger = logging.getLogger(__name__)
 
@@ -1445,7 +1445,7 @@ class DeltaClient:
 
         Default limit is MAX_EXPIRIES_RETURNED (7). Pass a larger limit for
         monthly hedge expiry resolution.
-        Each item: { date: "YYYY-MM-DD", label: "1DTE", timestamp: unix_ts }
+        Each item: { date, label, key, timestamp }
         """
         product_underlying = _resolve_product_underlying(underlying)
         products = await self._get_products("call_options", product_underlying)
@@ -1469,6 +1469,7 @@ class DeltaClient:
             {
                 "date": d.isoformat(),
                 "label": get_dte_label(d, date_list),
+                "key": get_expiry_label_key(d, date_list),
                 "timestamp": by_date[d],
             }
             for d in date_list

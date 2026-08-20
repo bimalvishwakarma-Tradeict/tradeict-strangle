@@ -52,9 +52,11 @@ export const disconnectAccount = async () => {
   }
 }
 
-export const getExpiries = async (underlying) => {
+export const getExpiries = async (underlying, options = {}) => {
   try {
-    const res = await api.get(`/api/strategy/expiries?underlying=${underlying}`)
+    const params = { underlying }
+    if (options.limit != null) params.limit = options.limit
+    const res = await api.get('/api/strategy/expiries', { params })
     return res.data
   } catch (err) {
     throw new Error(extractError(err, 'Failed to fetch expiries'))
