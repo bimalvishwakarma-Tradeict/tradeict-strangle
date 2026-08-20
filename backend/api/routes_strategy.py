@@ -165,3 +165,406 @@ async def get_payoff(
         breakeven_upper=call_strike + premium_per_unit,
         breakeven_lower=put_strike - premium_per_unit,
     )
+
+
+def _iv_history_from_log(db: Session) -> list[float]:
+    """Mid IV samples from hedge_theta_log for percentile (all hedges)."""
+    from backend.models import HedgeThetaLog
+
+    rows = db.query(HedgeThetaLog).order_by(HedgeThetaLog.log_date.asc()).all()
+    samples: list[float] = []
+    for row in rows:
+        call_iv = float(getattr(row, "call_iv", None) or 0)
+        put_iv = float(getattr(row, "put_iv", None) or 0)
+        if call_iv > 0 and put_iv > 0:
+            samples.append((call_iv + put_iv) / 2.0)
+        elif call_iv > 0:
+            samples.append(call_iv)
+        elif put_iv > 0:
+            samples.append(put_iv)
+    return samples
+
+
+@router.get("/hedge-preview")
+async def hedge_preview(
+    db: Session = Depends(get_db),
+    hedge_expiry_mode: str | None = Query(None),
+    hedge_expiry_date_override: str | None = Query(None),
+    hedge_expiry_dte: int | None = Query(None),
+    quantity: int | None = Query(None, ge=1, le=1000),
+    underlying: str | None = Query(None),
+    margin_buffer_pct: float | None = Query(None, ge=0, le=200),
+) -> dict[str, Any]:
+    """
+    Hypothetical long ATM straddle from saved hedge settings.
+
+    Optional query params override saved settings for live form previews.
+    Read-only — never places orders. Errors → unavailable (no stale data).
+    """
+    from backend.core.hedge_theta import (
+        HedgeThetaError,
+        compute_iv_percentile,
+        get_hypothetical_hedge_theta,
+        resolve_hedge_expiry_date,
+    )
+    from backend.database import get_or_create_auto_settings
+
+    settings = get_or_create_auto_settings(db)
+    und = (underlying or str(settings.underlying or "BTC")).upper()
+    qty = max(1, int(quantity if quantity is not None else (settings.quantity or 1)))
+    mode = str(
+        hedge_expiry_mode
+        or getattr(settings, "hedge_expiry_mode", None)
+        or "monthly"
+    )
+    date_override = (
+        hedge_expiry_date_override
+        if hedge_expiry_date_override is not None
+        else getattr(settings, "hedge_expiry_date_override", None)
+    )
+    dte_override = (
+        hedge_expiry_dte
+        if hedge_expiry_dte is not None
+        else getattr(settings, "hedge_expiry_dte", None)
+    )
+    buffer = float(
+        margin_buffer_pct
+        if margin_buffer_pct is not None
+        else (getattr(settings, "margin_buffer_pct", None) or 50.0)
+    )
+    client = _get_delta_client(db)
+    try:
+        try:
+            expiry = await resolve_hedge_expiry_date(
+                client,
+                und,
+                expiry_mode=mode,
+                expiry_date_override=date_override,
+                expiry_dte=dte_override,
+            )
+            theta = await get_hypothetical_hedge_theta(
+                client, und, expiry, qty
+            )
+        except HedgeThetaError as exc:
+            logger.warning("hedge-preview unavailable: %s", exc)
+            return {
+                "success": False,
+                "unavailable": True,
+                "message": "unavailable - chain fetch failed",
+                "detail": str(exc),
+            }
+        except DeltaAPIError as exc:
+            logger.warning("hedge-preview Delta error: %s", exc)
+            return {
+                "success": False,
+                "unavailable": True,
+                "message": "unavailable - chain fetch failed",
+                "detail": str(exc),
+            }
+
+        mid_iv = (float(theta["call_iv"]) + float(theta["put_iv"])) / 2.0
+        iv_pct = compute_iv_percentile(mid_iv, _iv_history_from_log(db))
+        order_margin_per_lot = None
+        capital_per_lot = None
+        if order_margin_per_lot is not None:
+            capital_per_lot = float(order_margin_per_lot) * (1.0 + buffer / 100.0)
+
+        iv_ok = mid_iv > 0 and (
+            iv_pct.get("percentile") is None or float(iv_pct["percentile"]) < 70
+        )
+        return {
+            "success": True,
+            "unavailable": False,
+            "underlying": und,
+            "strike": theta["strike"],
+            "expiry_date": theta["expiry_date"],
+            "quantity": qty,
+            "cost_usd": theta["cost_usd"],
+            "daily_theta_usd": theta["daily_theta_usd"],
+            "total_theta": theta["total_theta"],
+            "call_theta": theta["call_theta"],
+            "put_theta": theta["put_theta"],
+            "call_iv": theta["call_iv"],
+            "put_iv": theta["put_iv"],
+            "mid_iv": round(mid_iv, 4),
+            "iv_percentile": iv_pct,
+            "iv_ok": iv_ok,
+            "spot": theta["spot"],
+            "order_margin_per_lot": order_margin_per_lot,
+            "capital_per_lot": capital_per_lot,
+            "margin_buffer_pct": buffer,
+            "fetched_at": theta["fetched_at"],
+            "source": theta["source"],
+        }
+    finally:
+        await client.close()
+
+
+@router.get("/theta-preview")
+async def theta_preview(
+    db: Session = Depends(get_db),
+    theta_multiplier: float | None = Query(None, gt=0, le=20),
+    quantity: int | None = Query(None, ge=1, le=1000),
+    underlying: str | None = Query(None),
+    hedge_expiry_mode: str | None = Query(None),
+    hedge_expiry_date_override: str | None = Query(None),
+    hedge_expiry_dte: int | None = Query(None),
+    expiry_dte: int | None = Query(None, ge=0, le=90),
+    expiry_date_override: str | None = Query(None),
+) -> dict[str, Any]:
+    """
+    What theta_based strike selection would pick right now (no orders).
+    """
+    from backend.core.hedge_theta import (
+        CONTRACT_SIZE,
+        HedgeThetaError,
+        get_hypothetical_hedge_theta,
+        resolve_hedge_expiry_date,
+        resolve_short_expiry_date,
+        select_theta_based_strikes,
+    )
+    from backend.database import get_or_create_auto_settings
+
+    settings = get_or_create_auto_settings(db)
+    und = (underlying or str(settings.underlying or "BTC")).upper()
+    qty = max(1, int(quantity if quantity is not None else (settings.quantity or 1)))
+    multiplier = float(
+        theta_multiplier
+        if theta_multiplier is not None
+        else (getattr(settings, "theta_multiplier", None) or 3.0)
+    )
+    client = _get_delta_client(db)
+    try:
+        try:
+            hedge_exp = await resolve_hedge_expiry_date(
+                client,
+                und,
+                expiry_mode=str(
+                    hedge_expiry_mode
+                    or getattr(settings, "hedge_expiry_mode", None)
+                    or "monthly"
+                ),
+                expiry_date_override=(
+                    hedge_expiry_date_override
+                    if hedge_expiry_date_override is not None
+                    else getattr(settings, "hedge_expiry_date_override", None)
+                ),
+                expiry_dte=(
+                    hedge_expiry_dte
+                    if hedge_expiry_dte is not None
+                    else getattr(settings, "hedge_expiry_dte", None)
+                ),
+            )
+            hedge = await get_hypothetical_hedge_theta(
+                client, und, hedge_exp, qty
+            )
+            short_exp = await resolve_short_expiry_date(
+                expiry_dte=int(
+                    expiry_dte
+                    if expiry_dte is not None
+                    else (settings.expiry_dte or 1)
+                ),
+                expiry_date_override=(
+                    expiry_date_override
+                    if expiry_date_override is not None
+                    else getattr(settings, "expiry_date_override", None)
+                ),
+            )
+            product_u = _resolve_product_underlying(und)
+            price_symbol = _resolve_underlying_symbol(und)
+            spot = float(await client.get_underlying_price(price_symbol))
+            short_chain = await client.get_option_chain(
+                product_u, short_exp.isoformat()
+            )
+        except HedgeThetaError as exc:
+            logger.warning("theta-preview unavailable: %s", exc)
+            return {
+                "success": False,
+                "unavailable": True,
+                "message": "unavailable - chain fetch failed",
+                "detail": str(exc),
+            }
+        except DeltaAPIError as exc:
+            logger.warning("theta-preview Delta error: %s", exc)
+            return {
+                "success": False,
+                "unavailable": True,
+                "message": "unavailable - chain fetch failed",
+                "detail": str(exc),
+            }
+
+        hedge_total = float(hedge["total_theta"])
+        required = hedge_total * multiplier
+        if required <= 0:
+            return {
+                "success": False,
+                "unavailable": True,
+                "message": "unavailable - chain fetch failed",
+                "detail": "hedge total_theta is zero",
+            }
+
+        try:
+            picks = select_theta_based_strikes(short_chain, spot, required)
+        except HedgeThetaError as exc:
+            return {
+                "success": False,
+                "unavailable": True,
+                "message": "unavailable - chain fetch failed",
+                "detail": str(exc),
+            }
+
+        combined = float(picks["combined_theta"])
+        coverage = (combined / hedge_total) if hedge_total > 0 else 0.0
+        return {
+            "success": True,
+            "unavailable": False,
+            "hedge_total_theta": round(hedge_total, 4),
+            "multiplier": multiplier,
+            "required_theta": round(required, 4),
+            "short_expiry_date": short_exp.isoformat(),
+            "hedge_expiry_date": hedge["expiry_date"],
+            "call": picks["call"],
+            "put": picks["put"],
+            "coverage": round(coverage, 2),
+            "spot": spot,
+            "contract_size": CONTRACT_SIZE,
+            "fetched_at": hedge["fetched_at"],
+        }
+    finally:
+        await client.close()
+
+
+@router.get("/target-preview")
+async def target_preview(
+    db: Session = Depends(get_db),
+    target_theta_pct: float | None = Query(None, ge=10, le=1000),
+    theta_multiplier: float | None = Query(None, gt=0, le=20),
+    quantity: int | None = Query(None, ge=1, le=1000),
+    underlying: str | None = Query(None),
+    hedge_expiry_mode: str | None = Query(None),
+    hedge_expiry_date_override: str | None = Query(None),
+    hedge_expiry_dte: int | None = Query(None),
+    expiry_dte: int | None = Query(None, ge=0, le=90),
+    expiry_date_override: str | None = Query(None),
+) -> dict[str, Any]:
+    """
+    Theta-multiplier target vs max profit of the theta-preview strikes.
+    """
+    from backend.core.hedge_theta import (
+        CONTRACT_SIZE,
+        HedgeThetaError,
+        get_hypothetical_hedge_theta,
+        resolve_hedge_expiry_date,
+        resolve_short_expiry_date,
+        select_theta_based_strikes,
+    )
+    from backend.database import get_or_create_auto_settings
+
+    settings = get_or_create_auto_settings(db)
+    und = (underlying or str(settings.underlying or "BTC")).upper()
+    qty = max(1, int(quantity if quantity is not None else (settings.quantity or 1)))
+    tgt_pct = float(
+        target_theta_pct
+        if target_theta_pct is not None
+        else (getattr(settings, "target_theta_pct", None) or 150.0)
+    )
+    multiplier = float(
+        theta_multiplier
+        if theta_multiplier is not None
+        else (getattr(settings, "theta_multiplier", None) or 3.0)
+    )
+    client = _get_delta_client(db)
+    try:
+        try:
+            hedge_exp = await resolve_hedge_expiry_date(
+                client,
+                und,
+                expiry_mode=str(
+                    hedge_expiry_mode
+                    or getattr(settings, "hedge_expiry_mode", None)
+                    or "monthly"
+                ),
+                expiry_date_override=(
+                    hedge_expiry_date_override
+                    if hedge_expiry_date_override is not None
+                    else getattr(settings, "hedge_expiry_date_override", None)
+                ),
+                expiry_dte=(
+                    hedge_expiry_dte
+                    if hedge_expiry_dte is not None
+                    else getattr(settings, "hedge_expiry_dte", None)
+                ),
+            )
+            hedge = await get_hypothetical_hedge_theta(
+                client, und, hedge_exp, qty
+            )
+            short_exp = await resolve_short_expiry_date(
+                expiry_dte=int(
+                    expiry_dte
+                    if expiry_dte is not None
+                    else (settings.expiry_dte or 1)
+                ),
+                expiry_date_override=(
+                    expiry_date_override
+                    if expiry_date_override is not None
+                    else getattr(settings, "expiry_date_override", None)
+                ),
+            )
+            product_u = _resolve_product_underlying(und)
+            price_symbol = _resolve_underlying_symbol(und)
+            spot = float(await client.get_underlying_price(price_symbol))
+            short_chain = await client.get_option_chain(
+                product_u, short_exp.isoformat()
+            )
+            required = float(hedge["total_theta"]) * multiplier
+            picks = select_theta_based_strikes(short_chain, spot, required)
+        except (HedgeThetaError, DeltaAPIError) as exc:
+            logger.warning("target-preview unavailable: %s", exc)
+            return {
+                "success": False,
+                "unavailable": True,
+                "message": "unavailable - chain fetch failed",
+                "detail": str(exc),
+            }
+
+        total_theta = float(hedge["total_theta"])
+        target_usd = (
+            total_theta * (tgt_pct / 100.0) * qty * CONTRACT_SIZE
+        )
+        max_profit_usd = (
+            (float(picks["call"]["premium"]) + float(picks["put"]["premium"]))
+            * qty
+            * CONTRACT_SIZE
+        )
+        pct_of_max = (
+            (target_usd / max_profit_usd * 100.0) if max_profit_usd > 0 else 0.0
+        )
+        if pct_of_max <= 60:
+            band = "reachable"
+            band_label = "reachable"
+        elif pct_of_max <= 80:
+            band = "tight"
+            band_label = "tight — may be hard to hit"
+        else:
+            band = "rarely_reached"
+            band_label = (
+                "rarely reached - lower the target or raise the strike multiplier"
+            )
+
+        return {
+            "success": True,
+            "unavailable": False,
+            "target_usd": round(target_usd, 4),
+            "max_profit_usd": round(max_profit_usd, 4),
+            "pct_of_max": round(pct_of_max, 1),
+            "band": band,
+            "band_label": band_label,
+            "target_theta_pct": tgt_pct,
+            "hedge_total_theta": round(total_theta, 4),
+            "quantity": qty,
+            "call": picks["call"],
+            "put": picks["put"],
+            "fetched_at": hedge["fetched_at"],
+        }
+    finally:
+        await client.close()

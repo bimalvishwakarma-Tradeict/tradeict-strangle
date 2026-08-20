@@ -156,6 +156,38 @@ def _extract_delta(payload: dict[str, Any]) -> float:
     return _safe_float(payload.get("delta"))
 
 
+def _extract_greek(payload: dict[str, Any], name: str) -> float:
+    """Read a named greek from ticker.greeks or top-level."""
+    greeks = payload.get("greeks")
+    if isinstance(greeks, dict):
+        return _safe_float(greeks.get(name))
+    return _safe_float(payload.get(name))
+
+
+def _extract_iv(ticker: dict[str, Any]) -> float:
+    """
+    Implied vol as a decimal (0.36 = 36%).
+
+    Prefer mid of quotes.bid_iv / ask_iv; fall back to mark_vol.
+    """
+    quotes = ticker.get("quotes") if isinstance(ticker.get("quotes"), dict) else {}
+    bid_iv = _safe_float(quotes.get("bid_iv") or ticker.get("bid_iv"))
+    ask_iv = _safe_float(quotes.get("ask_iv") or ticker.get("ask_iv"))
+    if bid_iv > 0 and ask_iv > 0:
+        return (bid_iv + ask_iv) / 2.0
+    if ask_iv > 0:
+        return ask_iv
+    if bid_iv > 0:
+        return bid_iv
+    mark_vol = _safe_float(ticker.get("mark_vol") or ticker.get("mark_iv"))
+    if mark_vol <= 0:
+        return 0.0
+    # Some feeds return percent (36.2) instead of decimal (0.362)
+    if mark_vol > 5.0:
+        return mark_vol / 100.0
+    return mark_vol
+
+
 def _extract_live_quote(ticker: dict[str, Any]) -> tuple[float, float, float, float]:
     """
     Extract (bid, ask, mark_price, delta) from a live /v2/tickers row.
@@ -1402,10 +1434,17 @@ class DeltaClient:
         )
         return ticker_map
 
-    async def get_available_expiries(self, underlying: str) -> list[dict[str, Any]]:
+    async def get_available_expiries(
+        self,
+        underlying: str,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         """
-        Return future option expiries for underlying (max 7 nearest).
+        Return future option expiries for underlying.
 
+        Default limit is MAX_EXPIRIES_RETURNED (7). Pass a larger limit for
+        monthly hedge expiry resolution.
         Each item: { date: "YYYY-MM-DD", label: "1DTE", timestamp: unix_ts }
         """
         product_underlying = _resolve_product_underlying(underlying)
@@ -1423,7 +1462,8 @@ class DeltaClient:
             if existing is None or ts < existing:
                 by_date[exp_date] = ts
 
-        sorted_dates = sorted(by_date.keys())[:MAX_EXPIRIES_RETURNED]
+        cap = MAX_EXPIRIES_RETURNED if limit is None else max(1, int(limit))
+        sorted_dates = sorted(by_date.keys())[:cap]
         date_list = list(sorted_dates)
         return [
             {
@@ -1503,12 +1543,18 @@ class DeltaClient:
                     "call_ask": call_ask,
                     "call_mark_price": call_mark,
                     "call_delta": call_delta,
+                    "call_theta": _extract_greek(call_ticker, "theta"),
+                    "call_vega": _extract_greek(call_ticker, "vega"),
+                    "call_iv": _extract_iv(call_ticker),
                     "put_symbol": put_symbol,
                     "put_product_id": int(put_p.get("id") or 0),
                     "put_bid": put_bid,
                     "put_ask": put_ask,
                     "put_mark_price": put_mark,
                     "put_delta": abs(put_delta),
+                    "put_theta": _extract_greek(put_ticker, "theta"),
+                    "put_vega": _extract_greek(put_ticker, "vega"),
+                    "put_iv": _extract_iv(put_ticker),
                     "highlight": highlight,
                 }
             )

@@ -11,12 +11,51 @@ import {
   getAutoTradeSettings,
   getAutoTradeStatus,
   getExpiries,
+  getHedgePreview,
+  getTargetPreview,
+  getThetaPreview,
   saveAutoTradeSettings,
 } from '../services/api'
 
 const WS_URL = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/trades`
 const STATUS_POLL_MS = 5000
+const PREVIEW_POLL_MS = 30000
+const PREVIEW_DEBOUNCE_MS = 500
 const UNDERLYINGS = ['BTC', 'ETH', 'XAU']
+
+const PREVIEW_FAIL = {
+  success: false,
+  unavailable: true,
+  message: 'unavailable - chain fetch failed',
+}
+
+function formatIvPct(iv) {
+  const n = Number(iv)
+  if (!Number.isFinite(n) || n <= 0) return '--'
+  const pct = n > 5 ? n : n * 100
+  return `${pct.toFixed(1)}%`
+}
+
+function formatMoney(n, digits = 2) {
+  const v = Number(n)
+  if (!Number.isFinite(v)) return '--'
+  return `$${v.toFixed(digits)}`
+}
+
+function formatExpiryShort(iso) {
+  if (!iso) return '--'
+  try {
+    const d = new Date(`${String(iso).slice(0, 10)}T12:00:00Z`)
+    return d.toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      year: '2-digit',
+      timeZone: 'UTC',
+    })
+  } catch {
+    return String(iso)
+  }
+}
 
 function applyStatusToForm(data, setters) {
   if (!data) return
@@ -159,6 +198,10 @@ export default function AutoTrade() {
   const [cooldownAfterLossMinutes, setCooldownAfterLossMinutes] =
     useState('120')
   const [orderMarginPerLot, setOrderMarginPerLot] = useState(null)
+  const [hedgePreview, setHedgePreview] = useState(null)
+  const [thetaPreview, setThetaPreview] = useState(null)
+  const [targetPreview, setTargetPreview] = useState(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
   const [slabs, setSlabs] = useState(null)
   const [slabsInitial, setSlabsInitial] = useState(null)
   const [slabsKey, setSlabsKey] = useState(0)
@@ -491,13 +534,92 @@ export default function AutoTrade() {
   }
 
   const capitalPerLotDisplay = useMemo(() => {
+    if (
+      hedgePreview?.capital_per_lot != null &&
+      Number.isFinite(Number(hedgePreview.capital_per_lot))
+    ) {
+      return `$${Number(hedgePreview.capital_per_lot).toFixed(2)}`
+    }
     if (orderMarginPerLot == null || !Number.isFinite(Number(orderMarginPerLot))) {
       return '--'
     }
     const buf = Math.min(200, Math.max(0, Number(marginBufferPct) || 0))
     const cpl = Number(orderMarginPerLot) * (1 + buf / 100)
     return Number.isFinite(cpl) ? `$${cpl.toFixed(2)}` : '--'
-  }, [orderMarginPerLot, marginBufferPct])
+  }, [orderMarginPerLot, marginBufferPct, hedgePreview])
+
+  const buildPreviewParams = useCallback(() => {
+    const params = {
+      underlying,
+      quantity: Math.max(1, Number(quantity) || 1),
+      hedge_expiry_mode: hedgeExpiryMode || 'monthly',
+      margin_buffer_pct: Math.min(200, Math.max(0, Number(marginBufferPct) || 50)),
+      theta_multiplier: Math.min(20, Math.max(0.01, Number(thetaMultiplier) || 3)),
+      target_theta_pct: Math.min(1000, Math.max(10, Number(targetThetaPct) || 150)),
+      expiry_dte: Math.max(0, Number(expiryDte) || 1),
+    }
+    if (hedgeExpiryDateOverride) {
+      params.hedge_expiry_date_override = hedgeExpiryDateOverride
+    }
+    if (hedgeExpiryDte !== '' && hedgeExpiryDte != null) {
+      params.hedge_expiry_dte = Number(hedgeExpiryDte)
+    }
+    if (selectedExpiryDate) {
+      params.expiry_date_override = selectedExpiryDate
+    }
+    return params
+  }, [
+    underlying,
+    quantity,
+    hedgeExpiryMode,
+    hedgeExpiryDateOverride,
+    hedgeExpiryDte,
+    marginBufferPct,
+    thetaMultiplier,
+    targetThetaPct,
+    expiryDte,
+    selectedExpiryDate,
+  ])
+
+  const refreshPreviews = useCallback(async () => {
+    setPreviewLoading(true)
+    try {
+      const params = buildPreviewParams()
+      const [hp, tp, tgp] = await Promise.all([
+        getHedgePreview(params),
+        getThetaPreview(params),
+        getTargetPreview(params),
+      ])
+      // Never keep stale success data — replace with unavailable on failure
+      setHedgePreview(hp?.unavailable || hp?.success === false ? { ...PREVIEW_FAIL, ...hp } : hp)
+      setThetaPreview(tp?.unavailable || tp?.success === false ? { ...PREVIEW_FAIL, ...tp } : tp)
+      setTargetPreview(
+        tgp?.unavailable || tgp?.success === false ? { ...PREVIEW_FAIL, ...tgp } : tgp,
+      )
+      if (hp?.order_margin_per_lot != null && !hp?.unavailable) {
+        setOrderMarginPerLot(Number(hp.order_margin_per_lot))
+      } else {
+        setOrderMarginPerLot(null)
+      }
+    } catch {
+      setHedgePreview(PREVIEW_FAIL)
+      setThetaPreview(PREVIEW_FAIL)
+      setTargetPreview(PREVIEW_FAIL)
+      setOrderMarginPerLot(null)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }, [buildPreviewParams])
+
+  useEffect(() => {
+    if (loading) return undefined
+    const debounceId = setTimeout(refreshPreviews, PREVIEW_DEBOUNCE_MS)
+    const pollId = setInterval(refreshPreviews, PREVIEW_POLL_MS)
+    return () => {
+      clearTimeout(debounceId)
+      clearInterval(pollId)
+    }
+  }, [loading, refreshPreviews])
 
   const handleSave = async () => {
     setSaving(true)
@@ -1201,6 +1323,78 @@ export default function AutoTrade() {
             </span>
           </label>
         </div>
+
+        {/* Live hedge preview — always visible (hypothetical before any hedge) */}
+        <div className="mt-2 rounded-lg border border-gray-700/80 bg-gray-900/50 p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400/90">
+              Live preview (updates with spot)
+            </p>
+            {previewLoading ? (
+              <span className="text-[10px] text-gray-500">Refreshing…</span>
+            ) : null}
+          </div>
+          {hedgePreview?.unavailable || hedgePreview?.success === false ? (
+            <p className="text-sm text-amber-400">
+              {hedgePreview?.message || 'unavailable - chain fetch failed'}
+            </p>
+          ) : hedgePreview?.success ? (
+            <div className="space-y-1.5 font-mono text-xs text-gray-300">
+              <p className="text-sm text-white">
+                Hedge would be:{' '}
+                <span className="text-emerald-300">
+                  {hedgePreview.underlying || underlying}{' '}
+                  {Math.round(Number(hedgePreview.strike))} straddle
+                </span>
+                , {formatExpiryShort(hedgePreview.expiry_date)},{' '}
+                {hedgePreview.quantity} lot
+                {Number(hedgePreview.quantity) === 1 ? '' : 's'}
+              </p>
+              <p>
+                Estimated cost{' '}
+                <span className="text-white">
+                  {formatMoney(hedgePreview.cost_usd)}
+                </span>
+              </p>
+              <p>
+                Estimated daily theta{' '}
+                <span className="text-rose-300">
+                  -{formatMoney(Math.abs(Number(hedgePreview.daily_theta_usd)))}
+                </span>
+              </p>
+              <p>
+                Current IV{' '}
+                <span className="text-white">
+                  {formatIvPct(hedgePreview.call_iv)} /{' '}
+                  {formatIvPct(hedgePreview.put_iv)}
+                </span>{' '}
+                <span className="text-gray-500">
+                  (
+                  {hedgePreview.iv_percentile?.message ||
+                    'percentile: collecting data'}
+                  )
+                </span>
+              </p>
+              {hedgePreview.iv_ok ? (
+                <p className="text-emerald-400">
+                  [ok] IV is in the lower range — reasonable time to buy long
+                  vol
+                </p>
+              ) : hedgePreview.iv_percentile?.percentile != null ? (
+                <p className="text-amber-400">
+                  [!] IV is elevated vs recent history — long vol may be
+                  expensive
+                </p>
+              ) : (
+                <p className="text-gray-500">
+                  Percentile: collecting data (need 30+ daily IV samples)
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">Loading preview…</p>
+          )}
+        </div>
       </section>
 
       <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
@@ -1209,7 +1403,8 @@ export default function AutoTrade() {
         </h2>
         <p className="text-xs text-gray-500">
           How daily short strikes are chosen when hedge mode is on. Theta-based
-          selection needs a live hedge for its theta reading.
+          preview uses a hypothetical ATM hedge from the settings above — no
+          live hedge required.
         </p>
         <div className="space-y-2">
           <label className="flex cursor-pointer items-start gap-3">
@@ -1233,7 +1428,7 @@ export default function AutoTrade() {
             title={
               hedgeEnabled
                 ? undefined
-                : 'Enable Hedge Mode first — theta-based strike selection needs a live hedge'
+                : 'Enable Hedge Mode first — theta-based strike selection needs hedge mode'
             }
           >
             <input
@@ -1260,7 +1455,7 @@ export default function AutoTrade() {
           }`}
           title={
             !hedgeEnabled
-              ? 'Enable Hedge Mode first — theta multiplier needs a live hedge'
+              ? 'Enable Hedge Mode first — theta multiplier needs hedge mode'
               : undefined
           }
         >
@@ -1276,13 +1471,82 @@ export default function AutoTrade() {
             className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
           />
         </label>
+
+        <div className="rounded-lg border border-gray-700/80 bg-gray-900/50 p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400/90">
+              Live preview
+            </p>
+            {previewLoading ? (
+              <span className="text-[10px] text-gray-500">Refreshing…</span>
+            ) : null}
+          </div>
+          {thetaPreview?.unavailable || thetaPreview?.success === false ? (
+            <p className="text-sm text-amber-400">
+              {thetaPreview?.message || 'unavailable - chain fetch failed'}
+            </p>
+          ) : thetaPreview?.success ? (
+            <div className="space-y-1.5 font-mono text-xs text-gray-300">
+              <p>
+                Hedge theta today{' '}
+                <span className="text-white">
+                  {Number(thetaPreview.hedge_total_theta).toFixed(2)}
+                </span>
+              </p>
+              <p>
+                Required per leg{' '}
+                <span className="text-white">
+                  {Number(thetaPreview.required_theta).toFixed(2)}
+                </span>
+                <span className="text-gray-500">
+                  {' '}
+                  (×{Number(thetaPreview.multiplier).toFixed(2)})
+                </span>
+              </p>
+              <p>
+                Would pick CALL{' '}
+                <span className="text-emerald-300">
+                  {Math.round(Number(thetaPreview.call?.strike))}
+                </span>{' '}
+                (theta {Number(thetaPreview.call?.theta).toFixed(2)},{' '}
+                {formatMoney(thetaPreview.call?.premium)})
+                {thetaPreview.call?.chain_limit ? (
+                  <span className="text-amber-400"> [chain limit]</span>
+                ) : null}
+                {thetaPreview.call?.premium_matched ? (
+                  <span className="text-sky-400"> premium-matched</span>
+                ) : null}
+              </p>
+              <p>
+                {'              '}PUT{' '}
+                <span className="text-emerald-300">
+                  {Math.round(Number(thetaPreview.put?.strike))}
+                </span>{' '}
+                {thetaPreview.put?.premium_matched
+                  ? `(premium-matched, ${formatMoney(thetaPreview.put?.premium)})`
+                  : `(theta ${Number(thetaPreview.put?.theta).toFixed(2)}, ${formatMoney(thetaPreview.put?.premium)})`}
+                {thetaPreview.put?.chain_limit ? (
+                  <span className="text-amber-400"> [chain limit]</span>
+                ) : null}
+              </p>
+              <p>
+                Coverage{' '}
+                <span className="text-white">
+                  {Number(thetaPreview.coverage).toFixed(1)}x
+                </span>
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">Loading preview…</p>
+          )}
+        </div>
       </section>
 
       <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
         <h2 className="text-sm font-semibold text-white">TARGET</h2>
         <p className="text-xs text-gray-500">
-          Basket profit target source. Theta-multiplier target needs a live
-          hedge; otherwise the existing payoff % target is used.
+          Basket profit target source. Theta-multiplier preview uses
+          hypothetical hedge theta — no live hedge required to preview.
         </p>
         <div className="space-y-2">
           <label className="flex cursor-pointer items-start gap-3">
@@ -1306,7 +1570,7 @@ export default function AutoTrade() {
             title={
               hedgeEnabled
                 ? undefined
-                : 'Enable Hedge Mode first — theta-multiplier target needs a live hedge'
+                : 'Enable Hedge Mode first — theta-multiplier target needs hedge mode'
             }
           >
             <input
@@ -1328,7 +1592,7 @@ export default function AutoTrade() {
           }`}
           title={
             !hedgeEnabled
-              ? 'Enable Hedge Mode first — target theta % needs a live hedge'
+              ? 'Enable Hedge Mode first — target theta % needs hedge mode'
               : undefined
           }
         >
@@ -1347,6 +1611,47 @@ export default function AutoTrade() {
             Exit when basket P&amp;L reaches this % of daily hedge theta income.
           </span>
         </label>
+
+        <div className="rounded-lg border border-gray-700/80 bg-gray-900/50 p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400/90">
+              Live preview
+            </p>
+            {previewLoading ? (
+              <span className="text-[10px] text-gray-500">Refreshing…</span>
+            ) : null}
+          </div>
+          {targetPreview?.unavailable || targetPreview?.success === false ? (
+            <p className="text-sm text-amber-400">
+              {targetPreview?.message || 'unavailable - chain fetch failed'}
+            </p>
+          ) : targetPreview?.success ? (
+            <div className="space-y-1.5 font-mono text-xs text-gray-300">
+              <p className="text-sm text-white">
+                = {formatMoney(targetPreview.target_usd)} ={' '}
+                {Number(targetPreview.pct_of_max).toFixed(0)}% of max profit
+                <span className="text-gray-500">
+                  {' '}
+                  ({formatMoney(targetPreview.max_profit_usd)})
+                </span>
+              </p>
+              <p
+                className={
+                  targetPreview.band === 'reachable'
+                    ? 'text-emerald-400'
+                    : targetPreview.band === 'tight'
+                      ? 'text-amber-400'
+                      : 'text-rose-400'
+                }
+              >
+                [{targetPreview.band === 'reachable' ? 'ok' : '!'}]{' '}
+                {targetPreview.band_label}
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">Loading preview…</p>
+          )}
+        </div>
       </section>
 
       <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">

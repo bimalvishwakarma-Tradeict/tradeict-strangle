@@ -81,6 +81,62 @@ export const getPayoff = async (params) => {
   }
 }
 
+const PREVIEW_UNAVAILABLE = (detail) => ({
+  success: false,
+  unavailable: true,
+  message: 'unavailable - chain fetch failed',
+  detail,
+})
+
+/** Strip undefined / empty so FastAPI Query defaults fall through to saved settings. */
+const cleanPreviewParams = (params = {}) => {
+  const out = {}
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    out[key] = value
+  })
+  return out
+}
+
+export const getHedgePreview = async (params = {}) => {
+  try {
+    const res = await api.get('/api/strategy/hedge-preview', {
+      params: cleanPreviewParams(params),
+    })
+    return res.data
+  } catch (err) {
+    return PREVIEW_UNAVAILABLE(
+      extractError(err, 'Failed to fetch hedge preview'),
+    )
+  }
+}
+
+export const getThetaPreview = async (params = {}) => {
+  try {
+    const res = await api.get('/api/strategy/theta-preview', {
+      params: cleanPreviewParams(params),
+    })
+    return res.data
+  } catch (err) {
+    return PREVIEW_UNAVAILABLE(
+      extractError(err, 'Failed to fetch theta preview'),
+    )
+  }
+}
+
+export const getTargetPreview = async (params = {}) => {
+  try {
+    const res = await api.get('/api/strategy/target-preview', {
+      params: cleanPreviewParams(params),
+    })
+    return res.data
+  } catch (err) {
+    return PREVIEW_UNAVAILABLE(
+      extractError(err, 'Failed to fetch target preview'),
+    )
+  }
+}
+
 export const initiateTrade = async (data) => {
   try {
     const res = await api.post('/api/trade/initiate', data)
