@@ -166,6 +166,24 @@ export const getActiveTrades = async () => {
   }
 }
 
+export const getActiveHedge = async () => {
+  try {
+    const res = await api.get('/api/hedge/active')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch active hedge'))
+  }
+}
+
+export const closeHedge = async (hedgeId, reason = 'HEDGE_MANUAL') => {
+  try {
+    const res = await api.post(`/api/hedge/${hedgeId}/close`, { reason })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to close hedge'))
+  }
+}
+
 export const getTrade = async (id) => {
   try {
     const res = await api.get(`/api/trade/${id}`)

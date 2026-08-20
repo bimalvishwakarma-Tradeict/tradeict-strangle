@@ -16,6 +16,7 @@ from backend.engine.hedge_lifecycle import (
     HedgeCloseError,
     HedgeOpenError,
     VALID_HEDGE_EXIT_REASONS,
+    build_active_hedge_live,
     close_hedge,
     get_active_hedge,
     get_hedge_theta_log_payload,
@@ -297,7 +298,11 @@ async def hedge_theta_log(
 async def hedge_active(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Return the active hedge for the current auto-trade underlying, if any."""
+    """
+    Active hedge live panel payload, or hedge=null when none.
+
+    P&L matches the monitor (long bids + same fee deduction).
+    """
     settings = get_or_create_auto_settings(db)
     account = _get_active_account(db)
     hedge = get_active_hedge(
@@ -307,8 +312,26 @@ async def hedge_active(
     )
     if hedge is None:
         return {"success": True, "hedge": None, "message": "No active hedge"}
+
+    client = _get_delta_client(account)
+    try:
+        live = await build_active_hedge_live(hedge, db, client=client)
+    except Exception as exc:
+        logger.critical(
+            "[HEDGE_ACTIVE] live payload failed hedge=%s: %s",
+            hedge.id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to build live hedge payload: {exc}",
+        ) from exc
+    finally:
+        await client.close()
+
     return {
         "success": True,
-        "hedge": hedge_to_dict(hedge),
-        "message": f"Active hedge #{hedge.id}",
+        "hedge": live,
+        "message": f"Active hedge #{live.get('id')}",
     }

@@ -1309,6 +1309,208 @@ def get_hedge_theta_log_payload(
     }
 
 
+async def build_active_hedge_live(
+    hedge: HedgePosition,
+    db: Session,
+    *,
+    client: DeltaClient,
+    btc_index: float | None = None,
+) -> dict[str, Any]:
+    """
+    Full live panel payload for GET /api/hedge/active.
+
+    P&L uses the SAME formula as the hedge monitor (long bids + compute_long_hedge_pnl)
+    so the dashboard and [HEDGE_PNL] logs cannot disagree.
+    """
+    base = hedge_to_dict(hedge)
+    hid = int(hedge.id)
+    qty = max(1, int(hedge.quantity or 1))
+    call_entry = float(hedge.call_fill_price or 0)
+    put_entry = float(hedge.put_fill_price or 0)
+    call_sym = str(hedge.call_symbol or "")
+    put_sym = str(hedge.put_symbol or "")
+    target = float(hedge.target_usd or 0)
+    stoploss = float(hedge.stoploss_usd or 0)
+
+    hours_left = (
+        get_hours_to_expiry(hedge.expiry_date) if hedge.expiry_date else 0.0
+    )
+    days_to_expiry = round(hours_left / 24.0, 4)
+
+    days_since_entry: float | None = None
+    if hedge.entry_time is not None:
+        et = hedge.entry_time
+        if et.tzinfo is None:
+            et = et.replace(tzinfo=timezone.utc)
+        days_since_entry = round(
+            max(0.0, (_utc_now() - et.astimezone(timezone.utc)).total_seconds())
+            / 86400.0,
+            4,
+        )
+
+    call_bid = await _fetch_strict_bid(client, call_sym) if call_sym else None
+    put_bid = await _fetch_strict_bid(client, put_sym) if put_sym else None
+
+    btc = float(btc_index or 0)
+    if btc <= 0:
+        try:
+            btc = float(await client.get_btc_index_price())
+        except Exception:
+            btc = 0.0
+
+    entry_fees = float(hedge.call_entry_fee_usd or 0) + float(
+        hedge.put_entry_fee_usd or 0
+    )
+    est_exit = 0.0
+    call_upl: float | None = None
+    put_upl: float | None = None
+    gross_pnl: float | None = None
+    net_pnl: float | None = None
+    current_value_usd: float | None = None
+    cost_usd = base.get("cost_usd")
+
+    if (
+        call_bid is not None
+        and put_bid is not None
+        and call_bid > 0
+        and put_bid > 0
+        and call_entry > 0
+        and put_entry > 0
+    ):
+        if btc > 0:
+            est_exit += estimate_option_trading_fee(
+                option_price=float(call_bid),
+                quantity_lots=qty,
+                btc_index_price=btc,
+            )
+            est_exit += estimate_option_trading_fee(
+                option_price=float(put_bid),
+                quantity_lots=qty,
+                btc_index_price=btc,
+            )
+        pnl = compute_long_hedge_pnl(
+            call_bid=float(call_bid),
+            put_bid=float(put_bid),
+            call_entry=call_entry,
+            put_entry=put_entry,
+            quantity=qty,
+            entry_fees=entry_fees,
+            estimated_exit_fees=est_exit,
+        )
+        call_upl = round(float(pnl["call_pnl"]), 6)
+        put_upl = round(float(pnl["put_pnl"]), 6)
+        gross_pnl = round(float(pnl["gross"]), 6)
+        net_pnl = round(float(pnl["net"]), 6)
+        current_value_usd = round(
+            (float(call_bid) + float(put_bid)) * qty * CONTRACT_SIZE, 4
+        )
+
+    pct_to_target = (
+        round((net_pnl / target) * 100.0, 2)
+        if net_pnl is not None and target > 0
+        else None
+    )
+    pct_to_stop = (
+        round((-net_pnl / stoploss) * 100.0, 2)
+        if net_pnl is not None and stoploss > 0
+        else None
+    )
+
+    today_theta: float | None = None
+    today_theta_usd: float | None = None
+    current_call_iv: float | None = None
+    current_put_iv: float | None = None
+    try:
+        theta = await get_hedge_theta(client, hedge)
+        today_theta = float(theta.get("total_theta") or 0)
+        today_theta_usd = float(theta.get("daily_theta_usd") or 0)
+        civ = float(theta.get("call_iv") or 0)
+        piv = float(theta.get("put_iv") or 0)
+        current_call_iv = civ if civ > 0 else None
+        current_put_iv = piv if piv > 0 else None
+    except Exception as exc:
+        logger.warning(
+            "build_active_hedge_live theta fetch failed hedge=%s: %s",
+            hid,
+            exc,
+        )
+
+    accrual = {
+        "days_logged": 0,
+        "theta_accrued_estimate": 0.0,
+        "theta_accrued_is_estimate": True,
+        "theta_accrued_note": (
+            "ESTIMATE only — sum of daily theta snapshots × qty × contract size. "
+            "Not a measurable cash flow. Real hedge P&L combines theta, vega, and delta."
+        ),
+    }
+    try:
+        log_payload = get_hedge_theta_log_payload(db, hedge_id=hid)
+        accrual = {
+            "days_logged": int(log_payload.get("days_logged") or 0),
+            "theta_accrued_estimate": float(
+                log_payload.get("theta_accrued_estimate") or 0
+            ),
+            "theta_accrued_is_estimate": True,
+            "theta_accrued_note": log_payload.get("theta_accrued_note"),
+            "first_log_date": log_payload.get("first_log_date"),
+            "last_log_date": log_payload.get("last_log_date"),
+        }
+    except Exception as exc:
+        logger.warning(
+            "build_active_hedge_live theta-log failed hedge=%s: %s",
+            hid,
+            exc,
+        )
+
+    return {
+        **base,
+        "days_to_expiry": days_to_expiry,
+        "hours_to_expiry": round(hours_left, 4),
+        "days_since_entry": days_since_entry,
+        "call": {
+            "symbol": call_sym or None,
+            "entry_fill": call_entry if call_entry > 0 else None,
+            "current_bid": (
+                round(float(call_bid), 4)
+                if call_bid is not None and call_bid > 0
+                else None
+            ),
+            "upl": call_upl,
+        },
+        "put": {
+            "symbol": put_sym or None,
+            "entry_fill": put_entry if put_entry > 0 else None,
+            "current_bid": (
+                round(float(put_bid), 4)
+                if put_bid is not None and put_bid > 0
+                else None
+            ),
+            "upl": put_upl,
+        },
+        "cost_usd": cost_usd,
+        "current_value_usd": current_value_usd,
+        "gross_pnl": gross_pnl,
+        "net_pnl": net_pnl,
+        "entry_fees_usd": round(entry_fees, 6),
+        "est_exit_fees_usd": round(est_exit, 6),
+        "today_theta": today_theta,
+        "today_theta_usd": today_theta_usd,
+        "theta_accrued_estimate": accrual["theta_accrued_estimate"],
+        "theta_accrued_is_estimate": True,
+        "theta_accrued_note": accrual.get("theta_accrued_note"),
+        "days_logged": accrual["days_logged"],
+        "target_usd": target if target > 0 else hedge.target_usd,
+        "stoploss_usd": stoploss if stoploss > 0 else hedge.stoploss_usd,
+        "pct_to_target": pct_to_target,
+        "pct_to_stop": pct_to_stop,
+        "entry_call_iv": hedge.entry_call_iv,
+        "entry_put_iv": hedge.entry_put_iv,
+        "current_call_iv": current_call_iv,
+        "current_put_iv": current_put_iv,
+    }
+
+
 async def monitor_active_hedges(
     db: Session,
     *,

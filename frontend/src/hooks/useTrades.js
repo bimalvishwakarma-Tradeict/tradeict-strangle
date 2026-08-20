@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getActiveTrades } from '../services/api'
+import { getActiveHedge, getActiveTrades } from '../services/api'
 import { OPTIONS_CONTRACT_VALUE } from '../utils/contractValue'
 import { useWebSocket } from './useWebSocket'
 
@@ -27,6 +27,8 @@ export function useTrades() {
   const [loading, setLoading] = useState(true)
   /** Latest AUTO_TRADE_* snapshot from WS (Dashboard banner can sync). */
   const [autoTradeStatus, setAutoTradeStatus] = useState(null)
+  /** Live long hedge panel payload (null when none). */
+  const [activeHedge, setActiveHedge] = useState(null)
 
   const applyTradesList = useCallback((list) => {
     const next = new Map()
@@ -73,8 +75,16 @@ export function useTrades() {
 
   const refetch = useCallback(async () => {
     try {
-      const data = await getActiveTrades()
-      applyTradesList(data?.trades || [])
+      const [tradeData, hedgeResult] = await Promise.all([
+        getActiveTrades(),
+        getActiveHedge()
+          .then((data) => ({ ok: true, data }))
+          .catch(() => ({ ok: false, data: null })),
+      ])
+      applyTradesList(tradeData?.trades || [])
+      if (hedgeResult.ok) {
+        setActiveHedge(hedgeResult.data?.hedge ?? null)
+      }
       setLoading(false)
     } catch (err) {
       setLoading(false)
@@ -568,6 +578,15 @@ export function useTrades() {
       return
     }
 
+    if (msg.type === 'HEDGE_CLOSED') {
+      setActiveHedge((prev) => {
+        if (prev && Number(prev.id) === Number(msg.hedge_id)) return null
+        return prev
+      })
+      refetch()
+      return
+    }
+
     if (msg.type === 'TRADE_CLOSED') {
       setTradeMap((prev) => {
         const next = new Map(prev)
@@ -641,6 +660,7 @@ export function useTrades() {
 
   return {
     trades,
+    activeHedge,
     wsStatus,
     errors,
     adjustments,

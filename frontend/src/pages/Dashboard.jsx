@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useTrades } from '../hooks/useTrades'
+import HedgePanel from '../components/HedgePanel'
 import PositionCard from '../components/PositionCard'
 import {
   checkHealth,
@@ -752,7 +753,7 @@ function BasketHistoryCard({ basket }) {
 }
 
 export default function Dashboard() {
-  const { trades, wsStatus, loading, errors, adjustments, autoTradeStatus } =
+  const { trades, activeHedge, wsStatus, loading, errors, adjustments, autoTradeStatus, refetch } =
     useTrades()
   const [updatedAt, setUpdatedAt] = useState(() => formatIstTime())
   const [backendOnline, setBackendOnline] = useState(true)
@@ -961,6 +962,10 @@ export default function Dashboard() {
 
       <MultiAccountOverview overview={slaveOverview} />
 
+      {!loading && activeHedge && (
+        <HedgePanel hedge={activeHedge} onClosed={() => refetch()} />
+      )}
+
       {loading ? (
         <div className="space-y-4">
           <SkeletonCard />
@@ -970,9 +975,13 @@ export default function Dashboard() {
       ) : trades.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-700 bg-gray-800/50 px-6 py-12 text-center">
           <div className="mb-3 text-4xl">🤖</div>
-          <p className="text-lg font-medium text-white">No active trades</p>
+          <p className="text-lg font-medium text-white">
+            {activeHedge ? 'No active short baskets' : 'No active trades'}
+          </p>
           <p className="mt-1 text-sm text-gray-400">
-            Bot is ready and monitoring
+            {activeHedge
+              ? 'Long hedge is open — short baskets will appear here when placed'
+              : 'Bot is ready and monitoring'}
           </p>
           <Link
             to="/new-trade"
