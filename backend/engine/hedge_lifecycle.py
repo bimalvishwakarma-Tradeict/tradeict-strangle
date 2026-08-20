@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 CONTRACT_SIZE = float(OPTIONS_CONTRACT_VALUE)
 VERIFY_PAUSE_SECONDS = 0.5
 UNWIND_VERIFY_ATTEMPTS = 3
+# Require 15% headroom above ask-based premium cost before buying either leg
+HEDGE_AFFORD_BUFFER = 1.15
 
 VALID_HEDGE_EXIT_REASONS = frozenset(
     {
@@ -152,16 +154,26 @@ async def _unwind_long(
     quantity: int,
     symbol: str,
     hedge_id: int = 0,
-) -> bool:
-    """Close a long leg with reduce_only and verify flat. Returns True if flat."""
+    leg: str = "call",
+) -> tuple[bool, str | None]:
+    """
+    Close a long leg with reduce_only=True and verify flat.
+
+    Returns (verified_flat, last_order_id). Always emits [HEDGE_UNWIND].
+    """
     executor = OrderExecutor()
+    last_order_id: str | None = None
     for attempt in range(1, UNWIND_VERIFY_ATTEMPTS + 1):
         try:
-            await client.close_position(
+            result = await client.close_position(
                 product_id=int(product_id),
                 size=int(quantity),
                 is_long=True,
             )
+            if isinstance(result, dict):
+                oid = result.get("id") or result.get("order_id")
+                if oid is not None:
+                    last_order_id = str(oid)
         except Exception as exc:
             logger.warning(
                 "Unwind close_position attempt %s failed product=%s: %s — "
@@ -170,28 +182,59 @@ async def _unwind_long(
                 product_id,
                 exc,
             )
-            await executor.close_long_position(
+            res = await executor.close_long_position(
                 product_id=int(product_id),
                 quantity=int(quantity),
                 delta_client=client,
                 symbol_for_fallback=symbol,
             )
+            if res.order_id is not None:
+                last_order_id = str(res.order_id)
         await asyncio.sleep(VERIFY_PAUSE_SECONDS)
         exists, size = await _verify_leg(
             client,
-            leg="call_unwind",
+            leg=f"{leg}_unwind",
             product_id=int(product_id),
             hedge_id=hedge_id,
         )
-        if not exists or abs(size) < 1e-9:
-            return True
+        flat = (not exists) or abs(size) < 1e-9
+        if flat:
+            _hedge_log(
+                "HEDGE_UNWIND",
+                int(hedge_id),
+                {
+                    "leg": leg,
+                    "product_id": int(product_id),
+                    "symbol": symbol,
+                    "quantity": int(quantity),
+                    "order_id": last_order_id,
+                    "verified_flat": True,
+                    "attempt": attempt,
+                },
+            )
+            return True, last_order_id
         logger.warning(
             "Unwind still open after attempt %s product=%s size=%s",
             attempt,
             product_id,
             size,
         )
-    return False
+
+    _hedge_log(
+        "HEDGE_UNWIND",
+        int(hedge_id),
+        {
+            "leg": leg,
+            "product_id": int(product_id),
+            "symbol": symbol,
+            "quantity": int(quantity),
+            "order_id": last_order_id,
+            "verified_flat": False,
+            "attempt": UNWIND_VERIFY_ATTEMPTS,
+        },
+        critical=True,
+    )
+    return False, last_order_id
 
 
 async def _resolve_long_exit_fill(
@@ -357,6 +400,66 @@ async def open_hedge(
         call_iv = float(row.get("call_iv") or 0)
         put_iv = float(row.get("put_iv") or 0)
 
+        call_ask = float(
+            row.get("call_ask") or row.get("call_mark_price") or 0
+        )
+        put_ask = float(
+            row.get("put_ask") or row.get("put_mark_price") or 0
+        )
+        if call_ask <= 0 or put_ask <= 0:
+            raise HedgeOpenError(
+                "afford",
+                "Cannot estimate hedge cost — missing call/put ask on chain",
+            )
+
+        est_cost_per_lot = (call_ask + put_ask) * CONTRACT_SIZE
+        est_cost = est_cost_per_lot * qty
+        required = est_cost * HEDGE_AFFORD_BUFFER
+
+        try:
+            wallet = await client.get_wallet_balance()
+            available = float(wallet.get("available_balance") or 0)
+        except Exception as exc:
+            raise HedgeOpenError(
+                "afford",
+                f"Could not fetch wallet balance for affordability check: {exc}",
+            ) from exc
+
+        if available < required:
+            shortfall = round(required - available, 4)
+            max_affordable_qty = int(
+                available // (est_cost_per_lot * HEDGE_AFFORD_BUFFER)
+            )
+            if max_affordable_qty < 1:
+                qty_hint = "Add funds — even 1 lot is not affordable right now."
+            else:
+                qty_hint = (
+                    f"Reduce quantity to {max_affordable_qty} or add funds."
+                )
+            msg = (
+                f"Hedge needs ${required:.2f} for {qty} lot(s) "
+                f"(asks ${call_ask:.2f}+${put_ask:.2f} × {qty} × "
+                f"{CONTRACT_SIZE} × {HEDGE_AFFORD_BUFFER:.0%} buffer), "
+                f"${available:.2f} available (shortfall ${shortfall:.2f}). "
+                f"{qty_hint}"
+            )
+            _hedge_log(
+                "HEDGE_AFFORD_BLOCK",
+                0,
+                {
+                    "required": round(required, 4),
+                    "available": round(available, 4),
+                    "shortfall": shortfall,
+                    "quantity": qty,
+                    "est_cost": round(est_cost, 4),
+                    "call_ask": call_ask,
+                    "put_ask": put_ask,
+                    "max_affordable_qty": max_affordable_qty,
+                },
+                critical=True,
+            )
+            raise HedgeOpenError("afford", msg)
+
         _hedge_log(
             "HEDGE_OPEN_START",
             0,
@@ -367,6 +470,9 @@ async def open_hedge(
                 "quantity": qty,
                 "spot": round(spot, 2),
                 "mode": mode,
+                "est_cost": round(est_cost, 4),
+                "required_with_buffer": round(required, 4),
+                "available": round(available, 4),
             },
         )
 
@@ -456,18 +562,20 @@ async def open_hedge(
                 {"stage": "buy_put", "reason": put_fail_reason},
                 critical=True,
             )
-            flat = await _unwind_long(
+            flat, unwind_oid = await _unwind_long(
                 client,
                 product_id=call_pid,
                 quantity=qty,
                 symbol=call_symbol,
                 hedge_id=0,
+                leg="call",
             )
             err_msg = put_fail_reason
             if not flat:
                 err_msg = (
                     f"{put_fail_reason}; CRITICAL: call unwind incomplete "
-                    f"(product_id={call_pid}) — check Delta manually"
+                    f"(product_id={call_pid}, order_id={unwind_oid}) — "
+                    f"check Delta manually"
                 )
                 _hedge_log(
                     "HEDGE_OPEN_FAIL",
@@ -476,6 +584,8 @@ async def open_hedge(
                         "stage": "unwind_call",
                         "reason": "still_open",
                         "product_id": call_pid,
+                        "order_id": unwind_oid,
+                        "verified_flat": False,
                     },
                     critical=True,
                 )

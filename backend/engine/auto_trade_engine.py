@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 _AUTO_LOOP_SECONDS = 30
 _RETRY_DELAY_SECONDS = 60
+# After N consecutive hedge-gate failures, pause retries to avoid burning spread
+_HEDGE_GATE_FAIL_THRESHOLD = 3
+_HEDGE_GATE_BACKOFF_SECONDS = 15 * 60
 
 
 def _as_ist(dt: datetime | None) -> datetime | None:
@@ -62,6 +65,9 @@ class AutoTradeEngine:
         self.is_running = False
         self._bot_engine_ref: Any | None = None
         self._loop_task: asyncio.Task[None] | None = None
+        # Consecutive hedge-open failures (reset on success or settings change)
+        self._hedge_gate_fail_count: int = 0
+        self._hedge_gate_settings_sig: tuple[Any, ...] | None = None
 
     def set_bot_engine(self, bot_engine: Any) -> None:
         self._bot_engine_ref = bot_engine
@@ -1095,6 +1101,104 @@ class AutoTradeEngine:
                 pass
             await self._record_failure(settings, db, str(exc))
 
+    def _hedge_gate_settings_signature(self, settings: Any) -> tuple[Any, ...]:
+        """Fingerprint of settings that should reset the hedge-gate fail counter."""
+        return (
+            str(getattr(settings, "underlying", "") or "").upper(),
+            bool(getattr(settings, "hedge_enabled", False)),
+            int(getattr(settings, "quantity", 0) or 0),
+            float(getattr(settings, "hedge_qty_ratio", 1.0) or 1.0),
+            float(getattr(settings, "hedge_target_usd", 0) or 0),
+            float(getattr(settings, "hedge_stoploss_usd", 0) or 0),
+            str(getattr(settings, "hedge_expiry_mode", "") or ""),
+        )
+
+    def _reset_hedge_gate_failures_if_settings_changed(self, settings: Any) -> None:
+        sig = self._hedge_gate_settings_signature(settings)
+        if sig != self._hedge_gate_settings_sig:
+            if self._hedge_gate_fail_count > 0:
+                logger.info(
+                    "Hedge gate fail counter reset (settings changed) "
+                    "was=%s",
+                    self._hedge_gate_fail_count,
+                )
+            self._hedge_gate_fail_count = 0
+            self._hedge_gate_settings_sig = sig
+
+    async def _record_hedge_gate_failure(
+        self, settings: Any, db: Any, error: str
+    ) -> None:
+        """
+        Record a hedge-gate failure with escalating backoff.
+
+        First failures: normal short retry. After threshold consecutive fails:
+        long backoff so margin errors do not burn bid-ask every minute.
+        """
+        from backend.core.bot_logger import log_and_buffer
+        from backend.database import get_or_create_auto_settings
+
+        self._reset_hedge_gate_failures_if_settings_changed(settings)
+        self._hedge_gate_fail_count = int(self._hedge_gate_fail_count or 0) + 1
+        attempts = self._hedge_gate_fail_count
+
+        if attempts >= _HEDGE_GATE_FAIL_THRESHOLD:
+            delay = _HEDGE_GATE_BACKOFF_SECONDS
+        else:
+            delay = _RETRY_DELAY_SECONDS
+
+        now = get_ist_now()
+        next_at = now + timedelta(seconds=delay)
+
+        try:
+            settings = get_or_create_auto_settings(db)
+            settings.retry_count = int(settings.retry_count or 0) + 1
+            settings.last_error = error[:500]
+            settings.next_entry_time = next_at
+            settings.updated_at = now
+            db.commit()
+        except Exception as exc:
+            logger.warning(
+                "Could not persist hedge-gate failure state: %s", exc
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        if attempts >= _HEDGE_GATE_FAIL_THRESHOLD:
+            log_and_buffer(
+                "HEDGE_GATE_BACKOFF",
+                0,
+                {
+                    "attempts": attempts,
+                    "threshold": _HEDGE_GATE_FAIL_THRESHOLD,
+                    "backoff_seconds": delay,
+                    "next_attempt_at": next_at.isoformat(),
+                    "error": error[:200],
+                },
+            )
+            logger.critical(
+                "[HEDGE_GATE_BACKOFF] attempts=%s — pausing hedge open "
+                "retries until %s (%ss). %s",
+                attempts,
+                next_at.isoformat(),
+                delay,
+                error[:160],
+            )
+
+        await ws_manager.broadcast(
+            {
+                "type": "AUTO_TRADE_FAILED",
+                "underlying": getattr(settings, "underlying", "?"),
+                "error": error,
+                "retry_in_seconds": delay,
+                "message": (
+                    f"Auto trade failed: {error[:160]}. "
+                    f"Retrying in {delay}s."
+                ),
+            }
+        )
+
     async def _hedge_entry_gate(
         self,
         *,
@@ -1117,6 +1221,8 @@ class AutoTradeEngine:
             open_hedge,
         )
 
+        self._reset_hedge_gate_failures_if_settings_changed(settings)
+
         existing = get_active_hedge(
             db,
             account_id=int(account.id),
@@ -1124,6 +1230,7 @@ class AutoTradeEngine:
         )
         if existing is not None:
             hid = int(existing.id)
+            self._hedge_gate_fail_count = 0
             log_and_buffer(
                 "HEDGE_GATE",
                 hid,
@@ -1230,7 +1337,7 @@ class AutoTradeEngine:
                 "[HEDGE_GATE_BLOCK] hedge open failed — NOT placing basket. %s",
                 reason,
             )
-            await self._record_failure(
+            await self._record_hedge_gate_failure(
                 settings,
                 db,
                 f"HEDGE_GATE_BLOCK: {reason}",
@@ -1275,7 +1382,7 @@ class AutoTradeEngine:
                 exc,
                 exc_info=True,
             )
-            await self._record_failure(
+            await self._record_hedge_gate_failure(
                 settings,
                 db,
                 f"HEDGE_GATE_BLOCK: {reason}",
@@ -1320,11 +1427,12 @@ class AutoTradeEngine:
             logger.critical(
                 "[HEDGE_GATE_BLOCK] %s — NOT placing basket", reason
             )
-            await self._record_failure(
+            await self._record_hedge_gate_failure(
                 settings, db, f"HEDGE_GATE_BLOCK: {reason}"
             )
             return None
 
+        self._hedge_gate_fail_count = 0
         log_and_buffer(
             "HEDGE_GATE",
             hid,
