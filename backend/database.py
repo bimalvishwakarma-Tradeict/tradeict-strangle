@@ -593,6 +593,112 @@ def _migrate_schema() -> None:
                     )
                 )
 
+    # --- Hedge mode tables (schema only; no behavioural consumers yet) ---
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    if "hedge_positions" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE hedge_positions (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        account_id INTEGER NOT NULL
+                            REFERENCES accounts (id),
+                        underlying VARCHAR(20) NOT NULL,
+                        expiry_date DATE NOT NULL,
+                        strike FLOAT NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        status VARCHAR(20) NOT NULL,
+                        call_product_id INTEGER,
+                        call_symbol VARCHAR(100),
+                        call_order_id VARCHAR(100),
+                        call_fill_price FLOAT,
+                        call_entry_fee_usd FLOAT,
+                        call_exit_price FLOAT,
+                        put_product_id INTEGER,
+                        put_symbol VARCHAR(100),
+                        put_order_id VARCHAR(100),
+                        put_fill_price FLOAT,
+                        put_entry_fee_usd FLOAT,
+                        put_exit_price FLOAT,
+                        entry_time DATETIME,
+                        exit_time DATETIME,
+                        exit_reason VARCHAR(50),
+                        realized_pnl FLOAT,
+                        target_usd FLOAT,
+                        stoploss_usd FLOAT,
+                        entry_total_theta FLOAT,
+                        entry_call_iv FLOAT,
+                        entry_put_iv FLOAT,
+                        order_margin_per_lot FLOAT,
+                        is_bot_managed BOOLEAN NOT NULL DEFAULT 1,
+                        last_error VARCHAR(500)
+                    )
+                    """
+                )
+            )
+    if "slave_hedge_positions" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE slave_hedge_positions (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        account_id INTEGER NOT NULL
+                            REFERENCES accounts (id),
+                        slave_account_id INTEGER NOT NULL
+                            REFERENCES slave_accounts (id),
+                        master_hedge_id INTEGER NOT NULL
+                            REFERENCES hedge_positions (id),
+                        underlying VARCHAR(20) NOT NULL,
+                        expiry_date DATE NOT NULL,
+                        strike FLOAT NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        status VARCHAR(20) NOT NULL,
+                        call_product_id INTEGER,
+                        call_symbol VARCHAR(100),
+                        call_order_id VARCHAR(100),
+                        call_fill_price FLOAT,
+                        call_entry_fee_usd FLOAT,
+                        call_exit_price FLOAT,
+                        put_product_id INTEGER,
+                        put_symbol VARCHAR(100),
+                        put_order_id VARCHAR(100),
+                        put_fill_price FLOAT,
+                        put_entry_fee_usd FLOAT,
+                        put_exit_price FLOAT,
+                        entry_time DATETIME,
+                        exit_time DATETIME,
+                        exit_reason VARCHAR(50),
+                        realized_pnl FLOAT,
+                        target_usd FLOAT,
+                        stoploss_usd FLOAT,
+                        entry_total_theta FLOAT,
+                        entry_call_iv FLOAT,
+                        entry_put_iv FLOAT,
+                        order_margin_per_lot FLOAT,
+                        is_bot_managed BOOLEAN NOT NULL DEFAULT 1,
+                        last_error VARCHAR(500),
+                        allocated_capital FLOAT,
+                        capital_per_lot FLOAT,
+                        error_count INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+            )
+    if "trades" in tables:
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "hedge_position_id" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN "
+                        "hedge_position_id INTEGER "
+                        "REFERENCES hedge_positions (id)"
+                    )
+                )
+
 
 def get_usd_inr_rate(db: Session) -> float:
     """Return configured USD→INR rate from global auto_trade_settings row."""

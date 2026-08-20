@@ -31,6 +31,9 @@ class Account(Base):
     )
 
     trades: Mapped[list[Trade]] = relationship("Trade", back_populates="account")
+    hedge_positions: Mapped[list[HedgePosition]] = relationship(
+        "HedgePosition", back_populates="account"
+    )
 
 
 class Trade(Base):
@@ -114,8 +117,15 @@ class Trade(Base):
     )
     # True = virtual/demo trade — no real Delta orders placed
     is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Optional link to a long-lived hedge (monthly ATM straddle). NULL = no hedge.
+    hedge_position_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("hedge_positions.id"), nullable=True
+    )
 
     account: Mapped[Account] = relationship("Account", back_populates="trades")
+    hedge_position: Mapped[HedgePosition | None] = relationship(
+        "HedgePosition", back_populates="baskets"
+    )
     legs: Mapped[list[Leg]] = relationship("Leg", back_populates="trade")
     adjustments: Mapped[list[Adjustment]] = relationship(
         "Adjustment", back_populates="trade"
@@ -382,6 +392,9 @@ class SlaveAccount(Base):
     trades: Mapped[list[SlaveTrade]] = relationship(
         "SlaveTrade", back_populates="slave_account"
     )
+    hedge_positions: Mapped[list[SlaveHedgePosition]] = relationship(
+        "SlaveHedgePosition", back_populates="slave_account"
+    )
 
 
 class SlaveTrade(Base):
@@ -430,3 +443,142 @@ class SlaveTrade(Base):
         "SlaveAccount", back_populates="trades"
     )
     master_trade: Mapped[Trade] = relationship("Trade")
+
+
+class HedgePosition(Base):
+    """
+    Permanent long ATM straddle (typically monthly) held alongside daily short baskets.
+
+    Lives outside trades/legs so basket exits cannot close the hedge.
+    """
+
+    __tablename__ = "hedge_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id"), nullable=False
+    )
+    underlying: Mapped[str] = mapped_column(String(20), nullable=False)
+    expiry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    strike: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    # active | closed | partial | error
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+
+    call_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    call_symbol: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    call_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    call_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    call_entry_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    call_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    put_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    put_symbol: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    put_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    put_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_entry_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    entry_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    exit_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    exit_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stoploss_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Snapshot at purchase — reporting only
+    entry_total_theta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_call_iv: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_put_iv: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Master margin per lot — used later for slave sizing
+    order_margin_per_lot: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    is_bot_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    account: Mapped[Account] = relationship(
+        "Account", back_populates="hedge_positions"
+    )
+    baskets: Mapped[list[Trade]] = relationship(
+        "Trade", back_populates="hedge_position"
+    )
+    slave_hedges: Mapped[list[SlaveHedgePosition]] = relationship(
+        "SlaveHedgePosition", back_populates="master_hedge"
+    )
+
+
+class SlaveHedgePosition(Base):
+    """
+    Mirrored hedge on a slave account.
+
+    Separate from slave_trades: a basket may close many times while its hedge
+    stays open — mixing lifecycles would close the hedge on basket exit.
+    """
+
+    __tablename__ = "slave_hedge_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id"), nullable=False
+    )
+    slave_account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("slave_accounts.id"), nullable=False
+    )
+    master_hedge_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("hedge_positions.id"), nullable=False
+    )
+
+    underlying: Mapped[str] = mapped_column(String(20), nullable=False)
+    expiry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    strike: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    # active | closed | partial | error
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+
+    call_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    call_symbol: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    call_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    call_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    call_entry_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    call_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    put_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    put_symbol: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    put_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    put_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_entry_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    entry_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    exit_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    exit_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stoploss_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    entry_total_theta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_call_iv: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_put_iv: Mapped[float | None] = mapped_column(Float, nullable=True)
+    order_margin_per_lot: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    is_bot_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    allocated_capital: Mapped[float | None] = mapped_column(Float, nullable=True)
+    capital_per_lot: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    slave_account: Mapped[SlaveAccount] = relationship(
+        "SlaveAccount", back_populates="hedge_positions"
+    )
+    master_hedge: Mapped[HedgePosition] = relationship(
+        "HedgePosition", back_populates="slave_hedges"
+    )
