@@ -81,6 +81,7 @@ _IMPORTANT_EVENTS = frozenset(
         "HEDGE_CLOSE_DONE",
         "HEDGE_CLOSE_FAIL",
         "HEDGE_CLOSE_SKIP",
+        "HEDGE_PNL",
     }
 )
 

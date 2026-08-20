@@ -12,13 +12,15 @@ from sqlalchemy.orm import Session
 from backend.config import OPTIONS_CONTRACT_VALUE
 from backend.core.bot_logger import log_and_buffer
 from backend.core.chain_utils import annotate_atm
-from backend.core.delta_client import DeltaAPIError, DeltaClient
+from backend.core.delta_client import DeltaAPIError, DeltaClient, _extract_live_quote
+from backend.core.fees import estimate_option_trading_fee
 from backend.core.hedge_theta import (
     ExpiryNotAvailableError,
     HedgeThetaError,
     migrate_hedge_expiry_mode,
     resolve_hedge_expiry_date,
 )
+from backend.core.time_utils import get_hours_to_expiry, is_pre_expiry_window
 from backend.engine.order_executor import OrderExecutor
 from backend.models import Account, AutoTradeSettings, HedgePosition
 
@@ -907,6 +909,272 @@ async def close_hedge(
             },
         )
         return hedge
+
+
+async def _fetch_strict_bid(client: DeltaClient, symbol: str) -> float | None:
+    """
+    Best bid to sell a long. No mark/ask fallback — None if bid unavailable.
+    """
+    sym = str(symbol or "").strip()
+    if not sym:
+        return None
+    try:
+        book = await client._request("GET", f"/v2/l2orderbook/{sym}")
+        if isinstance(book, dict):
+            buys = book.get("buy") or book.get("bids") or []
+            if buys and isinstance(buys[0], dict):
+                try:
+                    l2_bid = float(buys[0].get("price") or 0)
+                except (TypeError, ValueError):
+                    l2_bid = 0.0
+                if l2_bid > 0:
+                    return l2_bid
+    except Exception as exc:
+        logger.warning("L2 bid fetch failed for %s: %s", sym, exc)
+
+    try:
+        ticker = await client.get_ticker(sym)
+        bid, _ask, _mark, _delta = _extract_live_quote(ticker)
+        if bid > 0:
+            return float(bid)
+    except Exception as exc:
+        logger.warning("Ticker bid fetch failed for %s: %s", sym, exc)
+    return None
+
+
+def compute_long_hedge_pnl(
+    *,
+    call_bid: float,
+    put_bid: float,
+    call_entry: float,
+    put_entry: float,
+    quantity: int,
+    entry_fees: float,
+    estimated_exit_fees: float,
+) -> dict[str, float]:
+    """
+    Unrealized P&L for a LONG straddle (buy call + buy put).
+
+    LONG vs SHORT sign convention (CRITICAL):
+      Short basket: P&L = (entry - current) × qty × CV  → premium rise hurts
+      Long hedge:   P&L = (current - entry) × qty × CV  → premium rise HELPS
+
+    If both legs are worth MORE than entry, gross P&L is POSITIVE.
+    We sell to close → mark-to-market at BID (exit proceeds).
+    """
+    qty = max(1, int(quantity or 1))
+    call_pnl = (float(call_bid) - float(call_entry)) * qty * CONTRACT_SIZE
+    put_pnl = (float(put_bid) - float(put_entry)) * qty * CONTRACT_SIZE
+    gross = call_pnl + put_pnl
+    fees = max(0.0, float(entry_fees or 0.0)) + max(
+        0.0, float(estimated_exit_fees or 0.0)
+    )
+    net = gross - fees
+    return {
+        "call_pnl": float(call_pnl),
+        "put_pnl": float(put_pnl),
+        "gross": float(gross),
+        "net": float(net),
+        "fees": float(fees),
+    }
+
+
+async def evaluate_and_maybe_close_hedge(
+    hedge: HedgePosition,
+    db: Session,
+    *,
+    client: DeltaClient,
+    btc_index: float,
+) -> HedgePosition | None:
+    """
+    One monitoring cycle for a single active hedge.
+
+    Returns the closed row if a close was triggered, else None.
+    Skips evaluation (no close) if either bid cannot be fetched.
+    """
+    hid = int(hedge.id)
+    call_sym = str(hedge.call_symbol or "")
+    put_sym = str(hedge.put_symbol or "")
+    call_entry = float(hedge.call_fill_price or 0)
+    put_entry = float(hedge.put_fill_price or 0)
+    qty = max(1, int(hedge.quantity or 1))
+    target = float(hedge.target_usd or 0)
+    stoploss = float(hedge.stoploss_usd or 0)
+
+    if call_entry <= 0 or put_entry <= 0 or not call_sym or not put_sym:
+        logger.warning(
+            "[HEDGE_PNL] hedge_id=%s skip — missing entry fills or symbols",
+            hid,
+        )
+        return None
+
+    call_bid = await _fetch_strict_bid(client, call_sym)
+    put_bid = await _fetch_strict_bid(client, put_sym)
+    if call_bid is None or put_bid is None or call_bid <= 0 or put_bid <= 0:
+        logger.warning(
+            "[HEDGE_PNL] hedge_id=%s bid fetch failed "
+            "call_bid=%s put_bid=%s — skipping evaluation this cycle",
+            hid,
+            call_bid,
+            put_bid,
+        )
+        _hedge_log(
+            "HEDGE_PNL",
+            hid,
+            {
+                "skipped": True,
+                "reason": "bid_fetch_failed",
+                "call_bid": call_bid,
+                "put_bid": put_bid,
+                "call_symbol": call_sym,
+                "put_symbol": put_sym,
+            },
+        )
+        return None
+
+    entry_fees = float(hedge.call_entry_fee_usd or 0) + float(
+        hedge.put_entry_fee_usd or 0
+    )
+    est_exit = 0.0
+    btc = float(btc_index or 0)
+    if btc > 0:
+        est_exit += estimate_option_trading_fee(
+            option_price=float(call_bid),
+            quantity_lots=qty,
+            btc_index_price=btc,
+        )
+        est_exit += estimate_option_trading_fee(
+            option_price=float(put_bid),
+            quantity_lots=qty,
+            btc_index_price=btc,
+        )
+
+    pnl = compute_long_hedge_pnl(
+        call_bid=float(call_bid),
+        put_bid=float(put_bid),
+        call_entry=call_entry,
+        put_entry=put_entry,
+        quantity=qty,
+        entry_fees=entry_fees,
+        estimated_exit_fees=est_exit,
+    )
+    net = float(pnl["net"])
+    gross = float(pnl["gross"])
+    hours_left = (
+        get_hours_to_expiry(hedge.expiry_date) if hedge.expiry_date else 0.0
+    )
+    # Same pre-expiry window as short basket (never allow settlement)
+    will_close_expiry = bool(
+        hedge.expiry_date
+        and (hours_left == 0 or is_pre_expiry_window(hedge.expiry_date))
+    )
+    will_close_target = bool(target > 0 and net >= target)
+    will_close_stop = bool(stoploss > 0 and net <= -stoploss)
+
+    pct_to_target = (net / target * 100.0) if target > 0 else 0.0
+    pct_to_stop = (-net / stoploss * 100.0) if stoploss > 0 else 0.0
+
+    _hedge_log(
+        "HEDGE_PNL",
+        hid,
+        {
+            "call_bid": round(float(call_bid), 4),
+            "put_bid": round(float(put_bid), 4),
+            "call_entry": round(call_entry, 4),
+            "put_entry": round(put_entry, 4),
+            "gross": round(gross, 6),
+            "net": round(net, 6),
+            "entry_fees": round(entry_fees, 6),
+            "est_exit_fees": round(est_exit, 6),
+            "target_usd": target,
+            "stoploss_usd": stoploss,
+            "pct_to_target": round(pct_to_target, 2),
+            "pct_to_stop": round(pct_to_stop, 2),
+            "hours_to_expiry": round(hours_left, 4),
+            "will_close_target": will_close_target,
+            "will_close_stop": will_close_stop,
+            "will_close_expiry": will_close_expiry,
+        },
+    )
+
+    close_reason: str | None = None
+    if will_close_target:
+        close_reason = "HEDGE_TARGET"
+    elif will_close_stop:
+        close_reason = "HEDGE_STOPLOSS"
+    elif will_close_expiry:
+        close_reason = "HEDGE_EXPIRY"
+
+    if close_reason is None:
+        return None
+
+    try:
+        closed = await close_hedge(hid, close_reason, db, client=client)
+        return closed
+    except HedgeCloseError as exc:
+        _hedge_log(
+            "HEDGE_CLOSE_FAIL",
+            hid,
+            {
+                "stage": f"monitor_{exc.stage}",
+                "reason": str(exc.reason),
+                "trigger": close_reason,
+                "net": round(net, 6),
+            },
+            critical=True,
+        )
+        return None
+    except Exception as exc:
+        _hedge_log(
+            "HEDGE_CLOSE_FAIL",
+            hid,
+            {
+                "stage": "monitor_unexpected",
+                "reason": str(exc),
+                "trigger": close_reason,
+            },
+            critical=True,
+        )
+        return None
+
+
+async def monitor_active_hedges(
+    db: Session,
+    *,
+    client: DeltaClient,
+    btc_index: float,
+) -> list[HedgePosition]:
+    """
+    Evaluate every active hedge this cycle.
+
+    Independent of short baskets — call even when no trade is open.
+    Never gated by basket settling windows or the adjusting guard.
+    """
+    hedges = (
+        db.query(HedgePosition)
+        .filter(HedgePosition.status == "active")
+        .order_by(HedgePosition.id.asc())
+        .all()
+    )
+    closed: list[HedgePosition] = []
+    for hedge in hedges:
+        try:
+            result = await evaluate_and_maybe_close_hedge(
+                hedge,
+                db,
+                client=client,
+                btc_index=btc_index,
+            )
+            if result is not None and str(result.status or "").lower() == "closed":
+                closed.append(result)
+        except Exception as exc:
+            logger.critical(
+                "[HEDGE_PNL] unexpected error hedge_id=%s: %s",
+                getattr(hedge, "id", "?"),
+                exc,
+                exc_info=True,
+            )
+    return closed
 
 
 def hedge_to_dict(h: HedgePosition) -> dict[str, Any]:

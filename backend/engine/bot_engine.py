@@ -341,6 +341,56 @@ class BotEngine:
             logger.debug("BTC spot refresh failed: %s", exc)
         return float(self._btc_spot or 0)
 
+    async def _monitor_active_hedges(self) -> None:
+        """
+        Evaluate active long hedges for target / stoploss / pre-expiry.
+
+        Runs every monitoring cycle independently of short baskets — including
+        when the trade tracker is empty. Not gated by settling or is_adjusting.
+        """
+        if self.delta_client is None:
+            self._refresh_delta_client()
+        if self.delta_client is None:
+            return
+
+        try:
+            btc = await self._refresh_btc_spot()
+        except Exception:
+            btc = float(self._btc_spot or 0)
+
+        try:
+            from backend.engine.hedge_lifecycle import monitor_active_hedges
+
+            with self.db_factory() as db:
+                closed = await monitor_active_hedges(
+                    db,
+                    client=self.delta_client,
+                    btc_index=float(btc or 0),
+                )
+                for h in closed:
+                    try:
+                        await ws_manager.broadcast(
+                            {
+                                "type": "HEDGE_CLOSED",
+                                "hedge_id": int(h.id),
+                                "reason": h.exit_reason,
+                                "realized_pnl": h.realized_pnl,
+                                "message": (
+                                    f"Hedge #{h.id} closed "
+                                    f"({h.exit_reason}) "
+                                    f"pnl={h.realized_pnl}"
+                                ),
+                            }
+                        )
+                    except Exception as ws_exc:
+                        logger.warning(
+                            "HEDGE_CLOSED WS broadcast failed: %s", ws_exc
+                        )
+        except Exception as exc:
+            logger.critical(
+                "Hedge monitor cycle failed: %s", exc, exc_info=True
+            )
+
     async def _get_premium(self, symbol: str) -> float:
         """
         Short-exit premium = Best Offer (L2/ticker ask).
@@ -471,6 +521,10 @@ class BotEngine:
                         )
             except Exception as exc:
                 logger.warning("Monitor reconcile failed: %s", exc)
+
+        # Hedge monitor: independent of baskets — runs even when tracker is empty,
+        # and is never skipped by settling windows or the is_adjusting guard.
+        await self._monitor_active_hedges()
 
         count = len(self.position_tracker.get_all_active())
         if self._last_trade_count != count:
