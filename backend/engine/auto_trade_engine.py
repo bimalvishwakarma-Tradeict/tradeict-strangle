@@ -271,6 +271,30 @@ class AutoTradeEngine:
             return
 
         # Guard 3: Delta positions — block only bot-tracked; auto-close orphans
+        # Active long-hedge legs (hedge_positions) are never orphans and never block.
+        from backend.engine.hedge_lifecycle import get_active_hedge
+
+        hedge_symbols: set[str] = set()
+        hedge_pids: set[int] = set()
+        _active_hedge = get_active_hedge(
+            db,
+            account_id=int(account.id),
+            underlying=underlying,
+        )
+        if _active_hedge is not None:
+            for _sym in (_active_hedge.call_symbol, _active_hedge.put_symbol):
+                if _sym:
+                    hedge_symbols.add(str(_sym).upper())
+            for _pid in (
+                _active_hedge.call_product_id,
+                _active_hedge.put_product_id,
+            ):
+                try:
+                    if _pid and int(_pid) > 0:
+                        hedge_pids.add(int(_pid))
+                except (TypeError, ValueError):
+                    pass
+
         delta_option_positions = await client.get_option_positions()
         underlying_positions = [
             p
@@ -311,6 +335,10 @@ class AutoTradeEngine:
                 )
             except (TypeError, ValueError, AttributeError):
                 product_id = 0
+
+            if symbol.upper() in hedge_symbols or product_id in hedge_pids:
+                # Active long hedge — keep it; short basket may share the book
+                continue
 
             if symbol.upper() in tracked_symbols:
                 # Bot's own open position — block entry
@@ -506,6 +534,20 @@ class AutoTradeEngine:
                 "trigger_mode": str(settings.trigger_mode or "slab"),
             },
         )
+
+        # Hedge gate — only when hedge_enabled. When False, skip entirely
+        # (byte-identical to pre-hedge auto entry).
+        hedge_position_id: int | None = None
+        if bool(getattr(settings, "hedge_enabled", False)):
+            hedge_position_id = await self._hedge_entry_gate(
+                settings=settings,
+                db=db,
+                account=account,
+                client=client,
+                underlying=underlying,
+            )
+            if hedge_position_id is None:
+                return
 
         try:
             expiry_str = expiry_date.isoformat()
@@ -724,6 +766,11 @@ class AutoTradeEngine:
                 basket_number=basket_no,
                 notes="auto_trade",
                 entry_spread_for_sl_usd=0.0,
+                hedge_position_id=(
+                    int(hedge_position_id)
+                    if hedge_position_id is not None
+                    else None
+                ),
             )
             db.add(trade)
             db.flush()
@@ -1047,6 +1094,264 @@ class AutoTradeEngine:
             except Exception:
                 pass
             await self._record_failure(settings, db, str(exc))
+
+    async def _hedge_entry_gate(
+        self,
+        *,
+        settings: Any,
+        db: Any,
+        account: Any,
+        client: Any,
+        underlying: str,
+    ) -> int | None:
+        """
+        Ensure an active long hedge exists before placing the short basket.
+
+        Returns hedge_positions.id on success, or None if the basket must NOT
+        be placed (caller should return immediately).
+        """
+        from backend.core.bot_logger import log_and_buffer
+        from backend.engine.hedge_lifecycle import (
+            HedgeOpenError,
+            get_active_hedge,
+            open_hedge,
+        )
+
+        existing = get_active_hedge(
+            db,
+            account_id=int(account.id),
+            underlying=str(underlying),
+        )
+        if existing is not None:
+            hid = int(existing.id)
+            log_and_buffer(
+                "HEDGE_GATE",
+                hid,
+                {
+                    "hedge_enabled": True,
+                    "existing_hedge_id": hid,
+                    "action": "reuse",
+                    "underlying": underlying,
+                },
+            )
+            log_and_buffer(
+                "ENTRY_GUARD_PASS",
+                hid,
+                {
+                    "source": "auto",
+                    "guard": "hedge",
+                    "action": "reuse",
+                    "hedge_id": hid,
+                    "underlying": underlying,
+                },
+            )
+            logger.info(
+                "HEDGE_GATE: reuse active hedge #%s for %s — placing basket only",
+                hid,
+                underlying,
+            )
+            return hid
+
+        basket_qty = max(1, int(settings.quantity or 1))
+        try:
+            ratio = float(getattr(settings, "hedge_qty_ratio", None) or 1.0)
+        except (TypeError, ValueError):
+            ratio = 1.0
+        if ratio <= 0:
+            ratio = 1.0
+        hedge_qty = max(1, int(round(basket_qty * ratio)))
+
+        log_and_buffer(
+            "HEDGE_GATE",
+            0,
+            {
+                "hedge_enabled": True,
+                "existing_hedge_id": None,
+                "action": "open",
+                "underlying": underlying,
+                "basket_qty": basket_qty,
+                "hedge_qty": hedge_qty,
+                "hedge_qty_ratio": ratio,
+            },
+        )
+        logger.info(
+            "HEDGE_GATE: no active hedge for %s — opening hedge qty=%s "
+            "(basket_qty=%s × ratio=%.2f)",
+            underlying,
+            hedge_qty,
+            basket_qty,
+            ratio,
+        )
+
+        try:
+            hedge = await open_hedge(
+                account,
+                settings,
+                db,
+                client=client,
+                quantity_override=hedge_qty,
+            )
+        except HedgeOpenError as exc:
+            reason = f"{exc.stage}: {exc.reason}"
+            log_and_buffer(
+                "HEDGE_GATE",
+                0,
+                {
+                    "hedge_enabled": True,
+                    "existing_hedge_id": None,
+                    "action": "blocked",
+                    "underlying": underlying,
+                    "reason": reason,
+                },
+            )
+            log_and_buffer(
+                "HEDGE_GATE_BLOCK",
+                0,
+                {
+                    "source": "auto",
+                    "guard": "hedge",
+                    "underlying": underlying,
+                    "stage": exc.stage,
+                    "reason": str(exc.reason),
+                },
+            )
+            log_and_buffer(
+                "ENTRY_GUARD_BLOCK",
+                0,
+                {
+                    "source": "auto",
+                    "guard": "hedge",
+                    "underlying": underlying,
+                    "stage": exc.stage,
+                    "reason": str(exc.reason),
+                },
+            )
+            logger.critical(
+                "[HEDGE_GATE_BLOCK] hedge open failed — NOT placing basket. %s",
+                reason,
+            )
+            await self._record_failure(
+                settings,
+                db,
+                f"HEDGE_GATE_BLOCK: {reason}",
+            )
+            return None
+        except Exception as exc:
+            reason = str(exc)
+            log_and_buffer(
+                "HEDGE_GATE",
+                0,
+                {
+                    "hedge_enabled": True,
+                    "existing_hedge_id": None,
+                    "action": "blocked",
+                    "underlying": underlying,
+                    "reason": reason,
+                },
+            )
+            log_and_buffer(
+                "HEDGE_GATE_BLOCK",
+                0,
+                {
+                    "source": "auto",
+                    "guard": "hedge",
+                    "underlying": underlying,
+                    "reason": reason,
+                },
+            )
+            log_and_buffer(
+                "ENTRY_GUARD_BLOCK",
+                0,
+                {
+                    "source": "auto",
+                    "guard": "hedge",
+                    "underlying": underlying,
+                    "reason": reason,
+                },
+            )
+            logger.critical(
+                "[HEDGE_GATE_BLOCK] unexpected hedge open error — "
+                "NOT placing basket: %s",
+                exc,
+                exc_info=True,
+            )
+            await self._record_failure(
+                settings,
+                db,
+                f"HEDGE_GATE_BLOCK: {reason}",
+            )
+            return None
+
+        hid = int(hedge.id)
+        # open_hedge returns existing if raced — treat as success either way
+        if str(hedge.status or "").lower() != "active":
+            reason = f"hedge #{hid} status={hedge.status} after open"
+            log_and_buffer(
+                "HEDGE_GATE",
+                hid,
+                {
+                    "hedge_enabled": True,
+                    "existing_hedge_id": hid,
+                    "action": "blocked",
+                    "underlying": underlying,
+                    "reason": reason,
+                },
+            )
+            log_and_buffer(
+                "HEDGE_GATE_BLOCK",
+                hid,
+                {
+                    "source": "auto",
+                    "guard": "hedge",
+                    "underlying": underlying,
+                    "reason": reason,
+                },
+            )
+            log_and_buffer(
+                "ENTRY_GUARD_BLOCK",
+                hid,
+                {
+                    "source": "auto",
+                    "guard": "hedge",
+                    "underlying": underlying,
+                    "reason": reason,
+                },
+            )
+            logger.critical(
+                "[HEDGE_GATE_BLOCK] %s — NOT placing basket", reason
+            )
+            await self._record_failure(
+                settings, db, f"HEDGE_GATE_BLOCK: {reason}"
+            )
+            return None
+
+        log_and_buffer(
+            "HEDGE_GATE",
+            hid,
+            {
+                "hedge_enabled": True,
+                "existing_hedge_id": hid,
+                "action": "open",
+                "underlying": underlying,
+                "hedge_qty": hedge_qty,
+            },
+        )
+        log_and_buffer(
+            "ENTRY_GUARD_PASS",
+            hid,
+            {
+                "source": "auto",
+                "guard": "hedge",
+                "action": "open",
+                "hedge_id": hid,
+                "underlying": underlying,
+            },
+        )
+        logger.info(
+            "HEDGE_GATE: opened hedge #%s — proceeding to place short basket",
+            hid,
+        )
+        return hid
 
     async def _record_failure(
         self, settings: Any, db: Any, error: str

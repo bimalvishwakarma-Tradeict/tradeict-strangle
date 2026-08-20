@@ -721,6 +721,7 @@ def _migrate_schema() -> None:
             ("theta_multiplier", "FLOAT NOT NULL DEFAULT 3.0"),
             ("target_mode", "VARCHAR(30) NOT NULL DEFAULT 'payoff_pct'"),
             ("target_theta_pct", "FLOAT NOT NULL DEFAULT 150.0"),
+            ("hedge_qty_ratio", "FLOAT NOT NULL DEFAULT 1.0"),
             ("cooldown_after_loss_minutes", "INTEGER NOT NULL DEFAULT 120"),
         ]
         for col_name, col_type in hedge_setting_cols:

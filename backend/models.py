@@ -353,6 +353,10 @@ class AutoTradeSettings(Base):
     target_theta_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=150.0
     )
+    # hedge lots = short basket qty × this ratio (default 1:1)
+    hedge_qty_ratio: Mapped[float] = mapped_column(
+        Float, nullable=False, default=1.0
+    )
     cooldown_after_loss_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=120
     )
