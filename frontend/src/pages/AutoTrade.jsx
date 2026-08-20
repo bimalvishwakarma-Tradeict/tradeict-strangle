@@ -1639,6 +1639,13 @@ export default function AutoTrade() {
             </p>
           ) : targetPreview?.success ? (
             <div className="space-y-1.5 font-mono text-xs text-gray-300">
+              <p className="text-gray-500">
+                Short {formatExpiryShort(targetPreview.short_expiry)} · CALL{' '}
+                {Math.round(Number(targetPreview.call_strike))} @{' '}
+                {formatMoney(targetPreview.call_premium)} · PUT{' '}
+                {Math.round(Number(targetPreview.put_strike))} @{' '}
+                {formatMoney(targetPreview.put_premium)}
+              </p>
               <p className="text-sm text-white">
                 = {formatMoney(targetPreview.target_usd)} ={' '}
                 {Number(targetPreview.pct_of_max).toFixed(0)}% of max profit
@@ -1649,15 +1656,18 @@ export default function AutoTrade() {
               </p>
               <p
                 className={
-                  targetPreview.band === 'reachable'
+                  (targetPreview.reachability || targetPreview.band) === 'reachable'
                     ? 'text-emerald-400'
-                    : targetPreview.band === 'tight'
+                    : (targetPreview.reachability || targetPreview.band) === 'tight'
                       ? 'text-amber-400'
                       : 'text-rose-400'
                 }
               >
-                [{targetPreview.band === 'reachable' ? 'ok' : '!'}]{' '}
-                {targetPreview.band_label}
+                [
+                {(targetPreview.reachability || targetPreview.band) === 'reachable'
+                  ? 'ok'
+                  : '!'}
+                ] {targetPreview.band_label || targetPreview.reachability}
               </p>
             </div>
           ) : (
