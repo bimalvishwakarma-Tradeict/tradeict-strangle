@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -310,6 +320,43 @@ class AutoTradeSettings(Base):
     premium_cover_loss_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+
+    # --- Hedge mode (config only until engine steps land) ---
+    # Defaults preserve today's behaviour: hedge off, fixed premium, payoff %.
+    hedge_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    # monthly | date | dte
+    hedge_expiry_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="monthly"
+    )
+    hedge_expiry_date_override: Mapped[str | None] = mapped_column(
+        String(10), nullable=True, default=None
+    )
+    hedge_expiry_dte: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hedge_target_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hedge_stoploss_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin_buffer_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, default=50.0
+    )
+    # fixed_premium | theta_based
+    strike_selection_mode: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="fixed_premium"
+    )
+    theta_multiplier: Mapped[float] = mapped_column(
+        Float, nullable=False, default=3.0
+    )
+    # payoff_pct | theta_multiplier
+    target_mode: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="payoff_pct"
+    )
+    target_theta_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, default=150.0
+    )
+    cooldown_after_loss_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=120
+    )
+
     # Demo/virtual mode — places virtual trades without real Delta orders
     is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
@@ -509,6 +556,9 @@ class HedgePosition(Base):
     slave_hedges: Mapped[list[SlaveHedgePosition]] = relationship(
         "SlaveHedgePosition", back_populates="master_hedge"
     )
+    theta_logs: Mapped[list[HedgeThetaLog]] = relationship(
+        "HedgeThetaLog", back_populates="hedge"
+    )
 
 
 class SlaveHedgePosition(Base):
@@ -581,4 +631,32 @@ class SlaveHedgePosition(Base):
     )
     master_hedge: Mapped[HedgePosition] = relationship(
         "HedgePosition", back_populates="slave_hedges"
+    )
+
+
+class HedgeThetaLog(Base):
+    """Daily theta / IV snapshot for a hedge. Nothing writes yet (schema only)."""
+
+    __tablename__ = "hedge_theta_log"
+    __table_args__ = (
+        UniqueConstraint("hedge_id", "log_date", name="uq_hedge_theta_log_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    hedge_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("hedge_positions.id"), nullable=False
+    )
+    log_date: Mapped[date] = mapped_column(Date, nullable=False)
+    call_theta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_theta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_theta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spot_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    call_iv: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_iv: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now
+    )
+
+    hedge: Mapped[HedgePosition] = relationship(
+        "HedgePosition", back_populates="theta_logs"
     )

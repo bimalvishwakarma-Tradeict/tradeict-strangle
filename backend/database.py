@@ -699,6 +699,65 @@ def _migrate_schema() -> None:
                     )
                 )
 
+    # Hedge mode settings columns + theta log table
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    if "auto_trade_settings" in tables:
+        at_cols = {
+            col["name"] for col in inspector.get_columns("auto_trade_settings")
+        }
+        hedge_setting_cols = [
+            ("hedge_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("hedge_expiry_mode", "VARCHAR(20) NOT NULL DEFAULT 'monthly'"),
+            ("hedge_expiry_date_override", "VARCHAR(10) DEFAULT NULL"),
+            ("hedge_expiry_dte", "INTEGER DEFAULT NULL"),
+            ("hedge_target_usd", "FLOAT DEFAULT NULL"),
+            ("hedge_stoploss_usd", "FLOAT DEFAULT NULL"),
+            ("margin_buffer_pct", "FLOAT NOT NULL DEFAULT 50.0"),
+            (
+                "strike_selection_mode",
+                "VARCHAR(30) NOT NULL DEFAULT 'fixed_premium'",
+            ),
+            ("theta_multiplier", "FLOAT NOT NULL DEFAULT 3.0"),
+            ("target_mode", "VARCHAR(30) NOT NULL DEFAULT 'payoff_pct'"),
+            ("target_theta_pct", "FLOAT NOT NULL DEFAULT 150.0"),
+            ("cooldown_after_loss_minutes", "INTEGER NOT NULL DEFAULT 120"),
+        ]
+        for col_name, col_type in hedge_setting_cols:
+            if col_name not in at_cols:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE auto_trade_settings "
+                            f"ADD COLUMN {col_name} {col_type}"
+                        )
+                    )
+                at_cols.add(col_name)
+
+    if "hedge_theta_log" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE hedge_theta_log (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        hedge_id INTEGER NOT NULL
+                            REFERENCES hedge_positions (id),
+                        log_date DATE NOT NULL,
+                        call_theta FLOAT,
+                        put_theta FLOAT,
+                        total_theta FLOAT,
+                        spot_price FLOAT,
+                        call_iv FLOAT,
+                        put_iv FLOAT,
+                        created_at DATETIME NOT NULL,
+                        CONSTRAINT uq_hedge_theta_log_day
+                            UNIQUE (hedge_id, log_date)
+                    )
+                    """
+                )
+            )
+
 
 def get_usd_inr_rate(db: Session) -> float:
     """Return configured USD→INR rate from global auto_trade_settings row."""

@@ -57,6 +57,31 @@ function applyStatusToForm(data, setters) {
   setters.setCombinedTriggerMode(
     Boolean(data.combined_trigger_mode),
   )
+  setters.setHedgeEnabled(Boolean(data.hedge_enabled))
+  setters.setHedgeExpiryMode(data.hedge_expiry_mode || 'monthly')
+  setters.setHedgeExpiryDateOverride(data.hedge_expiry_date_override || '')
+  setters.setHedgeExpiryDte(
+    data.hedge_expiry_dte == null ? '' : String(data.hedge_expiry_dte),
+  )
+  setters.setHedgeTargetUsd(
+    data.hedge_target_usd == null ? '' : String(data.hedge_target_usd),
+  )
+  setters.setHedgeStoplossUsd(
+    data.hedge_stoploss_usd == null ? '' : String(data.hedge_stoploss_usd),
+  )
+  setters.setMarginBufferPct(String(data.margin_buffer_pct ?? 50))
+  setters.setStrikeSelectionMode(data.strike_selection_mode || 'fixed_premium')
+  setters.setThetaMultiplier(String(data.theta_multiplier ?? 3))
+  setters.setTargetMode(data.target_mode || 'payoff_pct')
+  setters.setTargetThetaPct(String(data.target_theta_pct ?? 150))
+  setters.setCooldownAfterLossMinutes(
+    String(data.cooldown_after_loss_minutes ?? 120),
+  )
+  setters.setOrderMarginPerLot(
+    data.order_margin_per_lot == null || data.order_margin_per_lot === ''
+      ? null
+      : Number(data.order_margin_per_lot),
+  )
   setters.setIsEnabled(Boolean(data.is_enabled))
   setters.setLastError(data.last_error || null)
   setters.setLastTradeId(data.last_trade_id ?? null)
@@ -119,6 +144,21 @@ export default function AutoTrade() {
   const [maxAdjustmentsPerBasket, setMaxAdjustmentsPerBasket] = useState('')
   const [premiumCoverLossEnabled, setPremiumCoverLossEnabled] = useState(false)
   const [combinedTriggerMode, setCombinedTriggerMode] = useState(false)
+  const [hedgeEnabled, setHedgeEnabled] = useState(false)
+  const [hedgeExpiryMode, setHedgeExpiryMode] = useState('monthly')
+  const [hedgeExpiryDateOverride, setHedgeExpiryDateOverride] = useState('')
+  const [hedgeExpiryDte, setHedgeExpiryDte] = useState('')
+  const [hedgeTargetUsd, setHedgeTargetUsd] = useState('')
+  const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
+  const [marginBufferPct, setMarginBufferPct] = useState('50')
+  const [strikeSelectionMode, setStrikeSelectionMode] =
+    useState('fixed_premium')
+  const [thetaMultiplier, setThetaMultiplier] = useState('3')
+  const [targetMode, setTargetMode] = useState('payoff_pct')
+  const [targetThetaPct, setTargetThetaPct] = useState('150')
+  const [cooldownAfterLossMinutes, setCooldownAfterLossMinutes] =
+    useState('120')
+  const [orderMarginPerLot, setOrderMarginPerLot] = useState(null)
   const [slabs, setSlabs] = useState(null)
   const [slabsInitial, setSlabsInitial] = useState(null)
   const [slabsKey, setSlabsKey] = useState(0)
@@ -148,6 +188,19 @@ export default function AutoTrade() {
       setMaxAdjustmentsPerBasket,
       setPremiumCoverLossEnabled,
       setCombinedTriggerMode,
+      setHedgeEnabled,
+      setHedgeExpiryMode,
+      setHedgeExpiryDateOverride,
+      setHedgeExpiryDte,
+      setHedgeTargetUsd,
+      setHedgeStoplossUsd,
+      setMarginBufferPct,
+      setStrikeSelectionMode,
+      setThetaMultiplier,
+      setTargetMode,
+      setTargetThetaPct,
+      setCooldownAfterLossMinutes,
+      setOrderMarginPerLot,
       setIsEnabled,
       setLastError,
       setLastTradeId,
@@ -394,8 +447,57 @@ export default function AutoTrade() {
           : Math.max(1, Math.min(50, Number(maxAdjustmentsPerBasket) || 1)),
       premium_cover_loss_enabled: Boolean(premiumCoverLossEnabled),
       combined_trigger_mode: Boolean(combinedTriggerMode),
+      hedge_enabled: Boolean(hedgeEnabled),
+      hedge_expiry_mode: hedgeExpiryMode || 'monthly',
+      hedge_expiry_date_override:
+        hedgeExpiryMode === 'date' && hedgeExpiryDateOverride
+          ? hedgeExpiryDateOverride
+          : null,
+      hedge_expiry_dte:
+        hedgeExpiryMode === 'dte' && hedgeExpiryDte !== ''
+          ? Math.max(0, Math.min(365, Number(hedgeExpiryDte) || 0))
+          : null,
+      hedge_target_usd:
+        hedgeTargetUsd === '' || hedgeTargetUsd == null
+          ? null
+          : Number(hedgeTargetUsd),
+      hedge_stoploss_usd:
+        hedgeStoplossUsd === '' || hedgeStoplossUsd == null
+          ? null
+          : Number(hedgeStoplossUsd),
+      margin_buffer_pct: Math.min(
+        200,
+        Math.max(0, Number(marginBufferPct) || 0),
+      ),
+      strike_selection_mode: hedgeEnabled
+        ? strikeSelectionMode || 'fixed_premium'
+        : 'fixed_premium',
+      theta_multiplier: Math.min(
+        20,
+        Math.max(0.01, Number(thetaMultiplier) || 3),
+      ),
+      target_mode: hedgeEnabled
+        ? targetMode || 'payoff_pct'
+        : 'payoff_pct',
+      target_theta_pct: Math.min(
+        1000,
+        Math.max(10, Number(targetThetaPct) || 150),
+      ),
+      cooldown_after_loss_minutes: Math.min(
+        1440,
+        Math.max(0, Number(cooldownAfterLossMinutes) || 0),
+      ),
     }
   }
+
+  const capitalPerLotDisplay = useMemo(() => {
+    if (orderMarginPerLot == null || !Number.isFinite(Number(orderMarginPerLot))) {
+      return '--'
+    }
+    const buf = Math.min(200, Math.max(0, Number(marginBufferPct) || 0))
+    const cpl = Number(orderMarginPerLot) * (1 + buf / 100)
+    return Number.isFinite(cpl) ? `$${cpl.toFixed(2)}` : '--'
+  }, [orderMarginPerLot, marginBufferPct])
 
   const handleSave = async () => {
     setSaving(true)
@@ -971,6 +1073,301 @@ export default function AutoTrade() {
           both legs expire worthless, and gives more breathing room before
           next trigger.
         </p>
+      </section>
+
+      {/* ===== HEDGE MODE (config only — engine not wired yet) ===== */}
+      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">HEDGE MODE</h2>
+        <p className="text-xs text-gray-500">
+          A permanent long ATM straddle held alongside daily short baskets.
+          The hedge is NOT closed when a basket closes — it outlives many
+          baskets and has its own target / stop / lifecycle.
+        </p>
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            checked={hedgeEnabled}
+            onChange={(e) => {
+              const on = e.target.checked
+              setHedgeEnabled(on)
+              if (!on) {
+                setStrikeSelectionMode('fixed_premium')
+                setTargetMode('payoff_pct')
+              }
+            }}
+            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500"
+          />
+          <span className="text-sm text-gray-300">
+            Enable Hedge Mode{' '}
+            <span className="text-gray-500">
+              ({hedgeEnabled ? 'ON' : 'OFF'})
+            </span>
+          </span>
+        </label>
+
+        <div
+          className={`grid gap-3 sm:grid-cols-2 ${
+            hedgeEnabled ? '' : 'pointer-events-none opacity-40'
+          }`}
+        >
+          <label className="block text-sm text-gray-300">
+            Hedge expiry
+            <select
+              value={hedgeExpiryMode}
+              onChange={(e) => setHedgeExpiryMode(e.target.value)}
+              disabled={!hedgeEnabled}
+              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+            >
+              <option value="monthly">Nearest monthly</option>
+              <option value="date">Fixed calendar date</option>
+              <option value="dte">Fixed DTE</option>
+            </select>
+          </label>
+          {hedgeExpiryMode === 'date' && (
+            <label className="block text-sm text-gray-300">
+              Hedge expiry date
+              <input
+                type="date"
+                value={hedgeExpiryDateOverride}
+                onChange={(e) => setHedgeExpiryDateOverride(e.target.value)}
+                disabled={!hedgeEnabled}
+                className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+              />
+            </label>
+          )}
+          {hedgeExpiryMode === 'dte' && (
+            <label className="block text-sm text-gray-300">
+              Hedge DTE
+              <input
+                type="number"
+                min={0}
+                max={365}
+                value={hedgeExpiryDte}
+                onChange={(e) => setHedgeExpiryDte(e.target.value)}
+                disabled={!hedgeEnabled}
+                className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+              />
+            </label>
+          )}
+          <label className="block text-sm text-gray-300">
+            Hedge target ($)
+            <input
+              type="number"
+              min={0.01}
+              step={1}
+              value={hedgeTargetUsd}
+              onChange={(e) => setHedgeTargetUsd(e.target.value)}
+              disabled={!hedgeEnabled}
+              placeholder="Required when ON"
+              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+            />
+          </label>
+          <label className="block text-sm text-gray-300">
+            Hedge stop loss ($)
+            <input
+              type="number"
+              min={0.01}
+              step={1}
+              value={hedgeStoplossUsd}
+              onChange={(e) => setHedgeStoplossUsd(e.target.value)}
+              disabled={!hedgeEnabled}
+              placeholder="Required when ON"
+              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+            />
+          </label>
+          <label className="block text-sm text-gray-300 sm:col-span-2">
+            Margin buffer (%)
+            <div className="mt-1 flex flex-wrap items-center gap-3">
+              <input
+                type="number"
+                min={0}
+                max={200}
+                step={1}
+                value={marginBufferPct}
+                onChange={(e) => setMarginBufferPct(e.target.value)}
+                disabled={!hedgeEnabled}
+                className="w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+              />
+              <span className="text-xs text-gray-400">
+                Capital per lot:{' '}
+                <span className="font-mono text-gray-200">
+                  {capitalPerLotDisplay}
+                </span>
+              </span>
+            </div>
+            <span className="mt-1 block text-xs text-gray-500">
+              capital_per_lot = order_margin × (1 + buffer%). Shows &quot;--&quot;
+              until live order margin is available.
+            </span>
+          </label>
+        </div>
+      </section>
+
+      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">
+          SHORT STRIKE SELECTION
+        </h2>
+        <p className="text-xs text-gray-500">
+          How daily short strikes are chosen when hedge mode is on. Theta-based
+          selection needs a live hedge for its theta reading.
+        </p>
+        <div className="space-y-2">
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="radio"
+              name="strike_selection_mode"
+              checked={strikeSelectionMode === 'fixed_premium'}
+              onChange={() => setStrikeSelectionMode('fixed_premium')}
+              className="mt-1"
+            />
+            <span className="text-sm text-gray-300">
+              Fixed premium (current behaviour)
+            </span>
+          </label>
+          <label
+            className={`flex items-start gap-3 ${
+              hedgeEnabled
+                ? 'cursor-pointer'
+                : 'cursor-not-allowed opacity-40'
+            }`}
+            title={
+              hedgeEnabled
+                ? undefined
+                : 'Enable Hedge Mode first — theta-based strike selection needs a live hedge'
+            }
+          >
+            <input
+              type="radio"
+              name="strike_selection_mode"
+              checked={strikeSelectionMode === 'theta_based'}
+              disabled={!hedgeEnabled}
+              onChange={() => setStrikeSelectionMode('theta_based')}
+              className="mt-1 disabled:cursor-not-allowed"
+            />
+            <span className="text-sm text-gray-300">
+              Theta-based{' '}
+              <span className="text-gray-500">
+                (short premium ≈ hedge theta × multiplier)
+              </span>
+            </span>
+          </label>
+        </div>
+        <label
+          className={`block text-sm text-gray-300 ${
+            hedgeEnabled && strikeSelectionMode === 'theta_based'
+              ? ''
+              : 'opacity-40'
+          }`}
+          title={
+            !hedgeEnabled
+              ? 'Enable Hedge Mode first — theta multiplier needs a live hedge'
+              : undefined
+          }
+        >
+          Theta multiplier
+          <input
+            type="number"
+            min={0.01}
+            max={20}
+            step={0.1}
+            value={thetaMultiplier}
+            disabled={!hedgeEnabled || strikeSelectionMode !== 'theta_based'}
+            onChange={(e) => setThetaMultiplier(e.target.value)}
+            className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+          />
+        </label>
+      </section>
+
+      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">TARGET</h2>
+        <p className="text-xs text-gray-500">
+          Basket profit target source. Theta-multiplier target needs a live
+          hedge; otherwise the existing payoff % target is used.
+        </p>
+        <div className="space-y-2">
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="radio"
+              name="target_mode"
+              checked={targetMode === 'payoff_pct'}
+              onChange={() => setTargetMode('payoff_pct')}
+              className="mt-1"
+            />
+            <span className="text-sm text-gray-300">
+              Payoff % of max premium (current behaviour)
+            </span>
+          </label>
+          <label
+            className={`flex items-start gap-3 ${
+              hedgeEnabled
+                ? 'cursor-pointer'
+                : 'cursor-not-allowed opacity-40'
+            }`}
+            title={
+              hedgeEnabled
+                ? undefined
+                : 'Enable Hedge Mode first — theta-multiplier target needs a live hedge'
+            }
+          >
+            <input
+              type="radio"
+              name="target_mode"
+              checked={targetMode === 'theta_multiplier'}
+              disabled={!hedgeEnabled}
+              onChange={() => setTargetMode('theta_multiplier')}
+              className="mt-1 disabled:cursor-not-allowed"
+            />
+            <span className="text-sm text-gray-300">
+              Theta multiplier target
+            </span>
+          </label>
+        </div>
+        <label
+          className={`block text-sm text-gray-300 ${
+            hedgeEnabled && targetMode === 'theta_multiplier' ? '' : 'opacity-40'
+          }`}
+          title={
+            !hedgeEnabled
+              ? 'Enable Hedge Mode first — target theta % needs a live hedge'
+              : undefined
+          }
+        >
+          Target theta %
+          <input
+            type="number"
+            min={10}
+            max={1000}
+            step={1}
+            value={targetThetaPct}
+            disabled={!hedgeEnabled || targetMode !== 'theta_multiplier'}
+            onChange={(e) => setTargetThetaPct(e.target.value)}
+            className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+          />
+          <span className="mt-1 block text-xs text-gray-500">
+            Exit when basket P&amp;L reaches this % of daily hedge theta income.
+          </span>
+        </label>
+      </section>
+
+      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">COOLDOWN</h2>
+        <label className="block text-sm text-gray-300">
+          Cooldown after loss (minutes)
+          <input
+            type="number"
+            min={0}
+            max={1440}
+            step={1}
+            value={cooldownAfterLossMinutes}
+            onChange={(e) => setCooldownAfterLossMinutes(e.target.value)}
+            className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+          />
+          <span className="mt-1 block text-xs text-gray-500">
+            After a basket stop-loss, wait this long before auto re-entry.
+            0 = no extra cooldown. Independent of the hedge — the hedge stays
+            open during cooldown.
+          </span>
+        </label>
       </section>
 
       {/* Actions */}

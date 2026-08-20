@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from backend.config import IST
@@ -62,6 +62,20 @@ class AutoTradeSettingsSchema(BaseModel):
     premium_cover_loss_enabled: bool | None = None
     is_demo: bool | None = None
 
+    # Hedge mode (config surface only — engine ignores until later steps)
+    hedge_enabled: bool = False
+    hedge_expiry_mode: str = "monthly"  # monthly | date | dte
+    hedge_expiry_date_override: str | None = None
+    hedge_expiry_dte: int | None = Field(default=None, ge=0, le=365)
+    hedge_target_usd: float | None = Field(default=None, gt=0)
+    hedge_stoploss_usd: float | None = Field(default=None, gt=0)
+    margin_buffer_pct: float = Field(default=50.0, ge=0, le=200)
+    strike_selection_mode: str = "fixed_premium"  # fixed_premium | theta_based
+    theta_multiplier: float = Field(default=3.0, gt=0, le=20)
+    target_mode: str = "payoff_pct"  # payoff_pct | theta_multiplier
+    target_theta_pct: float = Field(default=150.0, ge=10, le=1000)
+    cooldown_after_loss_minutes: int = Field(default=120, ge=0, le=1440)
+
     @field_validator("trade_type")
     @classmethod
     def validate_trade_type(cls, v: str) -> str:
@@ -76,6 +90,50 @@ class AutoTradeSettingsSchema(BaseModel):
         if v <= 0 or v > 10000:
             raise ValueError("target_premium must be between 1 and 10000")
         return float(v)
+
+    @field_validator("hedge_expiry_mode")
+    @classmethod
+    def validate_hedge_expiry_mode(cls, v: str) -> str:
+        normalized = str(v or "monthly").lower().strip()
+        if normalized not in {"monthly", "date", "dte"}:
+            raise ValueError(
+                "hedge_expiry_mode must be 'monthly', 'date', or 'dte'"
+            )
+        return normalized
+
+    @field_validator("strike_selection_mode")
+    @classmethod
+    def validate_strike_selection_mode(cls, v: str) -> str:
+        normalized = str(v or "fixed_premium").lower().strip()
+        if normalized not in {"fixed_premium", "theta_based"}:
+            raise ValueError(
+                "strike_selection_mode must be 'fixed_premium' or 'theta_based'"
+            )
+        return normalized
+
+    @field_validator("target_mode")
+    @classmethod
+    def validate_target_mode(cls, v: str) -> str:
+        normalized = str(v or "payoff_pct").lower().strip()
+        if normalized not in {"payoff_pct", "theta_multiplier"}:
+            raise ValueError(
+                "target_mode must be 'payoff_pct' or 'theta_multiplier'"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_hedge_money_when_enabled(self) -> AutoTradeSettingsSchema:
+        if not self.hedge_enabled:
+            return self
+        if self.hedge_target_usd is None or float(self.hedge_target_usd) <= 0:
+            raise ValueError(
+                "hedge_target_usd must be > 0 when hedge_enabled is True"
+            )
+        if self.hedge_stoploss_usd is None or float(self.hedge_stoploss_usd) <= 0:
+            raise ValueError(
+                "hedge_stoploss_usd must be > 0 when hedge_enabled is True"
+            )
+        return self
 
 
 def _as_ist(dt: datetime | None) -> datetime | None:
@@ -150,6 +208,55 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "premium_cover_loss_enabled", False)
         ),
         "is_demo": bool(getattr(s, "is_demo", False)),
+        "hedge_enabled": bool(getattr(s, "hedge_enabled", False)),
+        "hedge_expiry_mode": str(
+            getattr(s, "hedge_expiry_mode", None) or "monthly"
+        ),
+        "hedge_expiry_date_override": getattr(
+            s, "hedge_expiry_date_override", None
+        ),
+        "hedge_expiry_dte": (
+            int(s.hedge_expiry_dte)
+            if getattr(s, "hedge_expiry_dte", None) is not None
+            else None
+        ),
+        "hedge_target_usd": (
+            float(s.hedge_target_usd)
+            if getattr(s, "hedge_target_usd", None) is not None
+            else None
+        ),
+        "hedge_stoploss_usd": (
+            float(s.hedge_stoploss_usd)
+            if getattr(s, "hedge_stoploss_usd", None) is not None
+            else None
+        ),
+        "margin_buffer_pct": float(
+            getattr(s, "margin_buffer_pct", None)
+            if getattr(s, "margin_buffer_pct", None) is not None
+            else 50.0
+        ),
+        "strike_selection_mode": str(
+            getattr(s, "strike_selection_mode", None) or "fixed_premium"
+        ),
+        "theta_multiplier": float(
+            getattr(s, "theta_multiplier", None)
+            if getattr(s, "theta_multiplier", None) is not None
+            else 3.0
+        ),
+        "target_mode": str(getattr(s, "target_mode", None) or "payoff_pct"),
+        "target_theta_pct": float(
+            getattr(s, "target_theta_pct", None)
+            if getattr(s, "target_theta_pct", None) is not None
+            else 150.0
+        ),
+        "cooldown_after_loss_minutes": int(
+            getattr(s, "cooldown_after_loss_minutes", None)
+            if getattr(s, "cooldown_after_loss_minutes", None) is not None
+            else 120
+        ),
+        # Placeholder until Step 4 supplies live order margin
+        "order_margin_per_lot": None,
+        "capital_per_lot": None,
         "last_trade_id": s.last_trade_id,
         "last_exit_time": last_exit.isoformat() if last_exit else None,
         "next_entry_time": next_entry.isoformat() if next_entry else None,
@@ -256,6 +363,45 @@ async def update_auto_trade_settings(
         settings.premium_cover_loss_enabled = payload.premium_cover_loss_enabled
     if payload.is_demo is not None:
         settings.is_demo = bool(payload.is_demo)
+
+    settings.hedge_enabled = bool(payload.hedge_enabled)
+    settings.hedge_expiry_mode = str(payload.hedge_expiry_mode).lower().strip()
+    settings.hedge_expiry_date_override = (
+        str(payload.hedge_expiry_date_override).strip()[:10]
+        if payload.hedge_expiry_date_override
+        else None
+    )
+    settings.hedge_expiry_dte = (
+        int(payload.hedge_expiry_dte)
+        if payload.hedge_expiry_dte is not None
+        else None
+    )
+    settings.hedge_target_usd = (
+        float(payload.hedge_target_usd)
+        if payload.hedge_target_usd is not None
+        else None
+    )
+    settings.hedge_stoploss_usd = (
+        float(payload.hedge_stoploss_usd)
+        if payload.hedge_stoploss_usd is not None
+        else None
+    )
+    settings.margin_buffer_pct = float(payload.margin_buffer_pct)
+    # When hedge is off, force modes that require a live hedge back to defaults
+    if settings.hedge_enabled:
+        settings.strike_selection_mode = str(
+            payload.strike_selection_mode
+        ).lower().strip()
+        settings.target_mode = str(payload.target_mode).lower().strip()
+    else:
+        settings.strike_selection_mode = "fixed_premium"
+        settings.target_mode = "payoff_pct"
+    settings.theta_multiplier = float(payload.theta_multiplier)
+    settings.target_theta_pct = float(payload.target_theta_pct)
+    settings.cooldown_after_loss_minutes = int(
+        payload.cooldown_after_loss_minutes
+    )
+
     settings.updated_at = get_ist_now()
     # Do NOT change is_enabled here
 
