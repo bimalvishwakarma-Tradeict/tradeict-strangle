@@ -1933,8 +1933,8 @@ async def evaluate_and_maybe_close_hedge(
         if getattr(settings, "hedge_roll_hard_dte", None) is not None
         else 5
     )
-    roll_dte = max(1, min(30, roll_dte))
-    hard_dte = max(1, min(30, hard_dte))
+    roll_dte = max(1, min(60, roll_dte))
+    hard_dte = max(1, min(60, hard_dte))
     if hard_dte >= roll_dte:
         hard_dte = max(1, roll_dte - 1)
 
@@ -2426,7 +2426,7 @@ def _roll_banner_fields(db: Session, hedge: HedgePosition) -> dict[str, Any]:
         if getattr(settings, "hedge_roll_hard_dte", None) is not None
         else 5
     )
-    hard_dte = max(1, min(30, hard_dte))
+    hard_dte = max(1, min(60, hard_dte))
     if status != "pending_close":
         return {
             "roll_pending": False,

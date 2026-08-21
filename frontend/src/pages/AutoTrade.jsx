@@ -542,9 +542,9 @@ export default function AutoTrade() {
         null,
       hedge_expiry_dte: null,
       min_hedge_dte: Math.min(60, Math.max(5, Number(minHedgeDte) || 15)),
-      hedge_roll_dte: Math.min(30, Math.max(1, Number(hedgeRollDte) || 10)),
+      hedge_roll_dte: Math.min(60, Math.max(1, Number(hedgeRollDte) || 10)),
       hedge_roll_hard_dte: Math.min(
-        30,
+        60,
         Math.max(1, Number(hedgeRollHardDte) || 5),
       ),
       hedge_target_usd:
@@ -643,18 +643,18 @@ export default function AutoTrade() {
   const hedgeRollDteError = useMemo(() => {
     const n = Number(hedgeRollDte)
     if (hedgeRollDte === '' || Number.isNaN(n)) {
-      return 'Must be between 1 and 30'
+      return 'Must be between 1 and 60'
     }
-    if (n < 1 || n > 30) return 'Must be between 1 and 30'
+    if (n < 1 || n > 60) return 'Must be between 1 and 60'
     return null
   }, [hedgeRollDte])
 
   const hedgeRollHardDteError = useMemo(() => {
     const n = Number(hedgeRollHardDte)
     if (hedgeRollHardDte === '' || Number.isNaN(n)) {
-      return 'Must be between 1 and 30'
+      return 'Must be between 1 and 60'
     }
-    if (n < 1 || n > 30) return 'Must be between 1 and 30'
+    if (n < 1 || n > 60) return 'Must be between 1 and 60'
     return null
   }, [hedgeRollHardDte])
 
@@ -1529,7 +1529,7 @@ export default function AutoTrade() {
             <input
               type="number"
               min={1}
-              max={30}
+              max={60}
               step={1}
               value={hedgeRollDte}
               onChange={(e) => setHedgeRollDte(e.target.value)}
@@ -1556,7 +1556,7 @@ export default function AutoTrade() {
             <input
               type="number"
               min={1}
-              max={30}
+              max={60}
               step={1}
               value={hedgeRollHardDte}
               onChange={(e) => setHedgeRollHardDte(e.target.value)}
