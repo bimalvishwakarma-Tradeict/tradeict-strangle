@@ -601,7 +601,8 @@ class HedgePosition(Base):
         Float, nullable=False, default=0.0
     )
     structure_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    # 'live' = computed by monitor; 'reconstructed' = backfilled from fill/exit prices
+    # 'live' = open/estimated; 'realized' = closed from actual fills;
+    # 'reconstructed' = backfilled from fill/exit prices (pre-instrumentation)
     hedge_net_source: Mapped[str] = mapped_column(
         String(20), nullable=False, default="live"
     )

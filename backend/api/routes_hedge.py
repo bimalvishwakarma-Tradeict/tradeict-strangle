@@ -107,6 +107,9 @@ async def list_structures(
         hid = int(h.id)
         hedge_status = str(h.status or "").lower().strip()
         hedge_net = float(getattr(h, "hedge_net_mtm", 0.0) or 0.0)
+        # Closed structures: show booked realized (structure_pnl uses this too)
+        if hedge_status == "closed" and h.realized_pnl is not None:
+            hedge_net = float(h.realized_pnl)
         cum_closed = float(getattr(h, "cum_closed_basket_pnl", 0.0) or 0.0)
         structure = float(getattr(h, "structure_pnl", 0.0) or 0.0)
 
@@ -288,6 +291,11 @@ async def list_structures(
                     "hedge_net_mtm": hedge_net,
                     "hedge_net_source": str(
                         getattr(h, "hedge_net_source", None) or "live"
+                    ),
+                    "realized_pnl": (
+                        float(h.realized_pnl)
+                        if h.realized_pnl is not None
+                        else None
                     ),
                     "status": h.status,
                     "entry_time": _ist_iso(h.entry_time),

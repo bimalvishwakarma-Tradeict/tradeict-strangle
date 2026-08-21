@@ -1438,6 +1438,8 @@ def finalize_closed_structure_pnl(
     Persist final structure_pnl after cascade + hedge close.
 
     Must run only when every child basket is closed (open MTM = 0).
+    Closed hedges use realized_pnl (actual fills) — never hedge_net_mtm,
+    which still embeds estimated exit fees / exit spread.
     Does not change hedge_net_mtm, realized_pnl, or any trade/leg row.
     """
     db.expire_all()
@@ -1449,12 +1451,24 @@ def finalize_closed_structure_pnl(
             "cum_closed_basket_pnl": 0.0,
             "open_basket_net_mtm": 0.0,
             "structure_pnl": 0.0,
+            "hedge_component": 0.0,
+            "hedge_net_source": "live",
         }
 
     cum_closed = _cum_closed_basket_pnl(db, hid)
-    hedge_net = float(getattr(row, "hedge_net_mtm", 0.0) or 0.0)
     open_basket = 0.0
-    structure = float(hedge_net) + float(cum_closed)
+
+    realized = getattr(row, "realized_pnl", None)
+    if realized is not None:
+        hedge_component = float(realized)
+        source = "realized"
+        row.hedge_net_source = "realized"
+    else:
+        # Rare: closed without booked realized — fall back to last live MTM
+        hedge_component = float(getattr(row, "hedge_net_mtm", 0.0) or 0.0)
+        source = str(getattr(row, "hedge_net_source", None) or "live")
+
+    structure = float(hedge_component) + float(cum_closed)
 
     row.cum_closed_basket_pnl = float(cum_closed)
     row.structure_pnl = float(structure)
@@ -1464,13 +1478,21 @@ def finalize_closed_structure_pnl(
     details = {
         "hedge": hid,
         "phase": "final_after_cascade",
-        "hedge_net": round(float(hedge_net), 6),
+        "hedge_component": round(float(hedge_component), 6),
+        "hedge_net_source": source,
+        "realized_pnl": (
+            round(float(realized), 6) if realized is not None else None
+        ),
+        "hedge_net_mtm": round(
+            float(getattr(row, "hedge_net_mtm", 0.0) or 0.0), 6
+        ),
         "cum_closed": round(float(cum_closed), 6),
         "open_basket": 0.0,
         "structure": round(float(structure), 6),
         "summary": (
             f"[STRUCTURE_PNL] hedge={hid} | phase=final_after_cascade | "
-            f"hedge_net={round(float(hedge_net), 6)} | "
+            f"source={source} | "
+            f"hedge_component={round(float(hedge_component), 6)} | "
             f"cum_closed={round(float(cum_closed), 6)} | "
             f"open_basket=0.0 | "
             f"structure={round(float(structure), 6)}"
@@ -1478,7 +1500,9 @@ def finalize_closed_structure_pnl(
     }
     _hedge_log("STRUCTURE_PNL", hid, details)
     return {
-        "hedge_net_mtm": float(hedge_net),
+        "hedge_net_mtm": float(getattr(row, "hedge_net_mtm", 0.0) or 0.0),
+        "hedge_component": float(hedge_component),
+        "hedge_net_source": source,
         "cum_closed_basket_pnl": float(cum_closed),
         "open_basket_net_mtm": float(open_basket),
         "structure_pnl": float(structure),

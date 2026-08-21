@@ -2,8 +2,14 @@
 """
 One-off: recompute cum_closed_basket_pnl + structure_pnl for closed hedges.
 
-Also reconstructs hedge_net_mtm from fill/exit prices when it is still 0.0
-(pre-instrumentation closes). Does NOT modify realized_pnl or any leg row.
+Preference for the hedge component of structure_pnl:
+  1. realized_pnl when non-null  → hedge_net_source='realized'
+  2. else reconstruct from fill/exit when hedge_net_mtm is 0.0
+     → hedge_net_source='reconstructed'
+  3. else keep stored hedge_net_mtm
+
+Does NOT modify realized_pnl or any leg row. Idempotent — a second --apply
+run writes nothing if values already match.
 
   cd /path/to/trading-bot
   python deploy/backfill_structure_pnl.py --dry-run
@@ -28,6 +34,7 @@ from backend.engine.hedge_lifecycle import _cum_closed_basket_pnl
 from backend.models import HedgePosition
 
 CONTRACT_SIZE = float(OPTIONS_CONTRACT_VALUE)
+_EPS = 1e-9
 
 
 def _four_prices_present(h: HedgePosition) -> bool:
@@ -50,7 +57,7 @@ def _four_prices_present(h: HedgePosition) -> bool:
 
 def reconstruct_hedge_net_mtm(h: HedgePosition) -> dict[str, float] | None:
     """
-    Rebuild hedge_net_mtm from stored fill/exit prices.
+    Rebuild hedge component from stored fill/exit prices.
 
     Returns None if prices are incomplete. Does not mutate ``h``.
     """
@@ -96,12 +103,27 @@ def reconstruct_hedge_net_mtm(h: HedgePosition) -> dict[str, float] | None:
     }
 
 
-def _should_reconstruct(h: HedgePosition) -> bool:
-    """Only zero hedge_net_mtm with complete fill/exit prices."""
-    net = float(getattr(h, "hedge_net_mtm", 0.0) or 0.0)
-    if abs(net) > 1e-12:
-        return False
-    return _four_prices_present(h)
+def _resolve_hedge_component(
+    h: HedgePosition,
+) -> tuple[float, str, dict[str, Any] | None]:
+    """
+    Return (hedge_component, source, optional reconstruct detail).
+
+    Prefer realized_pnl; else reconstruct from fills when net MTM is zero;
+    else keep stored hedge_net_mtm.
+    """
+    realized = getattr(h, "realized_pnl", None)
+    if realized is not None:
+        return float(realized), "realized", None
+
+    stored_net = float(getattr(h, "hedge_net_mtm", 0.0) or 0.0)
+    if abs(stored_net) <= 1e-12 and _four_prices_present(h):
+        recon = reconstruct_hedge_net_mtm(h)
+        if recon is not None:
+            return float(recon["hedge_net_mtm"]), "reconstructed", recon
+
+    source = str(getattr(h, "hedge_net_source", None) or "live")
+    return stored_net, source, None
 
 
 def main() -> int:
@@ -115,22 +137,23 @@ def main() -> int:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Persist reconstructed hedge_net + structure_pnl",
+        help="Persist structure_pnl / source / reconstructed net",
     )
     args = parser.parse_args()
     apply = bool(args.apply)
 
     init_db()
     updated = 0
-    reconstructed = 0
+    realized_n = 0
+    reconstructed_n = 0
 
     print(
         f"{'id':>4}  {'src':<14}  "
-        f"{'gross':>10}  {'fees':>10}  {'net':>10}  "
-        f"{'hedge_before':>12}  {'hedge_after':>12}  "
+        f"{'hedge_comp':>12}  "
+        f"{'cum_before':>12}  {'cum_after':>12}  "
         f"{'struct_before':>14}  {'struct_after':>14}"
     )
-    print("-" * 128)
+    print("-" * 110)
 
     with SessionLocal() as db:
         hedges = (
@@ -141,41 +164,24 @@ def main() -> int:
         )
         for h in hedges:
             hid = int(h.id)
-            hedge_before = float(getattr(h, "hedge_net_mtm", 0.0) or 0.0)
             cum_before = float(getattr(h, "cum_closed_basket_pnl", 0.0) or 0.0)
             struct_before = float(getattr(h, "structure_pnl", 0.0) or 0.0)
             source_before = str(
                 getattr(h, "hedge_net_source", None) or "live"
             )
+            net_before = float(getattr(h, "hedge_net_mtm", 0.0) or 0.0)
 
-            hedge_after = hedge_before
-            gross = 0.0
-            fees_total = 0.0
-            src_label = source_before
-            did_reconstruct = False
-
-            recon: dict[str, Any] | None = None
-            if _should_reconstruct(h):
-                recon = reconstruct_hedge_net_mtm(h)
-                if recon is not None:
-                    hedge_after = float(recon["hedge_net_mtm"])
-                    gross = float(recon["gross"])
-                    fees_total = float(recon["entry_fees"]) + float(
-                        recon["est_exit_fees"]
-                    )
-                    src_label = "reconstructed"
-                    did_reconstruct = True
-
+            hedge_comp, src_label, recon = _resolve_hedge_component(h)
             cum_after = float(_cum_closed_basket_pnl(db, hid))
-            struct_after = float(hedge_after) + float(cum_after)
+            struct_after = float(hedge_comp) + float(cum_after)
 
             print(
                 f"{hid:4d}  {src_label:<14}  "
-                f"{gross:10.6f}  {fees_total:10.6f}  {hedge_after:10.6f}  "
-                f"{hedge_before:12.6f}  {hedge_after:12.6f}  "
+                f"{hedge_comp:12.6f}  "
+                f"{cum_before:12.6f}  {cum_after:12.6f}  "
                 f"{struct_before:14.6f}  {struct_after:14.6f}"
             )
-            if did_reconstruct and recon is not None:
+            if recon is not None:
                 print(
                     f"      reconstruct detail: "
                     f"gross={recon['gross']:.6f} "
@@ -184,27 +190,37 @@ def main() -> int:
                     f"net={recon['hedge_net_mtm']:.6f}"
                 )
 
-            dirty = False
-            if apply and did_reconstruct and recon is not None:
-                h.hedge_net_mtm = float(recon["hedge_net_mtm"])
-                h.hedge_net_source = "reconstructed"
-                reconstructed += 1
-                dirty = True
+            needs_write = (
+                abs(cum_before - cum_after) > _EPS
+                or abs(struct_before - struct_after) > _EPS
+                or source_before != src_label
+                or (
+                    src_label == "reconstructed"
+                    and abs(net_before - hedge_comp) > _EPS
+                )
+            )
+            if not needs_write:
+                continue
 
-            if apply and (
-                abs(cum_before - cum_after) > 1e-9
-                or abs(struct_before - struct_after) > 1e-9
-                or dirty
-            ):
-                h.cum_closed_basket_pnl = float(cum_after)
-                h.structure_pnl = float(struct_after)
-                updated += 1
+            if not apply:
+                continue
+
+            h.cum_closed_basket_pnl = float(cum_after)
+            h.structure_pnl = float(struct_after)
+            h.hedge_net_source = src_label
+            if src_label == "reconstructed" and recon is not None:
+                # Only the reconstruction path writes hedge_net_mtm
+                h.hedge_net_mtm = float(recon["hedge_net_mtm"])
+                reconstructed_n += 1
+            elif src_label == "realized":
+                realized_n += 1
+            updated += 1
 
         if apply:
             db.commit()
             print(
                 f"\nApplied: updated {updated} closed hedge(s) "
-                f"({reconstructed} hedge_net reconstructed)."
+                f"(realized={realized_n}, reconstructed={reconstructed_n})."
             )
         else:
             print(

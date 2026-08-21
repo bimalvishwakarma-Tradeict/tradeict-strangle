@@ -803,12 +803,24 @@ function StructureHistoryCard({ structure }) {
               <span className={pnlColor(hedge.hedge_net_mtm)}>
                 {formatSignedMoney(hedge.hedge_net_mtm)}
               </span>
-              {String(hedge.hedge_net_source || '').toLowerCase() ===
-              'reconstructed' ? (
-                <span className="ml-2 text-[10px] font-normal text-gray-500">
-                  reconstructed from fills - exit spread not captured
-                </span>
-              ) : null}
+              {(() => {
+                const src = String(hedge.hedge_net_source || '').toLowerCase()
+                if (src === 'reconstructed') {
+                  return (
+                    <span className="ml-2 text-[10px] font-normal text-gray-500">
+                      reconstructed from fills - exit spread not captured
+                    </span>
+                  )
+                }
+                if (src === 'realized') {
+                  return (
+                    <span className="ml-2 text-[10px] font-normal text-gray-500">
+                      from actual fills
+                    </span>
+                  )
+                }
+                return null
+              })()}
             </div>
             <div>
               Entry cost:{' '}
