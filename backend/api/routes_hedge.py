@@ -104,11 +104,27 @@ async def list_structures(
     structures: list[dict[str, Any]] = []
     for h in hedges:
         hid = int(h.id)
+        hedge_status = str(h.status or "").lower().strip()
         hedge_net = float(getattr(h, "hedge_net_mtm", 0.0) or 0.0)
         cum_closed = float(getattr(h, "cum_closed_basket_pnl", 0.0) or 0.0)
         structure = float(getattr(h, "structure_pnl", 0.0) or 0.0)
-        # Prefer derived open basket so panel stays consistent with stored total
-        open_basket = round(structure - hedge_net - cum_closed, 6)
+
+        baskets_orm = (
+            db.query(Trade)
+            .filter(Trade.hedge_position_id == hid)
+            .order_by(Trade.id.asc())
+            .all()
+        )
+        has_active_basket = any(
+            str(t.status or "").lower() == TradeStatus.ACTIVE.value
+            for t in baskets_orm
+        )
+        # Closed structure (or no live baskets): open bucket must be 0 —
+        # never count a closed basket's stale MTM alongside its realized_pnl.
+        if hedge_status == "closed" or not has_active_basket:
+            open_basket = 0.0
+        else:
+            open_basket = round(structure - hedge_net - cum_closed, 6)
 
         entry_cost = None
         if h.call_fill_price is not None and h.put_fill_price is not None:
@@ -124,12 +140,6 @@ async def list_structures(
                 4,
             )
 
-        baskets_orm = (
-            db.query(Trade)
-            .filter(Trade.hedge_position_id == hid)
-            .order_by(Trade.id.asc())
-            .all()
-        )
         baskets_out: list[dict[str, Any]] = []
         for trade in baskets_orm:
             legs = (
