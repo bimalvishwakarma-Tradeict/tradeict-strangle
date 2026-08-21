@@ -767,6 +767,8 @@ def _migrate_schema() -> None:
             ("hedge_stoploss_usd", "FLOAT DEFAULT NULL"),
             ("hedge_fixed_sl_usd", "FLOAT NOT NULL DEFAULT 2.0"),
             ("hedge_sl_floor_pct", "FLOAT NOT NULL DEFAULT 25.0"),
+            ("hedge_roll_dte", "INTEGER NOT NULL DEFAULT 10"),
+            ("hedge_roll_hard_dte", "INTEGER NOT NULL DEFAULT 5"),
             ("hedge_target_multiple", "FLOAT NOT NULL DEFAULT 3.0"),
             ("spread_mode", "VARCHAR(20) NOT NULL DEFAULT 'MANUAL'"),
             ("basket_exit_spread_pct", "FLOAT NOT NULL DEFAULT 4.0"),

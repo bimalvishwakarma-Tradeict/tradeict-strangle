@@ -350,6 +350,12 @@ class AutoTradeSettings(Base):
     hedge_sl_floor_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=25.0
     )
+    # Start roll countdown when calendar DTE <= this (mark pending_close)
+    hedge_roll_dte: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    # Force-close hedge (cascade) when calendar DTE <= this while pending_close
+    hedge_roll_hard_dte: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5
+    )
     hedge_target_multiple: Mapped[float] = mapped_column(
         Float, nullable=False, default=3.0
     )
@@ -551,7 +557,7 @@ class HedgePosition(Base):
     expiry_date: Mapped[date] = mapped_column(Date, nullable=False)
     strike: Mapped[float] = mapped_column(Float, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
-    # active | closed | partial | error | exit_failed
+    # active | pending_close | closed | partial | error | exit_failed
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
 
     call_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

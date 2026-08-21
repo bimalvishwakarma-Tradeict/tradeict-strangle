@@ -94,6 +94,10 @@ _IMPORTANT_EVENTS = frozenset(
         "STRUCTURE_PNL",
         "HEDGE_SL_CHECK",
         "HEDGE_SL_FIRE",
+        "HEDGE_ROLL_PENDING",
+        "HEDGE_ROLL_EXECUTE",
+        "HEDGE_ROLL_WAIT",
+        "HEDGE_ROLL_FORCED",
         "SPREAD_EST",
         "HEDGE_GATE",
         "HEDGE_THETA_LOG",
@@ -232,6 +236,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_GATE_BACKOFF",
         "ADJUSTMENT_ABORT",
         "ORPHAN_BASKET",
+        "HEDGE_ROLL_FORCED",
     ):
         bot_log.error(msg)
     elif event_type in (
@@ -249,6 +254,8 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "CONVERSION_HOLD",
         "PARTIAL_ENTRY_CLEANUP_FAILED",
         "DB_AUDIT_SKIP",
+        "HEDGE_ROLL_PENDING",
+        "HEDGE_ROLL_EXECUTE",
     ):
         bot_log.warning(msg)
     elif event_type in (
@@ -281,6 +288,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MIRROR_EXIT",
         "SLAVE_SWEEP",
         "BRACKET_SL",
+        "HEDGE_ROLL_WAIT",
         # Hedge audit trail — must survive INFO-level production logging
         "HEDGE_CASCADE",
         "HEDGE_OPEN_START",

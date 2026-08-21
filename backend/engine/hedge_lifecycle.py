@@ -42,8 +42,12 @@ VALID_HEDGE_EXIT_REASONS = frozenset(
         "HEDGE_STOPLOSS",
         "HEDGE_EXPIRY",
         "HEDGE_MANUAL",
+        "HEDGE_ROLL",
     }
 )
+
+# Live statuses: still protecting baskets (orphan sweep treats these as alive)
+LIVE_HEDGE_STATUSES = frozenset({"active", "pending_close"})
 
 # Per-hedge close locks (same pattern as bot_engine._exit_locks)
 _hedge_close_locks: dict[int, asyncio.Lock] = {}
@@ -341,6 +345,7 @@ def get_active_hedge(
     account_id: int,
     underlying: str,
 ) -> HedgePosition | None:
+    """Return an ACTIVE hedge only (not pending_close — that blocks new baskets)."""
     und = _normalize_underlying(underlying)
     return (
         db.query(HedgePosition)
@@ -351,6 +356,78 @@ def get_active_hedge(
         )
         .order_by(HedgePosition.id.desc())
         .first()
+    )
+
+
+def get_live_hedge(
+    db: Session,
+    *,
+    account_id: int,
+    underlying: str,
+) -> HedgePosition | None:
+    """
+    Active or pending_close hedge for this underlying.
+
+    pending_close still protects open baskets; new basket entry must be blocked
+    separately via ENTRY_GUARD_BLOCK guard=hedge_pending_close.
+    """
+    und = _normalize_underlying(underlying)
+    return (
+        db.query(HedgePosition)
+        .filter(
+            HedgePosition.account_id == int(account_id),
+            HedgePosition.underlying == und,
+            HedgePosition.status.in_(tuple(LIVE_HEDGE_STATUSES)),
+        )
+        .order_by(HedgePosition.id.desc())
+        .first()
+    )
+
+
+def get_pending_close_hedge(
+    db: Session,
+    *,
+    account_id: int,
+    underlying: str,
+) -> HedgePosition | None:
+    und = _normalize_underlying(underlying)
+    return (
+        db.query(HedgePosition)
+        .filter(
+            HedgePosition.account_id == int(account_id),
+            HedgePosition.underlying == und,
+            HedgePosition.status == "pending_close",
+        )
+        .order_by(HedgePosition.id.desc())
+        .first()
+    )
+
+
+def _calendar_dte(expiry_date: Any) -> int:
+    """Whole calendar days from IST today to expiry (floor, never negative)."""
+    if expiry_date is None:
+        return 0
+    today = get_ist_now().date()
+    try:
+        exp = expiry_date if hasattr(expiry_date, "year") else None
+        if exp is None:
+            return 0
+        return max(0, int((exp - today).days))
+    except Exception:
+        return 0
+
+
+def _active_baskets_under_hedge(db: Session, hedge_id: int) -> list[Trade]:
+    from backend.config import TradeStatus
+
+    return (
+        db.query(Trade)
+        .filter(
+            Trade.hedge_position_id == int(hedge_id),
+            Trade.status == TradeStatus.ACTIVE.value,
+        )
+        .order_by(Trade.id.asc())
+        .all()
     )
 
 
@@ -393,6 +470,16 @@ async def open_hedge(
             },
         )
         return existing
+
+    pending = get_pending_close_hedge(
+        db, account_id=int(account.id), underlying=und
+    )
+    if pending is not None:
+        raise HedgeOpenError(
+            "pending_close",
+            f"Hedge #{pending.id} is PENDING_CLOSE — cannot open a new hedge "
+            "until roll completes",
+        )
 
     raw_mode = str(getattr(settings, "hedge_expiry_mode", None) or "month_1")
     dte = getattr(settings, "hedge_expiry_dte", None)
@@ -942,7 +1029,7 @@ async def close_hedge(
             )
             return hedge
 
-        if status not in {"active", "exit_failed", "partial", "error"}:
+        if status not in {"active", "pending_close", "exit_failed", "partial", "error"}:
             raise HedgeCloseError(
                 "status",
                 f"Hedge #{hid} status={status} cannot be closed",
@@ -1801,37 +1888,131 @@ async def evaluate_and_maybe_close_hedge(
     elif will_close_expiry:
         close_reason = "HEDGE_EXPIRY"
 
-    if close_reason is None:
+    async def _close_with_reason(reason: str) -> HedgePosition | None:
+        try:
+            return await close_hedge(hid, reason, db, client=client)
+        except HedgeCloseError as exc:
+            _hedge_log(
+                "HEDGE_CLOSE_FAIL",
+                hid,
+                {
+                    "stage": f"monitor_{exc.stage}",
+                    "reason": str(exc.reason),
+                    "trigger": reason,
+                    "net": round(net, 6),
+                },
+                critical=True,
+            )
+            return None
+        except Exception as exc:
+            _hedge_log(
+                "HEDGE_CLOSE_FAIL",
+                hid,
+                {
+                    "stage": "monitor_unexpected",
+                    "reason": str(exc),
+                    "trigger": reason,
+                },
+                critical=True,
+            )
+            return None
+
+    # STOPLOSS / TARGET / EXPIRY always close immediately — never wait for roll.
+    if close_reason is not None:
+        return await _close_with_reason(close_reason)
+
+    # --- Roll countdown (ROLL only — never used for SL/TARGET) ---
+    status_now = str(hedge.status or "").lower().strip()
+    roll_dte = int(
+        getattr(settings, "hedge_roll_dte", None)
+        if getattr(settings, "hedge_roll_dte", None) is not None
+        else 10
+    )
+    hard_dte = int(
+        getattr(settings, "hedge_roll_hard_dte", None)
+        if getattr(settings, "hedge_roll_hard_dte", None) is not None
+        else 5
+    )
+    roll_dte = max(1, min(30, roll_dte))
+    hard_dte = max(1, min(30, hard_dte))
+    if hard_dte >= roll_dte:
+        hard_dte = max(1, roll_dte - 1)
+
+    calendar_dte = _calendar_dte(hedge.expiry_date)
+    open_baskets = _active_baskets_under_hedge(db, hid)
+    open_n = len(open_baskets)
+
+    if status_now == "active" and calendar_dte <= roll_dte:
+        hedge.status = "pending_close"
+        db.commit()
+        db.refresh(hedge)
+        _hedge_log(
+            "HEDGE_ROLL_PENDING",
+            hid,
+            {
+                "hedge": hid,
+                "dte": calendar_dte,
+                "roll_dte": roll_dte,
+                "open_baskets": open_n,
+                "summary": (
+                    f"[HEDGE_ROLL_PENDING] hedge={hid} | dte={calendar_dte} | "
+                    f"roll_dte={roll_dte} | open_baskets={open_n}"
+                ),
+            },
+        )
         return None
 
-    try:
-        closed = await close_hedge(hid, close_reason, db, client=client)
-        return closed
-    except HedgeCloseError as exc:
+    if status_now == "pending_close":
+        if calendar_dte <= hard_dte:
+            _hedge_log(
+                "HEDGE_ROLL_FORCED",
+                hid,
+                {
+                    "hedge": hid,
+                    "dte": calendar_dte,
+                    "open_baskets": open_n,
+                    "hard_dte": hard_dte,
+                    "summary": (
+                        f"[HEDGE_ROLL_FORCED] hedge={hid} | dte={calendar_dte} | "
+                        f"open_baskets={open_n}"
+                    ),
+                },
+                critical=True,
+            )
+            return await _close_with_reason("HEDGE_ROLL")
+
+        if open_n == 0:
+            _hedge_log(
+                "HEDGE_ROLL_EXECUTE",
+                hid,
+                {
+                    "hedge": hid,
+                    "dte": calendar_dte,
+                    "summary": (
+                        f"[HEDGE_ROLL_EXECUTE] hedge={hid} | dte={calendar_dte}"
+                    ),
+                },
+            )
+            return await _close_with_reason("HEDGE_ROLL")
+
+        waiting_id = int(open_baskets[0].id)
         _hedge_log(
-            "HEDGE_CLOSE_FAIL",
+            "HEDGE_ROLL_WAIT",
             hid,
             {
-                "stage": f"monitor_{exc.stage}",
-                "reason": str(exc.reason),
-                "trigger": close_reason,
-                "net": round(net, 6),
+                "hedge": hid,
+                "dte": calendar_dte,
+                "waiting_on_trade": waiting_id,
+                "open_baskets": open_n,
+                "summary": (
+                    f"[HEDGE_ROLL_WAIT] hedge={hid} | dte={calendar_dte} | "
+                    f"waiting_on_trade={waiting_id}"
+                ),
             },
-            critical=True,
         )
         return None
-    except Exception as exc:
-        _hedge_log(
-            "HEDGE_CLOSE_FAIL",
-            hid,
-            {
-                "stage": "monitor_unexpected",
-                "reason": str(exc),
-                "trigger": close_reason,
-            },
-            critical=True,
-        )
-        return None
+
+    return None
 
 
 async def maybe_log_hedge_theta_snapshot(
@@ -2230,6 +2411,51 @@ async def build_active_hedge_live(
         ),
         "structure_pnl": float(getattr(hedge, "structure_pnl", 0.0) or 0.0),
         **_live_sl_budget_fields(db, hedge),
+        **_roll_banner_fields(db, hedge),
+    }
+
+
+def _roll_banner_fields(db: Session, hedge: HedgePosition) -> dict[str, Any]:
+    """Fields for the PENDING_CLOSE amber banner on the hedge card."""
+    from backend.database import get_or_create_auto_settings
+
+    status = str(hedge.status or "").lower().strip()
+    settings = get_or_create_auto_settings(db)
+    hard_dte = int(
+        getattr(settings, "hedge_roll_hard_dte", None)
+        if getattr(settings, "hedge_roll_hard_dte", None) is not None
+        else 5
+    )
+    hard_dte = max(1, min(30, hard_dte))
+    if status != "pending_close":
+        return {
+            "roll_pending": False,
+            "roll_waiting_trade_id": None,
+            "roll_waiting_basket_seq": None,
+            "hedge_roll_hard_dte": hard_dte,
+            "calendar_dte": _calendar_dte(hedge.expiry_date),
+        }
+
+    open_baskets = _active_baskets_under_hedge(db, int(hedge.id))
+    waiting = open_baskets[0] if open_baskets else None
+    seq = None
+    tid = None
+    if waiting is not None:
+        tid = int(waiting.id)
+        seq_raw = getattr(waiting, "basket_seq_in_structure", None)
+        if seq_raw is not None:
+            try:
+                seq = int(seq_raw)
+            except (TypeError, ValueError):
+                seq = None
+        if seq is None:
+            seq = tid
+    return {
+        "roll_pending": True,
+        "roll_waiting_trade_id": tid,
+        "roll_waiting_basket_seq": seq,
+        "hedge_roll_hard_dte": hard_dte,
+        "calendar_dte": _calendar_dte(hedge.expiry_date),
     }
 
 
@@ -2241,14 +2467,14 @@ async def monitor_active_hedges(
     position_tracker: Any | None = None,
 ) -> list[HedgePosition]:
     """
-    Evaluate every active hedge this cycle.
+    Evaluate every live hedge this cycle (active + pending_close).
 
     Independent of short baskets — call even when no trade is open.
     Never gated by basket settling windows or the adjusting guard.
     """
     hedges = (
         db.query(HedgePosition)
-        .filter(HedgePosition.status == "active")
+        .filter(HedgePosition.status.in_(tuple(LIVE_HEDGE_STATUSES)))
         .order_by(HedgePosition.id.asc())
         .all()
     )

@@ -397,7 +397,7 @@ class BotEngine:
         """
         True when a linked hedge is no longer protecting its baskets.
 
-        Safe (not orphan): active, pending_close (future roll — task 2C).
+        Safe (not orphan): active, pending_close (roll countdown — still protects).
         Orphan: closed / error / exit_failed / partial / unknown / missing.
         """
         s = str(status or "").lower().strip()

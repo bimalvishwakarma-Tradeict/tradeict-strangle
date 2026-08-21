@@ -192,6 +192,21 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
           </div>
         </div>
 
+        {hedge.roll_pending ? (
+          <div
+            className="mb-4 rounded-lg border border-amber-600/60 bg-amber-950/40 px-3 py-2 text-sm text-amber-200"
+            role="status"
+          >
+            ROLLING - waiting for basket #
+            {hedge.roll_waiting_basket_seq != null
+              ? hedge.roll_waiting_basket_seq
+              : hedge.roll_waiting_trade_id != null
+                ? hedge.roll_waiting_trade_id
+                : '—'}{' '}
+            to close. Force close at {Number(hedge.hedge_roll_hard_dte) || 5} DTE.
+          </div>
+        ) : null}
+
         <div className="mb-4 grid gap-2 text-sm sm:grid-cols-2">
           <div className="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-2 font-mono text-xs sm:text-sm">
             <span className="text-blue-300">CALL {fmtStrike(strike)}</span>

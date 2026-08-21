@@ -545,6 +545,39 @@ class AutoTradeEngine:
         # (byte-identical to pre-hedge auto entry).
         hedge_position_id: int | None = None
         if bool(getattr(settings, "hedge_enabled", False)):
+            from backend.engine.hedge_lifecycle import (
+                get_active_hedge,
+                get_pending_close_hedge,
+            )
+
+            pending = get_pending_close_hedge(
+                db,
+                account_id=int(account.id),
+                underlying=str(underlying),
+            )
+            if pending is not None:
+                log_and_buffer(
+                    "ENTRY_GUARD_BLOCK",
+                    0,
+                    {
+                        "source": "auto",
+                        "guard": "hedge_pending_close",
+                        "hedge": int(pending.id),
+                        "underlying": underlying,
+                        "summary": (
+                            f"[ENTRY_GUARD_BLOCK] guard=hedge_pending_close | "
+                            f"hedge={int(pending.id)} | underlying={underlying}"
+                        ),
+                    },
+                )
+                logger.error(
+                    "[ENTRY_GUARD_BLOCK] guard=hedge_pending_close | "
+                    "hedge=%s | underlying=%s",
+                    int(pending.id),
+                    underlying,
+                )
+                return
+
             hedge_position_id = await self._hedge_entry_gate(
                 settings=settings,
                 db=db,
@@ -556,8 +589,6 @@ class AutoTradeEngine:
                 return
 
             # Preventive: never place a basket without a live active hedge
-            from backend.engine.hedge_lifecycle import get_active_hedge
-
             active_hedge = get_active_hedge(
                 db,
                 account_id=int(account.id),

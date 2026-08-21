@@ -73,6 +73,8 @@ class AutoTradeSettingsSchema(BaseModel):
     hedge_stoploss_usd: float | None = Field(default=None, gt=0)
     hedge_fixed_sl_usd: float = Field(default=2.0, ge=0.1, le=1000)
     hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
+    hedge_roll_dte: int = Field(default=10, ge=1, le=30)
+    hedge_roll_hard_dte: int = Field(default=5, ge=1, le=30)
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
     # Exit-spread estimation (AUTO from L2 / MANUAL / capped)
     spread_mode: str = "MANUAL"
@@ -157,6 +159,11 @@ class AutoTradeSettingsSchema(BaseModel):
 
     @model_validator(mode="after")
     def validate_hedge_money_when_enabled(self) -> AutoTradeSettingsSchema:
+        if int(self.hedge_roll_hard_dte) >= int(self.hedge_roll_dte):
+            raise ValueError(
+                "hedge_roll_hard_dte must be < hedge_roll_dte "
+                f"(got hard={self.hedge_roll_hard_dte}, roll={self.hedge_roll_dte})"
+            )
         if not self.hedge_enabled:
             return self
         if self.hedge_target_usd is None or float(self.hedge_target_usd) <= 0:
@@ -290,6 +297,16 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "hedge_sl_floor_pct", None)
             if getattr(s, "hedge_sl_floor_pct", None) is not None
             else 25.0
+        ),
+        "hedge_roll_dte": int(
+            getattr(s, "hedge_roll_dte", None)
+            if getattr(s, "hedge_roll_dte", None) is not None
+            else 10
+        ),
+        "hedge_roll_hard_dte": int(
+            getattr(s, "hedge_roll_hard_dte", None)
+            if getattr(s, "hedge_roll_hard_dte", None) is not None
+            else 5
         ),
         "hedge_target_multiple": float(
             getattr(s, "hedge_target_multiple", None)
@@ -585,6 +602,8 @@ async def update_auto_trade_settings(
     )
     settings.hedge_sl_floor_pct = float(payload.hedge_sl_floor_pct)
     settings.hedge_fixed_sl_usd = float(payload.hedge_fixed_sl_usd)
+    settings.hedge_roll_dte = int(payload.hedge_roll_dte)
+    settings.hedge_roll_hard_dte = int(payload.hedge_roll_hard_dte)
     settings.hedge_target_multiple = float(payload.hedge_target_multiple)
     settings.spread_mode = str(payload.spread_mode or "MANUAL").upper().strip()
     settings.basket_exit_spread_pct = float(payload.basket_exit_spread_pct)

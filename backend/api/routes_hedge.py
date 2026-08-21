@@ -21,6 +21,7 @@ from backend.engine.hedge_lifecycle import (
     close_hedge,
     get_active_hedge,
     get_hedge_theta_log_payload,
+    get_live_hedge,
     hedge_to_dict,
     open_hedge,
 )
@@ -649,7 +650,7 @@ async def hedge_active(
     """
     settings = get_or_create_auto_settings(db)
     account = _get_active_account(db)
-    hedge = get_active_hedge(
+    hedge = get_live_hedge(
         db,
         account_id=int(account.id),
         underlying=str(settings.underlying or "BTC"),
