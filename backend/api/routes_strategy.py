@@ -26,6 +26,22 @@ router = APIRouter(prefix="/api/strategy", tags=["strategy"])
 NO_ACCOUNT_DETAIL = "No account connected. Please add API keys in Settings."
 
 
+def _active_hedge_id(db: Session) -> int:
+    """Best-effort active hedge id for THETA_FALLBACK logs (0 if none)."""
+    try:
+        from backend.models import HedgePosition
+
+        row = (
+            db.query(HedgePosition)
+            .filter(HedgePosition.status == "active")
+            .order_by(HedgePosition.id.desc())
+            .first()
+        )
+        return int(row.id) if row is not None else 0
+    except Exception:
+        return 0
+
+
 def _resolve_underlying_symbol(underlying: str) -> str:
     """Map UI underlying (BTC) to perpetual ticker symbol (BTCUSD)."""
     key = underlying.upper().strip()
@@ -462,7 +478,13 @@ async def theta_preview(
             }
 
         try:
-            picks = select_theta_based_strikes(short_chain, spot, required)
+            picks = select_theta_based_strikes(
+                short_chain,
+                spot,
+                required,
+                hedge_call_theta=hedge_call_theta,
+                log_hedge_id=_active_hedge_id(db),
+            )
         except HedgeThetaError as exc:
             return {
                 "success": False,
@@ -478,7 +500,8 @@ async def theta_preview(
         logger.info(
             "[STRIKE_SELECT_THETA] hedge_call_theta=%.4f theta_multiplier=%.4f "
             "required_theta=%.4f short_expiry=%s spot=%.2f "
-            "call=%s put=%s coverage=%.2f hedge_total_theta=%.4f",
+            "call=%s put=%s coverage=%.2f hedge_total_theta=%.4f "
+            "fallback_used=%s max_available_theta=%.4f max_usable_multiplier=%.4f",
             hedge_call_theta,
             multiplier,
             required,
@@ -488,6 +511,9 @@ async def theta_preview(
             picks["put"],
             coverage,
             hedge_total,
+            picks.get("fallback_used"),
+            picks.get("max_available_theta") or 0,
+            picks.get("max_usable_multiplier") or 0,
         )
 
         return {
@@ -498,6 +524,9 @@ async def theta_preview(
             "theta_multiplier": multiplier,
             "multiplier": multiplier,
             "required_theta": round(required, 4),
+            "max_available_theta": picks.get("max_available_theta"),
+            "fallback_used": bool(picks.get("fallback_used")),
+            "max_usable_multiplier": picks.get("max_usable_multiplier"),
             "short_expiry": short_expiry_str,
             "short_expiry_date": short_expiry_str,
             "hedge_expiry_date": hedge["expiry_date"],
@@ -660,7 +689,13 @@ async def target_preview(
             }
 
         try:
-            picks = select_theta_based_strikes(short_chain, spot, required)
+            picks = select_theta_based_strikes(
+                short_chain,
+                spot,
+                required,
+                hedge_call_theta=hedge_call_theta,
+                log_hedge_id=_active_hedge_id(db),
+            )
         except HedgeThetaError as exc:
             return {
                 "success": False,
@@ -698,7 +733,8 @@ async def target_preview(
             "[TARGET_THETA] hedge_total_theta=%.4f target_theta_pct=%.2f "
             "quantity=%s contract_size=%s target_usd=%.4f max_profit_usd=%.4f "
             "pct_of_max=%.1f reachability=%s short_expiry=%s "
-            "call_strike=%s call_premium=%.2f put_strike=%s put_premium=%.2f",
+            "call_strike=%s call_premium=%.2f put_strike=%s put_premium=%.2f "
+            "fallback_used=%s max_available_theta=%.4f",
             total_theta,
             tgt_pct,
             qty,
@@ -712,6 +748,8 @@ async def target_preview(
             call_premium,
             put_strike,
             put_premium,
+            picks.get("fallback_used"),
+            picks.get("max_available_theta") or 0,
         )
 
         return {
@@ -728,6 +766,10 @@ async def target_preview(
             "reachability": reachability,
             "band": reachability,
             "band_label": band_label,
+            "required_theta": round(required, 4),
+            "max_available_theta": picks.get("max_available_theta"),
+            "fallback_used": bool(picks.get("fallback_used")),
+            "max_usable_multiplier": picks.get("max_usable_multiplier"),
             "short_expiry": short_expiry_str,
             "call_strike": call_strike,
             "call_premium": round(call_premium, 2),
@@ -736,7 +778,6 @@ async def target_preview(
             "call": picks["call"],
             "put": picks["put"],
             "theta_multiplier": multiplier,
-            "required_theta": round(required, 4),
             "spot": spot,
             "fetched_at": hedge["fetched_at"],
         }

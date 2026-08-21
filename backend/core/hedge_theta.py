@@ -382,13 +382,22 @@ def select_theta_based_strikes(
     chain: list[dict[str, Any]],
     spot: float,
     required_theta: float,
+    *,
+    hedge_call_theta: float | None = None,
+    log_hedge_id: int = 0,
 ) -> dict[str, Any]:
     """
     Call-by-theta / put-by-premium-match on the SHORT expiry chain.
 
     CALL: OTM only (strike > spot); furthest whose |theta| >= required_theta.
     PUT:  OTM only (strike < spot); closest premium to the chosen call.
+
+    When required_theta exceeds every |theta| on the chain, falls back to the
+    nearest OTM call (near-ATM / high-gamma). Selection logic unchanged —
+    observability fields are returned and logged.
     """
+    from backend.core.bot_logger import log_and_buffer
+
     if not chain or spot <= 0 or required_theta <= 0:
         raise HedgeThetaError(
             "Invalid chain or required_theta for strike selection"
@@ -403,16 +412,33 @@ def select_theta_based_strikes(
     if not put_rows:
         raise HedgeThetaError("No OTM put strikes (strike < spot) on short chain")
 
+    # Highest |theta| anywhere on the short chain (call or put)
+    max_available_theta = 0.0
+    for row in sorted_rows:
+        max_available_theta = max(
+            max_available_theta,
+            _side_theta(row, "call"),
+            _side_theta(row, "put"),
+        )
+
+    req = float(required_theta)
+    fallback_used = bool(req > max_available_theta)
+
+    hct = abs(float(hedge_call_theta)) if hedge_call_theta is not None else 0.0
+    max_usable_multiplier = (
+        (max_available_theta / hct) if hct > 0 else 0.0
+    )
+
     # Walk outward (ascending strike); keep last that still meets required_theta
     last_ok: dict[str, Any] | None = None
     for row in call_rows:
-        if _side_theta(row, "call") >= required_theta:
+        if _side_theta(row, "call") >= req:
             last_ok = row
         else:
             break
 
     if last_ok is None:
-        # Nearest OTM already below floor — stay there (not a chain-limit case)
+        # Nearest OTM already below floor — stay there
         call_row = call_rows[0]
         chain_limit = False
     else:
@@ -431,20 +457,53 @@ def select_theta_based_strikes(
 
     call_theta = _side_theta(call_row, "call")
     put_theta = _side_theta(put_row, "put")
+    call_strike = float(call_row["strike"])
+    put_strike = float(put_row["strike"])
+
+    if fallback_used:
+        shortfall_pct = (
+            ((req - max_available_theta) / req * 100.0) if req > 0 else 0.0
+        )
+        details = {
+            "hedge": int(log_hedge_id or 0),
+            "required": round(req, 4),
+            "max_available": round(float(max_available_theta), 4),
+            "shortfall_pct": round(float(shortfall_pct), 2),
+            "max_usable_multiplier": round(float(max_usable_multiplier), 4),
+            "selected_call": call_strike,
+            "selected_put": put_strike,
+            "summary": (
+                f"[THETA_FALLBACK] hedge={int(log_hedge_id or 0)} | "
+                f"required={round(req, 4)} | "
+                f"max_available={round(float(max_available_theta), 4)} | "
+                f"shortfall_pct={round(float(shortfall_pct), 2)} | "
+                f"max_usable_multiplier={round(float(max_usable_multiplier), 4)} | "
+                f"selected_call={call_strike} | selected_put={put_strike}"
+            ),
+        }
+        try:
+            log_and_buffer("THETA_FALLBACK", int(log_hedge_id or 0), details)
+        except Exception as exc:
+            logger.warning("THETA_FALLBACK log_and_buffer failed: %s", exc)
+
     return {
         "call": {
-            "strike": float(call_row["strike"]),
+            "strike": call_strike,
             "premium": round(call_premium, 2),
             "theta": round(call_theta, 4),
             "chain_limit": bool(chain_limit),
         },
         "put": {
-            "strike": float(put_row["strike"]),
+            "strike": put_strike,
             "premium": round(_side_premium(put_row, "put"), 2),
             "theta": round(put_theta, 4),
             "premium_matched": True,
         },
         "combined_theta": round(call_theta + put_theta, 4),
+        "required_theta": round(req, 4),
+        "max_available_theta": round(float(max_available_theta), 4),
+        "fallback_used": bool(fallback_used),
+        "max_usable_multiplier": round(float(max_usable_multiplier), 4),
     }
 
 

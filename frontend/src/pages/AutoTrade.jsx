@@ -1696,7 +1696,23 @@ export default function AutoTrade() {
                 <span className="text-white">
                   {Number(thetaPreview.required_theta).toFixed(2)}
                 </span>
+                {thetaPreview.max_available_theta != null ? (
+                  <span className="text-gray-500">
+                    {' '}
+                    (chain max {Number(thetaPreview.max_available_theta).toFixed(2)})
+                  </span>
+                ) : null}
               </p>
+              {thetaPreview.fallback_used ? (
+                <p className="rounded border border-rose-600/50 bg-rose-950/40 px-2 py-2 text-xs font-semibold text-amber-300">
+                  THETA TARGET UNREACHABLE - required{' '}
+                  {Number(thetaPreview.required_theta).toFixed(2)}, chain max{' '}
+                  {Number(thetaPreview.max_available_theta ?? 0).toFixed(2)}.
+                  Falling back to nearest-ATM strikes (near-straddle, high
+                  gamma). Max usable multiplier right now:{' '}
+                  {Number(thetaPreview.max_usable_multiplier ?? 0).toFixed(2)}
+                </p>
+              ) : null}
               <p>
                 Would pick CALL{' '}
                 <span className="text-emerald-300">
@@ -1704,7 +1720,9 @@ export default function AutoTrade() {
                 </span>{' '}
                 (theta {Number(thetaPreview.call?.theta).toFixed(2)},{' '}
                 {formatMoney(thetaPreview.call?.premium)})
-                {thetaPreview.call?.chain_limit ? (
+                {thetaPreview.fallback_used ? (
+                  <span className="text-rose-400"> [THETA FALLBACK]</span>
+                ) : thetaPreview.call?.chain_limit ? (
                   <span className="text-amber-400"> [chain limit]</span>
                 ) : null}
               </p>
@@ -1832,21 +1850,35 @@ export default function AutoTrade() {
                   ({formatMoney(targetPreview.max_profit_usd)})
                 </span>
               </p>
-              <p
-                className={
-                  (targetPreview.reachability || targetPreview.band) === 'reachable'
-                    ? 'text-emerald-400'
-                    : (targetPreview.reachability || targetPreview.band) === 'tight'
-                      ? 'text-amber-400'
-                      : 'text-rose-400'
-                }
-              >
-                [
-                {(targetPreview.reachability || targetPreview.band) === 'reachable'
-                  ? 'ok'
-                  : '!'}
-                ] {targetPreview.band_label || targetPreview.reachability}
-              </p>
+              {targetPreview.fallback_used ? (
+                <p className="rounded border border-rose-600/50 bg-rose-950/40 px-2 py-2 text-xs font-semibold text-amber-300">
+                  THETA TARGET UNREACHABLE - required{' '}
+                  {Number(targetPreview.required_theta).toFixed(2)}, chain max{' '}
+                  {Number(targetPreview.max_available_theta ?? 0).toFixed(2)}.
+                  Falling back to nearest-ATM strikes (near-straddle, high
+                  gamma). Max usable multiplier right now:{' '}
+                  {Number(targetPreview.max_usable_multiplier ?? 0).toFixed(2)}
+                </p>
+              ) : (
+                <p
+                  className={
+                    (targetPreview.reachability || targetPreview.band) ===
+                    'reachable'
+                      ? 'text-emerald-400'
+                      : (targetPreview.reachability || targetPreview.band) ===
+                          'tight'
+                        ? 'text-amber-400'
+                        : 'text-rose-400'
+                  }
+                >
+                  [
+                  {(targetPreview.reachability || targetPreview.band) ===
+                  'reachable'
+                    ? 'ok'
+                    : '!'}
+                  ] {targetPreview.band_label || targetPreview.reachability}
+                </p>
+              )}
             </div>
           ) : (
             <p className="text-sm text-gray-500">Loading preview…</p>
