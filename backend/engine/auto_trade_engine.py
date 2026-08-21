@@ -192,6 +192,9 @@ class AutoTradeEngine:
                         "underlying": settings.underlying,
                         "seconds_remaining": max(0, remaining),
                         "next_entry_time": next_entry.isoformat(),
+                        "next_entry_source": getattr(
+                            settings, "next_entry_source", None
+                        ),
                     }
                 )
                 return
@@ -409,6 +412,7 @@ class AutoTradeEngine:
                 },
             )
             settings.next_entry_time = get_ist_now() + timedelta(minutes=2)
+            settings.next_entry_source = "retry"
             settings.last_error = (
                 f"Delta has bot-tracked positions: {blocking_symbols}"[:500]
             )
@@ -519,6 +523,7 @@ class AutoTradeEngine:
                 },
             )
             settings.next_entry_time = get_ist_now() + timedelta(hours=1)
+            settings.next_entry_source = "expiry_too_close"
             settings.last_error = f"Expiry too close: {hours_to_expiry:.1f}h"[:500]
             db.commit()
             return
@@ -1354,6 +1359,7 @@ class AutoTradeEngine:
             settings.retry_count = 0
             settings.last_error = None
             settings.next_entry_time = None
+            settings.next_entry_source = None
             settings.updated_at = now_ist
             db.commit()
             logger.info(
@@ -1497,8 +1503,10 @@ class AutoTradeEngine:
 
         if attempts >= _HEDGE_GATE_FAIL_THRESHOLD:
             delay = _HEDGE_GATE_BACKOFF_SECONDS
+            source = "hedge_gate"
         else:
             delay = _RETRY_DELAY_SECONDS
+            source = "retry"
 
         now = get_ist_now()
         next_at = now + timedelta(seconds=delay)
@@ -1508,6 +1516,7 @@ class AutoTradeEngine:
             settings.retry_count = int(settings.retry_count or 0) + 1
             settings.last_error = error[:500]
             settings.next_entry_time = next_at
+            settings.next_entry_source = source
             settings.updated_at = now
             db.commit()
         except Exception as exc:
@@ -1826,6 +1835,7 @@ class AutoTradeEngine:
             settings.retry_count = int(settings.retry_count or 0) + 1
             settings.last_error = error[:500]
             settings.next_entry_time = now + timedelta(seconds=_RETRY_DELAY_SECONDS)
+            settings.next_entry_source = "retry"
             settings.updated_at = now
             db.commit()
         except Exception as exc:
@@ -1848,10 +1858,19 @@ class AutoTradeEngine:
             }
         )
 
-    def schedule_reentry(self, underlying: str, delay_minutes: int) -> None:
+    def schedule_reentry(
+        self,
+        underlying: str,
+        delay_minutes: int,
+        *,
+        source: str = "reentry_delay",
+    ) -> None:
         """
         Called by bot_engine when a trade exits.
         Schedules next auto re-entry after delay (minimum 1 minute).
+
+        source: 'reentry_delay' | 'cooldown_after_loss' — only reentry_delay
+        is recomputed when the user edits re_entry_delay_minutes.
         """
         from backend.database import get_or_create_auto_settings
 
@@ -1871,18 +1890,24 @@ class AutoTradeEngine:
             effective_delay = max(user_delay, 1)
             reentry_time = now + timedelta(minutes=effective_delay)
 
+            src = str(source or "reentry_delay").strip().lower()
+            if src not in {"reentry_delay", "cooldown_after_loss"}:
+                src = "reentry_delay"
+
             settings.last_exit_time = now
             settings.next_entry_time = reentry_time
+            settings.next_entry_source = src
             settings.retry_count = 0
             settings.last_error = None
             settings.updated_at = now
             db.commit()
 
             logger.info(
-                "Auto re-entry scheduled: %s in %smin at %s IST",
+                "Auto re-entry scheduled: %s in %smin at %s IST (source=%s)",
                 underlying,
                 effective_delay,
                 reentry_time.strftime("%H:%M:%S"),
+                src,
             )
 
 

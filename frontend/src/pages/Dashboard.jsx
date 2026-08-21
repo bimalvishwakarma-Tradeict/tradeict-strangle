@@ -11,6 +11,7 @@ import {
   getHedgeStructures,
   getSlaveOverview,
 } from '../services/api'
+import { formatNextEntryWait } from '../utils/nextEntryLabel'
 
 const AUTO_STATUS_POLL_MS = 5000
 const SLAVE_OVERVIEW_POLL_MS = 30000
@@ -486,7 +487,7 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
     } else {
       setSecondsLeft(null)
     }
-  }, [status?.is_enabled, status?.seconds_until_entry, status?.next_entry_time])
+  }, [status?.is_enabled, status?.seconds_until_entry, status?.next_entry_time, status?.next_entry_source])
 
   const countdownActive = secondsLeft != null && secondsLeft > 0
   useEffect(() => {
@@ -513,6 +514,11 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
     status.trade_type === 'strangle'
       ? `Strangle $${status.target_premium_per_side ?? 150}/side`
       : 'Straddle (ATM)'
+  const nextEntryLabel = formatNextEntryWait(
+    secondsLeft,
+    status.next_entry_source,
+    status.next_entry_reason,
+  )
 
   const handleEnterNow = async () => {
     setEntering(true)
@@ -551,7 +557,11 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
         <div className="font-medium">
           ⚠️ Auto Trade ON · {tradeTypeLabel} ·{' '}
           {secondsLeft != null && secondsLeft > 0
-            ? `Retry in ${secondsLeft}s`
+            ? formatNextEntryWait(
+                secondsLeft,
+                status.next_entry_source || 'retry',
+                status.next_entry_reason,
+              )
             : 'Retrying…'}
         </div>
         <div className="mt-1 text-red-200/90">
@@ -575,7 +585,7 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
         <div className="font-medium">
           🔄 Auto Trade ON · {tradeTypeLabel} ·{' '}
           {secondsLeft != null && secondsLeft > 0
-            ? `Next entry in ${secondsLeft}s ⏱`
+            ? `${nextEntryLabel} ⏱`
             : 'Ready to enter…'}
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -930,6 +940,8 @@ export default function Dashboard() {
               is_enabled: true,
               seconds_until_entry: autoTradeStatus.seconds_remaining,
               next_entry_time: autoTradeStatus.next_entry_time,
+              next_entry_source:
+                autoTradeStatus.next_entry_source ?? prev.next_entry_source,
               last_error: null,
             }
           : prev,
@@ -944,6 +956,7 @@ export default function Dashboard() {
               is_enabled: true,
               last_error: autoTradeStatus.error || prev.last_error,
               seconds_until_entry: autoTradeStatus.retry_in_seconds ?? 60,
+              next_entry_source: 'retry',
             }
           : prev,
       )

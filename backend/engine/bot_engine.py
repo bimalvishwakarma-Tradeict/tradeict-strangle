@@ -1479,14 +1479,19 @@ class BotEngine:
                         is not None
                         else 120
                     )
+                    source = "cooldown_after_loss"
                 else:
                     delay = int(settings.re_entry_delay_minutes or 1)
-                self.auto_trade_engine.schedule_reentry(underlying, delay)
+                    source = "reentry_delay"
+                self.auto_trade_engine.schedule_reentry(
+                    underlying, delay, source=source
+                )
                 logger.info(
-                    "Auto re-entry scheduled for %s in %s min (reason=%s)",
+                    "Auto re-entry scheduled for %s in %s min (reason=%s source=%s)",
                     underlying,
                     delay,
                     reason or "n/a",
+                    source,
                 )
         except Exception as exc:
             logger.warning("Could not schedule auto re-entry: %s", exc)

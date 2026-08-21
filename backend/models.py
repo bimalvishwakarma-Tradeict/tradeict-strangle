@@ -443,6 +443,12 @@ class AutoTradeSettings(Base):
     next_entry_time: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Why next_entry_time was set — only 'reentry_delay' is recomputed on
+    # settings save. Values: reentry_delay | cooldown_after_loss | retry |
+    # hedge_gate | expiry_too_close
+    next_entry_source: Mapped[str | None] = mapped_column(
+        String(40), nullable=True
+    )
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # Global app config — USD→INR for balance display in Navbar

@@ -16,6 +16,7 @@ import {
   getThetaPreview,
   saveAutoTradeSettings,
 } from '../services/api'
+import { formatNextEntryWait } from '../utils/nextEntryLabel'
 
 const WS_URL = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/trades`
 const STATUS_POLL_MS = 5000
@@ -162,6 +163,9 @@ function applyStatusToForm(data, setters) {
       ? Math.max(0, Number(data.seconds_until_entry))
       : null
   setters.setSecondsUntilEntry(secs)
+  if (setters.setNextEntrySource) {
+    setters.setNextEntrySource(data.next_entry_source || null)
+  }
   setters.setSlabsInitial({
     mode: data.trigger_mode || 'slab',
     flat_pct: data.flat_trigger_pct ?? 150,
@@ -189,6 +193,7 @@ export default function AutoTrade() {
   const [lastError, setLastError] = useState(null)
   const [lastTradeId, setLastTradeId] = useState(null)
   const [secondsUntilEntry, setSecondsUntilEntry] = useState(null)
+  const [nextEntrySource, setNextEntrySource] = useState(null)
   const [activeTrade, setActiveTrade] = useState(null)
 
   const [underlying, setUnderlying] = useState('BTC')
@@ -316,6 +321,7 @@ export default function AutoTrade() {
       setLastError,
       setLastTradeId,
       setSecondsUntilEntry,
+      setNextEntrySource,
       setSlabsInitial,
     }),
     [],
@@ -336,6 +342,7 @@ export default function AutoTrade() {
           ? Math.max(0, Number(status.seconds_until_entry))
           : null
       setSecondsUntilEntry(secs)
+      setNextEntrySource(status?.next_entry_source || null)
 
       const trades = activeRes?.trades || []
       const und = status?.underlying || underlying
@@ -478,6 +485,9 @@ export default function AutoTrade() {
       const secs = Number(lastMessage.seconds_remaining)
       if (Number.isFinite(secs)) {
         setSecondsUntilEntry(Math.max(0, secs))
+      }
+      if (lastMessage.next_entry_source != null) {
+        setNextEntrySource(lastMessage.next_entry_source || null)
       }
       setIsEnabled(true)
     } else if (t === 'TRADE_UPDATE' || t === 'TRADE_CLOSED') {
@@ -984,7 +994,7 @@ export default function AutoTrade() {
     if (lastError) {
       const retry =
         secondsUntilEntry != null && secondsUntilEntry > 0
-          ? ` (retry in ${secondsUntilEntry}s)`
+          ? ` (${formatNextEntryWait(secondsUntilEntry, nextEntrySource || 'retry')})`
           : ''
       return {
         color: 'text-red-400',
@@ -996,7 +1006,7 @@ export default function AutoTrade() {
       return {
         color: 'text-yellow-300',
         bg: 'border-yellow-700/50 bg-yellow-950/20',
-        text: `🔄 Auto Trade ON · ${tradeTypeLabel} · Next entry in ${secondsUntilEntry}s`,
+        text: `🔄 Auto Trade ON · ${tradeTypeLabel} · ${formatNextEntryWait(secondsUntilEntry, nextEntrySource)}`,
       }
     }
     return {
@@ -1010,6 +1020,7 @@ export default function AutoTrade() {
     tradeLabel,
     lastError,
     secondsUntilEntry,
+    nextEntrySource,
     tradeTypeLabel,
   ])
 

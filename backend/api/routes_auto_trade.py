@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from backend.config import IST
+from backend.core.bot_logger import log_and_buffer
 from backend.core.time_utils import get_ist_now
 from backend.database import get_db, get_or_create_auto_settings
 from backend.models import AutoTradeSettings
@@ -19,6 +20,14 @@ from backend.strategies.s001_short_strangle.config import SUPPORTED_UNDERLYINGS
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auto-trade", tags=["auto-trade"])
+
+_NEXT_ENTRY_SOURCE_LABELS = {
+    "reentry_delay": "re-entry delay",
+    "cooldown_after_loss": "cooldown after loss",
+    "retry": "retry backoff",
+    "hedge_gate": "hedge gate backoff",
+    "expiry_too_close": "expiry too close",
+}
 
 
 class AutoTradeSettingsSchema(BaseModel):
@@ -195,6 +204,80 @@ def _as_ist(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return IST.localize(dt)
     return dt.astimezone(IST)
+
+
+def _reschedule_reentry_if_delay_changed(
+    settings: AutoTradeSettings,
+    *,
+    old_delay: int,
+    new_delay: int,
+) -> None:
+    """
+    If a user-preference re-entry wait is pending, recompute from last_exit.
+    Safety sources (cooldown / retry / hedge_gate / expiry) are left alone.
+    """
+    if int(old_delay) == int(new_delay):
+        return
+
+    now = get_ist_now()
+    next_entry = _as_ist(getattr(settings, "next_entry_time", None))
+    if next_entry is None or next_entry <= now:
+        return
+
+    source = str(getattr(settings, "next_entry_source", None) or "").strip()
+    # Pre-migration NULL → treat as user re-entry delay (the common case)
+    if source and source != "reentry_delay":
+        logger.info(
+            "[REENTRY_NOT_RESCHEDULED] source=%s | next_entry=%s",
+            source or "unknown",
+            next_entry.isoformat(),
+        )
+        log_and_buffer(
+            "REENTRY_NOT_RESCHEDULED",
+            0,
+            {
+                "source": source or "unknown",
+                "next_entry": next_entry.isoformat(),
+                "old_delay": int(old_delay),
+                "new_delay": int(new_delay),
+            },
+        )
+        return
+
+    last_exit = _as_ist(getattr(settings, "last_exit_time", None))
+    if last_exit is None:
+        last_exit = next_entry - timedelta(minutes=max(int(old_delay), 1))
+
+    effective = max(int(new_delay), 1)
+    new_next = last_exit + timedelta(minutes=effective)
+    old_iso = next_entry.isoformat()
+
+    if new_next <= now:
+        settings.next_entry_time = None
+        settings.next_entry_source = None
+        new_iso: str | None = None
+    else:
+        settings.next_entry_time = new_next
+        settings.next_entry_source = "reentry_delay"
+        new_iso = new_next.isoformat()
+
+    logger.info(
+        "[REENTRY_RESCHEDULED] old=%s | new=%s | old_delay=%s | new_delay=%s",
+        old_iso,
+        new_iso,
+        int(old_delay),
+        int(new_delay),
+    )
+    log_and_buffer(
+        "REENTRY_RESCHEDULED",
+        0,
+        {
+            "old": old_iso,
+            "new": new_iso,
+            "old_delay": int(old_delay),
+            "new_delay": int(new_delay),
+        },
+    )
 
 
 def _hedge_expiry_fields(s: AutoTradeSettings) -> dict[str, Any]:
@@ -402,6 +485,11 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "last_trade_id": s.last_trade_id,
         "last_exit_time": last_exit.isoformat() if last_exit else None,
         "next_entry_time": next_entry.isoformat() if next_entry else None,
+        "next_entry_source": getattr(s, "next_entry_source", None),
+        "next_entry_reason": _NEXT_ENTRY_SOURCE_LABELS.get(
+            str(getattr(s, "next_entry_source", None) or ""),
+            None,
+        ),
         "seconds_until_entry": seconds_until_entry,
         "retry_count": int(s.retry_count or 0),
         "last_error": s.last_error,
@@ -465,7 +553,9 @@ async def update_auto_trade_settings(
         else:
             settings.expiry_date_override = None
     settings.quantity = int(payload.quantity)
-    settings.re_entry_delay_minutes = int(payload.re_entry_delay_minutes)
+    old_reentry_delay = int(settings.re_entry_delay_minutes or 1)
+    new_reentry_delay = int(payload.re_entry_delay_minutes)
+    settings.re_entry_delay_minutes = new_reentry_delay
     settings.entry_settling_seconds = int(payload.entry_settling_seconds)
     settings.adjustment_settling_seconds = int(
         payload.adjustment_settling_seconds
@@ -678,6 +768,12 @@ async def update_auto_trade_settings(
     settings.updated_at = get_ist_now()
     # Do NOT change is_enabled here
 
+    _reschedule_reentry_if_delay_changed(
+        settings,
+        old_delay=old_reentry_delay,
+        new_delay=new_reentry_delay,
+    )
+
     db.commit()
     db.refresh(settings)
 
@@ -746,6 +842,7 @@ async def enable_auto_trade(
     now = get_ist_now()
     settings.is_enabled = True
     settings.next_entry_time = now  # place ASAP if no active trade
+    settings.next_entry_source = None
     settings.last_error = None
     settings.updated_at = now
     db.commit()
@@ -776,6 +873,7 @@ async def disable_auto_trade(
     settings = get_or_create_auto_settings(db)
     settings.is_enabled = False
     settings.next_entry_time = None
+    settings.next_entry_source = None
     settings.updated_at = get_ist_now()
     db.commit()
     db.refresh(settings)
