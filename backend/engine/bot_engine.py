@@ -3629,7 +3629,7 @@ class BotEngine:
 
                     if mirror_module.mirror_engine is not None:
                         asyncio.create_task(
-                            mirror_module.mirror_engine.mirror_hedge_close(
+                            mirror_module.mirror_engine.mirror_conversion_hedge_close(
                                 master_trade_id=trade_id,
                                 hedge_product_id=int(hedge_product_id),
                             )

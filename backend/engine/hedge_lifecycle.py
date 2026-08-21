@@ -1163,6 +1163,35 @@ async def close_hedge(
             )
             raise HedgeCloseError("cascade", err, hedge=hedge)
 
+        # Slave cascade: baskets→verify→hedge per slave. Never blocks master.
+        try:
+            import backend.engine.mirror_engine as mirror_module
+
+            me = mirror_module.mirror_engine
+            if me is not None:
+                await me.mirror_hedge_close(
+                    hedge,
+                    reason_norm,
+                    db,
+                    closed_master_trade_ids=list(
+                        cascade.get("closed_trade_ids") or []
+                    ),
+                )
+            else:
+                logger.warning(
+                    "[SLAVE_HEDGE_CASCADE] mirror_engine is None — "
+                    "slave hedges not closed master_hedge=%s",
+                    hid,
+                )
+        except Exception as slave_cascade_exc:
+            logger.error(
+                "[SLAVE_HEDGE_CASCADE] slave cascade failed "
+                "(master hedge #%s continues): %s",
+                hid,
+                slave_cascade_exc,
+                exc_info=True,
+            )
+
         call_exists, call_size = await _verify_leg(
             client, leg="call_pre", product_id=call_pid, hedge_id=hid
         )

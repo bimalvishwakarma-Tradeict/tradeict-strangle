@@ -1860,23 +1860,43 @@ class MirrorEngine:
         Open long straddle on one slave. Returns 'opened' | 'skipped' | 'failed'.
         """
         slave_id = int(slave.id)
-        # Idempotent: already mirroring this master hedge
-        existing = (
+        # Any live slave hedge blocks a second open (roll race / blocked close)
+        existing_any = (
             db.query(SlaveHedgePosition)
             .filter(
                 SlaveHedgePosition.slave_account_id == slave_id,
-                SlaveHedgePosition.master_hedge_id == int(master_hedge_id),
                 SlaveHedgePosition.status.in_(("active", "partial")),
             )
             .first()
         )
-        if existing is not None:
-            logger.info(
-                "[SLAVE_HEDGE_OPEN] slave=%s already has active row id=%s "
-                "for master_hedge=%s — skip",
+        if existing_any is not None:
+            existing_id = int(existing_any.id)
+            existing_master = int(existing_any.master_hedge_id or 0)
+            if existing_master == int(master_hedge_id):
+                logger.info(
+                    "[SLAVE_HEDGE_OPEN] slave=%s already has active row id=%s "
+                    "for master_hedge=%s — skip",
+                    slave_id,
+                    existing_id,
+                    master_hedge_id,
+                )
+                return "skipped"
+            logger.error(
+                "[SLAVE_HEDGE_DUPLICATE_SKIP] slave=%s | existing_hedge=%s | "
+                "new_master_hedge=%s",
                 slave_id,
-                existing.id,
+                existing_id,
                 master_hedge_id,
+            )
+            log_and_buffer(
+                "SLAVE_HEDGE_DUPLICATE_SKIP",
+                int(master_hedge_id),
+                {
+                    "slave": slave_id,
+                    "existing_hedge": existing_id,
+                    "existing_master_hedge": existing_master,
+                    "new_master_hedge": int(master_hedge_id),
+                },
             )
             return "skipped"
 
@@ -2322,6 +2342,619 @@ class MirrorEngine:
             return "failed"
         finally:
             await client.close()
+
+    def _master_trade_call_put_pids(
+        self, db: Any, master_trade_id: int
+    ) -> tuple[int, int]:
+        """Latest call/put product_ids for a master trade (any leg status)."""
+        from backend.models import Leg
+
+        call_pid = 0
+        put_pid = 0
+        legs = (
+            db.query(Leg)
+            .filter(Leg.trade_id == int(master_trade_id))
+            .order_by(Leg.id.asc())
+            .all()
+        )
+        for leg in legs:
+            lt = str(getattr(leg, "leg_type", "") or "").lower()
+            pid = int(getattr(leg, "product_id", 0) or 0)
+            if pid <= 0:
+                continue
+            if lt == "call":
+                call_pid = pid
+            elif lt == "put":
+                put_pid = pid
+        return call_pid, put_pid
+
+    async def _verify_slave_products_flat(
+        self,
+        client: DeltaClient,
+        product_ids: list[int],
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        """
+        Exchange-truth check: listed products must be flat.
+        Returns (all_flat, remaining_rows).
+        """
+        wanted = {int(p) for p in product_ids if int(p or 0) > 0}
+        if not wanted:
+            return True, []
+        try:
+            positions = await client.get_option_positions()
+        except Exception as exc:
+            logger.error(
+                "[SLAVE_HEDGE_CASCADE] get_option_positions failed: %s",
+                exc,
+            )
+            return False, [{"error": "verify_fetch_failed", "detail": str(exc)}]
+        remaining: list[dict[str, Any]] = []
+        for pos in positions or []:
+            try:
+                pid = int(pos.get("product_id") or 0)
+                size = float(pos.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid in wanted and abs(size) > 1e-9:
+                remaining.append(
+                    {
+                        "product_id": pid,
+                        "size": size,
+                        "symbol": str(pos.get("product_symbol") or ""),
+                    }
+                )
+        return (len(remaining) == 0), remaining
+
+    async def mirror_hedge_close(
+        self,
+        master_hedge: Any,
+        reason: str = "",
+        db: Any = None,
+        *,
+        closed_master_trade_ids: list[int] | None = None,
+    ) -> dict[str, int]:
+        """
+        Cascade structure-hedge close to slaves: baskets first, then hedge.
+
+        Per slave — never close the long hedge while any basket for that
+        slave under this master hedge is still live on the exchange.
+        Slave failures do not raise; master close is independent.
+        """
+        master_hedge_id = int(getattr(master_hedge, "id", 0) or 0)
+        reason_norm = str(reason or "HEDGE_MANUAL").upper().strip()
+        hedges_closed = 0
+        blocked = 0
+        slaves_n = 0
+
+        if master_hedge_id <= 0:
+            logger.error("[SLAVE_HEDGE_CASCADE] invalid master_hedge — abort")
+            return {
+                "slaves": 0,
+                "hedges_closed": 0,
+                "blocked": 0,
+            }
+
+        with self.db_factory() as work_db:
+            # Master baskets under this hedge (all statuses — cascade may
+            # already have closed them via close_master_trade → mirror_exit)
+            master_rows = (
+                work_db.query(Trade)
+                .filter(Trade.hedge_position_id == master_hedge_id)
+                .order_by(Trade.id.asc())
+                .all()
+            )
+            master_trade_ids = [int(t.id) for t in master_rows]
+            if closed_master_trade_ids:
+                for tid in closed_master_trade_ids:
+                    tid_i = int(tid)
+                    if tid_i not in master_trade_ids:
+                        master_trade_ids.append(tid_i)
+
+            slave_hedges = (
+                work_db.query(SlaveHedgePosition)
+                .filter(
+                    SlaveHedgePosition.master_hedge_id == master_hedge_id,
+                    SlaveHedgePosition.status.in_(
+                        ("active", "partial", "exit_failed", "error")
+                    ),
+                )
+                .all()
+            )
+            # Also include active slaves that might lack a row? No — only
+            # mirrored hedges. One row per slave for this master hedge.
+            seen_slave_ids: set[int] = set()
+            for sh in slave_hedges:
+                sid = int(sh.slave_account_id)
+                if sid in seen_slave_ids:
+                    continue
+                seen_slave_ids.add(sid)
+                slaves_n += 1
+                slave = (
+                    work_db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == sid)
+                    .first()
+                )
+                if slave is None or not bool(getattr(slave, "is_active", True)):
+                    blocked += 1
+                    continue
+
+                async with self._get_slave_hedge_lock(sid):
+                    outcome = await self._cascade_close_slave_hedge(
+                        slave=slave,
+                        slave_hedge=sh,
+                        db=work_db,
+                        master_hedge_id=master_hedge_id,
+                        master_trade_ids=master_trade_ids,
+                        reason=reason_norm,
+                    )
+                if outcome.get("hedge_closed"):
+                    hedges_closed += 1
+                else:
+                    blocked += 1
+
+        log_and_buffer(
+            "SLAVE_HEDGE_CASCADE_SUMMARY",
+            int(master_hedge_id),
+            {
+                "master_hedge": master_hedge_id,
+                "slaves": slaves_n,
+                "hedges_closed": hedges_closed,
+                "blocked": blocked,
+                "reason": reason_norm,
+            },
+        )
+        logger.info(
+            "[SLAVE_HEDGE_CASCADE_SUMMARY] master_hedge=%s | slaves=%s | "
+            "hedges_closed=%s | blocked=%s",
+            master_hedge_id,
+            slaves_n,
+            hedges_closed,
+            blocked,
+        )
+        return {
+            "slaves": slaves_n,
+            "hedges_closed": hedges_closed,
+            "blocked": blocked,
+        }
+
+    async def _cascade_close_slave_hedge(
+        self,
+        *,
+        slave: SlaveAccount,
+        slave_hedge: SlaveHedgePosition,
+        db: Any,
+        master_hedge_id: int,
+        master_trade_ids: list[int],
+        reason: str,
+    ) -> dict[str, Any]:
+        """Baskets → verify → hedge for one slave. Never naked-strangle."""
+        slave_id = int(slave.id)
+        baskets_found = 0
+        baskets_closed = 0
+        baskets_failed = 0
+        failed_basket_ids: list[int] = []
+        hedge_closed = False
+
+        try:
+            # --- a. Close open slave baskets under this master hedge ---
+            open_slave_trades: list[SlaveTrade] = []
+            if master_trade_ids:
+                open_slave_trades = (
+                    db.query(SlaveTrade)
+                    .filter(
+                        SlaveTrade.slave_account_id == slave_id,
+                        SlaveTrade.master_trade_id.in_(master_trade_ids),
+                        SlaveTrade.status != "closed",
+                    )
+                    .all()
+                )
+            baskets_found = len(open_slave_trades)
+
+            for st in open_slave_trades:
+                mid = int(st.master_trade_id)
+                call_pid, put_pid = self._master_trade_call_put_pids(db, mid)
+                try:
+                    await self._mirror_exit_to_slave(
+                        slave=slave,
+                        slave_trade=st,
+                        call_product_id=call_pid,
+                        put_product_id=put_pid,
+                        reason=f"HEDGE_CASCADE:{reason}",
+                        db=db,
+                        hedge_product_id=None,  # never touch structure hedge here
+                    )
+                except Exception as exit_exc:
+                    logger.error(
+                        "[SLAVE_HEDGE_CASCADE] slave=%s basket master=%s "
+                        "exit raised: %s",
+                        slave_id,
+                        mid,
+                        exit_exc,
+                    )
+
+            # --- b. Exchange verify — do not trust DB status alone ---
+            db.expire_all()
+            check_trades: list[SlaveTrade] = []
+            if master_trade_ids:
+                check_trades = (
+                    db.query(SlaveTrade)
+                    .filter(
+                        SlaveTrade.slave_account_id == slave_id,
+                        SlaveTrade.master_trade_id.in_(master_trade_ids),
+                    )
+                    .all()
+                )
+            # Ignore never-placed capital skips — no live positions to clear
+            _ignore = {"skipped_low_capital"}
+            check_trades = [
+                st
+                for st in check_trades
+                if str(st.status or "").lower() not in _ignore
+            ]
+
+            if not check_trades:
+                baskets_closed = 0
+            else:
+                is_virtual = bool(getattr(slave, "is_virtual", False))
+                client: DeltaClient | None = None
+                try:
+                    if not is_virtual:
+                        client = self._get_slave_client(slave)
+                    # Hedge legs are longs — any remaining SHORT means a
+                    # basket is still live (product_ids may differ after adj).
+                    live_shorts: list[dict[str, Any]] = []
+                    if client is not None:
+                        try:
+                            positions = await client.get_option_positions()
+                        except Exception as pos_exc:
+                            logger.error(
+                                "[SLAVE_HEDGE_CASCADE] slave=%s positions "
+                                "fetch failed: %s",
+                                slave_id,
+                                pos_exc,
+                            )
+                            positions = None
+                        if positions is None:
+                            for st in check_trades:
+                                baskets_failed += 1
+                                failed_basket_ids.append(
+                                    int(st.master_trade_id)
+                                )
+                            positions = []
+                        else:
+                            for pos in positions:
+                                try:
+                                    size = float(pos.get("size") or 0)
+                                    pid = int(pos.get("product_id") or 0)
+                                except (TypeError, ValueError):
+                                    continue
+                                if size < -1e-9 and pid > 0:
+                                    live_shorts.append(
+                                        {
+                                            "product_id": pid,
+                                            "size": size,
+                                            "symbol": str(
+                                                pos.get("product_symbol") or ""
+                                            ),
+                                        }
+                                    )
+
+                    for st in check_trades:
+                        mid = int(st.master_trade_id)
+                        st_status = str(st.status or "").lower()
+                        if is_virtual:
+                            if st_status == "closed":
+                                baskets_closed += 1
+                            else:
+                                baskets_failed += 1
+                                failed_basket_ids.append(mid)
+                            continue
+
+                        call_pid, put_pid = self._master_trade_call_put_pids(
+                            db, mid
+                        )
+                        # Per-trade hint flat + no live shorts on account
+                        hint_flat = True
+                        if client is not None and (call_pid or put_pid):
+                            hint_flat, _rem = await self._verify_slave_products_flat(
+                                client, [call_pid, put_pid]
+                            )
+                        if (
+                            st_status == "closed"
+                            and hint_flat
+                            and not live_shorts
+                        ):
+                            baskets_closed += 1
+                        else:
+                            baskets_failed += 1
+                            failed_basket_ids.append(mid)
+                            if live_shorts:
+                                logger.warning(
+                                    "[SLAVE_HEDGE_CASCADE] slave=%s still has "
+                                    "shorts=%s (blocks hedge close)",
+                                    slave_id,
+                                    live_shorts,
+                                )
+                finally:
+                    if client is not None:
+                        await client.close()
+
+            if baskets_failed > 0:
+                logger.critical(
+                    "[SLAVE_HEDGE_CLOSE_BLOCKED] slave=%s | master_hedge=%s | "
+                    "failed_baskets=%s",
+                    slave_id,
+                    master_hedge_id,
+                    failed_basket_ids,
+                )
+                log_and_buffer(
+                    "SLAVE_HEDGE_CLOSE_BLOCKED",
+                    int(master_hedge_id),
+                    {
+                        "slave": slave_id,
+                        "master_hedge": master_hedge_id,
+                        "failed_baskets": failed_basket_ids,
+                        "reason": reason,
+                    },
+                )
+                hedge_closed = False
+            else:
+                # --- c. Close slave hedge legs, verify, persist ---
+                hedge_closed = await self._close_slave_hedge_legs(
+                    slave=slave,
+                    slave_hedge=slave_hedge,
+                    db=db,
+                    reason=reason,
+                )
+
+        except Exception as exc:
+            logger.error(
+                "[SLAVE_HEDGE_CASCADE] slave=%s unexpected: %s",
+                slave_id,
+                exc,
+                exc_info=True,
+            )
+            hedge_closed = False
+
+        log_and_buffer(
+            "SLAVE_HEDGE_CASCADE",
+            int(master_hedge_id),
+            {
+                "master_hedge": master_hedge_id,
+                "slave": slave_id,
+                "reason": reason,
+                "baskets_found": baskets_found,
+                "baskets_closed": baskets_closed,
+                "baskets_failed": baskets_failed,
+                "hedge_closed": bool(hedge_closed),
+                "failed_baskets": failed_basket_ids,
+            },
+        )
+        logger.info(
+            "[SLAVE_HEDGE_CASCADE] master_hedge=%s | slave=%s | reason=%s | "
+            "baskets_found=%s | baskets_closed=%s | baskets_failed=%s | "
+            "hedge_closed=%s",
+            master_hedge_id,
+            slave_id,
+            reason,
+            baskets_found,
+            baskets_closed,
+            baskets_failed,
+            bool(hedge_closed),
+        )
+        return {
+            "hedge_closed": bool(hedge_closed),
+            "baskets_found": baskets_found,
+            "baskets_closed": baskets_closed,
+            "baskets_failed": baskets_failed,
+            "failed_baskets": failed_basket_ids,
+        }
+
+    async def _close_slave_hedge_legs(
+        self,
+        *,
+        slave: SlaveAccount,
+        slave_hedge: SlaveHedgePosition,
+        db: Any,
+        reason: str,
+    ) -> bool:
+        """Sell both long legs, verify flat, mark slave_hedge_positions closed."""
+        sh = slave_hedge
+        slave_id = int(slave.id)
+        call_pid = int(getattr(sh, "call_product_id", 0) or 0)
+        put_pid = int(getattr(sh, "put_product_id", 0) or 0)
+        qty = max(1, int(getattr(sh, "quantity", 1) or 1))
+        call_symbol = str(getattr(sh, "call_symbol", "") or "")
+        put_symbol = str(getattr(sh, "put_symbol", "") or "")
+
+        if call_pid <= 0 or put_pid <= 0:
+            logger.error(
+                "[SLAVE_HEDGE_CASCADE] slave=%s hedge=%s missing product ids",
+                slave_id,
+                getattr(sh, "id", None),
+            )
+            return False
+
+        # Virtual: DB only
+        if bool(getattr(slave, "is_virtual", False)) or str(
+            getattr(sh, "call_order_id", "") or ""
+        ).upper() == "VIRTUAL":
+            entry_call = float(getattr(sh, "call_fill_price", 0) or 0)
+            entry_put = float(getattr(sh, "put_fill_price", 0) or 0)
+            sh.call_exit_price = entry_call
+            sh.put_exit_price = entry_put
+            sh.realized_pnl = 0.0
+            sh.status = "closed"
+            sh.exit_reason = reason
+            sh.exit_time = get_ist_now()
+            sh.last_error = None
+            db.commit()
+            return True
+
+        from backend.engine.order_executor import OrderExecutor
+
+        client = self._get_slave_client(slave)
+        executor = OrderExecutor()
+        call_order: dict[str, Any] | None = None
+        put_order: dict[str, Any] | None = None
+        try:
+            for leg, pid, sym in (
+                ("call", call_pid, call_symbol),
+                ("put", put_pid, put_symbol),
+            ):
+                try:
+                    exists = await client.verify_position_exists(int(pid))
+                except Exception:
+                    exists = True
+                if not exists:
+                    logger.info(
+                        "[SLAVE_HEDGE_CASCADE] slave=%s %s already flat pid=%s",
+                        slave_id,
+                        leg,
+                        pid,
+                    )
+                    continue
+                try:
+                    order = await client.close_position(
+                        product_id=int(pid),
+                        size=int(qty),
+                        is_long=True,
+                    )
+                    if leg == "call":
+                        call_order = order if isinstance(order, dict) else None
+                    else:
+                        put_order = order if isinstance(order, dict) else None
+                except Exception as close_exc:
+                    logger.warning(
+                        "[SLAVE_HEDGE_CASCADE] slave=%s close_position %s "
+                        "failed: %s — OrderExecutor",
+                        slave_id,
+                        leg,
+                        close_exc,
+                    )
+                    res = await executor.close_long_position(
+                        product_id=int(pid),
+                        quantity=int(qty),
+                        delta_client=client,
+                        symbol_for_fallback=sym or None,
+                    )
+                    if res.success:
+                        payload = {
+                            "order_id": res.order_id,
+                            "avg_fill_price": res.filled_price,
+                        }
+                        if leg == "call":
+                            call_order = payload
+                        else:
+                            put_order = payload
+                    else:
+                        logger.error(
+                            "[SLAVE_HEDGE_CASCADE] slave=%s %s close failed: %s",
+                            slave_id,
+                            leg,
+                            res.error,
+                        )
+
+            await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
+            flat, remaining = await self._verify_slave_products_flat(
+                client, [call_pid, put_pid]
+            )
+            if not flat:
+                err = f"hedge not flat after close remaining={remaining}"
+                sh.status = "exit_failed"
+                sh.last_error = err[:500]
+                sh.error_count = int(sh.error_count or 0) + 1
+                db.commit()
+                logger.critical(
+                    "[SLAVE_HEDGE_CASCADE] slave=%s hedge=%s %s",
+                    slave_id,
+                    sh.id,
+                    err,
+                )
+                return False
+
+            def _fill_from_order(order: dict[str, Any] | None) -> float:
+                if not order:
+                    return 0.0
+                for key in (
+                    "avg_fill_price",
+                    "average_fill_price",
+                    "filled_price",
+                ):
+                    try:
+                        v = float(order.get(key) or 0)
+                    except (TypeError, ValueError):
+                        v = 0.0
+                    if v > 0:
+                        return v
+                return 0.0
+
+            call_exit = _fill_from_order(call_order)
+            put_exit = _fill_from_order(put_order)
+            if call_exit <= 0:
+                try:
+                    call_exit = float(
+                        await client.resolve_fill_price(
+                            call_order or {},
+                            symbol_for_fallback=call_symbol or None,
+                        )
+                        or 0
+                    )
+                except Exception:
+                    call_exit = 0.0
+            if put_exit <= 0:
+                try:
+                    put_exit = float(
+                        await client.resolve_fill_price(
+                            put_order or {},
+                            symbol_for_fallback=put_symbol or None,
+                        )
+                        or 0
+                    )
+                except Exception:
+                    put_exit = 0.0
+
+            entry_call = float(getattr(sh, "call_fill_price", 0) or 0)
+            entry_put = float(getattr(sh, "put_fill_price", 0) or 0)
+            realized: float | None = None
+            if call_exit > 0 and put_exit > 0 and entry_call > 0 and entry_put > 0:
+                realized = round(
+                    ((call_exit - entry_call) + (put_exit - entry_put))
+                    * qty
+                    * _CONTRACT_SIZE,
+                    6,
+                )
+
+            sh.call_exit_price = call_exit if call_exit > 0 else None
+            sh.put_exit_price = put_exit if put_exit > 0 else None
+            sh.realized_pnl = realized
+            sh.status = "closed"
+            sh.exit_reason = reason
+            sh.exit_time = get_ist_now()
+            sh.last_error = None
+            db.commit()
+            return True
+        except Exception as exc:
+            logger.error(
+                "[SLAVE_HEDGE_CASCADE] slave=%s hedge close error: %s",
+                slave_id,
+                exc,
+                exc_info=True,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            await client.close()
+
+    async def mirror_conversion_hedge_close(
+        self,
+        master_trade_id: int,
+        hedge_product_id: int,
+    ) -> None:
+        """AUDIT-7: SELL-close legacy conversion hedge on active slaves."""
         if not hedge_product_id:
             return
         with self.db_factory() as db:
@@ -2354,18 +2987,21 @@ class MirrorEngine:
                             side="sell",
                         )
                         logger.info(
-                            "Slave '%s' hedge closed (sell) product=%s",
+                            "Slave '%s' conversion hedge closed (sell) "
+                            "product=%s",
                             slave.name,
                             hedge_product_id,
                         )
                     else:
                         logger.warning(
-                            "Slave '%s' hedge not on Delta — skip close",
+                            "Slave '%s' conversion hedge not on Delta — skip",
                             slave.name,
                         )
                 except Exception as exc:
                     logger.error(
-                        "Slave '%s' hedge close FAILED: %s", slave.name, exc
+                        "Slave '%s' conversion hedge close FAILED: %s",
+                        slave.name,
+                        exc,
                     )
                 finally:
                     await client.close()
