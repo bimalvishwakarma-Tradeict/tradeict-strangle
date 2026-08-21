@@ -134,6 +134,7 @@ async def hedge_open(
                 db,
                 client=client,
                 quantity_override=qty_override,
+                opened_via="manual",
             )
         except HedgeOpenError as exc:
             logger.critical(

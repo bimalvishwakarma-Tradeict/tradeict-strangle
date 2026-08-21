@@ -103,6 +103,7 @@ function applyStatusToForm(data, setters) {
   setters.setHedgeExpiryDte(
     data.hedge_expiry_dte == null ? '' : String(data.hedge_expiry_dte),
   )
+  setters.setMinHedgeDte(String(data.min_hedge_dte ?? 15))
   setters.setHedgeTargetUsd(
     data.hedge_target_usd == null ? '' : String(data.hedge_target_usd),
   )
@@ -199,6 +200,7 @@ export default function AutoTrade() {
   const [hedgeExpiryDateOverride, setHedgeExpiryDateOverride] = useState('')
   const [hedgeExpiryNeedsRepick, setHedgeExpiryNeedsRepick] = useState(false)
   const [hedgeExpiryDte, setHedgeExpiryDte] = useState('')
+  const [minHedgeDte, setMinHedgeDte] = useState('15')
   const [hedgeTargetUsd, setHedgeTargetUsd] = useState('')
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
   const [hedgeSlFloorPct, setHedgeSlFloorPct] = useState('25')
@@ -254,6 +256,7 @@ export default function AutoTrade() {
       setHedgeExpiryDateOverride,
       setHedgeExpiryNeedsRepick,
       setHedgeExpiryDte,
+      setMinHedgeDte,
       setHedgeTargetUsd,
       setHedgeStoplossUsd,
       setHedgeSlFloorPct,
@@ -523,6 +526,7 @@ export default function AutoTrade() {
         hedgeExpiryDateOverride ||
         null,
       hedge_expiry_dte: null,
+      min_hedge_dte: Math.min(60, Math.max(5, Number(minHedgeDte) || 15)),
       hedge_target_usd:
         hedgeTargetUsd === '' || hedgeTargetUsd == null
           ? null
@@ -598,6 +602,15 @@ export default function AutoTrade() {
     }
     return null
   }, [hedgeTargetMultiple])
+
+  const minHedgeDteError = useMemo(() => {
+    const n = Number(minHedgeDte)
+    if (minHedgeDte === '' || Number.isNaN(n)) {
+      return 'Must be between 5 and 60'
+    }
+    if (n < 5 || n > 60) return 'Must be between 5 and 60'
+    return null
+  }, [minHedgeDte])
 
   const basketExitSpreadPctError = useMemo(() => {
     const n = Number(basketExitSpreadPct)
@@ -725,12 +738,18 @@ export default function AutoTrade() {
   }
 
   const handleEnable = async () => {
-    if (hedgeSlFloorPctError || hedgeTargetMultipleError || spreadSettingsError) {
+    if (
+      hedgeSlFloorPctError ||
+      hedgeTargetMultipleError ||
+      minHedgeDteError ||
+      spreadSettingsError
+    ) {
       setToast({
         type: 'error',
         message:
           hedgeSlFloorPctError ||
           hedgeTargetMultipleError ||
+          minHedgeDteError ||
           spreadSettingsError ||
           'Fix validation errors before enabling',
       })
@@ -1387,6 +1406,33 @@ export default function AutoTrade() {
                 labelled option (Month / Week / DTE) before enabling hedge mode.
               </span>
             ) : null}
+          </label>
+          <label className="block text-sm text-gray-300">
+            Minimum hedge DTE
+            <input
+              type="number"
+              min={5}
+              max={60}
+              step={1}
+              value={minHedgeDte}
+              onChange={(e) => setMinHedgeDte(e.target.value)}
+              disabled={!hedgeEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+                minHedgeDteError ? 'border-red-500' : 'border-gray-600'
+              }`}
+            />
+            {minHedgeDteError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {minHedgeDteError}
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                If the selected monthly expiry is closer than this, the next
+                monthly is used instead. A short-dated hedge has inflated
+                theta, which pushes the basket&apos;s theta requirement beyond
+                what the daily chain can offer and forces near-ATM strikes.
+              </span>
+            )}
           </label>
           <label className="block text-sm text-gray-300">
             Hedge target ($)

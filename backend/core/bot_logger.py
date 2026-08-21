@@ -88,6 +88,7 @@ _IMPORTANT_EVENTS = frozenset(
         "SPREAD_EST",
         "HEDGE_THETA_LOG",
         "THETA_FALLBACK",
+        "HEDGE_EXPIRY_SKIP",
         "HEDGE_GATE",
         "HEDGE_GATE_BLOCK",
         "HEDGE_GATE_BACKOFF",
@@ -287,6 +288,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MIRROR_ADJ_SKIP",
         "MIRROR_ADJ_FAIL",
         "THETA_FALLBACK",
+        "HEDGE_EXPIRY_SKIP",
     ):
         bot_log.warning(msg)
     else:

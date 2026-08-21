@@ -19,6 +19,7 @@ from backend.core.spread_utils import estimate_and_log_exit_spread_usd
 from backend.core.hedge_theta import (
     ExpiryNotAvailableError,
     HedgeThetaError,
+    enforce_min_hedge_dte,
     get_hedge_theta,
     migrate_hedge_expiry_mode,
     resolve_hedge_expiry_date,
@@ -304,12 +305,15 @@ async def open_hedge(
     *,
     client: DeltaClient,
     quantity_override: int | None = None,
+    opened_via: str = "auto",
 ) -> HedgePosition:
     """
     Buy a long ATM straddle (call then put), verify both legs, persist hedge_positions.
 
     If the put fails after the call is live, unwind the call with reduce_only and
     persist status='error'. Never leaves a one-legged hedge unmarked.
+
+    opened_via: 'auto' (bot) or 'manual' (API) — logged when min-DTE skip fires.
     """
     und = _normalize_underlying(str(settings.underlying or "BTC"))
     qty = max(
@@ -360,6 +364,15 @@ async def open_hedge(
                     settings, "hedge_expiry_date_override", None
                 ),
                 expiry_dte=dte,
+            )
+            min_dte = int(getattr(settings, "min_hedge_dte", None) or 15)
+            expiry = await enforce_min_hedge_dte(
+                client,
+                und,
+                expiry,
+                min_dte,
+                opened_via=str(opened_via or "auto"),
+                log_hedge_id=0,
             )
         except ExpiryNotAvailableError as exc:
             raise HedgeOpenError("resolve_expiry", str(exc)) from exc
@@ -1718,19 +1731,34 @@ async def maybe_log_hedge_theta_snapshot(
         )
         return None
 
-    _hedge_log(
-        "HEDGE_THETA_LOG",
-        hid,
-        {
-            "log_date": log_date.isoformat(),
-            "total_theta": round(total_theta, 4),
-            "call_theta": round(call_theta, 4),
-            "put_theta": round(put_theta, 4),
-            "spot": round(float(spot), 2) if spot else None,
-            "call_iv": call_iv,
-            "put_iv": put_iv,
-        },
-    )
+    # Force INFO at the call site — do not rely solely on bot_logger
+    # event-type classification (live logs were still showing DEBUG).
+    details = {
+        "log_date": log_date.isoformat(),
+        "total_theta": round(total_theta, 4),
+        "call_theta": round(call_theta, 4),
+        "put_theta": round(put_theta, 4),
+        "spot": round(float(spot), 2) if spot else None,
+        "call_iv": call_iv,
+        "put_iv": put_iv,
+    }
+    try:
+        from backend.core.bot_logger import bot_log
+
+        log_and_buffer("HEDGE_THETA_LOG", hid, details)
+        bot_log.info(
+            "[HEDGE_THETA_LOG] Hedge#%s | log_date=%s total_theta=%s "
+            "call_theta=%s put_theta=%s spot=%s",
+            hid,
+            details["log_date"],
+            details["total_theta"],
+            details["call_theta"],
+            details["put_theta"],
+            details["spot"],
+        )
+    except Exception as exc:
+        logger.warning("HEDGE_THETA_LOG emit failed hedge_id=%s: %s", hid, exc)
+        _hedge_log("HEDGE_THETA_LOG", hid, details)
     return row
 
 

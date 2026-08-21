@@ -334,6 +334,8 @@ class AutoTradeSettings(Base):
         String(10), nullable=True, default=None
     )
     hedge_expiry_dte: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # If resolved hedge expiry has fewer days than this, advance to next monthly
+    min_hedge_dte: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
     hedge_target_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     hedge_stoploss_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Settings only until structure SL/target logic consumes them

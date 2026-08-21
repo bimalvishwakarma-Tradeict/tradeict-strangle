@@ -144,6 +144,7 @@ class AutoTradeHedgeBudgetSettings(BaseModel):
 
     hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
+    min_hedge_dte: int = Field(default=15, ge=5, le=60)
 
 
 class AutoTradeSpreadSettings(BaseModel):

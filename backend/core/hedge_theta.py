@@ -201,6 +201,92 @@ async def resolve_hedge_expiry_date(
     return _as_date(match["date"])
 
 
+async def enforce_min_hedge_dte(
+    client: DeltaClient,
+    underlying: str,
+    requested: date,
+    min_hedge_dte: int,
+    *,
+    opened_via: str = "auto",
+    log_hedge_id: int = 0,
+) -> date:
+    """
+    If requested expiry is closer than min_hedge_dte, advance to the next
+    monthly expiry that satisfies the floor (then further monthlies if needed).
+
+    Logs [HEDGE_EXPIRY_SKIP] via log_and_buffer when a skip occurs.
+    """
+    from backend.core.bot_logger import log_and_buffer
+
+    min_dte = int(min_hedge_dte if min_hedge_dte is not None else 15)
+    min_dte = max(5, min(60, min_dte))
+    today = get_ist_now().date()
+    req = _as_date(requested)
+    dte = (req - today).days
+    if dte >= min_dte:
+        return req
+
+    product_u = underlying.upper().strip()
+    if product_u.endswith("USD") and len(product_u) > 3:
+        product_u = product_u[:-3]
+
+    try:
+        rows = await client.get_available_expiries(product_u, limit=60)
+    except DeltaAPIError as exc:
+        raise HedgeThetaError(
+            f"Could not list expiries for min-DTE guard: {exc}"
+        ) from exc
+
+    monthly_dates = sorted(
+        {
+            _as_date(r["date"])
+            for r in rows
+            if str(r.get("key") or "").startswith("month_")
+        }
+    )
+    later = [d for d in monthly_dates if d > req]
+    selected: date | None = None
+    for d in later:
+        if (d - today).days >= min_dte:
+            selected = d
+            break
+    if selected is None and later:
+        # No monthly meets the floor — still take the furthest available monthly
+        selected = later[-1]
+    if selected is None:
+        logger.warning(
+            "[HEDGE_EXPIRY_SKIP] no later monthly after %s (dte=%s min=%s) — "
+            "keeping requested",
+            req.isoformat(),
+            dte,
+            min_dte,
+        )
+        return req
+
+    new_dte = (selected - today).days
+    via = str(opened_via or "auto").lower().strip()
+    details = {
+        "requested": req.isoformat(),
+        "dte": int(dte),
+        "min_required": int(min_dte),
+        "selected": selected.isoformat(),
+        "new_dte": int(new_dte),
+        "opened_via": via,
+        "manual": via == "manual",
+        "summary": (
+            f"[HEDGE_EXPIRY_SKIP] requested={req.isoformat()} dte={dte} "
+            f"min_required={min_dte} selected={selected.isoformat()} "
+            f"new_dte={new_dte}"
+            + (f" | opened_via=manual" if via == "manual" else "")
+        ),
+    }
+    try:
+        log_and_buffer("HEDGE_EXPIRY_SKIP", int(log_hedge_id or 0), details)
+    except Exception as exc:
+        logger.warning("HEDGE_EXPIRY_SKIP log_and_buffer failed: %s", exc)
+    return selected
+
+
 async def resolve_short_expiry_date(
     *,
     expiry_dte: int,

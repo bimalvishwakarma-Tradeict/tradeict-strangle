@@ -68,6 +68,7 @@ class AutoTradeSettingsSchema(BaseModel):
     hedge_expiry_mode: str = "month_1"
     hedge_expiry_date_override: str | None = None  # resolved date display only
     hedge_expiry_dte: int | None = Field(default=None, ge=0, le=365)
+    min_hedge_dte: int = Field(default=15, ge=5, le=60)
     hedge_target_usd: float | None = Field(default=None, gt=0)
     hedge_stoploss_usd: float | None = Field(default=None, gt=0)
     # Settings only — not consumed by hedge logic yet
@@ -259,6 +260,11 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "is_demo": bool(getattr(s, "is_demo", False)),
         "hedge_enabled": bool(getattr(s, "hedge_enabled", False)),
         **_hedge_expiry_fields(s),
+        "min_hedge_dte": int(
+            getattr(s, "min_hedge_dte", None)
+            if getattr(s, "min_hedge_dte", None) is not None
+            else 15
+        ),
         "hedge_target_usd": (
             float(s.hedge_target_usd)
             if getattr(s, "hedge_target_usd", None) is not None
@@ -468,6 +474,7 @@ async def update_auto_trade_settings(
 
     settings.hedge_expiry_mode = migrated_mode
     settings.hedge_expiry_dte = None  # relative keys replace fixed DTE
+    settings.min_hedge_dte = max(5, min(60, int(payload.min_hedge_dte)))
 
     # Resolve live dates and enforce hedge expiry > short basket expiry
     resolved_hedge_date: str | None = None
