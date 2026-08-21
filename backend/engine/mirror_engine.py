@@ -17,10 +17,15 @@ from backend.core.delta_client import DeltaClient
 from backend.core.encryption import decrypt
 from backend.core.time_utils import get_ist_now
 from backend.database import SessionLocal, get_active_slave_accounts
-from backend.models import SlaveAccount, SlaveTrade, Trade
-from backend.config import MAX_SLAVE_QTY, TradeStatus
+from backend.models import SlaveAccount, SlaveHedgePosition, SlaveTrade, Trade
+from backend.config import MAX_SLAVE_QTY, OPTIONS_CONTRACT_VALUE, TradeStatus
 
 logger = logging.getLogger(__name__)
+
+# Same debit buffer as master hedge open (hedge_lifecycle.HEDGE_AFFORD_BUFFER)
+_HEDGE_AFFORD_BUFFER = 1.15
+_CONTRACT_SIZE = float(OPTIONS_CONTRACT_VALUE)
+_HEDGE_VERIFY_PAUSE_SECONDS = 2.0
 
 
 def is_virtual_slave_trade(
@@ -51,6 +56,16 @@ class MirrorEngine:
 
     def __init__(self, db_factory: Callable[[], Any] | None = None) -> None:
         self.db_factory = db_factory or SessionLocal
+        # Per-slave serialisation for hedge open (never half-open two legs concurrently)
+        self._slave_hedge_locks: dict[int, asyncio.Lock] = {}
+
+    def _get_slave_hedge_lock(self, slave_id: int) -> asyncio.Lock:
+        sid = int(slave_id)
+        lock = self._slave_hedge_locks.get(sid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._slave_hedge_locks[sid] = lock
+        return lock
 
     def _get_slave_client(self, slave: SlaveAccount) -> DeltaClient:
         """Create DeltaClient for a slave account."""
@@ -1595,12 +1610,718 @@ class MirrorEngine:
                 finally:
                     await client.close()
 
-    async def mirror_hedge_close(
+    def _fit_hedge_qty_to_debit(
         self,
-        master_trade_id: int,
-        hedge_product_id: int,
-    ) -> None:
-        """AUDIT-7: SELL-close long hedge on all active slaves (reversal)."""
+        slave_qty: int,
+        *,
+        call_fill: float,
+        put_fill: float,
+        available_usd: float,
+    ) -> tuple[int, float]:
+        """
+        Reduce qty until (call+put)*qty*CV * afford_buffer ≤ available.
+
+        Returns (fitted_qty, required_usd_at_fitted_qty).
+        """
+        qty = max(0, int(slave_qty or 0))
+        per_lot = (
+            float(call_fill or 0) + float(put_fill or 0)
+        ) * _CONTRACT_SIZE
+        if qty <= 0 or per_lot <= 0:
+            return 0, 0.0
+        avail = float(available_usd or 0.0)
+        while qty >= 1:
+            required = per_lot * qty * _HEDGE_AFFORD_BUFFER
+            if required <= avail:
+                return qty, float(required)
+            qty -= 1
+        return 0, float(per_lot * _HEDGE_AFFORD_BUFFER)
+
+    async def mirror_hedge_open(
+        self,
+        master_hedge: Any,
+        db: Any = None,
+    ) -> dict[str, int]:
+        """
+        Mirror a confirmed master long ATM straddle onto every ACTIVE slave.
+
+        Sizing uses the same path as baskets (_calc_qty / _fit_qty_to_margin)
+        so hedge:basket stays 1:1. Hedge debit must be affordable at that qty;
+        if not, reduce qty — if still 0, skip the slave (no naked baskets).
+
+        Master hedge is never rolled back on slave failure.
+        """
+        from backend.engine.order_executor import OrderExecutor
+
+        master_hedge_id = int(getattr(master_hedge, "id", 0) or 0)
+        master_qty = max(1, int(getattr(master_hedge, "quantity", 1) or 1))
+        master_account_id = int(getattr(master_hedge, "account_id", 0) or 0)
+        call_pid = int(getattr(master_hedge, "call_product_id", 0) or 0)
+        put_pid = int(getattr(master_hedge, "put_product_id", 0) or 0)
+        call_symbol = str(getattr(master_hedge, "call_symbol", "") or "")
+        put_symbol = str(getattr(master_hedge, "put_symbol", "") or "")
+        master_call_fill = float(
+            getattr(master_hedge, "call_fill_price", 0) or 0
+        )
+        master_put_fill = float(
+            getattr(master_hedge, "put_fill_price", 0) or 0
+        )
+        master_entry_spread = float(
+            getattr(master_hedge, "entry_spread_usd", 0) or 0
+        )
+        underlying = str(getattr(master_hedge, "underlying", "") or "")
+        expiry_date = getattr(master_hedge, "expiry_date", None)
+        strike = float(getattr(master_hedge, "strike", 0) or 0)
+        entry_total_theta = getattr(master_hedge, "entry_total_theta", None)
+        entry_call_iv = getattr(master_hedge, "entry_call_iv", None)
+        entry_put_iv = getattr(master_hedge, "entry_put_iv", None)
+        target_usd = getattr(master_hedge, "target_usd", None)
+        stoploss_usd = getattr(master_hedge, "stoploss_usd", None)
+
+        opened = 0
+        skipped = 0
+        failed = 0
+        slaves_total = 0
+
+        if master_hedge_id <= 0 or call_pid <= 0 or put_pid <= 0:
+            logger.error(
+                "[SLAVE_HEDGE_OPEN] invalid master_hedge id=%s "
+                "call_pid=%s put_pid=%s — abort",
+                master_hedge_id,
+                call_pid,
+                put_pid,
+            )
+            return {
+                "slaves_total": 0,
+                "opened": 0,
+                "skipped": 0,
+                "failed": 0,
+            }
+
+        # Master hedge debit ≈ capital "used" for capital-based sizing
+        master_hedge_cost = (
+            (master_call_fill + master_put_fill) * master_qty * _CONTRACT_SIZE
+        )
+
+        with self.db_factory() as work_db:
+            slaves = get_active_slave_accounts(work_db)
+            slaves_total = len(slaves)
+            if not slaves:
+                log_and_buffer(
+                    "SLAVE_HEDGE_OPEN_SUMMARY",
+                    int(master_hedge_id),
+                    {
+                        "master_hedge": master_hedge_id,
+                        "slaves_total": 0,
+                        "opened": 0,
+                        "skipped": 0,
+                        "failed": 0,
+                    },
+                )
+                return {
+                    "slaves_total": 0,
+                    "opened": 0,
+                    "skipped": 0,
+                    "failed": 0,
+                }
+
+            master_total_capital: float | None = None
+            master_margin_used: float | None = (
+                master_hedge_cost if master_hedge_cost > 0 else None
+            )
+            try:
+                from backend.models import Account
+
+                master_acc = (
+                    work_db.query(Account)
+                    .filter(Account.id == master_account_id)
+                    .first()
+                )
+                if master_acc is None:
+                    master_acc = (
+                        work_db.query(Account)
+                        .filter(Account.is_active.is_(True))
+                        .order_by(Account.id.asc())
+                        .first()
+                    )
+                if master_acc is not None:
+                    m_client = DeltaClient(
+                        decrypt(master_acc.api_key_encrypted),
+                        decrypt(master_acc.api_secret_encrypted),
+                    )
+                    try:
+                        wallet = await m_client.get_wallet_balance()
+                        master_total_capital = float(
+                            wallet.get("balance_usdt", 0) or 0
+                        )
+                        if master_total_capital <= 0:
+                            master_total_capital = float(
+                                wallet.get("available_balance", 0) or 0
+                            )
+                    finally:
+                        await m_client.close()
+            except Exception as cap_err:
+                logger.warning(
+                    "[SLAVE_HEDGE_OPEN] master capital fetch failed: %s",
+                    cap_err,
+                )
+
+            for slave in slaves:
+                async with self._get_slave_hedge_lock(int(slave.id)):
+                    result = await self._mirror_hedge_open_to_slave(
+                        slave=slave,
+                        db=work_db,
+                        master_hedge_id=master_hedge_id,
+                        master_account_id=master_account_id,
+                        master_qty=master_qty,
+                        master_hedge_cost=master_hedge_cost,
+                        master_margin_used=master_margin_used,
+                        master_total_capital=master_total_capital,
+                        call_pid=call_pid,
+                        put_pid=put_pid,
+                        call_symbol=call_symbol,
+                        put_symbol=put_symbol,
+                        master_call_fill=master_call_fill,
+                        master_put_fill=master_put_fill,
+                        master_entry_spread=master_entry_spread,
+                        underlying=underlying,
+                        expiry_date=expiry_date,
+                        strike=strike,
+                        entry_total_theta=entry_total_theta,
+                        entry_call_iv=entry_call_iv,
+                        entry_put_iv=entry_put_iv,
+                        target_usd=target_usd,
+                        stoploss_usd=stoploss_usd,
+                        executor=OrderExecutor(),
+                    )
+                if result == "opened":
+                    opened += 1
+                elif result == "skipped":
+                    skipped += 1
+                else:
+                    failed += 1
+
+        log_and_buffer(
+            "SLAVE_HEDGE_OPEN_SUMMARY",
+            int(master_hedge_id),
+            {
+                "master_hedge": master_hedge_id,
+                "slaves_total": slaves_total,
+                "opened": opened,
+                "skipped": skipped,
+                "failed": failed,
+            },
+        )
+        logger.info(
+            "[SLAVE_HEDGE_OPEN_SUMMARY] master_hedge=%s | slaves_total=%s | "
+            "opened=%s | skipped=%s | failed=%s",
+            master_hedge_id,
+            slaves_total,
+            opened,
+            skipped,
+            failed,
+        )
+        return {
+            "slaves_total": slaves_total,
+            "opened": opened,
+            "skipped": skipped,
+            "failed": failed,
+        }
+
+    async def _mirror_hedge_open_to_slave(
+        self,
+        *,
+        slave: SlaveAccount,
+        db: Any,
+        master_hedge_id: int,
+        master_account_id: int,
+        master_qty: int,
+        master_hedge_cost: float,
+        master_margin_used: float | None,
+        master_total_capital: float | None,
+        call_pid: int,
+        put_pid: int,
+        call_symbol: str,
+        put_symbol: str,
+        master_call_fill: float,
+        master_put_fill: float,
+        master_entry_spread: float,
+        underlying: str,
+        expiry_date: Any,
+        strike: float,
+        entry_total_theta: Any,
+        entry_call_iv: Any,
+        entry_put_iv: Any,
+        target_usd: Any,
+        stoploss_usd: Any,
+        executor: Any,
+    ) -> str:
+        """
+        Open long straddle on one slave. Returns 'opened' | 'skipped' | 'failed'.
+        """
+        slave_id = int(slave.id)
+        # Idempotent: already mirroring this master hedge
+        existing = (
+            db.query(SlaveHedgePosition)
+            .filter(
+                SlaveHedgePosition.slave_account_id == slave_id,
+                SlaveHedgePosition.master_hedge_id == int(master_hedge_id),
+                SlaveHedgePosition.status.in_(("active", "partial")),
+            )
+            .first()
+        )
+        if existing is not None:
+            logger.info(
+                "[SLAVE_HEDGE_OPEN] slave=%s already has active row id=%s "
+                "for master_hedge=%s — skip",
+                slave_id,
+                existing.id,
+                master_hedge_id,
+            )
+            return "skipped"
+
+        # Fresh available balance
+        available_before = 0.0
+        if bool(getattr(slave, "is_virtual", False)):
+            allocated = float(
+                getattr(slave, "user_allocated_capital", None) or 0
+            )
+            cached = float(getattr(slave, "balance_usd", 0) or 0)
+            available_before = allocated if allocated > 0 else cached
+        else:
+            client_bal = self._get_slave_client(slave)
+            try:
+                try:
+                    wallet = await client_bal.get_wallet_balance()
+                    available_before = float(
+                        wallet.get("available_balance", 0) or 0
+                    )
+                    slave.balance_usd = float(
+                        wallet.get("balance_usdt", 0) or 0
+                    )
+                    db.commit()
+                except Exception as bal_err:
+                    logger.warning(
+                        "[SLAVE_HEDGE_OPEN] slave=%s balance fetch failed: %s",
+                        slave_id,
+                        bal_err,
+                    )
+                    available_before = float(
+                        getattr(slave, "balance_usd", 0) or 0
+                    )
+            finally:
+                await client_bal.close()
+
+        slave_qty = self._calc_qty(
+            int(master_qty),
+            float(slave.qty_multiplier or 1.0),
+            slave=slave,
+            master_margin_used_usd=master_margin_used,
+            master_total_capital_usd=master_total_capital,
+            slave_available_usd=available_before,
+        )
+
+        # Same margin headroom path as baskets (ratio consistency)
+        if not bool(getattr(slave, "is_virtual", False)) and slave_qty > 0:
+            slave_qty = self._fit_qty_to_margin(
+                slave_qty,
+                live_balance=available_before,
+                master_margin_used_usd=master_margin_used,
+                master_qty=int(master_qty),
+                call_fill=float(master_call_fill or 0),
+                put_fill=float(master_put_fill or 0),
+            )
+
+        # Hedge is a debit — must fit after buffer
+        required_at_qty = 0.0
+        if slave_qty > 0:
+            slave_qty, required_at_qty = self._fit_hedge_qty_to_debit(
+                slave_qty,
+                call_fill=master_call_fill,
+                put_fill=master_put_fill,
+                available_usd=available_before,
+            )
+
+        if slave_qty < 1:
+            req = required_at_qty or (
+                (master_call_fill + master_put_fill)
+                * _CONTRACT_SIZE
+                * _HEDGE_AFFORD_BUFFER
+            )
+            logger.error(
+                "[SLAVE_HEDGE_SKIP] slave=%s | reason=insufficient_capital | "
+                "required=%.4f | available=%.4f",
+                slave_id,
+                req,
+                available_before,
+            )
+            log_and_buffer(
+                "SLAVE_HEDGE_SKIP",
+                int(master_hedge_id),
+                {
+                    "slave": slave_id,
+                    "reason": "insufficient_capital",
+                    "required": round(float(req), 4),
+                    "available": round(float(available_before), 4),
+                },
+            )
+            return "skipped"
+
+        # Scale master's entry spread by qty ratio
+        entry_spread_usd = 0.0
+        if master_qty > 0 and master_entry_spread > 0:
+            entry_spread_usd = float(master_entry_spread) * (
+                float(slave_qty) / float(master_qty)
+            )
+
+        # Virtual: DB only
+        if bool(getattr(slave, "is_virtual", False)):
+            cost_usd = (
+                (master_call_fill + master_put_fill)
+                * slave_qty
+                * _CONTRACT_SIZE
+            )
+            row = SlaveHedgePosition(
+                account_id=int(master_account_id),
+                slave_account_id=slave_id,
+                master_hedge_id=int(master_hedge_id),
+                underlying=underlying,
+                expiry_date=expiry_date,
+                strike=float(strike),
+                quantity=int(slave_qty),
+                status="active",
+                call_product_id=int(call_pid),
+                call_symbol=call_symbol or None,
+                call_order_id="VIRTUAL",
+                call_fill_price=float(master_call_fill or 0) or None,
+                put_product_id=int(put_pid),
+                put_symbol=put_symbol or None,
+                put_order_id="VIRTUAL",
+                put_fill_price=float(master_put_fill or 0) or None,
+                entry_time=get_ist_now(),
+                target_usd=float(target_usd) if target_usd is not None else None,
+                stoploss_usd=(
+                    float(stoploss_usd) if stoploss_usd is not None else None
+                ),
+                entry_total_theta=(
+                    float(entry_total_theta)
+                    if entry_total_theta is not None
+                    else None
+                ),
+                entry_call_iv=(
+                    float(entry_call_iv) if entry_call_iv is not None else None
+                ),
+                entry_put_iv=(
+                    float(entry_put_iv) if entry_put_iv is not None else None
+                ),
+                entry_spread_usd=float(entry_spread_usd),
+                entry_cost_usd=float(cost_usd),
+                allocated_capital=float(
+                    getattr(slave, "user_allocated_capital", None) or 0
+                )
+                or None,
+                is_bot_managed=True,
+                error_count=0,
+            )
+            db.add(row)
+            db.commit()
+            log_and_buffer(
+                "SLAVE_HEDGE_OPEN",
+                int(master_hedge_id),
+                {
+                    "master_hedge": master_hedge_id,
+                    "slave": slave_id,
+                    "qty": slave_qty,
+                    "master_qty": master_qty,
+                    "call_fill": master_call_fill,
+                    "put_fill": master_put_fill,
+                    "cost": round(cost_usd, 4),
+                    "entry_spread": round(entry_spread_usd, 6),
+                    "available_before": round(available_before, 4),
+                    "virtual": True,
+                },
+            )
+            logger.info(
+                "[SLAVE_HEDGE_OPEN] master_hedge=%s | slave=%s | qty=%s | "
+                "master_qty=%s | call_fill=%s | put_fill=%s | cost=%s | "
+                "entry_spread=%s | available_before=%s (virtual)",
+                master_hedge_id,
+                slave_id,
+                slave_qty,
+                master_qty,
+                master_call_fill,
+                master_put_fill,
+                round(cost_usd, 4),
+                round(entry_spread_usd, 6),
+                round(available_before, 4),
+            )
+            return "opened"
+
+        client = self._get_slave_client(slave)
+        call_fill = 0.0
+        put_fill = 0.0
+        call_fee = 0.0
+        put_fee = 0.0
+        call_order_id: str | None = None
+        put_order_id: str | None = None
+        try:
+            # --- BUY CALL ---
+            call_result = await executor.buy_option(
+                product_id=int(call_pid),
+                quantity=int(slave_qty),
+                delta_client=client,
+                symbol_for_fallback=call_symbol or None,
+            )
+            if not call_result.success:
+                logger.error(
+                    "[SLAVE_HEDGE_OPEN] slave=%s CALL buy failed: %s",
+                    slave_id,
+                    call_result.error,
+                )
+                return "failed"
+
+            await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
+            call_ok = await client.verify_position_exists(int(call_pid))
+            if not call_ok:
+                logger.error(
+                    "[SLAVE_HEDGE_OPEN] slave=%s CALL verify failed "
+                    "product=%s — attempting unwind",
+                    slave_id,
+                    call_pid,
+                )
+                unwound = False
+                try:
+                    await client.close_position(
+                        product_id=int(call_pid),
+                        size=int(slave_qty),
+                        is_long=True,
+                    )
+                    await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
+                    still = await client.verify_position_exists(int(call_pid))
+                    unwound = not still
+                except Exception as uw_err:
+                    logger.critical(
+                        "[SLAVE_HEDGE_UNWIND] slave=%s | leg=call | "
+                        "unwound=False | err=%s",
+                        slave_id,
+                        uw_err,
+                    )
+                log_and_buffer(
+                    "SLAVE_HEDGE_UNWIND",
+                    int(master_hedge_id),
+                    {
+                        "slave": slave_id,
+                        "leg": "call",
+                        "unwound": unwound,
+                        "reason": "call_verify_failed",
+                    },
+                )
+                logger.critical(
+                    "[SLAVE_HEDGE_UNWIND] slave=%s | leg=call | unwound=%s",
+                    slave_id,
+                    unwound,
+                )
+                return "failed"
+
+            call_fill = float(call_result.filled_price or 0) or float(
+                master_call_fill or 0
+            )
+            call_fee = float(call_result.commission or 0)
+            call_order_id = (
+                str(call_result.order_id)
+                if call_result.order_id is not None
+                else None
+            )
+
+            # --- BUY PUT ---
+            put_result = await executor.buy_option(
+                product_id=int(put_pid),
+                quantity=int(slave_qty),
+                delta_client=client,
+                symbol_for_fallback=put_symbol or None,
+            )
+            put_ok = False
+            put_fail_reason = ""
+            if not put_result.success:
+                put_fail_reason = put_result.error or "Put buy failed"
+            else:
+                await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
+                put_ok = await client.verify_position_exists(int(put_pid))
+                if not put_ok:
+                    put_fail_reason = (
+                        f"Put not on Delta product_id={put_pid}"
+                    )
+                else:
+                    put_fill = float(put_result.filled_price or 0) or float(
+                        master_put_fill or 0
+                    )
+                    put_fee = float(put_result.commission or 0)
+                    put_order_id = (
+                        str(put_result.order_id)
+                        if put_result.order_id is not None
+                        else None
+                    )
+
+            if not put_ok:
+                unwound = False
+                try:
+                    await client.close_position(
+                        product_id=int(call_pid),
+                        size=int(slave_qty),
+                        is_long=True,
+                    )
+                    await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
+                    still = await client.verify_position_exists(int(call_pid))
+                    unwound = not still
+                except Exception as uw_err:
+                    logger.critical(
+                        "[SLAVE_HEDGE_UNWIND] slave=%s | leg=call | "
+                        "unwound=False | err=%s | put_fail=%s",
+                        slave_id,
+                        uw_err,
+                        put_fail_reason,
+                    )
+                log_and_buffer(
+                    "SLAVE_HEDGE_UNWIND",
+                    int(master_hedge_id),
+                    {
+                        "slave": slave_id,
+                        "leg": "call",
+                        "unwound": unwound,
+                        "reason": put_fail_reason[:200],
+                    },
+                )
+                logger.critical(
+                    "[SLAVE_HEDGE_UNWIND] slave=%s | leg=call | unwound=%s",
+                    slave_id,
+                    unwound,
+                )
+                err_row = SlaveHedgePosition(
+                    account_id=int(master_account_id),
+                    slave_account_id=slave_id,
+                    master_hedge_id=int(master_hedge_id),
+                    underlying=underlying,
+                    expiry_date=expiry_date,
+                    strike=float(strike),
+                    quantity=int(slave_qty),
+                    status="error",
+                    call_product_id=int(call_pid),
+                    call_symbol=call_symbol or None,
+                    call_order_id=call_order_id,
+                    call_fill_price=call_fill if call_fill > 0 else None,
+                    call_entry_fee_usd=call_fee if call_fee > 0 else None,
+                    put_product_id=int(put_pid),
+                    put_symbol=put_symbol or None,
+                    put_order_id=put_order_id,
+                    entry_time=get_ist_now(),
+                    entry_spread_usd=float(entry_spread_usd),
+                    last_error=(
+                        f"put_failed:{put_fail_reason}; "
+                        f"call_unwound={unwound}"
+                    )[:500],
+                    error_count=1,
+                    is_bot_managed=True,
+                )
+                db.add(err_row)
+                db.commit()
+                return "failed"
+
+            cost_usd = (call_fill + put_fill) * slave_qty * _CONTRACT_SIZE
+            row = SlaveHedgePosition(
+                account_id=int(master_account_id),
+                slave_account_id=slave_id,
+                master_hedge_id=int(master_hedge_id),
+                underlying=underlying,
+                expiry_date=expiry_date,
+                strike=float(strike),
+                quantity=int(slave_qty),
+                status="active",
+                call_product_id=int(call_pid),
+                call_symbol=call_symbol or None,
+                call_order_id=call_order_id,
+                call_fill_price=call_fill if call_fill > 0 else None,
+                call_entry_fee_usd=call_fee if call_fee > 0 else None,
+                put_product_id=int(put_pid),
+                put_symbol=put_symbol or None,
+                put_order_id=put_order_id,
+                put_fill_price=put_fill if put_fill > 0 else None,
+                put_entry_fee_usd=put_fee if put_fee > 0 else None,
+                entry_time=get_ist_now(),
+                target_usd=float(target_usd) if target_usd is not None else None,
+                stoploss_usd=(
+                    float(stoploss_usd) if stoploss_usd is not None else None
+                ),
+                entry_total_theta=(
+                    float(entry_total_theta)
+                    if entry_total_theta is not None
+                    else None
+                ),
+                entry_call_iv=(
+                    float(entry_call_iv) if entry_call_iv is not None else None
+                ),
+                entry_put_iv=(
+                    float(entry_put_iv) if entry_put_iv is not None else None
+                ),
+                entry_spread_usd=float(entry_spread_usd),
+                entry_cost_usd=float(cost_usd),
+                allocated_capital=float(
+                    getattr(slave, "user_allocated_capital", None) or 0
+                )
+                or None,
+                capital_per_lot=(
+                    float(cost_usd) / float(slave_qty) if slave_qty > 0 else None
+                ),
+                is_bot_managed=True,
+                error_count=0,
+            )
+            db.add(row)
+            db.commit()
+
+            log_and_buffer(
+                "SLAVE_HEDGE_OPEN",
+                int(master_hedge_id),
+                {
+                    "master_hedge": master_hedge_id,
+                    "slave": slave_id,
+                    "qty": slave_qty,
+                    "master_qty": master_qty,
+                    "call_fill": call_fill,
+                    "put_fill": put_fill,
+                    "cost": round(cost_usd, 4),
+                    "entry_spread": round(entry_spread_usd, 6),
+                    "available_before": round(available_before, 4),
+                },
+            )
+            logger.info(
+                "[SLAVE_HEDGE_OPEN] master_hedge=%s | slave=%s | qty=%s | "
+                "master_qty=%s | call_fill=%s | put_fill=%s | cost=%s | "
+                "entry_spread=%s | available_before=%s",
+                master_hedge_id,
+                slave_id,
+                slave_qty,
+                master_qty,
+                call_fill,
+                put_fill,
+                round(cost_usd, 4),
+                round(entry_spread_usd, 6),
+                round(available_before, 4),
+            )
+            return "opened"
+
+        except Exception as exc:
+            logger.error(
+                "[SLAVE_HEDGE_OPEN] slave=%s FAILED: %s",
+                slave_id,
+                exc,
+                exc_info=True,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return "failed"
+        finally:
+            await client.close()
         if not hedge_product_id:
             return
         with self.db_factory() as db:

@@ -916,6 +916,26 @@ async def open_hedge(
                 "quantity": qty,
             },
         )
+        # Mirror long straddle to slaves — never roll back master on failure
+        try:
+            import backend.engine.mirror_engine as mirror_module
+
+            me = mirror_module.mirror_engine
+            if me is not None:
+                await me.mirror_hedge_open(hedge_row, db)
+            else:
+                logger.warning(
+                    "[SLAVE_HEDGE_OPEN] mirror_engine is None — "
+                    "slaves not hedged master_hedge=%s",
+                    hedge_row.id,
+                )
+        except Exception as mirror_exc:
+            logger.error(
+                "[SLAVE_HEDGE_OPEN] mirror failed (master hedge #%s stays open): %s",
+                hedge_row.id,
+                mirror_exc,
+                exc_info=True,
+            )
         # Day-1 snapshot so accrual/IV history starts even if bot restarts later today
         await maybe_log_hedge_theta_snapshot(hedge_row, db, client=client)
         return hedge_row

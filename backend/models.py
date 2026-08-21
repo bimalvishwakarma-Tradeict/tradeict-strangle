@@ -709,6 +709,10 @@ class SlaveHedgePosition(Base):
     entry_put_iv: Mapped[float | None] = mapped_column(Float, nullable=True)
     order_margin_per_lot: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Half-spread at open (scaled from master) + total debit paid
+    entry_spread_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    entry_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     is_bot_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
 

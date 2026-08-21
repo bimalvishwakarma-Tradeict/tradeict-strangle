@@ -705,6 +705,8 @@ def _migrate_schema() -> None:
                         entry_call_iv FLOAT,
                         entry_put_iv FLOAT,
                         order_margin_per_lot FLOAT,
+                        entry_spread_usd FLOAT NOT NULL DEFAULT 0.0,
+                        entry_cost_usd FLOAT,
                         is_bot_managed BOOLEAN NOT NULL DEFAULT 1,
                         last_error VARCHAR(500),
                         allocated_capital FLOAT,
@@ -714,6 +716,23 @@ def _migrate_schema() -> None:
                     """
                 )
             )
+    if "slave_hedge_positions" in tables:
+        sh_cols = {
+            col["name"]
+            for col in inspector.get_columns("slave_hedge_positions")
+        }
+        for col_name, col_type in (
+            ("entry_spread_usd", "FLOAT NOT NULL DEFAULT 0.0"),
+            ("entry_cost_usd", "FLOAT"),
+        ):
+            if col_name not in sh_cols:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE slave_hedge_positions "
+                            f"ADD COLUMN {col_name} {col_type}"
+                        )
+                    )
     if "trades" in tables:
         trade_cols = {col["name"] for col in inspector.get_columns("trades")}
         if "hedge_position_id" not in trade_cols:
