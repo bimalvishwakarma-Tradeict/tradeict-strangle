@@ -1614,16 +1614,18 @@ class BotEngine:
         from backend.core.fees import (
             basket_fees_paid_from_legs,
             compute_net_mtm,
-            estimate_expected_exit_spread_usd,
             estimate_option_trading_fee,
             get_entry_spread_for_sl,
         )
+        from backend.core.spread_utils import estimate_and_log_exit_spread_usd
+        from backend.database import get_or_create_auto_settings
         from backend.models import Leg as LegModel
 
         fees_paid = 0.0
         est_exit = 0.0
         expected_exit_spread = 0.0
         with self.db_factory() as db:
+            spread_settings = get_or_create_auto_settings(db)
             legs = (
                 db.query(LegModel)
                 .filter(
@@ -1655,9 +1657,14 @@ class BotEngine:
                         btc_index_price=btc,
                     )
                 if offer > 0:
-                    expected_exit_spread += estimate_expected_exit_spread_usd(
+                    expected_exit_spread += await estimate_and_log_exit_spread_usd(
+                        symbol=str(leg.symbol or ""),
                         offer_price=offer,
                         quantity=int(leg.quantity or 0),
+                        settings=spread_settings,
+                        kind="basket",
+                        client=self.delta_client,
+                        log_id=int(trade_id),
                     )
 
         # Gross MTM for stoploss: add back latest entry-event spread only
@@ -4820,10 +4827,10 @@ class BotEngine:
         from backend.core.fees import (
             basket_fees_paid_from_legs,
             compute_net_mtm,
-            estimate_expected_exit_spread_usd,
             estimate_option_trading_fee,
             get_entry_spread_for_sl,
         )
+        from backend.core.spread_utils import estimate_and_log_exit_spread_usd
         from backend.models import Leg as LegModel
 
         fees_paid = 0.0
@@ -4834,11 +4841,13 @@ class BotEngine:
         conversion_enabled = False
         max_adjustments_per_basket = None
         conversion_mode_enabled_flag = True
+        spread_settings = None
         with self.db_factory() as db:
             from backend.database import get_or_create_auto_settings
 
             try:
                 _cfg = get_or_create_auto_settings(db)
+                spread_settings = _cfg
                 conversion_equality_pct = float(
                     getattr(_cfg, "conversion_equality_pct", 10.0) or 10.0
                 )
@@ -4862,6 +4871,7 @@ class BotEngine:
                 conversion_enabled = False
                 max_adjustments_per_basket = None
                 conversion_mode_enabled_flag = True
+                spread_settings = None
 
             legs = (
                 db.query(LegModel)
@@ -4893,7 +4903,19 @@ class BotEngine:
                         quantity_lots=int(leg.quantity or 0),
                         btc_index_price=btc,
                     )
-                if offer > 0:
+                if offer > 0 and spread_settings is not None:
+                    expected_exit_spread += await estimate_and_log_exit_spread_usd(
+                        symbol=str(leg.symbol or ""),
+                        offer_price=offer,
+                        quantity=int(leg.quantity or 0),
+                        settings=spread_settings,
+                        kind="basket",
+                        client=self.delta_client,
+                        log_id=int(trade_state.trade_id),
+                    )
+                elif offer > 0:
+                    from backend.core.fees import estimate_expected_exit_spread_usd
+
                     expected_exit_spread += estimate_expected_exit_spread_usd(
                         offer_price=offer,
                         quantity=int(leg.quantity or 0),

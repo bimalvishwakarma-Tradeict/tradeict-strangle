@@ -740,6 +740,10 @@ def _migrate_schema() -> None:
             ("hedge_stoploss_usd", "FLOAT DEFAULT NULL"),
             ("hedge_sl_floor_pct", "FLOAT NOT NULL DEFAULT 25.0"),
             ("hedge_target_multiple", "FLOAT NOT NULL DEFAULT 3.0"),
+            ("spread_mode", "VARCHAR(20) NOT NULL DEFAULT 'AUTO'"),
+            ("basket_exit_spread_pct", "FLOAT NOT NULL DEFAULT 0.5"),
+            ("hedge_exit_spread_pct", "FLOAT NOT NULL DEFAULT 2.7"),
+            ("spread_cap_pct", "FLOAT NOT NULL DEFAULT 8.0"),
             ("margin_buffer_pct", "FLOAT NOT NULL DEFAULT 50.0"),
             (
                 "strike_selection_mode",

@@ -73,6 +73,11 @@ class AutoTradeSettingsSchema(BaseModel):
     # Settings only — not consumed by hedge logic yet
     hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
+    # Exit-spread estimation (AUTO from L2 / MANUAL / capped)
+    spread_mode: str = "AUTO"
+    basket_exit_spread_pct: float = Field(default=0.5, ge=0, le=20)
+    hedge_exit_spread_pct: float = Field(default=2.7, ge=0, le=20)
+    spread_cap_pct: float = Field(default=8.0, ge=0, le=20)
     margin_buffer_pct: float = Field(default=50.0, ge=0, le=200)
     strike_selection_mode: str = "fixed_premium"  # fixed_premium | theta_based
     theta_multiplier: float = Field(default=3.0, gt=0, le=20)
@@ -133,6 +138,14 @@ class AutoTradeSettingsSchema(BaseModel):
             raise ValueError(
                 "target_mode must be 'payoff_pct' or 'theta_multiplier'"
             )
+        return normalized
+
+    @field_validator("spread_mode")
+    @classmethod
+    def validate_spread_mode(cls, v: str) -> str:
+        normalized = str(v or "AUTO").upper().strip()
+        if normalized not in {"AUTO", "MANUAL"}:
+            raise ValueError("spread_mode must be 'AUTO' or 'MANUAL'")
         return normalized
 
     @model_validator(mode="after")
@@ -265,6 +278,22 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "hedge_target_multiple", None)
             if getattr(s, "hedge_target_multiple", None) is not None
             else 3.0
+        ),
+        "spread_mode": str(getattr(s, "spread_mode", None) or "AUTO").upper(),
+        "basket_exit_spread_pct": float(
+            getattr(s, "basket_exit_spread_pct", None)
+            if getattr(s, "basket_exit_spread_pct", None) is not None
+            else 0.5
+        ),
+        "hedge_exit_spread_pct": float(
+            getattr(s, "hedge_exit_spread_pct", None)
+            if getattr(s, "hedge_exit_spread_pct", None) is not None
+            else 2.7
+        ),
+        "spread_cap_pct": float(
+            getattr(s, "spread_cap_pct", None)
+            if getattr(s, "spread_cap_pct", None) is not None
+            else 8.0
         ),
         "margin_buffer_pct": float(
             getattr(s, "margin_buffer_pct", None)
@@ -528,6 +557,10 @@ async def update_auto_trade_settings(
     )
     settings.hedge_sl_floor_pct = float(payload.hedge_sl_floor_pct)
     settings.hedge_target_multiple = float(payload.hedge_target_multiple)
+    settings.spread_mode = str(payload.spread_mode or "AUTO").upper().strip()
+    settings.basket_exit_spread_pct = float(payload.basket_exit_spread_pct)
+    settings.hedge_exit_spread_pct = float(payload.hedge_exit_spread_pct)
+    settings.spread_cap_pct = float(payload.spread_cap_pct)
     settings.margin_buffer_pct = float(payload.margin_buffer_pct)
     # When hedge is off, force modes that require a live hedge back to defaults
     if settings.hedge_enabled:

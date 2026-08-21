@@ -14,7 +14,8 @@ from backend.config import OPTIONS_CONTRACT_VALUE
 from backend.core.bot_logger import log_and_buffer
 from backend.core.chain_utils import annotate_atm
 from backend.core.delta_client import DeltaAPIError, DeltaClient, _extract_live_quote
-from backend.core.fees import compute_slippage_amount, estimate_option_trading_fee
+from backend.core.fees import estimate_option_trading_fee
+from backend.core.spread_utils import estimate_and_log_exit_spread_usd
 from backend.core.hedge_theta import (
     ExpiryNotAvailableError,
     HedgeThetaError,
@@ -1302,13 +1303,16 @@ def compute_hedge_net_mtm_fields(
     entry_fees: float,
     estimated_exit_fees: float,
     entry_spread_usd: float,
-    slippage_pct: float = 2.0,
+    hedge_est_exit_slippage_usd: float = 0.0,
 ) -> dict[str, float]:
     """
     Long-hedge net_mtm / gross_for_sl (mirror of short-basket convention).
 
     hedge_net_mtm = Σ(bid − ask_at_entry)×qty×CV − fees − est_exit − est_slip
     hedge_gross_for_sl = hedge_net_mtm + entry_spread_usd
+
+    hedge_est_exit_slippage_usd is the exit-spread estimate (AUTO/MANUAL);
+    application to net_mtm is unchanged (subtract the USD amount).
     """
     qty = max(1, int(quantity or 1))
     # ask_at_entry stored as fill_price (bought at ask)
@@ -1318,7 +1322,7 @@ def compute_hedge_net_mtm_fields(
     )
     fees_paid = max(0.0, float(entry_fees or 0.0))
     est_exit = max(0.0, float(estimated_exit_fees or 0.0))
-    est_slip = compute_slippage_amount(gross, slippage_pct)
+    est_slip = max(0.0, float(hedge_est_exit_slippage_usd or 0.0))
     hedge_net = gross - fees_paid - est_exit - est_slip
     entry_spread = max(0.0, float(entry_spread_usd or 0.0))
     hedge_gross_sl = hedge_net + entry_spread
@@ -1333,7 +1337,7 @@ def compute_hedge_net_mtm_fields(
     }
 
 
-def persist_structure_pnl(
+async def persist_structure_pnl(
     hedge: HedgePosition,
     db: Session,
     *,
@@ -1341,12 +1345,15 @@ def persist_structure_pnl(
     put_bid: float,
     est_exit_fees: float,
     position_tracker: Any | None = None,
+    client: Any | None = None,
 ) -> dict[str, float]:
     """
     Compute + persist hedge_net_mtm / structure_pnl columns (no exit triggers).
 
     Logs [STRUCTURE_PNL] once per successful cycle via log_and_buffer.
     """
+    from backend.database import get_or_create_auto_settings
+
     hid = int(hedge.id)
     qty = max(1, int(hedge.quantity or 1))
     call_entry = float(hedge.call_fill_price or 0)
@@ -1355,6 +1362,41 @@ def persist_structure_pnl(
         hedge.put_entry_fee_usd or 0
     )
     entry_spread = float(getattr(hedge, "entry_spread_usd", 0.0) or 0.0)
+
+    # Exit-spread USD for both legs (replaces gross×slippage_pct for this field)
+    est_slip_usd = 0.0
+    try:
+        spread_settings = get_or_create_auto_settings(db)
+        call_sym = str(hedge.call_symbol or "")
+        put_sym = str(hedge.put_symbol or "")
+        if call_sym and float(call_bid) > 0:
+            est_slip_usd += await estimate_and_log_exit_spread_usd(
+                symbol=call_sym,
+                offer_price=float(call_bid),
+                quantity=qty,
+                settings=spread_settings,
+                kind="hedge",
+                client=client,
+                log_id=hid,
+            )
+        if put_sym and float(put_bid) > 0:
+            est_slip_usd += await estimate_and_log_exit_spread_usd(
+                symbol=put_sym,
+                offer_price=float(put_bid),
+                quantity=qty,
+                settings=spread_settings,
+                kind="hedge",
+                client=client,
+                log_id=hid,
+            )
+    except Exception as exc:
+        logger.warning(
+            "[SPREAD_EST] hedge_id=%s exit-spread estimate failed: %s",
+            hid,
+            exc,
+            exc_info=True,
+        )
+        est_slip_usd = 0.0
 
     mtm = compute_hedge_net_mtm_fields(
         call_bid=float(call_bid),
@@ -1365,6 +1407,7 @@ def persist_structure_pnl(
         entry_fees=entry_fees,
         estimated_exit_fees=float(est_exit_fees),
         entry_spread_usd=entry_spread,
+        hedge_est_exit_slippage_usd=float(est_slip_usd),
     )
     cum_closed = _cum_closed_basket_pnl(db, hid)
     open_basket = _open_basket_net_mtm(db, hid, position_tracker)
@@ -1482,13 +1525,14 @@ async def evaluate_and_maybe_close_hedge(
 
     # Calculation only — does NOT change target/SL/expiry triggers below
     try:
-        persist_structure_pnl(
+        await persist_structure_pnl(
             hedge,
             db,
             call_bid=float(call_bid),
             put_bid=float(put_bid),
             est_exit_fees=est_exit,
             position_tracker=position_tracker,
+            client=client,
         )
     except Exception as exc:
         logger.warning(

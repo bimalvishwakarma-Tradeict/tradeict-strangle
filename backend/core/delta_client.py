@@ -1251,6 +1251,31 @@ class DeltaClient:
             raise DeltaAPIError(0, f"mark_price missing for symbol {symbol}")
         return mark
 
+    async def get_l2_top_of_book(self, symbol: str) -> tuple[float, float]:
+        """
+        Return (best_bid, best_ask) from L2 top of book.
+
+        Raises DeltaAPIError if either side is missing.
+        """
+        book = await self._request("GET", f"/v2/l2orderbook/{symbol}")
+        if not isinstance(book, dict):
+            raise DeltaAPIError(0, f"L2 book missing for {symbol}")
+        buys = book.get("buy") or book.get("bids") or []
+        sells = book.get("sell") or book.get("asks") or []
+        bid = 0.0
+        ask = 0.0
+        if buys and isinstance(buys[0], dict):
+            bid = _safe_float(buys[0].get("price"))
+        elif buys and isinstance(buys[0], (list, tuple)) and len(buys[0]) >= 1:
+            bid = _safe_float(buys[0][0])
+        if sells and isinstance(sells[0], dict):
+            ask = _safe_float(sells[0].get("price"))
+        elif sells and isinstance(sells[0], (list, tuple)) and len(sells[0]) >= 1:
+            ask = _safe_float(sells[0][0])
+        if bid <= 0 or ask <= 0:
+            raise DeltaAPIError(0, f"L2 top missing bid/ask for {symbol}")
+        return bid, ask
+
     async def get_short_exit_price(self, symbol: str) -> float:
         """
         Best offer to buy back a short — matches Delta "Best Offer" / UPL @offer.

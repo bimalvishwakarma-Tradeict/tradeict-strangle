@@ -111,6 +111,14 @@ function applyStatusToForm(data, setters) {
   )
   setters.setHedgeSlFloorPct(String(data.hedge_sl_floor_pct ?? 25))
   setters.setHedgeTargetMultiple(String(data.hedge_target_multiple ?? 3))
+  setters.setSpreadMode(
+    String(data.spread_mode || 'AUTO').toUpperCase() === 'MANUAL'
+      ? 'MANUAL'
+      : 'AUTO',
+  )
+  setters.setBasketExitSpreadPct(String(data.basket_exit_spread_pct ?? 0.5))
+  setters.setHedgeExitSpreadPct(String(data.hedge_exit_spread_pct ?? 2.7))
+  setters.setSpreadCapPct(String(data.spread_cap_pct ?? 8))
   setters.setMarginBufferPct(String(data.margin_buffer_pct ?? 50))
   setters.setStrikeSelectionMode(data.strike_selection_mode || 'fixed_premium')
   setters.setThetaMultiplier(String(data.theta_multiplier ?? 3))
@@ -195,6 +203,10 @@ export default function AutoTrade() {
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
   const [hedgeSlFloorPct, setHedgeSlFloorPct] = useState('25')
   const [hedgeTargetMultiple, setHedgeTargetMultiple] = useState('3')
+  const [spreadMode, setSpreadMode] = useState('AUTO')
+  const [basketExitSpreadPct, setBasketExitSpreadPct] = useState('0.5')
+  const [hedgeExitSpreadPct, setHedgeExitSpreadPct] = useState('2.7')
+  const [spreadCapPct, setSpreadCapPct] = useState('8')
   const [marginBufferPct, setMarginBufferPct] = useState('50')
   const [strikeSelectionMode, setStrikeSelectionMode] =
     useState('fixed_premium')
@@ -246,6 +258,10 @@ export default function AutoTrade() {
       setHedgeStoplossUsd,
       setHedgeSlFloorPct,
       setHedgeTargetMultiple,
+      setSpreadMode,
+      setBasketExitSpreadPct,
+      setHedgeExitSpreadPct,
+      setSpreadCapPct,
       setMarginBufferPct,
       setStrikeSelectionMode,
       setThetaMultiplier,
@@ -517,6 +533,10 @@ export default function AutoTrade() {
           : Number(hedgeStoplossUsd),
       hedge_sl_floor_pct: Number(hedgeSlFloorPct),
       hedge_target_multiple: Number(hedgeTargetMultiple),
+      spread_mode: spreadMode === 'MANUAL' ? 'MANUAL' : 'AUTO',
+      basket_exit_spread_pct: Number(basketExitSpreadPct),
+      hedge_exit_spread_pct: Number(hedgeExitSpreadPct),
+      spread_cap_pct: Number(spreadCapPct),
       margin_buffer_pct: Math.min(
         200,
         Math.max(0, Number(marginBufferPct) || 0),
@@ -578,6 +598,36 @@ export default function AutoTrade() {
     }
     return null
   }, [hedgeTargetMultiple])
+
+  const basketExitSpreadPctError = useMemo(() => {
+    const n = Number(basketExitSpreadPct)
+    if (basketExitSpreadPct === '' || Number.isNaN(n)) {
+      return 'Must be between 0 and 20'
+    }
+    if (n < 0 || n > 20) return 'Must be between 0 and 20'
+    return null
+  }, [basketExitSpreadPct])
+
+  const hedgeExitSpreadPctError = useMemo(() => {
+    const n = Number(hedgeExitSpreadPct)
+    if (hedgeExitSpreadPct === '' || Number.isNaN(n)) {
+      return 'Must be between 0 and 20'
+    }
+    if (n < 0 || n > 20) return 'Must be between 0 and 20'
+    return null
+  }, [hedgeExitSpreadPct])
+
+  const spreadCapPctError = useMemo(() => {
+    const n = Number(spreadCapPct)
+    if (spreadCapPct === '' || Number.isNaN(n)) {
+      return 'Must be between 0 and 20'
+    }
+    if (n < 0 || n > 20) return 'Must be between 0 and 20'
+    return null
+  }, [spreadCapPct])
+
+  const spreadSettingsError =
+    spreadCapPctError || basketExitSpreadPctError || hedgeExitSpreadPctError
 
   const buildPreviewParams = useCallback(() => {
     const dte = Math.max(0, Number(expiryDte) || 1)
@@ -647,12 +697,13 @@ export default function AutoTrade() {
   }, [loading, refreshPreviews])
 
   const handleSave = async () => {
-    if (hedgeSlFloorPctError || hedgeTargetMultipleError) {
+    if (hedgeSlFloorPctError || hedgeTargetMultipleError || spreadSettingsError) {
       setToast({
         type: 'error',
         message:
           hedgeSlFloorPctError ||
           hedgeTargetMultipleError ||
+          spreadSettingsError ||
           'Fix validation errors before saving',
       })
       return
@@ -674,12 +725,13 @@ export default function AutoTrade() {
   }
 
   const handleEnable = async () => {
-    if (hedgeSlFloorPctError || hedgeTargetMultipleError) {
+    if (hedgeSlFloorPctError || hedgeTargetMultipleError || spreadSettingsError) {
       setToast({
         type: 'error',
         message:
           hedgeSlFloorPctError ||
           hedgeTargetMultipleError ||
+          spreadSettingsError ||
           'Fix validation errors before enabling',
       })
       return
@@ -1821,6 +1873,126 @@ export default function AutoTrade() {
             open during cooldown.
           </span>
         </label>
+      </section>
+
+      <section className="space-y-3 rounded-xl border border-amber-700/40 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">Spread Estimation</h2>
+        <p className="text-xs text-gray-500">
+          Used when estimating exit spread for short-basket net MTM and hedge
+          structure P&amp;L. Auto measures live from the L2 book; Manual uses
+          your fixed %. Cap always applies.
+        </p>
+        <fieldset className="space-y-2">
+          <legend className="text-sm text-gray-300">Mode</legend>
+          <label className="flex items-center gap-2 text-sm text-gray-200">
+            <input
+              type="radio"
+              name="spreadMode"
+              checked={spreadMode === 'AUTO'}
+              onChange={() => setSpreadMode('AUTO')}
+              className="accent-amber-500"
+            />
+            Auto (from live order book)
+          </label>
+          <label className="flex items-center gap-2 text-sm text-gray-200">
+            <input
+              type="radio"
+              name="spreadMode"
+              checked={spreadMode === 'MANUAL'}
+              onChange={() => setSpreadMode('MANUAL')}
+              className="accent-amber-500"
+            />
+            Manual
+          </label>
+        </fieldset>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="block text-sm text-gray-300">
+            Basket exit spread %
+            <input
+              type="number"
+              min={0}
+              max={20}
+              step={0.1}
+              value={basketExitSpreadPct}
+              onChange={(e) => setBasketExitSpreadPct(e.target.value)}
+              disabled={spreadMode !== 'MANUAL'}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50 ${
+                spreadMode === 'MANUAL' && basketExitSpreadPctError
+                  ? 'border-red-500'
+                  : 'border-gray-600'
+              }`}
+            />
+            {spreadMode === 'MANUAL' && basketExitSpreadPctError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {basketExitSpreadPctError}
+              </span>
+            ) : basketExitSpreadPctError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {basketExitSpreadPctError} (used as AUTO fallback)
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                Manual override / AUTO fallback for daily short baskets (legacy
+                default 0.5%).
+              </span>
+            )}
+          </label>
+          <label className="block text-sm text-gray-300">
+            Hedge exit spread %
+            <input
+              type="number"
+              min={0}
+              max={20}
+              step={0.1}
+              value={hedgeExitSpreadPct}
+              onChange={(e) => setHedgeExitSpreadPct(e.target.value)}
+              disabled={spreadMode !== 'MANUAL'}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50 ${
+                spreadMode === 'MANUAL' && hedgeExitSpreadPctError
+                  ? 'border-red-500'
+                  : 'border-gray-600'
+              }`}
+            />
+            {spreadMode === 'MANUAL' && hedgeExitSpreadPctError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {hedgeExitSpreadPctError}
+              </span>
+            ) : hedgeExitSpreadPctError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {hedgeExitSpreadPctError} (used as AUTO fallback)
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                Manual override / AUTO fallback for monthly hedge (default
+                2.7%).
+              </span>
+            )}
+          </label>
+          <label className="block text-sm text-gray-300 sm:col-span-2">
+            Spread cap %
+            <input
+              type="number"
+              min={0}
+              max={20}
+              step={0.1}
+              value={spreadCapPct}
+              onChange={(e) => setSpreadCapPct(e.target.value)}
+              className={`mt-1 w-full max-w-xs rounded-md border bg-gray-900 px-3 py-2 text-white ${
+                spreadCapPctError ? 'border-red-500' : 'border-gray-600'
+              }`}
+            />
+            {spreadCapPctError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {spreadCapPctError}
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                Safety ceiling. Applies in both modes - protects against a
+                momentarily empty order book blowing up the estimate.
+              </span>
+            )}
+          </label>
+        </div>
       </section>
 
       {/* Actions */}

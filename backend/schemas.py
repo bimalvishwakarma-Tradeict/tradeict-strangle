@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class AccountConnectRequest(BaseModel):
@@ -144,6 +144,23 @@ class AutoTradeHedgeBudgetSettings(BaseModel):
 
     hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
+
+
+class AutoTradeSpreadSettings(BaseModel):
+    """Exit-spread estimation mode + manual % + hard cap."""
+
+    spread_mode: str = Field(default="AUTO")
+    basket_exit_spread_pct: float = Field(default=0.5, ge=0, le=20)
+    hedge_exit_spread_pct: float = Field(default=2.7, ge=0, le=20)
+    spread_cap_pct: float = Field(default=8.0, ge=0, le=20)
+
+    @field_validator("spread_mode")
+    @classmethod
+    def validate_spread_mode(cls, v: str) -> str:
+        normalized = str(v or "AUTO").upper().strip()
+        if normalized not in {"AUTO", "MANUAL"}:
+            raise ValueError("spread_mode must be 'AUTO' or 'MANUAL'")
+        return normalized
 
 
 # --- Slave account schemas ---
