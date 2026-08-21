@@ -8,8 +8,8 @@ import {
   enableAutoTrade,
   getAccountStatus,
   getAutoTradeStatus,
+  getHedgeStructures,
   getSlaveOverview,
-  getTradeHistory,
 } from '../services/api'
 
 const AUTO_STATUS_POLL_MS = 5000
@@ -603,25 +603,71 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
   )
 }
 
-function BasketHistoryCard({ basket }) {
-  const [open, setOpen] = useState(false)
-  const pnl = Number(basket.realized_pnl || 0)
-  const feesPaid = Number(basket.fees_paid || 0)
-  const netMtm = Number(
-    basket.net_mtm != null ? basket.net_mtm : pnl - feesPaid,
+function StructurePnlPanel({ structure }) {
+  if (!structure) return null
+  const hedgeNet = Number(structure.hedge?.hedge_net_mtm ?? structure.hedge_net_mtm ?? 0)
+  const openBasket = Number(structure.open_basket_net_mtm ?? 0)
+  const cumClosed = Number(structure.cum_closed_basket_pnl ?? 0)
+  const structurePnl = Number(structure.structure_pnl ?? 0)
+
+  return (
+    <section className="mb-6 rounded-xl border border-emerald-800/40 bg-gradient-to-br from-gray-900 to-gray-800 px-5 py-4">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-emerald-400/90">
+        Structure P&amp;L
+        {structure.hedge?.id != null ? (
+          <span className="ml-2 font-normal text-gray-500">
+            · Structure #{structure.hedge.id}
+          </span>
+        ) : null}
+      </h2>
+      <div className="space-y-1.5 font-mono text-sm text-gray-300">
+        <div className="flex justify-between gap-4">
+          <span>Hedge P&amp;L</span>
+          <span className={pnlColor(hedgeNet)}>{formatSignedMoney(hedgeNet)}</span>
+        </div>
+        <div className="flex justify-between gap-4">
+          <span>Open basket net MTM</span>
+          <span className={pnlColor(openBasket)}>
+            {formatSignedMoney(openBasket)}
+          </span>
+        </div>
+        <div className="flex justify-between gap-4">
+          <span>Cumulative closed basket P&amp;L</span>
+          <span className={pnlColor(cumClosed)}>
+            {formatSignedMoney(cumClosed)}
+          </span>
+        </div>
+        <div className="my-2 border-t border-gray-600" />
+        <div className="flex justify-between gap-4 text-base font-bold">
+          <span className="text-white">STRUCTURE P&amp;L</span>
+          <span className={pnlColor(structurePnl)}>
+            {formatSignedMoney(structurePnl)}
+          </span>
+        </div>
+      </div>
+    </section>
   )
+}
+
+function StructureBasketRow({ basket }) {
+  const [open, setOpen] = useState(false)
+  const seq = basket.basket_seq_in_structure ?? '—'
+  const pnl =
+    basket.net_mtm != null
+      ? Number(basket.net_mtm)
+      : Number(basket.realized_pnl || 0)
   const status = String(basket.status || '').toLowerCase()
   const isActive = status === 'active'
 
   return (
-    <div className="rounded-xl border border-gray-700 bg-gray-800/80">
+    <div className="rounded-lg border border-gray-700/80 bg-gray-900/40">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full flex-wrap items-center justify-between gap-2 px-4 py-3 text-left text-sm"
+        className="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-2 text-left text-sm"
       >
         <div className="font-medium text-white">
-          Basket #{basket.basket_number} · {basket.underlying}
+          Basket {seq}
           <span
             className={`ml-2 rounded px-2 py-0.5 text-xs ${
               isActive
@@ -631,56 +677,27 @@ function BasketHistoryCard({ basket }) {
           >
             {status}
           </span>
+          <span className="ml-2 text-[10px] font-normal text-gray-500">
+            trade #{basket.trade_id}
+          </span>
         </div>
-        <div className="text-right text-gray-400">
-          <div>
-            Exp {basket.expiry_date} · Gross{' '}
-            <span className={pnlColor(pnl)}>
-              {pnl >= 0 ? '+' : ''}${fmtMoney(pnl)}
-            </span>
-          </div>
-          <div className="text-xs">
-            Fees ${fmtMoney(feesPaid)} · Net{' '}
-            <span className={pnlColor(netMtm)}>
-              {netMtm >= 0 ? '+' : ''}${fmtMoney(netMtm)}
-            </span>
-            <span className="ml-2 text-gray-500">{open ? '▲' : '▼'}</span>
-          </div>
+        <div className="text-right text-xs text-gray-400">
+          C {fmtStrike(basket.call_strike)} / P {fmtStrike(basket.put_strike)}
+          <span className={`ml-2 ${pnlColor(pnl)}`}>
+            {formatSignedMoney(pnl)}
+          </span>
+          <span className="ml-2 text-gray-500">{open ? '▲' : '▼'}</span>
         </div>
       </button>
       {open && (
-        <div className="space-y-3 border-t border-gray-700 px-4 py-3">
+        <div className="space-y-3 border-t border-gray-700 px-3 py-3">
           <div className="text-xs text-gray-400">
             Entry {formatAdjTime(basket.entry_time)}
             {basket.exit_time ? ` · Exit ${formatAdjTime(basket.exit_time)}` : ''}
-            {basket.exit_reason
-              ? ` · ${
-                  String(basket.exit_reason).includes('NO_STRIKE_AVAILABLE')
-                    ? '❌ No Strike Available — Basket Exited'
-                    : String(basket.exit_reason).includes('NO_HEDGE_STRIKE')
-                      ? '❌ No Hedge Strike — Basket Exited'
-                      : String(basket.exit_reason).includes('NO_OTHER_STRIKE')
-                        ? '❌ Conversion Strike Missing — Basket Exited'
-                        : basket.exit_reason
-                }`
+            {basket.exit_reason ? ` · ${basket.exit_reason}` : ''}
+            {basket.call_entry_premium != null || basket.put_entry_premium != null
+              ? ` · Entry prem C $${fmtMoney(basket.call_entry_premium)} / P $${fmtMoney(basket.put_entry_premium)}`
               : ''}
-          </div>
-          <div className="grid gap-2 rounded-lg border border-gray-700 bg-gray-900/40 px-3 py-2 text-xs text-gray-300 sm:grid-cols-3">
-            <div>
-              Gross MTM:{' '}
-              <span className={pnlColor(pnl)}>
-                {pnl >= 0 ? '+' : ''}${fmtMoney(pnl)}
-              </span>
-            </div>
-            <div className="text-amber-200/90">
-              Total Fees: ${fmtMoney(feesPaid)}
-            </div>
-            <div>
-              NET MTM:{' '}
-              <span className={pnlColor(netMtm)}>
-                {netMtm >= 0 ? '+' : ''}${fmtMoney(netMtm)}
-              </span>
-            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-left text-xs text-gray-200">
@@ -691,10 +708,6 @@ function BasketHistoryCard({ basket }) {
                   <th className="px-2 py-1">Qty</th>
                   <th className="px-2 py-1">Entry $</th>
                   <th className="px-2 py-1">Exit $</th>
-                  <th className="px-2 py-1">Entry Fee</th>
-                  <th className="px-2 py-1">Exit Fee</th>
-                  <th className="px-2 py-1">Entry time</th>
-                  <th className="px-2 py-1">Exit time</th>
                   <th className="px-2 py-1">Status</th>
                   <th className="px-2 py-1">Realized</th>
                 </tr>
@@ -707,22 +720,10 @@ function BasketHistoryCard({ basket }) {
                     <td className="px-2 py-1">{leg.quantity}</td>
                     <td className="px-2 py-1">${fmtMoney(leg.entry_premium)}</td>
                     <td className="px-2 py-1">${fmtMoney(leg.exit_premium)}</td>
-                    <td className="px-2 py-1 text-amber-200/80">
-                      {leg.entry_fee_usd != null
-                        ? `$${fmtMoney(leg.entry_fee_usd)}`
-                        : '—'}
-                    </td>
-                    <td className="px-2 py-1 text-amber-200/80">
-                      {leg.exit_fee_usd != null
-                        ? `$${fmtMoney(leg.exit_fee_usd)}`
-                        : '—'}
-                    </td>
-                    <td className="px-2 py-1">{formatAdjTime(leg.entry_time)}</td>
-                    <td className="px-2 py-1">{formatAdjTime(leg.exit_time)}</td>
                     <td className="px-2 py-1">{leg.status}</td>
                     <td className={`px-2 py-1 ${pnlColor(leg.realized_pnl)}`}>
                       {leg.realized_pnl != null
-                        ? `${Number(leg.realized_pnl) >= 0 ? '+' : ''}$${fmtMoney(leg.realized_pnl)}`
+                        ? formatSignedMoney(leg.realized_pnl)
                         : '—'}
                     </td>
                   </tr>
@@ -738,12 +739,107 @@ function BasketHistoryCard({ basket }) {
               <ul className="space-y-1 text-xs text-gray-400">
                 {basket.adjustments.map((a, i) => (
                   <li key={`${a.timestamp}-${i}`}>
-                    {formatAdjTime(a.timestamp)} · {String(a.leg_type).toUpperCase()}{' '}
-                    ${fmtStrike(a.old_strike)} → ${fmtStrike(a.new_strike)} · exit $
-                    {fmtMoney(a.old_exit_premium)} · entry ${fmtMoney(a.new_entry_premium)}
+                    {formatAdjTime(a.timestamp)} ·{' '}
+                    {String(a.leg || a.leg_type || '').toUpperCase()} $
+                    {fmtStrike(a.old_strike)} → ${fmtStrike(a.new_strike)} · exit $
+                    {fmtMoney(a.old_premium ?? a.old_exit_premium)} · entry $
+                    {fmtMoney(a.new_premium ?? a.new_entry_premium)}
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function StructureHistoryCard({ structure }) {
+  const [open, setOpen] = useState(false)
+  const hedge = structure.hedge || {}
+  const structurePnl = Number(structure.structure_pnl || 0)
+  const status = String(hedge.status || '').toLowerCase()
+  const isActive = status === 'active'
+  const basketCount = Number(structure.basket_count ?? (structure.baskets || []).length)
+
+  return (
+    <div className="rounded-xl border border-gray-700 bg-gray-800/80">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full flex-wrap items-center justify-between gap-2 px-4 py-3 text-left text-sm"
+      >
+        <div className="font-medium text-white">
+          Structure #{hedge.id}
+          <span
+            className={`ml-2 rounded px-2 py-0.5 text-xs ${
+              isActive
+                ? 'bg-emerald-900/50 text-emerald-300'
+                : 'bg-gray-700 text-gray-300'
+            }`}
+          >
+            {status}
+          </span>
+          <span className="ml-2 text-xs font-normal text-gray-400">
+            {fmtStrike(hedge.strike)} · {hedge.expiry || '—'} · {basketCount}{' '}
+            basket{basketCount === 1 ? '' : 's'}
+          </span>
+        </div>
+        <div className="text-right">
+          <div className={`font-semibold ${pnlColor(structurePnl)}`}>
+            {formatSignedMoney(structurePnl)}
+          </div>
+          <div className="text-[10px] uppercase text-gray-500">
+            STRUCTURE P&amp;L {open ? '▲' : '▼'}
+          </div>
+        </div>
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-gray-700 px-4 py-3">
+          <div className="grid gap-2 rounded-lg border border-gray-700 bg-gray-900/40 px-3 py-2 text-xs text-gray-300 sm:grid-cols-2">
+            <div>
+              Hedge net MTM:{' '}
+              <span className={pnlColor(hedge.hedge_net_mtm)}>
+                {formatSignedMoney(hedge.hedge_net_mtm)}
+              </span>
+            </div>
+            <div>
+              Entry cost:{' '}
+              {hedge.entry_cost != null ? `$${fmtMoney(hedge.entry_cost)}` : '—'}
+            </div>
+            <div>
+              Open basket MTM:{' '}
+              <span className={pnlColor(structure.open_basket_net_mtm)}>
+                {formatSignedMoney(structure.open_basket_net_mtm)}
+              </span>
+            </div>
+            <div>
+              Cum closed baskets:{' '}
+              <span className={pnlColor(structure.cum_closed_basket_pnl)}>
+                {formatSignedMoney(structure.cum_closed_basket_pnl)}
+              </span>
+            </div>
+            <div className="sm:col-span-2 text-gray-500">
+              Entry {formatAdjTime(hedge.entry_time)}
+              {hedge.exit_time ? ` · Exit ${formatAdjTime(hedge.exit_time)}` : ''}
+              {hedge.exit_reason ? ` · ${hedge.exit_reason}` : ''}
+            </div>
+            {(hedge.call_symbol || hedge.put_symbol) && (
+              <div className="sm:col-span-2 text-gray-400">
+                Legs: {hedge.call_symbol || '—'} @ $
+                {fmtMoney(hedge.call_fill_price)} · {hedge.put_symbol || '—'} @ $
+                {fmtMoney(hedge.put_fill_price)}
+              </div>
+            )}
+          </div>
+          {(structure.baskets || []).length === 0 ? (
+            <p className="text-xs text-gray-500">No baskets under this structure</p>
+          ) : (
+            <div className="space-y-2">
+              {(structure.baskets || []).map((b) => (
+                <StructureBasketRow key={b.trade_id} basket={b} />
+              ))}
             </div>
           )}
         </div>
@@ -760,7 +856,7 @@ export default function Dashboard() {
   const [accountName, setAccountName] = useState('')
   const [balance, setBalance] = useState(0)
   const [accountConnected, setAccountConnected] = useState(false)
-  const [baskets, setBaskets] = useState([])
+  const [structures, setStructures] = useState([])
   const [autoStatus, setAutoStatus] = useState(null)
   const [slaveOverview, setSlaveOverview] = useState(null)
 
@@ -885,25 +981,48 @@ export default function Dashboard() {
     }
   }, [])
 
-  // Basket history (all baskets — not only currently active)
+  // Structure history (hedge + linked baskets)
   useEffect(() => {
     let cancelled = false
-    async function loadHistory() {
+    async function loadStructures() {
       try {
-        const data = await getTradeHistory(40)
+        const data = await getHedgeStructures(40)
         if (cancelled) return
-        setBaskets(Array.isArray(data?.baskets) ? data.baskets : [])
+        setStructures(Array.isArray(data?.structures) ? data.structures : [])
       } catch {
-        if (!cancelled) setBaskets([])
+        if (!cancelled) setStructures([])
       }
     }
-    loadHistory()
-    const id = setInterval(loadHistory, 30000)
+    loadStructures()
+    const id = setInterval(loadStructures, 30000)
     return () => {
       cancelled = true
       clearInterval(id)
     }
-  }, [trades, adjustments])
+  }, [trades, adjustments, activeHedge])
+
+  const activeStructure = useMemo(() => {
+    const fromList = structures.find(
+      (s) => String(s?.hedge?.status || '').toLowerCase() === 'active',
+    )
+    if (fromList) return fromList
+    if (!activeHedge) return null
+    const hedgeNet = Number(activeHedge.hedge_net_mtm ?? activeHedge.net_pnl ?? 0)
+    const cumClosed = Number(activeHedge.cum_closed_basket_pnl ?? 0)
+    const structurePnl = Number(activeHedge.structure_pnl ?? 0)
+    return {
+      hedge: {
+        id: activeHedge.id,
+        hedge_net_mtm: hedgeNet,
+      },
+      open_basket_net_mtm: Number(
+        activeHedge.open_basket_net_mtm ??
+          structurePnl - hedgeNet - cumClosed,
+      ),
+      cum_closed_basket_pnl: cumClosed,
+      structure_pnl: structurePnl,
+    }
+  }, [structures, activeHedge])
 
   const wsLabel = useMemo(() => {
     if (wsStatus === 'connected') return { text: 'connected', className: 'text-green-400' }
@@ -1016,22 +1135,25 @@ export default function Dashboard() {
         </div>
       )}
 
+      <StructurePnlPanel structure={activeStructure} />
+
       <section className="mt-10">
         <h2 className="mb-3 text-lg font-semibold text-white">
-          Basket History
+          Structure History
         </h2>
         <p className="mb-3 text-xs text-gray-500">
-          Each new strangle is a numbered basket. Adjustments and closed legs stay
-          with that basket — final PnL is the sum of realized legs.
+          Each long hedge is a structure. Baskets under it are numbered 1…N for
+          that structure only. Stored STRUCTURE P&amp;L is shown — not recomputed
+          in the browser.
         </p>
-        {baskets.length === 0 ? (
+        {structures.length === 0 ? (
           <div className="rounded-xl border border-dashed border-gray-700 px-4 py-8 text-center text-sm text-gray-500">
-            No baskets yet
+            No structures yet
           </div>
         ) : (
           <div className="space-y-3">
-            {baskets.map((b) => (
-              <BasketHistoryCard key={b.trade_id} basket={b} />
+            {structures.map((s) => (
+              <StructureHistoryCard key={s.hedge?.id} structure={s} />
             ))}
           </div>
         )}

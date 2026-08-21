@@ -36,6 +36,7 @@ from backend.engine.trade_reconcile import (
     finalize_trade_if_flat,
     heal_zombie_active_trades,
     next_basket_number,
+    next_basket_seq_in_structure,
     pick_call_put_legs,
     reconcile_open_legs_with_delta,
 )
@@ -557,6 +558,11 @@ async def _persist_strangle_trade(
     profit_target_usd = round(initial_max_profit * tp_pct / 100.0, 2)
     stoploss_usd = round(initial_max_profit * sl_pct / 100.0, 2)
     basket_no = next_basket_number(db, account.id)
+    # Manual initiate has no hedge link unless caller stamped one later
+    hedge_id = getattr(payload, "hedge_position_id", None)
+    seq_in_structure = next_basket_seq_in_structure(
+        db, int(hedge_id) if hedge_id is not None else None
+    )
 
     trade = Trade(
         account_id=account.id,
@@ -580,8 +586,12 @@ async def _persist_strangle_trade(
         realized_pnl=0.0,
         monitoring_starts_at=monitoring_starts,
         basket_number=basket_no,
+        basket_seq_in_structure=seq_in_structure,
         entry_spread_for_sl_usd=0.0,
         is_demo=bool(getattr(payload, "is_demo", False)),
+        hedge_position_id=(
+            int(hedge_id) if hedge_id is not None else None
+        ),
     )
     db.add(trade)
     db.flush()

@@ -2026,6 +2026,12 @@ async def build_active_hedge_live(
         "current_call_iv": current_call_iv,
         "current_put_iv": current_put_iv,
         "open_basket_count": count_active_baskets_for_hedge(db, hid),
+        "open_basket_net_mtm": round(
+            float(getattr(hedge, "structure_pnl", 0.0) or 0.0)
+            - float(getattr(hedge, "hedge_net_mtm", 0.0) or 0.0)
+            - float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0),
+            6,
+        ),
     }
 
 

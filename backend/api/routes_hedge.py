@@ -63,6 +63,240 @@ def _get_delta_client(account: Account) -> DeltaClient:
     )
 
 
+def _ist_iso(dt: Any) -> str | None:
+    if dt is None:
+        return None
+    from datetime import datetime, timezone
+
+    from backend.core.time_utils import get_ist_now
+
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(get_ist_now().tzinfo).isoformat()
+    return str(dt)
+
+
+@router.get("/structures")
+async def list_structures(
+    db: Session = Depends(get_db),
+    limit: int = Query(40, ge=1, le=200),
+) -> dict[str, Any]:
+    """
+    Hedge structures newest-first with linked baskets and adjustments.
+
+    Uses stored structure_pnl / hedge_net_mtm / cum_closed_basket_pnl —
+    does not recompute structure P&L here.
+    """
+    from backend.config import TradeStatus
+    from backend.engine.bot_engine import bot_engine
+    from backend.models import Adjustment, Leg, Trade
+
+    account = _get_active_account(db)
+    hedges = (
+        db.query(HedgePosition)
+        .filter(HedgePosition.account_id == int(account.id))
+        .order_by(HedgePosition.id.desc())
+        .limit(int(limit))
+        .all()
+    )
+
+    structures: list[dict[str, Any]] = []
+    for h in hedges:
+        hid = int(h.id)
+        hedge_net = float(getattr(h, "hedge_net_mtm", 0.0) or 0.0)
+        cum_closed = float(getattr(h, "cum_closed_basket_pnl", 0.0) or 0.0)
+        structure = float(getattr(h, "structure_pnl", 0.0) or 0.0)
+        # Prefer derived open basket so panel stays consistent with stored total
+        open_basket = round(structure - hedge_net - cum_closed, 6)
+
+        entry_cost = None
+        if h.call_fill_price is not None and h.put_fill_price is not None:
+            from backend.core.hedge_theta import CONTRACT_SIZE
+
+            entry_cost = round(
+                (
+                    float(h.call_fill_price or 0)
+                    + float(h.put_fill_price or 0)
+                )
+                * int(h.quantity)
+                * float(CONTRACT_SIZE),
+                4,
+            )
+
+        baskets_orm = (
+            db.query(Trade)
+            .filter(Trade.hedge_position_id == hid)
+            .order_by(Trade.id.asc())
+            .all()
+        )
+        baskets_out: list[dict[str, Any]] = []
+        for trade in baskets_orm:
+            legs = (
+                db.query(Leg)
+                .filter(
+                    Leg.trade_id == int(trade.id),
+                    Leg.is_bot_managed.is_(True),
+                )
+                .order_by(Leg.id.asc())
+                .all()
+            )
+            call_leg = next(
+                (
+                    lg
+                    for lg in legs
+                    if str(lg.leg_type).lower() == "call"
+                    and not bool(getattr(lg, "is_long", False))
+                ),
+                None,
+            )
+            put_leg = next(
+                (
+                    lg
+                    for lg in legs
+                    if str(lg.leg_type).lower() == "put"
+                    and not bool(getattr(lg, "is_long", False))
+                ),
+                None,
+            )
+            # Prefer currently open short legs if multiple generations exist
+            open_call = next(
+                (
+                    lg
+                    for lg in legs
+                    if str(lg.leg_type).lower() == "call"
+                    and str(lg.status).lower() == "open"
+                    and not bool(getattr(lg, "is_long", False))
+                ),
+                call_leg,
+            )
+            open_put = next(
+                (
+                    lg
+                    for lg in legs
+                    if str(lg.leg_type).lower() == "put"
+                    and str(lg.status).lower() == "open"
+                    and not bool(getattr(lg, "is_long", False))
+                ),
+                put_leg,
+            )
+
+            adjs = (
+                db.query(Adjustment)
+                .filter(Adjustment.trade_id == int(trade.id))
+                .order_by(Adjustment.timestamp.asc())
+                .all()
+            )
+            adj_rows = [
+                {
+                    "leg": a.leg_type,
+                    "old_strike": float(a.old_strike),
+                    "new_strike": float(a.new_strike),
+                    "old_premium": float(a.old_exit_premium),
+                    "new_premium": float(a.new_entry_premium),
+                    "timestamp": _ist_iso(a.timestamp),
+                }
+                for a in adjs
+            ]
+
+            is_active = str(trade.status).lower() == TradeStatus.ACTIVE.value
+            state = bot_engine.position_tracker.get(int(trade.id))
+            net_mtm = None
+            if state is not None and getattr(state, "last_net_mtm", None) is not None:
+                net_mtm = float(state.last_net_mtm)
+            elif not is_active and trade.realized_pnl is not None:
+                net_mtm = float(trade.realized_pnl)
+
+            seq = getattr(trade, "basket_seq_in_structure", None)
+            baskets_out.append(
+                {
+                    "basket_seq_in_structure": (
+                        int(seq) if seq is not None else None
+                    ),
+                    "trade_id": int(trade.id),
+                    "status": trade.status,
+                    "exit_reason": trade.exit_reason,
+                    "entry_time": _ist_iso(trade.entry_time),
+                    "exit_time": _ist_iso(trade.exit_time),
+                    "call_strike": (
+                        float(open_call.strike) if open_call is not None else None
+                    ),
+                    "put_strike": (
+                        float(open_put.strike) if open_put is not None else None
+                    ),
+                    "call_entry_premium": (
+                        float(open_call.initial_premium)
+                        if open_call is not None
+                        else None
+                    ),
+                    "put_entry_premium": (
+                        float(open_put.initial_premium)
+                        if open_put is not None
+                        else None
+                    ),
+                    "realized_pnl": (
+                        float(trade.realized_pnl)
+                        if trade.realized_pnl is not None
+                        else None
+                    ),
+                    "net_mtm": net_mtm,
+                    "legs": [
+                        {
+                            "id": int(lg.id),
+                            "leg_type": lg.leg_type,
+                            "strike": float(lg.strike),
+                            "quantity": int(lg.quantity),
+                            "entry_premium": float(lg.initial_premium),
+                            "exit_premium": (
+                                float(lg.exit_premium)
+                                if lg.exit_premium is not None
+                                else None
+                            ),
+                            "status": lg.status,
+                            "realized_pnl": (
+                                float(lg.realized_pnl)
+                                if lg.realized_pnl is not None
+                                else None
+                            ),
+                        }
+                        for lg in legs
+                    ],
+                    "adjustments": adj_rows,
+                }
+            )
+
+        structures.append(
+            {
+                "hedge": {
+                    "id": hid,
+                    "strike": float(h.strike) if h.strike is not None else None,
+                    "expiry": (
+                        h.expiry_date.isoformat() if h.expiry_date else None
+                    ),
+                    "entry_cost": entry_cost,
+                    "hedge_net_mtm": hedge_net,
+                    "status": h.status,
+                    "entry_time": _ist_iso(h.entry_time),
+                    "exit_time": _ist_iso(h.exit_time),
+                    "exit_reason": h.exit_reason,
+                    "underlying": h.underlying,
+                    "quantity": int(h.quantity),
+                    "call_fill_price": h.call_fill_price,
+                    "put_fill_price": h.put_fill_price,
+                    "call_symbol": h.call_symbol,
+                    "put_symbol": h.put_symbol,
+                },
+                "cum_closed_basket_pnl": cum_closed,
+                "open_basket_net_mtm": open_basket,
+                "structure_pnl": structure,
+                "basket_count": len(baskets_out),
+                "baskets": baskets_out,
+            }
+        )
+
+    return {"success": True, "structures": structures}
+
+
 @router.post("/open")
 async def hedge_open(
     payload: HedgeOpenRequest = HedgeOpenRequest(),

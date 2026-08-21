@@ -641,3 +641,24 @@ def next_basket_number(db: Any, account_id: int) -> int:
         .scalar()
     )
     return int(current or 0) + 1
+
+
+def next_basket_seq_in_structure(
+    db: Any, hedge_position_id: int | None
+) -> int | None:
+    """
+    Next per-structure basket index (1-based) for this hedge.
+
+    Returns None when there is no hedge link. Never renumbers existing rows.
+    """
+    if hedge_position_id is None:
+        return None
+    from sqlalchemy import func
+
+    hid = int(hedge_position_id)
+    current = (
+        db.query(func.count(Trade.id))
+        .filter(Trade.hedge_position_id == hid)
+        .scalar()
+    )
+    return int(current or 0) + 1

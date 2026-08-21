@@ -249,6 +249,15 @@ export const getTradeHistory = async (limit = 30) => {
   }
 }
 
+export const getHedgeStructures = async (limit = 40) => {
+  try {
+    const res = await api.get('/api/hedge/structures', { params: { limit } })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch structure history'))
+  }
+}
+
 export const getBotLogs = async ({ trade_id, limit = 100, level = 'all' } = {}) => {
   try {
     const params = { limit, level }

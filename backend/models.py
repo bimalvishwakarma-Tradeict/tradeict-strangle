@@ -97,6 +97,10 @@ class Trade(Base):
     )
     # Human-facing basket id (sequential per account); clubs all legs/adjustments
     basket_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Per-structure basket index (1..N under one hedge_position_id). Never renumbered.
+    basket_seq_in_structure: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     # Incremented on each successful normal adjustment
     adjustment_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 

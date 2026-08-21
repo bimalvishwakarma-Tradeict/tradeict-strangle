@@ -723,6 +723,32 @@ def _migrate_schema() -> None:
                         "REFERENCES hedge_positions (id)"
                     )
                 )
+        # Refresh cols after possible hedge_position_id add
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "basket_seq_in_structure" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN "
+                        "basket_seq_in_structure INTEGER"
+                    )
+                )
+                # Backfill: per hedge_position_id, order by id → 1..N
+                conn.execute(
+                    text(
+                        """
+                        UPDATE trades
+                        SET basket_seq_in_structure = (
+                            SELECT COUNT(*)
+                            FROM trades t2
+                            WHERE t2.hedge_position_id = trades.hedge_position_id
+                              AND t2.id <= trades.id
+                        )
+                        WHERE hedge_position_id IS NOT NULL
+                          AND basket_seq_in_structure IS NULL
+                        """
+                    )
+                )
 
     # Hedge mode settings columns + theta log table
     inspector = inspect(engine)

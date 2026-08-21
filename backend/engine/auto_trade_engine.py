@@ -21,7 +21,7 @@ from backend.core.time_utils import (
     settling_ends_at_after_place,
 )
 from backend.core.ws_manager import ws_manager
-from backend.engine.trade_reconcile import next_basket_number
+from backend.engine.trade_reconcile import next_basket_number, next_basket_seq_in_structure
 
 logger = logging.getLogger(__name__)
 
@@ -888,6 +888,10 @@ class AutoTradeEngine:
                 now_ist, seconds=entry_secs
             )
             basket_no = next_basket_number(db, int(account.id))
+            seq_in_structure = next_basket_seq_in_structure(
+                db,
+                int(hedge_position_id) if hedge_position_id is not None else None,
+            )
 
             trade = Trade(
                 account_id=int(account.id),
@@ -910,6 +914,7 @@ class AutoTradeEngine:
                 universal_sl_pct=float(settings.universal_sl_pct or 200.0),
                 slippage_pct=float(settings.slippage_pct or 2.0),
                 basket_number=basket_no,
+                basket_seq_in_structure=seq_in_structure,
                 notes="auto_trade",
                 entry_spread_for_sl_usd=0.0,
                 hedge_position_id=(
