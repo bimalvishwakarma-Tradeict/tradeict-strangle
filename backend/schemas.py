@@ -136,12 +136,9 @@ class TradeExitRequest(BaseModel):
 
 
 class AutoTradeHedgeBudgetSettings(BaseModel):
-    """
-    Hedge SL floor + structure target multiple.
+    """Hedge fixed SL + floor % + structure target multiple."""
 
-    Settings surface only — engine does not consume these yet.
-    """
-
+    hedge_fixed_sl_usd: float = Field(default=2.0, ge=0.1, le=1000)
     hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
     min_hedge_dte: int = Field(default=15, ge=5, le=60)

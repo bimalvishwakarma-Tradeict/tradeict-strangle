@@ -295,25 +295,32 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
               edit
             </span>
           </button>
-          <button
-            type="button"
-            onClick={() => openEdit('sl')}
-            className="rounded-md border border-transparent px-1.5 py-0.5 text-left hover:border-gray-600 hover:bg-gray-800/80"
-            title="Edit stop loss"
+          <div
+            className="rounded-md px-1.5 py-0.5 text-left"
+            title="Live SL budget = max(floor, fixed SL + booked basket P&L)"
           >
-            Stop{' '}
+            Stop:{' '}
             <span className="text-red-400">
-              −${fmtMoney(hedge.stoploss_usd)}
+              −${fmtMoney(
+                hedge.sl_budget != null ? hedge.sl_budget : hedge.stoploss_usd,
+              )}
+            </span>
+            <span className="ml-1 text-gray-500">
+              (fixed $
+              {fmtMoney(
+                hedge.hedge_fixed_sl_usd != null
+                  ? hedge.hedge_fixed_sl_usd
+                  : 2,
+              )}{' '}
+              + booked $
+              {fmtMoney(hedge.cum_closed_basket_pnl ?? 0)})
             </span>
             {hedge.pct_to_stop != null && (
               <span className="ml-1 text-gray-500">
                 ({fmtMoney(hedge.pct_to_stop, 1)}%)
               </span>
             )}
-            <span className="ml-1 text-[10px] uppercase text-gray-600">
-              edit
-            </span>
-          </button>
+          </div>
           <span>
             IV entry {fmtIv(entryIv)} · IV now {fmtIv(liveIv)}
           </span>

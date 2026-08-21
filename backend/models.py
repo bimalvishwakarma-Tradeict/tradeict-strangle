@@ -342,7 +342,11 @@ class AutoTradeSettings(Base):
     min_hedge_dte: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
     hedge_target_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     hedge_stoploss_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # Settings only until structure SL/target logic consumes them
+    # Fixed $ SL for budget formula (floor = fixed × floor_pct / 100)
+    hedge_fixed_sl_usd: Mapped[float] = mapped_column(
+        Float, nullable=False, default=2.0
+    )
+    # Minimum budget as % of fixed SL — prevents negative budget after basket losses
     hedge_sl_floor_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=25.0
     )

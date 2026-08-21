@@ -765,6 +765,7 @@ def _migrate_schema() -> None:
             ("min_hedge_dte", "INTEGER NOT NULL DEFAULT 15"),
             ("hedge_target_usd", "FLOAT DEFAULT NULL"),
             ("hedge_stoploss_usd", "FLOAT DEFAULT NULL"),
+            ("hedge_fixed_sl_usd", "FLOAT NOT NULL DEFAULT 2.0"),
             ("hedge_sl_floor_pct", "FLOAT NOT NULL DEFAULT 25.0"),
             ("hedge_target_multiple", "FLOAT NOT NULL DEFAULT 3.0"),
             ("spread_mode", "VARCHAR(20) NOT NULL DEFAULT 'MANUAL'"),

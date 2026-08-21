@@ -110,6 +110,7 @@ function applyStatusToForm(data, setters) {
   setters.setHedgeStoplossUsd(
     data.hedge_stoploss_usd == null ? '' : String(data.hedge_stoploss_usd),
   )
+  setters.setHedgeFixedSlUsd(String(data.hedge_fixed_sl_usd ?? 2))
   setters.setHedgeSlFloorPct(String(data.hedge_sl_floor_pct ?? 25))
   setters.setHedgeTargetMultiple(String(data.hedge_target_multiple ?? 3))
   setters.setSpreadMode(
@@ -206,6 +207,7 @@ export default function AutoTrade() {
   const [minHedgeDte, setMinHedgeDte] = useState('15')
   const [hedgeTargetUsd, setHedgeTargetUsd] = useState('')
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
+  const [hedgeFixedSlUsd, setHedgeFixedSlUsd] = useState('2')
   const [hedgeSlFloorPct, setHedgeSlFloorPct] = useState('25')
   const [hedgeTargetMultiple, setHedgeTargetMultiple] = useState('3')
   const [spreadMode, setSpreadMode] = useState('MANUAL')
@@ -264,6 +266,7 @@ export default function AutoTrade() {
       setMinHedgeDte,
       setHedgeTargetUsd,
       setHedgeStoplossUsd,
+      setHedgeFixedSlUsd,
       setHedgeSlFloorPct,
       setHedgeTargetMultiple,
       setSpreadMode,
@@ -541,6 +544,10 @@ export default function AutoTrade() {
         hedgeStoplossUsd === '' || hedgeStoplossUsd == null
           ? null
           : Number(hedgeStoplossUsd),
+      hedge_fixed_sl_usd: Math.min(
+        1000,
+        Math.max(0.1, Number(hedgeFixedSlUsd) || 2),
+      ),
       hedge_sl_floor_pct: Number(hedgeSlFloorPct),
       hedge_target_multiple: Number(hedgeTargetMultiple),
       spread_mode: spreadMode === 'MANUAL' ? 'MANUAL' : 'AUTO',
@@ -1480,8 +1487,25 @@ export default function AutoTrade() {
               className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
             />
             <span className="mt-1 block text-xs text-gray-500">
-              Default for the next hedge open only — edit a live hedge on the
-              Dashboard panel.
+              Legacy per-hedge display default on open. Live trigger uses Fixed
+              SL + booked baskets below.
+            </span>
+          </label>
+          <label className="block text-sm text-gray-300">
+            Hedge fixed SL ($)
+            <input
+              type="number"
+              min={0.1}
+              max={1000}
+              step={0.1}
+              value={hedgeFixedSlUsd}
+              onChange={(e) => setHedgeFixedSlUsd(e.target.value)}
+              disabled={!hedgeEnabled}
+              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+            />
+            <span className="mt-1 block text-xs text-gray-500">
+              Structure stop budget starts here. Booked basket profit raises the
+              budget; floor % keeps it from going negative after losses.
             </span>
           </label>
           <label className="block text-sm text-gray-300">

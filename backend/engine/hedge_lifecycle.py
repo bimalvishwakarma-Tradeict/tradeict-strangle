@@ -47,6 +47,8 @@ VALID_HEDGE_EXIT_REASONS = frozenset(
 
 # Per-hedge close locks (same pattern as bot_engine._exit_locks)
 _hedge_close_locks: dict[int, asyncio.Lock] = {}
+# Hedges that already fired HEDGE_SL — never re-evaluate SL for these ids
+_hedge_sl_fired: set[int] = set()
 
 
 def _get_hedge_close_lock(hedge_id: int) -> asyncio.Lock:
@@ -56,6 +58,60 @@ def _get_hedge_close_lock(hedge_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _hedge_close_locks[hid] = lock
     return lock
+
+
+def compute_hedge_sl_budget(
+    fixed_sl_usd: float,
+    floor_pct: float,
+    cum_closed_basket_pnl: float,
+) -> dict[str, float]:
+    """
+    Cumulative-basket hedge SL budget.
+
+    floor  = fixed_sl * (floor_pct / 100)
+    budget = max(floor, fixed_sl + cum_closed)
+    """
+    fixed = max(0.0, float(fixed_sl_usd))
+    floor_pct_clamped = max(0.0, min(100.0, float(floor_pct)))
+    floor = fixed * (floor_pct_clamped / 100.0)
+    cum = float(cum_closed_basket_pnl or 0.0)
+    budget = max(floor, fixed + cum)
+    return {
+        "fixed_sl": float(fixed),
+        "floor_pct": float(floor_pct_clamped),
+        "floor": float(floor),
+        "cum_closed": float(cum),
+        "budget": float(budget),
+    }
+
+
+def _live_sl_budget_fields(db: Session, hedge: HedgePosition) -> dict[str, Any]:
+    """Settings + live budget for the hedge card Stop line."""
+    from backend.database import get_or_create_auto_settings
+
+    settings = get_or_create_auto_settings(db)
+    fixed_sl = float(
+        getattr(settings, "hedge_fixed_sl_usd", None)
+        if getattr(settings, "hedge_fixed_sl_usd", None) is not None
+        else 2.0
+    )
+    floor_pct = float(
+        getattr(settings, "hedge_sl_floor_pct", None)
+        if getattr(settings, "hedge_sl_floor_pct", None) is not None
+        else 25.0
+    )
+    cum = float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0)
+    parts = compute_hedge_sl_budget(fixed_sl, floor_pct, cum)
+    gross_for_sl = float(getattr(hedge, "hedge_gross_for_sl", 0.0) or 0.0)
+    budget = float(parts["budget"])
+    pct_to_stop = (-gross_for_sl / budget * 100.0) if budget > 0 else 0.0
+    return {
+        "hedge_fixed_sl_usd": round(float(parts["fixed_sl"]), 4),
+        "hedge_sl_floor_pct": round(float(parts["floor_pct"]), 4),
+        "sl_floor_usd": round(float(parts["floor"]), 4),
+        "sl_budget": round(budget, 4),
+        "pct_to_stop": round(pct_to_stop, 2),
+    }
 
 
 def _hedge_log(
@@ -1575,10 +1631,61 @@ async def evaluate_and_maybe_close_hedge(
         and (hours_left == 0 or is_pre_expiry_window(hedge.expiry_date))
     )
     will_close_target = bool(target > 0 and net >= target)
-    will_close_stop = bool(stoploss > 0 and net <= -stoploss)
+
+    # --- Hedge SL: cumulative-basket budget (not raw stoploss_usd) ---
+    from backend.database import get_or_create_auto_settings
+
+    settings = get_or_create_auto_settings(db)
+    fixed_sl = float(
+        getattr(settings, "hedge_fixed_sl_usd", None)
+        if getattr(settings, "hedge_fixed_sl_usd", None) is not None
+        else 2.0
+    )
+    floor_pct = float(
+        getattr(settings, "hedge_sl_floor_pct", None)
+        if getattr(settings, "hedge_sl_floor_pct", None) is not None
+        else 25.0
+    )
+    cum_closed = float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0)
+    gross_for_sl = float(getattr(hedge, "hedge_gross_for_sl", 0.0) or 0.0)
+    structure_pnl = float(getattr(hedge, "structure_pnl", 0.0) or 0.0)
+    sl_parts = compute_hedge_sl_budget(fixed_sl, floor_pct, cum_closed)
+    budget = float(sl_parts["budget"])
+    room = budget + gross_for_sl  # positive = headroom remaining
+
+    _hedge_log(
+        "HEDGE_SL_CHECK",
+        hid,
+        {
+            "hedge": hid,
+            "gross_for_sl": round(gross_for_sl, 6),
+            "fixed_sl": round(float(sl_parts["fixed_sl"]), 6),
+            "cum_closed": round(float(sl_parts["cum_closed"]), 6),
+            "floor": round(float(sl_parts["floor"]), 6),
+            "budget": round(budget, 6),
+            "room": round(room, 6),
+            "summary": (
+                f"[HEDGE_SL_CHECK] hedge={hid} | "
+                f"gross_for_sl={round(gross_for_sl, 6)} | "
+                f"fixed_sl={round(float(sl_parts['fixed_sl']), 6)} | "
+                f"cum_closed={round(float(sl_parts['cum_closed']), 6)} | "
+                f"floor={round(float(sl_parts['floor']), 6)} | "
+                f"budget={round(budget, 6)} | "
+                f"room={round(room, 6)}"
+            ),
+        },
+    )
+
+    already_fired = hid in _hedge_sl_fired
+    will_close_stop = bool(
+        (not already_fired) and budget > 0 and gross_for_sl <= -budget
+    )
 
     pct_to_target = (net / target * 100.0) if target > 0 else 0.0
-    pct_to_stop = (-net / stoploss * 100.0) if stoploss > 0 else 0.0
+    # How close gross_for_sl is to the stop line (−budget)
+    pct_to_stop = (
+        (-gross_for_sl / budget * 100.0) if budget > 0 else 0.0
+    )
 
     _hedge_log(
         "HEDGE_PNL",
@@ -1594,12 +1701,15 @@ async def evaluate_and_maybe_close_hedge(
             "est_exit_fees": round(est_exit, 6),
             "target_usd": target,
             "stoploss_usd": stoploss,
+            "sl_budget": round(budget, 6),
+            "hedge_gross_for_sl": round(gross_for_sl, 6),
             "pct_to_target": round(pct_to_target, 2),
             "pct_to_stop": round(pct_to_stop, 2),
             "hours_to_expiry": round(hours_left, 4),
             "will_close_target": will_close_target,
             "will_close_stop": will_close_stop,
             "will_close_expiry": will_close_expiry,
+            "sl_already_fired": already_fired,
         },
     )
 
@@ -1608,6 +1718,23 @@ async def evaluate_and_maybe_close_hedge(
         close_reason = "HEDGE_TARGET"
     elif will_close_stop:
         close_reason = "HEDGE_STOPLOSS"
+        _hedge_sl_fired.add(hid)
+        _hedge_log(
+            "HEDGE_SL_FIRE",
+            hid,
+            {
+                "hedge": hid,
+                "gross_for_sl": round(gross_for_sl, 6),
+                "budget": round(budget, 6),
+                "structure_pnl": round(structure_pnl, 6),
+                "summary": (
+                    f"[HEDGE_SL_FIRE] hedge={hid} | "
+                    f"gross_for_sl={round(gross_for_sl, 6)} | "
+                    f"budget={round(budget, 6)} | "
+                    f"structure_pnl={round(structure_pnl, 6)}"
+                ),
+            },
+        )
     elif will_close_expiry:
         close_reason = "HEDGE_EXPIRY"
 
@@ -2032,6 +2159,14 @@ async def build_active_hedge_live(
             - float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0),
             6,
         ),
+        "cum_closed_basket_pnl": float(
+            getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0
+        ),
+        "hedge_gross_for_sl": float(
+            getattr(hedge, "hedge_gross_for_sl", 0.0) or 0.0
+        ),
+        "structure_pnl": float(getattr(hedge, "structure_pnl", 0.0) or 0.0),
+        **_live_sl_budget_fields(db, hedge),
     }
 
 

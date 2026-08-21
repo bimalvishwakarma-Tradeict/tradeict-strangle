@@ -71,7 +71,7 @@ class AutoTradeSettingsSchema(BaseModel):
     min_hedge_dte: int = Field(default=15, ge=5, le=60)
     hedge_target_usd: float | None = Field(default=None, gt=0)
     hedge_stoploss_usd: float | None = Field(default=None, gt=0)
-    # Settings only — not consumed by hedge logic yet
+    hedge_fixed_sl_usd: float = Field(default=2.0, ge=0.1, le=1000)
     hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
     # Exit-spread estimation (AUTO from L2 / MANUAL / capped)
@@ -280,6 +280,11 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             float(s.hedge_stoploss_usd)
             if getattr(s, "hedge_stoploss_usd", None) is not None
             else None
+        ),
+        "hedge_fixed_sl_usd": float(
+            getattr(s, "hedge_fixed_sl_usd", None)
+            if getattr(s, "hedge_fixed_sl_usd", None) is not None
+            else 2.0
         ),
         "hedge_sl_floor_pct": float(
             getattr(s, "hedge_sl_floor_pct", None)
@@ -579,6 +584,7 @@ async def update_auto_trade_settings(
         else None
     )
     settings.hedge_sl_floor_pct = float(payload.hedge_sl_floor_pct)
+    settings.hedge_fixed_sl_usd = float(payload.hedge_fixed_sl_usd)
     settings.hedge_target_multiple = float(payload.hedge_target_multiple)
     settings.spread_mode = str(payload.spread_mode or "MANUAL").upper().strip()
     settings.basket_exit_spread_pct = float(payload.basket_exit_spread_pct)
