@@ -106,6 +106,11 @@ function applyStatusToForm(data, setters) {
   setters.setMinHedgeDte(String(data.min_hedge_dte ?? 15))
   setters.setHedgeRollDte(String(data.hedge_roll_dte ?? 10))
   setters.setHedgeRollHardDte(String(data.hedge_roll_hard_dte ?? 5))
+  setters.setHedgeAutoReopenAfterRoll(
+    data.hedge_auto_reopen_after_roll == null
+      ? true
+      : Boolean(data.hedge_auto_reopen_after_roll),
+  )
   setters.setHedgeTargetUsd(
     data.hedge_target_usd == null ? '' : String(data.hedge_target_usd),
   )
@@ -209,6 +214,7 @@ export default function AutoTrade() {
   const [minHedgeDte, setMinHedgeDte] = useState('15')
   const [hedgeRollDte, setHedgeRollDte] = useState('10')
   const [hedgeRollHardDte, setHedgeRollHardDte] = useState('5')
+  const [hedgeAutoReopenAfterRoll, setHedgeAutoReopenAfterRoll] = useState(true)
   const [hedgeTargetUsd, setHedgeTargetUsd] = useState('')
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
   const [hedgeFixedSlUsd, setHedgeFixedSlUsd] = useState('2')
@@ -270,6 +276,7 @@ export default function AutoTrade() {
       setMinHedgeDte,
       setHedgeRollDte,
       setHedgeRollHardDte,
+      setHedgeAutoReopenAfterRoll,
       setHedgeTargetUsd,
       setHedgeStoplossUsd,
       setHedgeFixedSlUsd,
@@ -547,6 +554,7 @@ export default function AutoTrade() {
         60,
         Math.max(1, Number(hedgeRollHardDte) || 5),
       ),
+      hedge_auto_reopen_after_roll: Boolean(hedgeAutoReopenAfterRoll),
       hedge_target_usd:
         hedgeTargetUsd === '' || hedgeTargetUsd == null
           ? null
@@ -1588,6 +1596,22 @@ export default function AutoTrade() {
               </span>
             ) : null}
           </div>
+          <label className="flex cursor-pointer items-start gap-3 sm:col-span-2">
+            <input
+              type="checkbox"
+              checked={hedgeAutoReopenAfterRoll}
+              onChange={(e) => setHedgeAutoReopenAfterRoll(e.target.checked)}
+              disabled={!hedgeEnabled}
+              className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500 disabled:cursor-not-allowed"
+            />
+            <span className="text-sm text-gray-300">
+              Auto-open next hedge after roll
+              <span className="mt-1 block text-xs text-gray-500">
+                When a hedge rolls at its DTE threshold, immediately open the
+                next monthly. Stoploss and target closes always stay manual.
+              </span>
+            </span>
+          </label>
           <label className="block text-sm text-gray-300">
             Hedge target ($)
             <input

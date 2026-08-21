@@ -1011,6 +1011,8 @@ async def close_hedge(
         )
 
     lock = _get_hedge_close_lock(hid)
+    closed_result: HedgePosition | None = None
+    do_auto_reopen = False
     async with lock:
         hedge = db.query(HedgePosition).filter(HedgePosition.id == hid).first()
         if hedge is None:
@@ -1339,7 +1341,195 @@ async def close_hedge(
                 "structure_pnl": final_snap.get("structure_pnl"),
             },
         )
-        return hedge
+        closed_result = hedge
+        do_auto_reopen = reason_norm == "HEDGE_ROLL"
+
+    # Close is fully committed — reopen outside the close lock so a failed
+    # open can never roll back a successful roll close.
+    if (
+        do_auto_reopen
+        and closed_result is not None
+        and str(closed_result.status or "").lower() == "closed"
+    ):
+        await maybe_auto_reopen_after_roll(
+            closed_result, db, client=client
+        )
+    assert closed_result is not None
+    return closed_result
+
+
+async def maybe_auto_reopen_after_roll(
+    closed_hedge: HedgePosition,
+    db: Session,
+    *,
+    client: DeltaClient,
+) -> HedgePosition | None:
+    """
+    Open the next hedge after a successful HEDGE_ROLL close.
+
+    Only runs when hedge_auto_reopen_after_roll is True. Never retries on
+    failure — records last_error on the closed hedge and leaves the system
+    with no active hedge (basket entry stays blocked).
+    """
+    from backend.database import get_or_create_auto_settings
+
+    old_id = int(closed_hedge.id)
+    settings = get_or_create_auto_settings(db)
+
+    if not bool(getattr(settings, "hedge_auto_reopen_after_roll", True)):
+        _hedge_log(
+            "HEDGE_AUTO_REOPEN",
+            old_id,
+            {
+                "skipped": True,
+                "reason": "hedge_auto_reopen_after_roll=false",
+                "old_hedge": old_id,
+            },
+        )
+        return None
+
+    if not bool(getattr(settings, "hedge_enabled", False)):
+        _hedge_log(
+            "HEDGE_AUTO_REOPEN",
+            old_id,
+            {
+                "skipped": True,
+                "reason": "hedge_enabled=false",
+                "old_hedge": old_id,
+            },
+        )
+        return None
+
+    und = _normalize_underlying(
+        str(closed_hedge.underlying or settings.underlying or "BTC")
+    )
+    qty = max(1, int(closed_hedge.quantity or 1))
+    old_expiry = (
+        closed_hedge.expiry_date.isoformat()
+        if closed_hedge.expiry_date is not None
+        else None
+    )
+
+    account = (
+        db.query(Account)
+        .filter(Account.id == int(closed_hedge.account_id))
+        .first()
+    )
+    if account is None:
+        await _record_auto_reopen_failure(
+            db,
+            old_hedge_id=old_id,
+            reason="No account for closed hedge",
+        )
+        return None
+
+    # open_hedge reads settings.underlying — align to the rolled hedge.
+    settings.underlying = und
+
+    try:
+        new_hedge = await open_hedge(
+            account,
+            settings,
+            db,
+            client=client,
+            quantity_override=qty,
+            opened_via="auto_roll",
+        )
+    except HedgeOpenError as exc:
+        await _record_auto_reopen_failure(
+            db,
+            old_hedge_id=old_id,
+            reason=f"[{exc.stage}] {exc.reason}",
+        )
+        return None
+    except Exception as exc:
+        await _record_auto_reopen_failure(
+            db,
+            old_hedge_id=old_id,
+            reason=str(exc),
+        )
+        return None
+
+    if new_hedge is None or str(new_hedge.status or "").lower() != "active":
+        await _record_auto_reopen_failure(
+            db,
+            old_hedge_id=old_id,
+            reason=(
+                f"open_hedge returned status="
+                f"{getattr(new_hedge, 'status', None)}"
+            ),
+        )
+        return None
+
+    new_id = int(new_hedge.id)
+    new_expiry = (
+        new_hedge.expiry_date.isoformat()
+        if new_hedge.expiry_date is not None
+        else None
+    )
+    new_dte = _calendar_dte(new_hedge.expiry_date)
+    _hedge_log(
+        "HEDGE_AUTO_REOPEN",
+        old_id,
+        {
+            "old_hedge": old_id,
+            "old_expiry": old_expiry,
+            "new_hedge": new_id,
+            "new_expiry": new_expiry,
+            "new_dte": new_dte,
+            "quantity": qty,
+            "summary": (
+                f"[HEDGE_AUTO_REOPEN] old_hedge={old_id} | "
+                f"old_expiry={old_expiry} | new_hedge={new_id} | "
+                f"new_expiry={new_expiry} | new_dte={new_dte} | "
+                f"quantity={qty}"
+            ),
+        },
+    )
+    return new_hedge
+
+
+async def _record_auto_reopen_failure(
+    db: Session,
+    *,
+    old_hedge_id: int,
+    reason: str,
+) -> None:
+    """Log CRITICAL and stamp closed hedge.last_error — no retry."""
+    msg = str(reason or "unknown")[:480]
+    _hedge_log(
+        "HEDGE_AUTO_REOPEN_FAILED",
+        int(old_hedge_id),
+        {
+            "old_hedge": int(old_hedge_id),
+            "reason": msg,
+            "summary": (
+                f"[HEDGE_AUTO_REOPEN_FAILED] old_hedge={int(old_hedge_id)} | "
+                f"reason={msg}"
+            ),
+        },
+        critical=True,
+    )
+    try:
+        db.expire_all()
+        row = (
+            db.query(HedgePosition)
+            .filter(HedgePosition.id == int(old_hedge_id))
+            .first()
+        )
+        if row is not None:
+            tag = f"HEDGE_AUTO_REOPEN_FAILED: {msg}"[:500]
+            prior = str(row.last_error or "").strip()
+            row.last_error = (
+                f"{prior}; {tag}".strip("; ")[:500] if prior else tag
+            )
+            db.commit()
+    except Exception as exc:
+        logger.warning(
+            "Failed to stamp last_error on hedge #%s after reopen fail: %s",
+            old_hedge_id,
+            exc,
+        )
 
 
 async def _fetch_strict_bid(client: DeltaClient, symbol: str) -> float | None:

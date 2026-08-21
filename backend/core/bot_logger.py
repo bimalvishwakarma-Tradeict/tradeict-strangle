@@ -98,6 +98,8 @@ _IMPORTANT_EVENTS = frozenset(
         "HEDGE_ROLL_EXECUTE",
         "HEDGE_ROLL_WAIT",
         "HEDGE_ROLL_FORCED",
+        "HEDGE_AUTO_REOPEN",
+        "HEDGE_AUTO_REOPEN_FAILED",
         "SPREAD_EST",
         "HEDGE_GATE",
         "HEDGE_THETA_LOG",
@@ -238,6 +240,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ADJUSTMENT_ABORT",
         "ORPHAN_BASKET",
         "HEDGE_ROLL_FORCED",
+        "HEDGE_AUTO_REOPEN_FAILED",
     ):
         bot_log.error(msg)
     elif event_type in (
@@ -258,6 +261,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_ROLL_PENDING",
         "HEDGE_ROLL_EXECUTE",
         "HEDGE_DTE_CONFIG_INVALID",
+        "HEDGE_AUTO_REOPEN",
     ):
         bot_log.warning(msg)
     elif event_type in (

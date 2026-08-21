@@ -75,6 +75,7 @@ class AutoTradeSettingsSchema(BaseModel):
     hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
     hedge_roll_dte: int = Field(default=10, ge=1, le=60)
     hedge_roll_hard_dte: int = Field(default=5, ge=1, le=60)
+    hedge_auto_reopen_after_roll: bool = True
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
     # Exit-spread estimation (AUTO from L2 / MANUAL / capped)
     spread_mode: str = "MANUAL"
@@ -312,6 +313,9 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "hedge_roll_hard_dte", None)
             if getattr(s, "hedge_roll_hard_dte", None) is not None
             else 5
+        ),
+        "hedge_auto_reopen_after_roll": bool(
+            getattr(s, "hedge_auto_reopen_after_roll", True)
         ),
         "hedge_target_multiple": float(
             getattr(s, "hedge_target_multiple", None)
@@ -609,6 +613,9 @@ async def update_auto_trade_settings(
     settings.hedge_fixed_sl_usd = float(payload.hedge_fixed_sl_usd)
     settings.hedge_roll_dte = int(payload.hedge_roll_dte)
     settings.hedge_roll_hard_dte = int(payload.hedge_roll_hard_dte)
+    settings.hedge_auto_reopen_after_roll = bool(
+        payload.hedge_auto_reopen_after_roll
+    )
     settings.hedge_target_multiple = float(payload.hedge_target_multiple)
     settings.spread_mode = str(payload.spread_mode or "MANUAL").upper().strip()
     settings.basket_exit_spread_pct = float(payload.basket_exit_spread_pct)
