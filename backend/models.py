@@ -363,6 +363,14 @@ class AutoTradeSettings(Base):
     hedge_target_multiple: Mapped[float] = mapped_column(
         Float, nullable=False, default=3.0
     )
+    # Expected monthly earnings as % of hedge entry cost (for target_usd)
+    hedge_expected_monthly_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, default=30.0
+    )
+    # Do not book target until held at least this many days (spread amortisation)
+    hedge_min_hold_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10
+    )
     # Exit-spread estimate: MANUAL default (AUTO under-estimates on thin books)
     spread_mode: Mapped[str] = mapped_column(
         String(20), nullable=False, default="MANUAL"

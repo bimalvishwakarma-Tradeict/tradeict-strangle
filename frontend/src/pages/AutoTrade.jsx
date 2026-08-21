@@ -120,6 +120,10 @@ function applyStatusToForm(data, setters) {
   setters.setHedgeFixedSlUsd(String(data.hedge_fixed_sl_usd ?? 2))
   setters.setHedgeSlFloorPct(String(data.hedge_sl_floor_pct ?? 25))
   setters.setHedgeTargetMultiple(String(data.hedge_target_multiple ?? 3))
+  setters.setHedgeExpectedMonthlyPct(
+    String(data.hedge_expected_monthly_pct ?? 30),
+  )
+  setters.setHedgeMinHoldDays(String(data.hedge_min_hold_days ?? 10))
   setters.setSpreadMode(
     String(data.spread_mode || 'MANUAL').toUpperCase() === 'AUTO'
       ? 'AUTO'
@@ -220,6 +224,8 @@ export default function AutoTrade() {
   const [hedgeFixedSlUsd, setHedgeFixedSlUsd] = useState('2')
   const [hedgeSlFloorPct, setHedgeSlFloorPct] = useState('25')
   const [hedgeTargetMultiple, setHedgeTargetMultiple] = useState('3')
+  const [hedgeExpectedMonthlyPct, setHedgeExpectedMonthlyPct] = useState('30')
+  const [hedgeMinHoldDays, setHedgeMinHoldDays] = useState('10')
   const [spreadMode, setSpreadMode] = useState('MANUAL')
   const [basketExitSpreadPct, setBasketExitSpreadPct] = useState('4')
   const [hedgeExitSpreadPct, setHedgeExitSpreadPct] = useState('4')
@@ -282,6 +288,8 @@ export default function AutoTrade() {
       setHedgeFixedSlUsd,
       setHedgeSlFloorPct,
       setHedgeTargetMultiple,
+      setHedgeExpectedMonthlyPct,
+      setHedgeMinHoldDays,
       setSpreadMode,
       setBasketExitSpreadPct,
       setHedgeExitSpreadPct,
@@ -569,6 +577,14 @@ export default function AutoTrade() {
       ),
       hedge_sl_floor_pct: Number(hedgeSlFloorPct),
       hedge_target_multiple: Number(hedgeTargetMultiple),
+      hedge_expected_monthly_pct: Math.min(
+        200,
+        Math.max(1, Number(hedgeExpectedMonthlyPct) || 30),
+      ),
+      hedge_min_hold_days: Math.min(
+        60,
+        Math.max(0, Number(hedgeMinHoldDays) || 10),
+      ),
       spread_mode: spreadMode === 'MANUAL' ? 'MANUAL' : 'AUTO',
       basket_exit_spread_pct: Number(basketExitSpreadPct),
       hedge_exit_spread_pct: Number(hedgeExitSpreadPct),
@@ -638,6 +654,28 @@ export default function AutoTrade() {
     }
     return null
   }, [hedgeTargetMultiple])
+
+  const hedgeExpectedMonthlyPctError = useMemo(() => {
+    const n = Number(hedgeExpectedMonthlyPct)
+    if (hedgeExpectedMonthlyPct === '' || Number.isNaN(n)) {
+      return 'Enter a number between 1 and 200'
+    }
+    if (n < 1 || n > 200) {
+      return 'Must be between 1 and 200'
+    }
+    return null
+  }, [hedgeExpectedMonthlyPct])
+
+  const hedgeMinHoldDaysError = useMemo(() => {
+    const n = Number(hedgeMinHoldDays)
+    if (hedgeMinHoldDays === '' || Number.isNaN(n)) {
+      return 'Enter a number between 0 and 60'
+    }
+    if (n < 0 || n > 60) {
+      return 'Must be between 0 and 60'
+    }
+    return null
+  }, [hedgeMinHoldDays])
 
   const minHedgeDteError = useMemo(() => {
     const n = Number(minHedgeDte)
@@ -791,6 +829,8 @@ export default function AutoTrade() {
     if (
       hedgeSlFloorPctError ||
       hedgeTargetMultipleError ||
+      hedgeExpectedMonthlyPctError ||
+      hedgeMinHoldDaysError ||
       minHedgeDteError ||
       hedgeRollDteError ||
       hedgeRollHardDteError ||
@@ -802,6 +842,8 @@ export default function AutoTrade() {
         message:
           hedgeSlFloorPctError ||
           hedgeTargetMultipleError ||
+          hedgeExpectedMonthlyPctError ||
+          hedgeMinHoldDaysError ||
           minHedgeDteError ||
           hedgeRollDteError ||
           hedgeRollHardDteError ||
@@ -831,6 +873,8 @@ export default function AutoTrade() {
     if (
       hedgeSlFloorPctError ||
       hedgeTargetMultipleError ||
+      hedgeExpectedMonthlyPctError ||
+      hedgeMinHoldDaysError ||
       minHedgeDteError ||
       hedgeRollDteError ||
       hedgeRollHardDteError ||
@@ -842,6 +886,8 @@ export default function AutoTrade() {
         message:
           hedgeSlFloorPctError ||
           hedgeTargetMultipleError ||
+          hedgeExpectedMonthlyPctError ||
+          hedgeMinHoldDaysError ||
           minHedgeDteError ||
           hedgeRollDteError ||
           hedgeRollHardDteError ||
@@ -1613,7 +1659,7 @@ export default function AutoTrade() {
             </span>
           </label>
           <label className="block text-sm text-gray-300">
-            Hedge target ($)
+            Hedge target ($) — legacy
             <input
               type="number"
               min={0.01}
@@ -1621,16 +1667,16 @@ export default function AutoTrade() {
               value={hedgeTargetUsd}
               onChange={(e) => setHedgeTargetUsd(e.target.value)}
               disabled={!hedgeEnabled}
-              placeholder="Required when ON"
+              placeholder="Optional"
               className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
             />
-            <span className="mt-1 block text-xs text-gray-500">
-              Default for the next hedge open only — edit a live hedge on the
-              Dashboard panel.
+            <span className="mt-1 block text-xs text-amber-500/90">
+              Legacy display only — not used by the live trigger. Live target =
+              multiple × expected monthly earnings on structure P&amp;L.
             </span>
           </label>
           <label className="block text-sm text-gray-300">
-            Hedge stop loss ($)
+            Hedge stop loss ($) — legacy
             <input
               type="number"
               min={0.01}
@@ -1638,12 +1684,12 @@ export default function AutoTrade() {
               value={hedgeStoplossUsd}
               onChange={(e) => setHedgeStoplossUsd(e.target.value)}
               disabled={!hedgeEnabled}
-              placeholder="Required when ON"
+              placeholder="Optional"
               className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
             />
-            <span className="mt-1 block text-xs text-gray-500">
-              Legacy per-hedge display default on open. Live trigger uses Fixed
-              SL + booked baskets below.
+            <span className="mt-1 block text-xs text-amber-500/90">
+              Legacy display only — not used by the live trigger. Live stop uses
+              Fixed SL + booked baskets below.
             </span>
           </label>
           <label className="block text-sm text-gray-300">
@@ -1691,6 +1737,33 @@ export default function AutoTrade() {
             )}
           </label>
           <label className="block text-sm text-gray-300">
+            Expected monthly earnings (%)
+            <input
+              type="number"
+              min={1}
+              max={200}
+              step={1}
+              value={hedgeExpectedMonthlyPct}
+              onChange={(e) => setHedgeExpectedMonthlyPct(e.target.value)}
+              disabled={!hedgeEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+                hedgeExpectedMonthlyPctError
+                  ? 'border-red-500'
+                  : 'border-gray-600'
+              }`}
+            />
+            {hedgeExpectedMonthlyPctError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {hedgeExpectedMonthlyPctError}
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                Assumed monthly return on hedge entry cost. Target USD =
+                multiple × entry_cost × this %.
+              </span>
+            )}
+          </label>
+          <label className="block text-sm text-gray-300">
             Hedge Target (x monthly)
             <input
               type="number"
@@ -1712,9 +1785,34 @@ export default function AutoTrade() {
               </span>
             ) : (
               <span className="mt-1 block text-xs text-gray-500">
-                Close the whole structure when profit reaches this multiple of
-                expected monthly earnings. Keep this large - a small target
-                forces frequent hedge rolls and spread eats the profit.
+                Close the whole structure when structure P&amp;L reaches this
+                multiple of expected monthly earnings. Keep this large — a small
+                target forces frequent hedge rolls and spread eats the profit.
+              </span>
+            )}
+          </label>
+          <label className="block text-sm text-gray-300">
+            Min hold days (target)
+            <input
+              type="number"
+              min={0}
+              max={60}
+              step={1}
+              value={hedgeMinHoldDays}
+              onChange={(e) => setHedgeMinHoldDays(e.target.value)}
+              disabled={!hedgeEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+                hedgeMinHoldDaysError ? 'border-red-500' : 'border-gray-600'
+              }`}
+            />
+            {hedgeMinHoldDaysError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {hedgeMinHoldDaysError}
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                Do not book a target close until the hedge has been held this
+                many days (amortises ~5% round-trip spread).
               </span>
             )}
           </label>

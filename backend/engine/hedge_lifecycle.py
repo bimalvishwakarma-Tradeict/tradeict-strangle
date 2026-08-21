@@ -53,6 +53,8 @@ LIVE_HEDGE_STATUSES = frozenset({"active", "pending_close"})
 _hedge_close_locks: dict[int, asyncio.Lock] = {}
 # Hedges that already fired HEDGE_SL — never re-evaluate SL for these ids
 _hedge_sl_fired: set[int] = set()
+# Hedges that already fired HEDGE_TARGET — never re-evaluate target for these ids
+_hedge_target_fired: set[int] = set()
 
 
 def _get_hedge_close_lock(hedge_id: int) -> asyncio.Lock:
@@ -62,6 +64,53 @@ def _get_hedge_close_lock(hedge_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _hedge_close_locks[hid] = lock
     return lock
+
+
+def compute_hedge_structure_target(
+    *,
+    entry_cost_usd: float,
+    expected_monthly_pct: float,
+    target_multiple: float,
+) -> dict[str, float]:
+    """
+    Live structure target from entry cost × expected monthly % × multiple.
+
+    target_usd = multiple * entry_cost * (expected_monthly_pct / 100)
+    """
+    cost = max(0.0, float(entry_cost_usd or 0.0))
+    monthly_pct = max(0.0, float(expected_monthly_pct or 0.0))
+    multiple = max(0.0, float(target_multiple or 0.0))
+    monthly_usd = cost * (monthly_pct / 100.0)
+    target_usd = multiple * monthly_usd
+    return {
+        "entry_cost_usd": float(cost),
+        "expected_monthly_pct": float(monthly_pct),
+        "monthly_usd": float(monthly_usd),
+        "multiple": float(multiple),
+        "target_usd": float(target_usd),
+    }
+
+
+def _hedge_days_held(hedge: HedgePosition) -> float:
+    """Fractional days since hedge.entry_time (UTC), or 0 if missing."""
+    if hedge.entry_time is None:
+        return 0.0
+    et = hedge.entry_time
+    if et.tzinfo is None:
+        et = et.replace(tzinfo=timezone.utc)
+    return max(
+        0.0,
+        (_utc_now() - et.astimezone(timezone.utc)).total_seconds() / 86400.0,
+    )
+
+
+def _hedge_entry_cost_usd(hedge: HedgePosition) -> float:
+    call_fill = float(hedge.call_fill_price or 0)
+    put_fill = float(hedge.put_fill_price or 0)
+    qty = max(1, int(hedge.quantity or 1))
+    if call_fill <= 0 or put_fill <= 0:
+        return 0.0
+    return float((call_fill + put_fill) * qty * CONTRACT_SIZE)
 
 
 def compute_hedge_sl_budget(
@@ -124,6 +173,7 @@ def _hedge_log(
     details: dict[str, Any],
     *,
     critical: bool = False,
+    warning: bool = False,
 ) -> None:
     """All hedge tags go through log_and_buffer → bot_activity.log."""
     try:
@@ -133,6 +183,8 @@ def _hedge_log(
     msg = f"[{event_type}] hedge_id={hedge_id} {details}"
     if critical:
         logger.critical(msg)
+    elif warning:
+        logger.warning(msg)
     else:
         logger.info(msg)
 
@@ -1905,7 +1957,6 @@ async def evaluate_and_maybe_close_hedge(
     call_entry = float(hedge.call_fill_price or 0)
     put_entry = float(hedge.put_fill_price or 0)
     qty = max(1, int(hedge.quantity or 1))
-    target = float(hedge.target_usd or 0)
     stoploss = float(hedge.stoploss_usd or 0)
 
     if call_entry <= 0 or put_entry <= 0 or not call_sym or not put_sym:
@@ -1994,12 +2045,98 @@ async def evaluate_and_maybe_close_hedge(
         hedge.expiry_date
         and (hours_left == 0 or is_pre_expiry_window(hedge.expiry_date))
     )
-    will_close_target = bool(target > 0 and net >= target)
 
-    # --- Hedge SL: cumulative-basket budget (not raw stoploss_usd) ---
+    # --- Settings: structure target + hedge SL budget ---
     from backend.database import get_or_create_auto_settings
 
     settings = get_or_create_auto_settings(db)
+    entry_cost = _hedge_entry_cost_usd(hedge)
+    monthly_pct = float(
+        getattr(settings, "hedge_expected_monthly_pct", None)
+        if getattr(settings, "hedge_expected_monthly_pct", None) is not None
+        else 30.0
+    )
+    monthly_pct = max(1.0, min(200.0, monthly_pct))
+    target_multiple = float(
+        getattr(settings, "hedge_target_multiple", None)
+        if getattr(settings, "hedge_target_multiple", None) is not None
+        else 3.0
+    )
+    min_hold = int(
+        getattr(settings, "hedge_min_hold_days", None)
+        if getattr(settings, "hedge_min_hold_days", None) is not None
+        else 10
+    )
+    min_hold = max(0, min(60, min_hold))
+    days_held = _hedge_days_held(hedge)
+    structure_pnl = float(getattr(hedge, "structure_pnl", 0.0) or 0.0)
+    tgt = compute_hedge_structure_target(
+        entry_cost_usd=entry_cost,
+        expected_monthly_pct=monthly_pct,
+        target_multiple=target_multiple,
+    )
+    live_target_usd = float(tgt["target_usd"])
+    monthly_usd = float(tgt["monthly_usd"])
+    pct_to_target = (
+        (structure_pnl / live_target_usd * 100.0) if live_target_usd > 0 else 0.0
+    )
+
+    target_already_fired = hid in _hedge_target_fired
+    pnl_hits_target = bool(
+        live_target_usd > 0 and structure_pnl >= live_target_usd
+    )
+    hold_ok = bool(days_held >= float(min_hold))
+    will_close_target = bool(
+        (not target_already_fired) and pnl_hits_target and hold_ok
+    )
+
+    _hedge_log(
+        "HEDGE_TARGET_CHECK",
+        hid,
+        {
+            "hedge": hid,
+            "structure_pnl": round(structure_pnl, 6),
+            "target_usd": round(live_target_usd, 6),
+            "entry_cost": round(entry_cost, 6),
+            "monthly_usd": round(monthly_usd, 6),
+            "multiple": round(target_multiple, 4),
+            "days_held": round(days_held, 4),
+            "min_hold": min_hold,
+            "pct_to_target": round(pct_to_target, 2),
+            "summary": (
+                f"[HEDGE_TARGET_CHECK] hedge={hid} | "
+                f"structure_pnl={round(structure_pnl, 6)} | "
+                f"target_usd={round(live_target_usd, 6)} | "
+                f"entry_cost={round(entry_cost, 6)} | "
+                f"monthly_usd={round(monthly_usd, 6)} | "
+                f"multiple={round(target_multiple, 4)} | "
+                f"days_held={round(days_held, 4)} | "
+                f"min_hold={min_hold} | "
+                f"pct_to_target={round(pct_to_target, 2)}"
+            ),
+        },
+    )
+    if pnl_hits_target and not hold_ok and not target_already_fired:
+        _hedge_log(
+            "HEDGE_TARGET_HELD",
+            hid,
+            {
+                "hedge": hid,
+                "structure_pnl": round(structure_pnl, 6),
+                "target_usd": round(live_target_usd, 6),
+                "days_held": round(days_held, 4),
+                "min_hold": min_hold,
+                "summary": (
+                    f"[HEDGE_TARGET_HELD] hedge={hid} | "
+                    f"structure_pnl={round(structure_pnl, 6)} | "
+                    f"target_usd={round(live_target_usd, 6)} | "
+                    f"days_held={round(days_held, 4)} | "
+                    f"min_hold={min_hold}"
+                ),
+            },
+        )
+
+    # --- Hedge SL: cumulative-basket budget (not raw stoploss_usd) ---
     fixed_sl = float(
         getattr(settings, "hedge_fixed_sl_usd", None)
         if getattr(settings, "hedge_fixed_sl_usd", None) is not None
@@ -2012,7 +2149,6 @@ async def evaluate_and_maybe_close_hedge(
     )
     cum_closed = float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0)
     gross_for_sl = float(getattr(hedge, "hedge_gross_for_sl", 0.0) or 0.0)
-    structure_pnl = float(getattr(hedge, "structure_pnl", 0.0) or 0.0)
     sl_parts = compute_hedge_sl_budget(fixed_sl, floor_pct, cum_closed)
     budget = float(sl_parts["budget"])
     room = budget + gross_for_sl  # positive = headroom remaining
@@ -2045,7 +2181,6 @@ async def evaluate_and_maybe_close_hedge(
         (not already_fired) and budget > 0 and gross_for_sl <= -budget
     )
 
-    pct_to_target = (net / target * 100.0) if target > 0 else 0.0
     # How close gross_for_sl is to the stop line (−budget)
     pct_to_stop = (
         (-gross_for_sl / budget * 100.0) if budget > 0 else 0.0
@@ -2063,7 +2198,8 @@ async def evaluate_and_maybe_close_hedge(
             "net": round(net, 6),
             "entry_fees": round(entry_fees, 6),
             "est_exit_fees": round(est_exit, 6),
-            "target_usd": target,
+            "target_usd": round(live_target_usd, 6),
+            "structure_pnl": round(structure_pnl, 6),
             "stoploss_usd": stoploss,
             "sl_budget": round(budget, 6),
             "hedge_gross_for_sl": round(gross_for_sl, 6),
@@ -2074,12 +2210,31 @@ async def evaluate_and_maybe_close_hedge(
             "will_close_stop": will_close_stop,
             "will_close_expiry": will_close_expiry,
             "sl_already_fired": already_fired,
+            "target_already_fired": target_already_fired,
         },
     )
 
     close_reason: str | None = None
     if will_close_target:
         close_reason = "HEDGE_TARGET"
+        _hedge_target_fired.add(hid)
+        _hedge_log(
+            "HEDGE_TARGET_FIRE",
+            hid,
+            {
+                "hedge": hid,
+                "structure_pnl": round(structure_pnl, 6),
+                "target_usd": round(live_target_usd, 6),
+                "days_held": round(days_held, 4),
+                "summary": (
+                    f"[HEDGE_TARGET_FIRE] hedge={hid} | "
+                    f"structure_pnl={round(structure_pnl, 6)} | "
+                    f"target_usd={round(live_target_usd, 6)} | "
+                    f"days_held={round(days_held, 4)}"
+                ),
+            },
+            warning=True,
+        )
     elif will_close_stop:
         close_reason = "HEDGE_STOPLOSS"
         _hedge_sl_fired.add(hid)
@@ -2518,6 +2673,47 @@ async def build_active_hedge_live(
         else None
     )
 
+    # Live structure target (multiple × expected monthly earnings)
+    from backend.database import get_or_create_auto_settings
+
+    settings = get_or_create_auto_settings(db)
+    entry_cost_live = _hedge_entry_cost_usd(hedge)
+    if entry_cost_live <= 0 and cost_usd is not None:
+        try:
+            entry_cost_live = float(cost_usd)
+        except (TypeError, ValueError):
+            entry_cost_live = 0.0
+    monthly_pct = float(
+        getattr(settings, "hedge_expected_monthly_pct", None)
+        if getattr(settings, "hedge_expected_monthly_pct", None) is not None
+        else 30.0
+    )
+    monthly_pct = max(1.0, min(200.0, monthly_pct))
+    target_multiple = float(
+        getattr(settings, "hedge_target_multiple", None)
+        if getattr(settings, "hedge_target_multiple", None) is not None
+        else 3.0
+    )
+    min_hold = int(
+        getattr(settings, "hedge_min_hold_days", None)
+        if getattr(settings, "hedge_min_hold_days", None) is not None
+        else 10
+    )
+    min_hold = max(0, min(60, min_hold))
+    days_held = round(_hedge_days_held(hedge), 4)
+    tgt = compute_hedge_structure_target(
+        entry_cost_usd=entry_cost_live,
+        expected_monthly_pct=monthly_pct,
+        target_multiple=target_multiple,
+    )
+    live_target_usd = float(tgt["target_usd"])
+    structure_pnl_live = float(getattr(hedge, "structure_pnl", 0.0) or 0.0)
+    pct_to_target = (
+        round(structure_pnl_live / live_target_usd * 100.0, 2)
+        if live_target_usd > 0
+        else None
+    )
+
     today_theta: float | None = None
     today_theta_usd: float | None = None
     current_call_iv: float | None = None
@@ -2602,10 +2798,16 @@ async def build_active_hedge_live(
         "theta_accrued_is_estimate": True,
         "theta_accrued_note": accrual.get("theta_accrued_note"),
         "days_logged": accrual["days_logged"],
-        "target_usd": target if target > 0 else hedge.target_usd,
+        "target_usd": round(live_target_usd, 4) if live_target_usd > 0 else None,
+        "legacy_target_usd": target if target > 0 else hedge.target_usd,
         "stoploss_usd": stoploss if stoploss > 0 else hedge.stoploss_usd,
         "pct_to_target": pct_to_target,
         "pct_to_stop": pct_to_stop,
+        "hedge_target_multiple": round(target_multiple, 4),
+        "hedge_expected_monthly_pct": round(monthly_pct, 4),
+        "expected_monthly_usd": round(float(tgt["monthly_usd"]), 4),
+        "hedge_min_hold_days": min_hold,
+        "days_held": days_held,
         "entry_call_iv": hedge.entry_call_iv,
         "entry_put_iv": hedge.entry_put_iv,
         "current_call_iv": current_call_iv,

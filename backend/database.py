@@ -773,6 +773,8 @@ def _migrate_schema() -> None:
             ("hedge_roll_hard_dte", "INTEGER NOT NULL DEFAULT 5"),
             ("hedge_auto_reopen_after_roll", "BOOLEAN NOT NULL DEFAULT 1"),
             ("hedge_target_multiple", "FLOAT NOT NULL DEFAULT 3.0"),
+            ("hedge_expected_monthly_pct", "FLOAT NOT NULL DEFAULT 30.0"),
+            ("hedge_min_hold_days", "INTEGER NOT NULL DEFAULT 10"),
             ("spread_mode", "VARCHAR(20) NOT NULL DEFAULT 'MANUAL'"),
             ("basket_exit_spread_pct", "FLOAT NOT NULL DEFAULT 4.0"),
             ("hedge_exit_spread_pct", "FLOAT NOT NULL DEFAULT 4.0"),

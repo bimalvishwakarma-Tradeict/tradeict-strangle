@@ -77,6 +77,8 @@ class AutoTradeSettingsSchema(BaseModel):
     hedge_roll_hard_dte: int = Field(default=5, ge=1, le=60)
     hedge_auto_reopen_after_roll: bool = True
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
+    hedge_expected_monthly_pct: float = Field(default=30.0, ge=1, le=200)
+    hedge_min_hold_days: int = Field(default=10, ge=0, le=60)
     # Exit-spread estimation (AUTO from L2 / MANUAL / capped)
     spread_mode: str = "MANUAL"
     basket_exit_spread_pct: float = Field(default=4.0, ge=0, le=20)
@@ -172,14 +174,8 @@ class AutoTradeSettingsSchema(BaseModel):
             )
         if not self.hedge_enabled:
             return self
-        if self.hedge_target_usd is None or float(self.hedge_target_usd) <= 0:
-            raise ValueError(
-                "hedge_target_usd must be > 0 when hedge_enabled is True"
-            )
-        if self.hedge_stoploss_usd is None or float(self.hedge_stoploss_usd) <= 0:
-            raise ValueError(
-                "hedge_stoploss_usd must be > 0 when hedge_enabled is True"
-            )
+        # hedge_target_usd / hedge_stoploss_usd are legacy display defaults only —
+        # live triggers use structure multiple + fixed SL budget.
         return self
 
 
@@ -321,6 +317,16 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "hedge_target_multiple", None)
             if getattr(s, "hedge_target_multiple", None) is not None
             else 3.0
+        ),
+        "hedge_expected_monthly_pct": float(
+            getattr(s, "hedge_expected_monthly_pct", None)
+            if getattr(s, "hedge_expected_monthly_pct", None) is not None
+            else 30.0
+        ),
+        "hedge_min_hold_days": int(
+            getattr(s, "hedge_min_hold_days", None)
+            if getattr(s, "hedge_min_hold_days", None) is not None
+            else 10
         ),
         "spread_mode": str(getattr(s, "spread_mode", None) or "MANUAL").upper(),
         "basket_exit_spread_pct": float(
@@ -617,6 +623,10 @@ async def update_auto_trade_settings(
         payload.hedge_auto_reopen_after_roll
     )
     settings.hedge_target_multiple = float(payload.hedge_target_multiple)
+    settings.hedge_expected_monthly_pct = float(
+        payload.hedge_expected_monthly_pct
+    )
+    settings.hedge_min_hold_days = int(payload.hedge_min_hold_days)
     settings.spread_mode = str(payload.spread_mode or "MANUAL").upper().strip()
     settings.basket_exit_spread_pct = float(payload.basket_exit_spread_pct)
     settings.hedge_exit_spread_pct = float(payload.hedge_exit_spread_pct)

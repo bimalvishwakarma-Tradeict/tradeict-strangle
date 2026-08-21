@@ -291,25 +291,25 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
         </div>
 
         <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-gray-800 pt-3 text-xs text-gray-400">
-          <button
-            type="button"
-            onClick={() => openEdit('target')}
-            className="rounded-md border border-transparent px-1.5 py-0.5 text-left hover:border-gray-600 hover:bg-gray-800/80"
-            title="Edit target"
+          <div
+            className="rounded-md px-1.5 py-0.5 text-left"
+            title="Live target = multiple × expected monthly on structure P&L"
           >
-            Target{' '}
+            Target:{' '}
             <span className="text-green-400">
               +${fmtMoney(hedge.target_usd)}
+            </span>
+            <span className="ml-1 text-gray-500">
+              ({fmtMoney(hedge.hedge_target_multiple ?? 3, 1)}x monthly, held{' '}
+              {fmtMoney(hedge.days_held ?? hedge.days_since_entry ?? 0, 0)}/
+              {hedge.hedge_min_hold_days ?? 10}d)
             </span>
             {hedge.pct_to_target != null && (
               <span className="ml-1 text-gray-500">
                 ({fmtMoney(hedge.pct_to_target, 1)}%)
               </span>
             )}
-            <span className="ml-1 text-[10px] uppercase text-gray-600">
-              edit
-            </span>
-          </button>
+          </div>
           <div
             className="rounded-md px-1.5 py-0.5 text-left"
             title="Live SL budget = max(floor, fixed SL + booked basket P&L)"
