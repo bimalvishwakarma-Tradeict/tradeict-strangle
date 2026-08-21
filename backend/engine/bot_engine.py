@@ -392,6 +392,142 @@ class BotEngine:
                 "Hedge monitor cycle failed: %s", exc, exc_info=True
             )
 
+    @staticmethod
+    def _hedge_status_leaves_basket_orphan(status: str | None) -> bool:
+        """
+        True when a linked hedge is no longer protecting its baskets.
+
+        Safe (not orphan): active, pending_close (future roll — task 2C).
+        Orphan: closed / error / exit_failed / partial / unknown / missing.
+        """
+        s = str(status or "").lower().strip()
+        if s in {"active", "pending_close"}:
+            return False
+        return True
+
+    async def _sweep_orphan_baskets(self) -> None:
+        """
+        Close active baskets whose linked hedge is inactive or missing.
+
+        Complements HEDGE_CASCADE (normal hedge-close path). Runs every
+        monitor cycle regardless of auto-trade enabled.
+        """
+        from backend.models import HedgePosition
+
+        try:
+            with self.db_factory() as db:
+                candidates = (
+                    db.query(Trade)
+                    .filter(
+                        Trade.status == TradeStatus.ACTIVE.value,
+                        Trade.hedge_position_id.isnot(None),
+                    )
+                    .order_by(Trade.id.asc())
+                    .all()
+                )
+                if not candidates:
+                    return
+
+                hedge_ids = {
+                    int(t.hedge_position_id)
+                    for t in candidates
+                    if t.hedge_position_id is not None
+                }
+                hedges = (
+                    db.query(HedgePosition)
+                    .filter(HedgePosition.id.in_(list(hedge_ids)))
+                    .all()
+                    if hedge_ids
+                    else []
+                )
+                hedge_by_id = {int(h.id): h for h in hedges}
+
+                now = datetime.now(timezone.utc)
+                for trade in candidates:
+                    hid = int(trade.hedge_position_id)
+                    hedge = hedge_by_id.get(hid)
+                    hedge_status = (
+                        None if hedge is None else str(hedge.status or "")
+                    )
+                    if hedge is not None and not self._hedge_status_leaves_basket_orphan(
+                        hedge_status
+                    ):
+                        continue
+
+                    exit_time = (
+                        None if hedge is None else getattr(hedge, "exit_time", None)
+                    )
+                    orphan_sec = 0
+                    if exit_time is not None:
+                        et = exit_time
+                        if et.tzinfo is None:
+                            et = et.replace(tzinfo=timezone.utc)
+                        orphan_sec = max(
+                            0,
+                            int((now - et.astimezone(timezone.utc)).total_seconds()),
+                        )
+
+                    tid = int(trade.id)
+                    log_and_buffer(
+                        "ORPHAN_BASKET",
+                        tid,
+                        {
+                            "trade": tid,
+                            "hedge": hid,
+                            "hedge_status": hedge_status or "missing",
+                            "hedge_exit_time": (
+                                exit_time.isoformat()
+                                if exit_time is not None
+                                else None
+                            ),
+                            "orphan_duration_sec": orphan_sec,
+                            "summary": (
+                                f"[ORPHAN_BASKET] trade={tid} | hedge={hid} | "
+                                f"hedge_status={hedge_status or 'missing'} | "
+                                f"hedge_exit_time="
+                                f"{exit_time.isoformat() if exit_time else None} | "
+                                f"orphan_duration_sec={orphan_sec}"
+                            ),
+                        },
+                    )
+                    logger.critical(
+                        "[ORPHAN_BASKET] trade=%s hedge=%s status=%s "
+                        "orphan_duration_sec=%s — closing",
+                        tid,
+                        hid,
+                        hedge_status or "missing",
+                        orphan_sec,
+                    )
+                    try:
+                        await self.close_master_trade(
+                            trade_id=tid,
+                            reason=ExitReason.ORPHAN_NO_HEDGE.value,
+                            db=db,
+                            trade_state=self.position_tracker.get(tid),
+                        )
+                        await ws_manager.broadcast(
+                            {
+                                "type": "TRADE_CLOSED",
+                                "trade_id": tid,
+                                "reason": ExitReason.ORPHAN_NO_HEDGE.value,
+                                "message": (
+                                    f"Basket #{tid} closed — linked hedge "
+                                    f"#{hid} is {hedge_status or 'missing'}"
+                                ),
+                            }
+                        )
+                    except Exception as close_exc:
+                        logger.critical(
+                            "[ORPHAN_BASKET] close failed trade=%s: %s",
+                            tid,
+                            close_exc,
+                            exc_info=True,
+                        )
+        except Exception as exc:
+            logger.critical(
+                "Orphan basket sweep failed: %s", exc, exc_info=True
+            )
+
     async def _get_premium(self, symbol: str) -> float:
         """
         Short-exit premium = Best Offer (L2/ticker ask).
@@ -526,6 +662,10 @@ class BotEngine:
         # Hedge monitor: independent of baskets — runs even when tracker is empty,
         # and is never skipped by settling windows or the is_adjusting guard.
         await self._monitor_active_hedges()
+
+        # Orphan baskets: linked hedge no longer active (covers failed cascade,
+        # exchange manual close, crash mid-close). Runs even if auto-trade is off.
+        await self._sweep_orphan_baskets()
 
         count = len(self.position_tracker.get_all_active())
         if self._last_trade_count != count:

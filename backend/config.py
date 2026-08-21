@@ -93,3 +93,5 @@ class ExitReason(str, Enum):
     HEDGE_TARGET = "HEDGE_TARGET"
     HEDGE_EXPIRY = "HEDGE_EXPIRY"
     HEDGE_MANUAL = "HEDGE_MANUAL"
+    # Active basket whose linked hedge is gone / inactive
+    ORPHAN_NO_HEDGE = "ORPHAN_NO_HEDGE"

@@ -555,6 +555,40 @@ class AutoTradeEngine:
             if hedge_position_id is None:
                 return
 
+            # Preventive: never place a basket without a live active hedge
+            from backend.engine.hedge_lifecycle import get_active_hedge
+
+            active_hedge = get_active_hedge(
+                db,
+                account_id=int(account.id),
+                underlying=str(underlying),
+            )
+            if (
+                active_hedge is None
+                or int(active_hedge.id) != int(hedge_position_id)
+                or str(active_hedge.status or "").lower().strip() != "active"
+            ):
+                log_and_buffer(
+                    "ENTRY_GUARD_BLOCK",
+                    0,
+                    {
+                        "source": "auto",
+                        "guard": "no_active_hedge",
+                        "underlying": underlying,
+                        "hedge_position_id": hedge_position_id,
+                        "hedge_status": (
+                            None
+                            if active_hedge is None
+                            else str(active_hedge.status or "")
+                        ),
+                    },
+                )
+                logger.error(
+                    "[ENTRY_GUARD_BLOCK] guard=no_active_hedge | underlying=%s",
+                    underlying,
+                )
+                return
+
         try:
             expiry_str = expiry_date.isoformat()
             logger.info("Auto trade: expiry=%s", expiry_str)

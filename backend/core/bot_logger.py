@@ -56,6 +56,7 @@ _IMPORTANT_EVENTS = frozenset(
         "ORPHAN_DETECTED",
         "ORPHAN_AUTO_CLOSED",
         "ORPHAN_SL_CANCELLED",
+        "ORPHAN_BASKET",
         "ENTRY_SPREAD_RESET",
         "PARTIAL_ENTRY_CLEANUP",
         "PARTIAL_ENTRY_CLEANUP_FAILED",
@@ -230,6 +231,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_GATE_BLOCK",
         "HEDGE_GATE_BACKOFF",
         "ADJUSTMENT_ABORT",
+        "ORPHAN_BASKET",
     ):
         bot_log.error(msg)
     elif event_type in (
