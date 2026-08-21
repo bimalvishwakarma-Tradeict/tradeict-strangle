@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt, encrypt
-from backend.core.time_utils import get_ist_now
+from backend.core.time_utils import get_utc_now
 from backend.database import get_db, get_or_create_auto_settings, get_usd_inr_rate
 from backend.models import Account, SlaveAccount, SlaveTrade, Trade
 from backend.schemas import (
@@ -113,7 +113,7 @@ async def create_slave_account(
 
     rate = get_usd_inr_rate(db)
     bal_usd = float(wallet.get("balance_usdt", 0.0) or 0.0)
-    now = get_ist_now()
+    now = get_utc_now()
     slave = SlaveAccount(
         name=payload.name.strip(),
         api_key_encrypted=encrypt(payload.api_key.strip()),
@@ -166,7 +166,7 @@ async def test_slave_account(
         except DeltaAPIError as exc:
             slave.connection_status = "error"
             slave.last_error = str(exc)[:500]
-            slave.updated_at = get_ist_now()
+            slave.updated_at = get_utc_now()
             db.commit()
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -175,9 +175,9 @@ async def test_slave_account(
         slave.balance_usd = bal_usd
         slave.balance_inr = round(bal_usd * rate, 2)
         slave.connection_status = "connected"
-        slave.last_connected_at = get_ist_now()
+        slave.last_connected_at = get_utc_now()
         slave.last_error = None
-        slave.updated_at = get_ist_now()
+        slave.updated_at = get_utc_now()
         db.commit()
 
         return {
@@ -272,7 +272,7 @@ async def update_slave_account(
             except DeltaAPIError as exc:
                 slave.connection_status = "error"
                 slave.last_error = str(exc)[:500]
-                slave.updated_at = get_ist_now()
+                slave.updated_at = get_utc_now()
                 db.commit()
                 raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -281,12 +281,12 @@ async def update_slave_account(
             slave.balance_usd = bal_usd
             slave.balance_inr = round(bal_usd * rate, 2)
             slave.connection_status = "connected"
-            slave.last_connected_at = get_ist_now()
+            slave.last_connected_at = get_utc_now()
             slave.last_error = None
         finally:
             await client.close()
 
-    slave.updated_at = get_ist_now()
+    slave.updated_at = get_utc_now()
     db.commit()
     db.refresh(slave)
     return _to_response(slave, db, get_usd_inr_rate(db))
@@ -328,7 +328,7 @@ async def toggle_slave_account(
         raise HTTPException(status_code=404, detail=f"Slave {slave_id} not found")
 
     slave.is_active = not bool(slave.is_active)
-    slave.updated_at = get_ist_now()
+    slave.updated_at = get_utc_now()
     db.commit()
     msg = "enabled" if slave.is_active else "paused"
     return {
@@ -578,9 +578,9 @@ async def copy_master_trade_to_slave(
         db.add(slave_trade)
 
         slave.connection_status = "connected"
-        slave.last_connected_at = get_ist_now()
+        slave.last_connected_at = get_utc_now()
         slave.last_error = None
-        slave.updated_at = get_ist_now()
+        slave.updated_at = get_utc_now()
         db.commit()
 
         logger.info(
@@ -618,7 +618,7 @@ async def copy_master_trade_to_slave(
         )
         slave.last_error = str(exc)[:500]
         slave.connection_status = "error"
-        slave.updated_at = get_ist_now()
+        slave.updated_at = get_utc_now()
         try:
             db.commit()
         except Exception:
@@ -837,7 +837,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                     slave.balance_usd = bal_usd
                     slave.balance_inr = round(bal_usd * rate, 2)
                     slave.connection_status = "connected"
-                    slave.last_connected_at = get_ist_now()
+                    slave.last_connected_at = get_utc_now()
                     slave.last_error = None
                     db.commit()
                 finally:
@@ -903,7 +903,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             # Persist net_mtm to DB so history is meaningful
             try:
                 active_st.last_mtm = slave_net_mtm
-                active_st.last_updated = get_ist_now()
+                active_st.last_updated = get_utc_now()
                 db.commit()
             except Exception as exc:
                 logger.warning(

@@ -34,6 +34,7 @@ from backend.core.time_utils import (
     get_hours_to_expiry,
     get_ist_now,
     get_settling_info_for_trade,
+    get_utc_now,
 )
 from backend.core.ws_manager import ws_manager
 from backend.database import SessionLocal
@@ -442,7 +443,7 @@ class BotEngine:
                 )
                 hedge_by_id = {int(h.id): h for h in hedges}
 
-                now = datetime.now(timezone.utc)
+                now = get_utc_now()
                 for trade in candidates:
                     hid = int(trade.hedge_position_id)
                     hedge = hedge_by_id.get(hid)
@@ -1066,7 +1067,7 @@ class BotEngine:
             resolve_external_exit_fill,
         )
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = get_utc_now()
         closed_n = 0
 
         with self.db_factory() as db:
@@ -1097,7 +1098,7 @@ class BotEngine:
                     )
                 else:
                     leg.status = "closed"
-                    leg.exit_time = get_ist_now()
+                    leg.exit_time = get_utc_now()
                     leg.exit_premium = exit_px
                 closed_n += 1
 
@@ -1230,7 +1231,7 @@ class BotEngine:
             resolve_external_exit_fill,
         )
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = get_utc_now()
         close_ok = False
         filled = 0.0
         result: Any = None
@@ -1378,7 +1379,7 @@ class BotEngine:
                     )
                 else:
                     leftover.status = "closed"
-                    leftover.exit_time = get_ist_now()
+                    leftover.exit_time = get_utc_now()
                     leftover.exit_premium = exit_px
 
             if trade is not None:
@@ -2366,7 +2367,7 @@ class BotEngine:
             )
 
             trade_row.status = status
-            trade_row.exit_time = get_ist_now()
+            trade_row.exit_time = get_utc_now()
             trade_row.exit_reason = reason
             final_pnl = recompute_trade_realized_pnl(db, trade_row)
             legs_for_sanity = (
@@ -3011,7 +3012,7 @@ class BotEngine:
 
         # Step 6: Update DB — book closes for all tracked legs
         status = self._status_for_reason(reason)
-        now_utc = datetime.now(timezone.utc)
+        now_utc = get_utc_now()
         call_fill = 0.0
         put_fill = 0.0
         call_close = None
@@ -3159,7 +3160,7 @@ class BotEngine:
             trade_row.conversion_triggered_leg = None
 
             trade_row.status = status
-            trade_row.exit_time = get_ist_now()
+            trade_row.exit_time = get_utc_now()
             trade_row.exit_reason = reason
             # Single source of truth: sum of closed legs (not incremental paths)
             final_pnl = recompute_trade_realized_pnl(exit_db, trade_row)
@@ -3547,7 +3548,7 @@ class BotEngine:
                         hedge_close_success = True
                         hedge_close_price = float(close_res.filled_price or 0)
                         hedge_leg.status = "closed"
-                        hedge_leg.exit_time = datetime.now(timezone.utc)
+                        hedge_leg.exit_time = get_utc_now()
                         hedge_leg.exit_premium = hedge_close_price
                         if close_res.order_id is not None:
                             hedge_leg.exit_order_id = str(close_res.order_id)
@@ -4333,7 +4334,7 @@ class BotEngine:
             except Exception:
                 pass
             secs = max(0, min(300, secs))
-            until = datetime.now(timezone.utc) + timedelta(seconds=secs)
+            until = get_utc_now() + timedelta(seconds=secs)
             row = db.query(Trade).filter(Trade.id == trade_state.trade_id).first()
             if row is not None:
                 row.adjust_settling_until = until

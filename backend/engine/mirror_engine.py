@@ -17,7 +17,7 @@ from backend.core.bot_logger import log_and_buffer
 from backend.core.delta_client import DeltaClient
 from backend.core.encryption import decrypt
 from backend.core.fees import compute_entry_spread_usd
-from backend.core.time_utils import get_ist_now
+from backend.core.time_utils import get_utc_now
 from backend.database import SessionLocal, get_active_slave_accounts
 from backend.models import SlaveAccount, SlaveHedgePosition, SlaveTrade, Trade
 from backend.config import MAX_SLAVE_QTY, OPTIONS_CONTRACT_VALUE, ExitReason, TradeStatus
@@ -542,7 +542,7 @@ class MirrorEngine:
                 allow_virtual=False,
             )
             st.last_error = note[:500]
-            st.last_updated = get_ist_now()
+            st.last_updated = get_utc_now()
 
         db.commit()
         return "cleared"
@@ -1022,7 +1022,7 @@ class MirrorEngine:
                             "blocked_foreign_position — not auto-closing "
                             "user-owned positions"
                         )[:500]
-                        slave.updated_at = get_ist_now()
+                        slave.updated_at = get_utc_now()
                         db.commit()
                         return
                     if resolve == "failed":
@@ -1040,7 +1040,7 @@ class MirrorEngine:
                         db.add(slave_trade)
                         slave.connection_status = "error"
                         slave.last_error = "conflict_close_failed"[:500]
-                        slave.updated_at = get_ist_now()
+                        slave.updated_at = get_utc_now()
                         db.commit()
                         return
                     # cleared — continue with entry
@@ -1256,8 +1256,8 @@ class MirrorEngine:
             else:
                 slave.connection_status = "error"
                 slave.last_error = last_error
-            slave.last_connected_at = get_ist_now()
-            slave.updated_at = get_ist_now()
+            slave.last_connected_at = get_utc_now()
+            slave.updated_at = get_utc_now()
             db.commit()
 
             self._log_slave_trade_detail(
@@ -1292,7 +1292,7 @@ class MirrorEngine:
                 pass
             slave.connection_status = "error"
             slave.last_error = str(exc)[:500]
-            slave.updated_at = get_ist_now()
+            slave.updated_at = get_utc_now()
             failed_trade = SlaveTrade(
                 slave_account_id=int(slave.id),
                 master_trade_id=int(master_trade_id),
@@ -1584,7 +1584,7 @@ class MirrorEngine:
                     slave_trade.error_count = (
                         int(slave_trade.error_count or 0) + 1
                     )
-                    slave_trade.last_updated = get_ist_now()
+                    slave_trade.last_updated = get_utc_now()
                     slave.connection_status = "error"
                     slave.last_error = msg[:500]
                     db.commit()
@@ -1688,7 +1688,7 @@ class MirrorEngine:
                 slave_trade.error_count = (
                     int(slave_trade.error_count or 0) + 1
                 )
-                slave_trade.last_updated = get_ist_now()
+                slave_trade.last_updated = get_utc_now()
                 if leg == "call":
                     slave_trade.call_order_id = new_order_id or None
                     slave_trade.call_product_id = new_pid
@@ -1729,10 +1729,10 @@ class MirrorEngine:
             slave_trade.actual_quantity = entry_qty
             slave_trade.status = "active"
             slave_trade.last_error = None
-            slave_trade.last_updated = get_ist_now()
+            slave_trade.last_updated = get_utc_now()
             slave.last_error = None
             slave.connection_status = "connected"
-            slave.last_connected_at = get_ist_now()
+            slave.last_connected_at = get_utc_now()
             db.commit()
             logger.info(
                 "✅ Slave '%s' adjustment mirrored (atomic verify OK)",
@@ -1759,7 +1759,7 @@ class MirrorEngine:
                 slave_trade.error_count = (
                     int(slave_trade.error_count or 0) + 1
                 )
-                slave_trade.last_updated = get_ist_now()
+                slave_trade.last_updated = get_utc_now()
                 slave.connection_status = "error"
                 slave.last_error = str(exc)[:500]
                 db.commit()
@@ -1893,7 +1893,7 @@ class MirrorEngine:
 
                     slave.last_error = None
                     slave.connection_status = "connected"
-                    slave.last_connected_at = get_ist_now()
+                    slave.last_connected_at = get_utc_now()
                     db.commit()
                     logger.info(
                         "✅ Slave '%s' conversion mirrored (hedge + %s replace) "
@@ -2335,7 +2335,7 @@ class MirrorEngine:
                 put_symbol=put_symbol or None,
                 put_order_id="VIRTUAL",
                 put_fill_price=float(master_put_fill or 0) or None,
-                entry_time=get_ist_now(),
+                entry_time=get_utc_now(),
                 target_usd=float(target_usd) if target_usd is not None else None,
                 stoploss_usd=(
                     float(stoploss_usd) if stoploss_usd is not None else None
@@ -2550,7 +2550,7 @@ class MirrorEngine:
                     put_product_id=int(put_pid),
                     put_symbol=put_symbol or None,
                     put_order_id=put_order_id,
-                    entry_time=get_ist_now(),
+                    entry_time=get_utc_now(),
                     entry_spread_usd=float(entry_spread_usd),
                     last_error=(
                         f"put_failed:{put_fail_reason}; "
@@ -2583,7 +2583,7 @@ class MirrorEngine:
                 put_order_id=put_order_id,
                 put_fill_price=put_fill if put_fill > 0 else None,
                 put_entry_fee_usd=put_fee if put_fee > 0 else None,
-                entry_time=get_ist_now(),
+                entry_time=get_utc_now(),
                 target_usd=float(target_usd) if target_usd is not None else None,
                 stoploss_usd=(
                     float(stoploss_usd) if stoploss_usd is not None else None
@@ -3114,7 +3114,7 @@ class MirrorEngine:
             sh.realized_pnl = 0.0
             sh.status = "closed"
             sh.exit_reason = reason
-            sh.exit_time = get_ist_now()
+            sh.exit_time = get_utc_now()
             sh.last_error = None
             db.commit()
             return True
@@ -3258,7 +3258,7 @@ class MirrorEngine:
             sh.realized_pnl = realized
             sh.status = "closed"
             sh.exit_reason = reason
-            sh.exit_time = get_ist_now()
+            sh.exit_time = get_utc_now()
             sh.last_error = None
             db.commit()
             return True
@@ -3414,7 +3414,7 @@ class MirrorEngine:
                     slaves_failed += 1
                     if failure_status:
                         slave_trade.status = failure_status
-                        slave_trade.last_updated = get_ist_now()
+                        slave_trade.last_updated = get_utc_now()
                         db.commit()
                     continue
 
@@ -3470,7 +3470,7 @@ class MirrorEngine:
         def _mark_failure(msg: str) -> None:
             slave_trade.last_error = msg[:500]
             slave_trade.error_count = int(slave_trade.error_count or 0) + 1
-            slave_trade.last_updated = get_ist_now()
+            slave_trade.last_updated = get_utc_now()
             if failure_status:
                 slave_trade.status = failure_status
                 slave.connection_status = "error"
@@ -3486,7 +3486,7 @@ class MirrorEngine:
                 )[:500]
             else:
                 slave_trade.last_error = None
-            slave_trade.last_updated = get_ist_now()
+            slave_trade.last_updated = get_utc_now()
             db.commit()
 
         if is_virtual_slave_trade(slave, slave_trade):
@@ -3823,9 +3823,9 @@ class MirrorEngine:
                     st.put_exit_price = float(st.put_fill_price or 0) or None
                     st.call_exit_fee_usd = 0.0
                     st.put_exit_fee_usd = 0.0
-                    st.exit_time = get_ist_now()
+                    st.exit_time = get_utc_now()
                     st.exit_reason = str(reason or "")[:50]
-                    st.last_updated = get_ist_now()
+                    st.last_updated = get_utc_now()
                     virt_db.commit()
                     logger.info(
                         "VIRTUAL EXIT done: slave='%s' slave_trade_id=%s",
@@ -3847,7 +3847,7 @@ class MirrorEngine:
             ) or None
             slave_trade.call_exit_fee_usd = 0.0
             slave_trade.put_exit_fee_usd = 0.0
-            slave_trade.exit_time = get_ist_now()
+            slave_trade.exit_time = get_utc_now()
             slave_trade.exit_reason = str(reason or "")[:50]
             return
 
@@ -4218,7 +4218,7 @@ class MirrorEngine:
                 slave_trade.error_count = (
                     int(slave_trade.error_count or 0) + 1
                 )
-                slave_trade.last_updated = get_ist_now()
+                slave_trade.last_updated = get_utc_now()
                 slave.connection_status = "error"
                 slave.last_error = msg[:500]
                 db.commit()
@@ -4249,10 +4249,10 @@ class MirrorEngine:
                 slave_trade.put_exit_fee_usd = float(
                     put_exit.get("fee") or 0.0
                 )
-            slave_trade.exit_time = get_ist_now()
+            slave_trade.exit_time = get_utc_now()
             slave_trade.exit_reason = str(reason or "")[:50]
             slave_trade.last_error = None
-            slave_trade.last_updated = get_ist_now()
+            slave_trade.last_updated = get_utc_now()
             db.commit()
 
             logger.info(
@@ -4284,7 +4284,7 @@ class MirrorEngine:
                 slave_trade.error_count = (
                     int(slave_trade.error_count or 0) + 1
                 )
-                slave_trade.last_updated = get_ist_now()
+                slave_trade.last_updated = get_utc_now()
                 slave.connection_status = "error"
                 slave.last_error = str(exc)[:500]
                 db.commit()
@@ -4323,9 +4323,9 @@ class MirrorEngine:
                     slave.balance_usd = bal_usd
                     slave.balance_inr = round(bal_usd * rate, 2)
                     slave.connection_status = "connected"
-                    slave.last_connected_at = get_ist_now()
+                    slave.last_connected_at = get_utc_now()
                     slave.last_error = None
-                    slave.updated_at = get_ist_now()
+                    slave.updated_at = get_utc_now()
                     db.commit()
 
                     results.append(
@@ -4340,7 +4340,7 @@ class MirrorEngine:
                 except Exception as exc:
                     slave.connection_status = "error"
                     slave.last_error = str(exc)[:500]
-                    slave.updated_at = get_ist_now()
+                    slave.updated_at = get_utc_now()
                     db.commit()
                     results.append(
                         {
@@ -4415,7 +4415,7 @@ class MirrorEngine:
 
                     old_mtm = float(slave_trade.last_mtm or 0.0)
                     slave_trade.last_mtm = round(total_upnl, 4)
-                    slave_trade.last_updated = get_ist_now()
+                    slave_trade.last_updated = get_utc_now()
                     db.commit()
 
                     logger.info(
@@ -4492,7 +4492,7 @@ class MirrorEngine:
                 .all()
             )
             baskets_open = len(open_baskets)
-            now = datetime.now(timezone.utc)
+            now = get_utc_now()
 
             for st in open_baskets:
                 slave = (
@@ -4832,7 +4832,7 @@ class MirrorEngine:
                     f"sweep_unreachable: get_option_positions: {pos_exc}"
                 )[:500]
                 slave_trade.error_count = int(slave_trade.error_count or 0) + 1
-                slave_trade.last_updated = get_ist_now()
+                slave_trade.last_updated = get_utc_now()
                 slave.connection_status = "error"
                 slave.last_error = str(pos_exc)[:500]
                 db.commit()
@@ -4886,7 +4886,7 @@ class MirrorEngine:
                     allow_virtual=False,
                 ):
                     slave_trade.last_error = None
-                    slave_trade.last_updated = get_ist_now()
+                    slave_trade.last_updated = get_utc_now()
                     db.commit()
                     logger.info(
                         "[SLAVE_SWEEP] slave='%s' slave_trade=%s verified "
@@ -4946,7 +4946,7 @@ class MirrorEngine:
                     f"sweep_verify_unreachable: {verify_exc}"
                 )[:500]
                 slave_trade.error_count = int(slave_trade.error_count or 0) + 1
-                slave_trade.last_updated = get_ist_now()
+                slave_trade.last_updated = get_utc_now()
                 db.commit()
                 logger.critical(
                     "[SLAVE_SWEEP] slave='%s' verify UNREACHABLE: %s",
@@ -4973,7 +4973,7 @@ class MirrorEngine:
                     f"sweep_close_failed: remaining={remaining}"
                 )[:500]
                 slave_trade.error_count = int(slave_trade.error_count or 0) + 1
-                slave_trade.last_updated = get_ist_now()
+                slave_trade.last_updated = get_utc_now()
                 slave.connection_status = "error"
                 slave.last_error = slave_trade.last_error
                 db.commit()
@@ -4993,7 +4993,7 @@ class MirrorEngine:
                 allow_virtual=False,
             ):
                 slave_trade.last_error = None
-                slave_trade.last_updated = get_ist_now()
+                slave_trade.last_updated = get_utc_now()
                 db.commit()
                 logger.info(
                     "[SLAVE_SWEEP] slave='%s' slave_trade=%s closed OK "
@@ -5139,7 +5139,7 @@ class MirrorEngine:
                 st.last_error = (f"[RETRY_DONE] prior: {err}")[:500]
                 st.error_count = err_count + 1
                 st.status = "closed"  # clear slot so new entry can record
-                st.last_updated = get_ist_now()
+                st.last_updated = get_utc_now()
                 db.commit()
 
                 try:
@@ -5224,7 +5224,7 @@ class MirrorEngine:
                             reason="integrity_empty_book",
                             allow_virtual=False,
                         ):
-                            slave_trade.last_updated = get_ist_now()
+                            slave_trade.last_updated = get_utc_now()
                             db.commit()
                         continue
 
@@ -5259,7 +5259,7 @@ class MirrorEngine:
                         slave_trade.error_count = (
                             int(slave_trade.error_count or 0) + 1
                         )
-                        slave_trade.last_updated = get_ist_now()
+                        slave_trade.last_updated = get_utc_now()
                         slave.connection_status = "error"
                         slave.last_error = msg[:500]
                         db.commit()

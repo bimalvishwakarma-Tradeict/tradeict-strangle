@@ -10,9 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
-from backend.config import IST
 from backend.core.bot_logger import log_and_buffer
-from backend.core.time_utils import get_ist_now
+from backend.core.time_utils import get_ist_now, get_utc_now, to_utc_for_db
 from backend.database import get_db, get_or_create_auto_settings
 from backend.models import AutoTradeSettings
 from backend.strategies.s001_short_strangle.config import SUPPORTED_UNDERLYINGS
@@ -199,11 +198,10 @@ class AutoTradeSettingsSchema(BaseModel):
 
 
 def _as_ist(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return IST.localize(dt)
-    return dt.astimezone(IST)
+    """Normalize DB datetime to IST (naive = UTC wall-clock)."""
+    from backend.core.time_utils import _as_ist as _shared_as_ist
+
+    return _shared_as_ist(dt)
 
 
 def _reschedule_reentry_if_delay_changed(
@@ -257,7 +255,9 @@ def _reschedule_reentry_if_delay_changed(
         settings.next_entry_source = None
         new_iso: str | None = None
     else:
-        settings.next_entry_time = new_next
+        settings.next_entry_time = to_utc_for_db(
+            new_next, context="auto_trade_settings.next_entry_time"
+        )
         settings.next_entry_source = "reentry_delay"
         new_iso = new_next.isoformat()
 
@@ -765,7 +765,7 @@ async def update_auto_trade_settings(
         payload.entry_premium_match_tolerance_pct
     )
 
-    settings.updated_at = get_ist_now()
+    settings.updated_at = get_utc_now()
     # Do NOT change is_enabled here
 
     _reschedule_reentry_if_delay_changed(
@@ -839,7 +839,7 @@ async def enable_auto_trade(
 ) -> dict[str, Any]:
     """Enable auto-trade and schedule immediate next entry attempt."""
     settings = get_or_create_auto_settings(db)
-    now = get_ist_now()
+    now = get_utc_now()
     settings.is_enabled = True
     settings.next_entry_time = now  # place ASAP if no active trade
     settings.next_entry_source = None
@@ -874,7 +874,7 @@ async def disable_auto_trade(
     settings.is_enabled = False
     settings.next_entry_time = None
     settings.next_entry_source = None
-    settings.updated_at = get_ist_now()
+    settings.updated_at = get_utc_now()
     db.commit()
     db.refresh(settings)
 

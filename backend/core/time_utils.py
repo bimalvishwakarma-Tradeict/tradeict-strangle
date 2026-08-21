@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 # Allow `python backend/core/time_utils.py` from trading-bot/ root
 _ROOT = Path(__file__).resolve().parent.parent.parent
@@ -21,10 +23,167 @@ from backend.config import (
     SETTLING_PERIOD_MINUTES,
 )
 
+logger = logging.getLogger(__name__)
+
+# Runtime TZ audit counters (flush guard + get_utc_now)
+_writers_utc: int = 0
+_writers_ist: int = 0
+_naive_blocked: int = 0
+
+_UTC = timezone.utc
+try:
+    _IST_ZONE = ZoneInfo("Asia/Kolkata")
+except Exception:  # pragma: no cover
+    _IST_ZONE = None
+
+
+def get_utc_now() -> datetime:
+    """
+    Single DB-write clock — always timezone-aware UTC.
+
+    All ORM DateTime columns must be set from this helper (or from
+    ``to_utc_for_db`` converting an existing aware instant).
+    """
+    global _writers_utc
+    _writers_utc += 1
+    return datetime.now(_UTC)
+
 
 def get_ist_now() -> datetime:
-    """Return the current time in IST timezone."""
+    """Current time in IST — logs and display ONLY. Never write to the DB."""
     return datetime.now(IST)
+
+
+def tz_audit_counters() -> tuple[int, int, int]:
+    """Return (writers_utc, writers_ist, naive_blocked) runtime counters."""
+    return _writers_utc, _writers_ist, _naive_blocked
+
+
+def reset_tz_audit_counters() -> None:
+    """Test helper — reset runtime counters."""
+    global _writers_utc, _writers_ist, _naive_blocked
+    _writers_utc = 0
+    _writers_ist = 0
+    _naive_blocked = 0
+
+
+def _offset_looks_like_ist(dt: datetime) -> bool:
+    if dt.tzinfo is None:
+        return False
+    try:
+        off = dt.utcoffset()
+    except Exception:
+        return False
+    if off is None:
+        return False
+    return int(off.total_seconds()) == 19800  # UTC+5:30
+
+
+def to_utc_for_db(
+    dt: datetime | None,
+    *,
+    context: str = "",
+) -> datetime | None:
+    """
+    Coerce a datetime to timezone-aware UTC for DB storage.
+
+    - None → None
+    - Aware non-UTC → convert to UTC (IST writes counted as writers_ist)
+    - Naive → ERROR log, treat wall-clock as UTC, count naive_blocked
+    """
+    global _writers_ist, _naive_blocked
+    if dt is None:
+        return None
+    if not isinstance(dt, datetime):
+        return dt  # type: ignore[return-value]
+    if dt.tzinfo is None:
+        _naive_blocked += 1
+        logger.error(
+            "[TZ_NAIVE] coerced naive datetime to UTC | context=%s | value=%s",
+            context or "unknown",
+            dt.isoformat(sep=" ", timespec="seconds"),
+        )
+        return dt.replace(tzinfo=_UTC)
+    if _offset_looks_like_ist(dt):
+        _writers_ist += 1
+        logger.error(
+            "[TZ_IST_WRITE] IST-aware datetime coerced to UTC for DB | "
+            "context=%s | value=%s",
+            context or "unknown",
+            dt.isoformat(sep=" ", timespec="seconds"),
+        )
+    return dt.astimezone(_UTC)
+
+
+def log_tz_audit(prefix: str = "[TZ_AUDIT]") -> None:
+    """
+    Log runtime counters plus a static source scan of DB timestamp writers.
+
+    Static scan: assignment lines to known DateTime columns using
+    get_utc_now / get_ist_now / datetime.now(timezone.utc).
+    """
+    utc_rt, ist_rt, naive_rt = tz_audit_counters()
+    utc_static, ist_static = scan_db_timestamp_writers()
+    # Prefer static inventory for "which helper writers use"; include runtime
+    # naive/ist catches so regressions after startup are visible in the same tag.
+    logger.info(
+        "%s writers_utc=%s | writers_ist=%s | naive_blocked=%s",
+        prefix,
+        utc_static + utc_rt,
+        ist_static + ist_rt,
+        naive_rt,
+    )
+
+
+def scan_db_timestamp_writers() -> tuple[int, int]:
+    """
+    Count source lines that assign known DB DateTime columns via UTC vs IST helpers.
+
+    Returns (writers_utc, writers_ist). After phase-1 fix, writers_ist should be 0.
+    """
+    import re
+
+    col_re = re.compile(
+        r"(entry_time|exit_time|created_at|updated_at|last_updated|"
+        r"last_connected_at|monitoring_starts_at|adjust_settling_until|"
+        r"last_exit_time|next_entry_time|timestamp)\s*="
+    )
+    utc_re = re.compile(
+        r"get_utc_now\s*\(|datetime\.now\s*\(\s*timezone\.utc\s*\)|_utc_now\s*\("
+    )
+    ist_re = re.compile(r"get_ist_now\s*\(")
+    # Settling helpers return IST — must be converted via to_utc_for_db before write
+    ist_settle_re = re.compile(
+        r"settling_ends_at(?:_after_place)?\s*\("
+    )
+
+    backend_root = Path(__file__).resolve().parent.parent
+    utc_n = 0
+    ist_n = 0
+    skip_dirs = {"tests", "__pycache__", ".venv", "venv"}
+    for path in backend_root.rglob("*.py"):
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not col_re.search(line):
+                continue
+            if "isoformat" in line or "strftime" in line:
+                continue  # display / payload, not ORM write
+            if ist_re.search(line):
+                ist_n += 1
+            elif utc_re.search(line):
+                utc_n += 1
+            elif ist_settle_re.search(line):
+                # monitoring_starts_at=settling_ends_at... without to_utc → IST write
+                if "to_utc_for_db" not in line:
+                    ist_n += 1
+                else:
+                    utc_n += 1
+    return utc_n, ist_n
 
 
 def settling_ends_at(
@@ -59,11 +218,26 @@ def settling_ends_at_after_place(
 
 
 def _as_ist(dt: datetime | None) -> datetime | None:
+    """Convert a DB timestamp to IST for display / IST-clock comparisons.
+
+    Naive values are treated as UTC wall-clock (DB storage contract).
+    """
     if dt is None:
         return None
     if dt.tzinfo is None:
-        return IST.localize(dt)
+        dt = dt.replace(tzinfo=_UTC)
+    else:
+        dt = dt.astimezone(_UTC)
     return dt.astimezone(IST)
+
+
+def as_utc(dt: datetime | None) -> datetime | None:
+    """Interpret a DB timestamp as UTC (naive = UTC wall-clock)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_UTC)
+    return dt.astimezone(_UTC)
 
 
 def get_settling_info(

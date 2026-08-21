@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import func
 
 from backend.config import IST, TradeStatus
-from backend.core.time_utils import get_ist_now
+from backend.core.time_utils import get_ist_now, get_utc_now, as_utc
 from backend.models import Leg, SlaveAccount, SlaveTrade, Trade
 
 logger = logging.getLogger(__name__)
@@ -20,12 +20,10 @@ _EXIT_TIME_GRACE_SECONDS = 60.0
 
 
 def _as_ist(dt: Any) -> Any:
-    """Normalize naive/aware datetimes to IST for age comparisons."""
-    if dt is None:
-        return None
-    if getattr(dt, "tzinfo", None) is None:
-        return IST.localize(dt)
-    return dt.astimezone(IST)
+    """Normalize DB datetime to IST (naive = UTC wall-clock)."""
+    from backend.core.time_utils import _as_ist as _shared_as_ist
+
+    return _shared_as_ist(dt)
 
 
 async def verify_db_consistency(
@@ -62,7 +60,7 @@ async def verify_db_consistency(
                 if exit_time is not None:
                     try:
                         et = _as_ist(exit_time)
-                        age_s = (get_ist_now() - et).total_seconds()
+                        age_s = (get_utc_now() - as_utc(et)).total_seconds() if as_utc(et) else 0.0
                         if age_s < _EXIT_TIME_GRACE_SECONDS:
                             logger.info(
                                 "[DB_AUDIT_SKIP] trade_id=%s recent "
@@ -129,7 +127,7 @@ async def verify_db_consistency(
                 else:
                     trade.exit_reason = DB_CONSISTENCY_FIX_NO_LEGS
                 if trade.exit_time is None:
-                    trade.exit_time = get_ist_now()
+                    trade.exit_time = get_utc_now()
                 # Never overwrite a non-null realized_pnl
                 if existing_pnl is None:
                     trade.realized_pnl = 0.0
@@ -200,7 +198,7 @@ async def verify_db_consistency(
                 len(orphan_legs),
                 [leg.symbol for leg in orphan_legs],
             )
-            now = get_ist_now()
+            now = get_utc_now()
             for leg in orphan_legs:
                 leg.status = "closed"
                 leg.exit_time = now
@@ -344,7 +342,7 @@ async def verify_db_consistency(
                                     st.error_count = (
                                         int(st.error_count or 0) + 1
                                     )
-                                    st.last_updated = get_ist_now()
+                                    st.last_updated = get_utc_now()
                                     db.commit()
                                     warnings += 1
                                     break
@@ -379,13 +377,13 @@ async def verify_db_consistency(
                                     f"db_audit_still_open: {len(still)} positions"
                                 )[:500]
                                 st.error_count = int(st.error_count or 0) + 1
-                                st.last_updated = get_ist_now()
+                                st.last_updated = get_utc_now()
                                 db.commit()
                                 warnings += 1
                             else:
                                 st.status = "closed"
                                 st.last_error = None
-                                st.last_updated = get_ist_now()
+                                st.last_updated = get_utc_now()
                                 closed_orphans += 1
                                 fixes += 1
                                 db.commit()
@@ -406,7 +404,7 @@ async def verify_db_consistency(
                         )
                         st.status = "closed"
                         st.last_error = None
-                        st.last_updated = get_ist_now()
+                        st.last_updated = get_utc_now()
                         closed_orphans += 1
                         fixes += 1
                         db.commit()

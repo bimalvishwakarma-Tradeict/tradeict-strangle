@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
@@ -18,10 +18,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
+from backend.core.time_utils import get_utc_now
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    """ORM default — always UTC via shared helper."""
+    return get_utc_now()
 
 
 class Account(Base):

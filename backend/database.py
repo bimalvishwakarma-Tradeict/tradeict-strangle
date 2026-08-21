@@ -11,8 +11,9 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.types import DateTime as SADateTime
 
 from backend.config import DATABASE_URL
 
@@ -27,6 +28,38 @@ if DATABASE_URL.startswith("sqlite"):
 
 engine = create_engine(DATABASE_URL, connect_args=_connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+@event.listens_for(Session, "before_flush")
+def _guard_orm_datetimes_are_utc(
+    session: Session,
+    flush_context: object,
+    instances: object,
+) -> None:
+    """Reject/coerce tz-naive (and IST) DateTime values before they hit the DB."""
+    from datetime import datetime
+
+    from backend.core.time_utils import to_utc_for_db
+
+    targets = list(session.new) + list(session.dirty)
+    for obj in targets:
+        mapper = getattr(obj, "__mapper__", None)
+        if mapper is None:
+            continue
+        table = getattr(obj, "__tablename__", obj.__class__.__name__)
+        for col in mapper.columns:
+            if not isinstance(col.type, SADateTime):
+                continue
+            key = col.key
+            try:
+                val = getattr(obj, key, None)
+            except Exception:
+                continue
+            if not isinstance(val, datetime):
+                continue
+            coerced = to_utc_for_db(val, context=f"{table}.{key}")
+            if coerced is not None and coerced is not val:
+                setattr(obj, key, coerced)
 
 
 def get_db() -> Generator[Session, None, None]:

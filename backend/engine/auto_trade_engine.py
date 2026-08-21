@@ -18,7 +18,9 @@ from backend.core.time_utils import (
     get_expiry_date_for_dte,
     get_hours_to_expiry,
     get_ist_now,
+    get_utc_now,
     settling_ends_at_after_place,
+    to_utc_for_db,
 )
 from backend.core.ws_manager import ws_manager
 from backend.engine.trade_reconcile import next_basket_number, next_basket_seq_in_structure
@@ -33,14 +35,10 @@ _HEDGE_GATE_BACKOFF_SECONDS = 15 * 60
 
 
 def _as_ist(dt: datetime | None) -> datetime | None:
-    """Normalize DB datetime to IST-aware for comparisons."""
-    if dt is None:
-        return None
-    from backend.config import IST
+    """Normalize DB datetime to IST for comparisons (naive = UTC wall-clock)."""
+    from backend.core.time_utils import _as_ist as _shared_as_ist
 
-    if dt.tzinfo is None:
-        return IST.localize(dt)
-    return dt.astimezone(IST)
+    return _shared_as_ist(dt)
 
 
 class AutoTradeEngine:
@@ -411,7 +409,7 @@ class AutoTradeEngine:
                     "symbols": blocking_symbols,
                 },
             )
-            settings.next_entry_time = get_ist_now() + timedelta(minutes=2)
+            settings.next_entry_time = get_utc_now() + timedelta(minutes=2)
             settings.next_entry_source = "retry"
             settings.last_error = (
                 f"Delta has bot-tracked positions: {blocking_symbols}"[:500]
@@ -522,7 +520,7 @@ class AutoTradeEngine:
                     "hours_to_expiry": round(hours_to_expiry, 1),
                 },
             )
-            settings.next_entry_time = get_ist_now() + timedelta(hours=1)
+            settings.next_entry_time = get_utc_now() + timedelta(hours=1)
             settings.next_entry_source = "expiry_too_close"
             settings.last_error = f"Expiry too close: {hours_to_expiry:.1f}h"[:500]
             db.commit()
@@ -1005,7 +1003,7 @@ class AutoTradeEngine:
                     target_info["capture_required_pct"],
                 )
 
-            now_utc = datetime.now(timezone.utc)
+            now_utc = get_utc_now()
             now_ist = get_ist_now()
             from backend.config import ENTRY_SETTLING_SECONDS
 
@@ -1037,7 +1035,7 @@ class AutoTradeEngine:
                     getattr(settings, "combined_trigger_mode", False)
                 ),
                 realized_pnl=0.0,
-                monitoring_starts_at=monitoring_starts,
+                monitoring_starts_at=to_utc_for_db(monitoring_starts, context="trades.monitoring_starts_at"),
                 initial_max_profit=initial_max_profit,
                 tp_pct=tp_pct,
                 sl_pct=sl_pct,
@@ -1373,7 +1371,7 @@ class AutoTradeEngine:
             settings.last_error = None
             settings.next_entry_time = None
             settings.next_entry_source = None
-            settings.updated_at = now_ist
+            settings.updated_at = get_utc_now()
             db.commit()
             logger.info(
                 "Cleared next_entry_time after successful placement"
@@ -1521,7 +1519,7 @@ class AutoTradeEngine:
             delay = _RETRY_DELAY_SECONDS
             source = "retry"
 
-        now = get_ist_now()
+        now = get_utc_now()
         next_at = now + timedelta(seconds=delay)
 
         try:
@@ -1844,7 +1842,7 @@ class AutoTradeEngine:
 
         try:
             settings = get_or_create_auto_settings(db)
-            now = get_ist_now()
+            now = get_utc_now()
             settings.retry_count = int(settings.retry_count or 0) + 1
             settings.last_error = error[:500]
             settings.next_entry_time = now + timedelta(seconds=_RETRY_DELAY_SECONDS)
@@ -1895,7 +1893,7 @@ class AutoTradeEngine:
             if str(settings.underlying).upper() != str(underlying).upper():
                 return
 
-            now = get_ist_now()
+            now = get_utc_now()
             user_delay = int(delay_minutes)
             if user_delay <= 0:
                 user_delay = int(settings.re_entry_delay_minutes or 1)

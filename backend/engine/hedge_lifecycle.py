@@ -24,7 +24,7 @@ from backend.core.hedge_theta import (
     migrate_hedge_expiry_mode,
     resolve_hedge_expiry_date,
 )
-from backend.core.time_utils import get_hours_to_expiry, get_ist_now, is_pre_expiry_window
+from backend.core.time_utils import get_hours_to_expiry, get_ist_now, is_pre_expiry_window, get_utc_now
 from backend.engine.order_executor import OrderExecutor
 from backend.models import Account, AutoTradeSettings, HedgePosition, HedgeThetaLog, Trade
 
@@ -210,7 +210,7 @@ class HedgeCloseError(Exception):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return get_utc_now()
 
 
 def _normalize_underlying(underlying: str) -> str:

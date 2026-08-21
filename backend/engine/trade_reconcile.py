@@ -8,6 +8,7 @@ from typing import Any
 
 from backend.config import ExitReason, TradeStatus
 from backend.core.delta_client import short_leg_realized_pnl
+from backend.core.time_utils import get_utc_now
 from backend.models import Leg, Trade
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ def book_leg_close(
             pass
         return float(getattr(leg, "realized_pnl", None) or 0.0)
 
-    now = exit_time or datetime.now(timezone.utc)
+    now = exit_time or get_utc_now()
 
     # Unresolved / invalid fill — close the leg but do not invent a free exit
     if exit_premium is None or float(exit_premium) <= 0.0:
@@ -446,7 +447,7 @@ async def reconcile_open_legs_with_delta(
     actives = (
         db.query(Trade).filter(Trade.status == TradeStatus.ACTIVE.value).all()
     )
-    now = datetime.now(timezone.utc)
+    now = get_utc_now()
 
     for trade in actives:
         # Skip trades mid-adjustment — Delta shows temporary one-leg-missing

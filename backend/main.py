@@ -46,6 +46,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_bot_logger()
     logger.info("Database initialized / tables ready")
 
+    try:
+        from backend.core.time_utils import log_tz_audit
+
+        log_tz_audit()
+    except Exception as tz_exc:
+        logger.error("TZ audit log failed: %s", tz_exc)
+
     # Surface invalid hedge DTE ordering once (do not auto-correct)
     try:
         from backend.core.bot_logger import log_and_buffer

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt, encrypt
-from backend.core.time_utils import get_ist_now
+from backend.core.time_utils import get_ist_now, get_utc_now
 from backend.database import get_db, get_or_create_auto_settings
 from backend.models import Account, Leg, Trade
 from backend.schemas import (
@@ -369,7 +369,7 @@ async def connect_account(
 
         encrypted_key = encrypt(payload.api_key)
         encrypted_secret = encrypt(payload.api_secret)
-        now_utc = datetime.now(timezone.utc)
+        now_utc = get_utc_now()
         account_name = profile.get("account_name") or payload.name
 
         existing = db.query(Account).filter(Account.name == payload.name).first()
@@ -444,7 +444,7 @@ async def account_status(db: Session = Depends(get_db)) -> AccountStatusResponse
             logger.error("Account status check failed: %s", exc.status_code)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        account.last_connected_at = datetime.now(timezone.utc)
+        account.last_connected_at = get_utc_now()
         db.commit()
 
         balance_usd = float(wallet.get("balance_usdt", 0.0))

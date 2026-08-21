@@ -15,7 +15,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.core.bot_logger import log_and_buffer
-from backend.core.time_utils import get_hours_to_expiry
+from backend.core.time_utils import get_hours_to_expiry, get_utc_now
 from backend.core.delta_client import short_leg_realized_pnl
 from backend.models import Adjustment, Leg, Trade
 from backend.strategies.base_strategy import (
@@ -927,7 +927,7 @@ class AdjustmentExecutor:
                     trade_id=int(trade.id),
                 )
 
-                now_utc = datetime.now(timezone.utc)
+                now_utc = get_utc_now()
 
                 # Close old other leg in DB
                 other_leg.status = "closed"
@@ -1358,7 +1358,7 @@ class AdjustmentExecutor:
             display_sl = bracket_sl_price
 
             # Steps 6–8: Update DB on full success
-            now_utc = datetime.now(timezone.utc)
+            now_utc = get_utc_now()
             old_strike = float(triggered_leg.strike)
             old_entry_fill = float(triggered_leg.initial_premium)
             old_exit_premium = float(exit_result.filled_price or 0.0)
@@ -1868,7 +1868,7 @@ class AdjustmentExecutor:
         exit_px = float(exit_result.filled_price or 0.0)
         entry_px = float(triggered_leg.initial_premium or 0.0)
         triggered_leg.exit_premium = exit_px
-        triggered_leg.exit_time = datetime.now(timezone.utc)
+        triggered_leg.exit_time = get_utc_now()
         triggered_leg.status = "closed"
         if exit_result.order_id is not None:
             triggered_leg.exit_order_id = str(exit_result.order_id)

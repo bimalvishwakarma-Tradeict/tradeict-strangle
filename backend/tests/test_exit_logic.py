@@ -174,10 +174,10 @@ def main() -> None:
 
     # Test 6: Settling skips TP / adjust, but NOT stop loss
     trade = make_trade(tp_usd=30, sl_usd=60)
-    from backend.core.time_utils import get_ist_now
+    from backend.core.time_utils import get_utc_now
     from datetime import timedelta as td
 
-    trade.monitoring_starts_at = get_ist_now() + td(minutes=5)
+    trade.monitoring_starts_at = get_utc_now() + td(minutes=5)
     action = asyncio.run(
         strategy.on_tick(
             trade,
@@ -196,7 +196,7 @@ def main() -> None:
 
     # Test 6b: STOPLOSS fires even while settling
     trade = make_trade(tp_usd=30, sl_usd=0.01)
-    trade.monitoring_starts_at = get_ist_now() + td(minutes=5)
+    trade.monitoring_starts_at = get_utc_now() + td(minutes=5)
     action = asyncio.run(
         strategy.on_tick(
             trade,
@@ -215,7 +215,7 @@ def main() -> None:
 
     # Test 6c: Adjustment settling skips TP; SL still fires
     trade = make_trade(tp_usd=30, sl_usd=60)
-    trade.adjust_settling_until = get_ist_now() + td(seconds=20)
+    trade.adjust_settling_until = get_utc_now() + td(seconds=20)
     action = asyncio.run(
         strategy.on_tick(
             trade,
@@ -233,7 +233,7 @@ def main() -> None:
     print("Test 6c PASSED: Adjustment settling skips TP ✅")
 
     trade = make_trade(tp_usd=30, sl_usd=0.01)
-    trade.adjust_settling_until = get_ist_now() + td(seconds=20)
+    trade.adjust_settling_until = get_utc_now() + td(seconds=20)
     action = asyncio.run(
         strategy.on_tick(
             trade,

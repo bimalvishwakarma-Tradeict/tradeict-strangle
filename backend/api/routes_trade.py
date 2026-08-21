@@ -25,7 +25,9 @@ from backend.core.time_utils import (
     get_hours_to_expiry,
     get_ist_now,
     get_settling_info_for_trade,
+    get_utc_now,
     settling_ends_at_after_place,
+    to_utc_for_db,
 )
 from backend.core.ws_manager import ws_manager
 from backend.database import get_db, get_or_create_auto_settings
@@ -385,7 +387,7 @@ async def _ensure_no_active_trade(
         # Flat zombie — close it
         trade.status = TradeStatus.CLOSED.value
         if trade.exit_time is None:
-            trade.exit_time = get_ist_now()
+            trade.exit_time = get_utc_now()
         if not trade.exit_reason:
             trade.exit_reason = ExitReason.MANUAL_LEG_CLOSE.value
         bot_engine.position_tracker.mark_closed(int(trade.id))
@@ -539,7 +541,7 @@ async def _persist_strangle_trade(
     call_sent_price: float | None = None,
     put_sent_price: float | None = None,
 ) -> tuple[Trade, Leg, Leg]:
-    now_utc = datetime.now(timezone.utc)
+    now_utc = get_utc_now()
     qty = int(payload.quantity)
     # Premium points collected (display / accounting)
     total_premium = (call_fill_price + put_fill_price) * qty
@@ -584,7 +586,7 @@ async def _persist_strangle_trade(
         ),
         notes=None,
         realized_pnl=0.0,
-        monitoring_starts_at=monitoring_starts,
+        monitoring_starts_at=to_utc_for_db(monitoring_starts, context="trades.monitoring_starts_at"),
         basket_number=basket_no,
         basket_seq_in_structure=seq_in_structure,
         entry_spread_for_sl_usd=0.0,
@@ -2214,7 +2216,7 @@ async def exit_trade(
                         exc,
                     )
                 leftover.status = "closed"
-                leftover.exit_time = get_ist_now()
+                leftover.exit_time = get_utc_now()
                 leftover.exit_premium = exit_px
             db.commit()
 
@@ -2300,7 +2302,7 @@ async def exit_trade(
                 )
                 if hedge_close.success:
                     hedge_leg.status = "closed"
-                    hedge_leg.exit_time = datetime.now(timezone.utc)
+                    hedge_leg.exit_time = get_utc_now()
                     hedge_leg.exit_premium = float(hedge_close.filled_price or 0)
                 else:
                     logger.critical(
@@ -2310,9 +2312,9 @@ async def exit_trade(
                     )
             else:
                 hedge_leg.status = "closed"
-                hedge_leg.exit_time = get_ist_now()
+                hedge_leg.exit_time = get_utc_now()
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = get_utc_now()
         if call_leg is not None:
             call_leg.status = "closed"
             call_leg.exit_time = now_utc
@@ -2358,7 +2360,7 @@ async def exit_trade(
                     leftover.symbol,
                 )
             leftover.status = "closed"
-            leftover.exit_time = get_ist_now()
+            leftover.exit_time = get_utc_now()
             leftover.exit_premium = float(leftover.exit_premium or 0.0)
 
         call_ok = (
