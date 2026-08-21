@@ -879,6 +879,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             last_updated_iso = _iso(active_st.last_updated)
 
             # Prefer the master snapshot that matches THIS slave's master trade
+            # (strikes / target / live premiums for display only — NOT for MTM)
             linked_master = _master_snapshot(int(active_st.master_trade_id))
             pnl_source = linked_master or master_trade_data
             target_src = (
@@ -887,34 +888,16 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 else master_target
             )
 
-            # Slave P&L = master P&L × qty_multiplier (slave mirrors master)
-            if pnl_source:
-                slave_gross_mtm = round(
-                    float(pnl_source.get("gross_mtm") or 0) * mult, 4
-                )
-                slave_net_mtm = round(
-                    float(pnl_source.get("net_mtm") or 0) * mult, 4
-                )
-            else:
-                # Master not in tracker yet — fallback to stored last_mtm
-                slave_gross_mtm = float(active_st.last_mtm or 0.0)
-                slave_net_mtm = slave_gross_mtm
-
-            # Persist net_mtm to DB so history is meaningful
-            try:
-                active_st.last_mtm = slave_net_mtm
-                active_st.last_updated = get_utc_now()
-                db.commit()
-            except Exception as exc:
-                logger.warning(
-                    "SlaveTrade %s last_mtm update failed: %s",
-                    active_st.id,
-                    exc,
-                )
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
+            # Own computed MTM from update_all_slave_mtm — never copy master
+            # Convention: last_mtm stores gross when mtm_source=computed;
+            # net_mtm stores net. Copied legacy rows set both to the same value.
+            mtm_source = str(
+                getattr(active_st, "mtm_source", None) or "copied"
+            )
+            slave_net_mtm = float(getattr(active_st, "net_mtm", None) or 0.0)
+            slave_gross_mtm = float(active_st.last_mtm or 0.0)
+            if mtm_source == "copied":
+                slave_gross_mtm = slave_net_mtm
 
             slave_trade_data = {
                 "slave_trade_id": active_st.id,
@@ -927,9 +910,15 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "is_virtual": is_virtual
                 or str(active_st.call_order_id or "").upper() == "VIRTUAL",
                 "status": active_st.status,
-                "gross_mtm": slave_gross_mtm,
-                "last_mtm": slave_net_mtm,
-                "net_mtm": slave_net_mtm,
+                "gross_mtm": round(slave_gross_mtm, 4),
+                "last_mtm": round(slave_net_mtm, 4),
+                "net_mtm": round(slave_net_mtm, 4),
+                "mtm_source": mtm_source,
+                "realized_pnl": (
+                    float(active_st.realized_pnl)
+                    if getattr(active_st, "realized_pnl", None) is not None
+                    else None
+                ),
                 "last_updated": last_updated_iso,
                 "last_mtm_updated": last_updated_iso,
                 "net_mtm_updated": last_updated_iso,
@@ -938,14 +927,22 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 if target_src
                 else None,
                 "call_strike": (
-                    float(pnl_source["call_strike"])
-                    if pnl_source and pnl_source.get("call_strike") is not None
-                    else None
+                    float(getattr(active_st, "call_strike", None))
+                    if getattr(active_st, "call_strike", None) is not None
+                    else (
+                        float(pnl_source["call_strike"])
+                        if pnl_source and pnl_source.get("call_strike") is not None
+                        else None
+                    )
                 ),
                 "put_strike": (
-                    float(pnl_source["put_strike"])
-                    if pnl_source and pnl_source.get("put_strike") is not None
-                    else None
+                    float(getattr(active_st, "put_strike", None))
+                    if getattr(active_st, "put_strike", None) is not None
+                    else (
+                        float(pnl_source["put_strike"])
+                        if pnl_source and pnl_source.get("put_strike") is not None
+                        else None
+                    )
                 ),
                 "call_premium": (
                     float(pnl_source["call_premium"])

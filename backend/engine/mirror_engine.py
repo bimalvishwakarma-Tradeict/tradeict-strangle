@@ -60,6 +60,8 @@ class MirrorEngine:
         self.db_factory = db_factory or SessionLocal
         # Per-slave serialisation for hedge open (never half-open two legs concurrently)
         self._slave_hedge_locks: dict[int, asyncio.Lock] = {}
+        # SlaveTrade ids that already logged [SLAVE_MTM_FALLBACK] this process
+        self._slave_mtm_fallback_logged: set[int] = set()
 
     def _get_slave_hedge_lock(self, slave_id: int) -> asyncio.Lock:
         sid = int(slave_id)
@@ -3825,12 +3827,15 @@ class MirrorEngine:
                     st.put_exit_fee_usd = 0.0
                     st.exit_time = get_utc_now()
                     st.exit_reason = str(reason or "")[:50]
+                    self._apply_slave_realized_pnl(st)
                     st.last_updated = get_utc_now()
                     virt_db.commit()
                     logger.info(
-                        "VIRTUAL EXIT done: slave='%s' slave_trade_id=%s",
+                        "VIRTUAL EXIT done: slave='%s' slave_trade_id=%s "
+                        "realized_pnl=%s",
                         slave.name,
                         st.id,
+                        getattr(st, "realized_pnl", None),
                     )
             # Also mark the in-session object closed so caller state is consistent
             self._close_slave_trade(
@@ -3849,6 +3854,7 @@ class MirrorEngine:
             slave_trade.put_exit_fee_usd = 0.0
             slave_trade.exit_time = get_utc_now()
             slave_trade.exit_reason = str(reason or "")[:50]
+            self._apply_slave_realized_pnl(slave_trade)
             return
 
         client = self._get_slave_client(slave)
@@ -4251,17 +4257,19 @@ class MirrorEngine:
                 )
             slave_trade.exit_time = get_utc_now()
             slave_trade.exit_reason = str(reason or "")[:50]
+            self._apply_slave_realized_pnl(slave_trade)
             slave_trade.last_error = None
             slave_trade.last_updated = get_utc_now()
             db.commit()
 
             logger.info(
                 "[MIRROR_EXIT] Slave '%s' exit complete (verified flat) "
-                "trade=%s reason=%s closed_legs=%s",
+                "trade=%s reason=%s closed_legs=%s realized_pnl=%s",
                 slave.name,
                 slave_trade.master_trade_id,
                 reason,
                 closed_count,
+                getattr(slave_trade, "realized_pnl", None),
             )
 
         except Exception as exc:
@@ -4357,28 +4365,228 @@ class MirrorEngine:
         return results
 
 
-    async def update_all_slave_mtm(self, master_trade_id: int) -> None:
+    def _apply_slave_realized_pnl(self, slave_trade: SlaveTrade) -> float | None:
         """
-        Refresh last_mtm for every active SlaveTrade under this master trade.
+        Persist realized_pnl from actual exit fills + stored fees (billing number).
 
-        Fetches live UPNL from each slave's Delta /v2/positions/margined so the
-        Multi-Account Overview never shows a stale one-time copy value.
+        short PnL per leg: (entry − exit) × qty × CV, then subtract entry+exit fees.
+        Returns the value written, or None if fills are incomplete.
         """
+        from backend.core.delta_client import short_leg_realized_pnl
+
+        qty = abs(int(slave_trade.actual_quantity or 0))
+        call_entry = float(slave_trade.call_fill_price or 0)
+        put_entry = float(slave_trade.put_fill_price or 0)
+        call_exit = float(slave_trade.call_exit_price or 0)
+        put_exit = float(slave_trade.put_exit_price or 0)
+        if qty <= 0 or call_entry <= 0 or put_entry <= 0:
+            return None
+        if call_exit <= 0 or put_exit <= 0:
+            return None
+        gross = short_leg_realized_pnl(
+            call_entry, call_exit, qty
+        ) + short_leg_realized_pnl(put_entry, put_exit, qty)
+        fees = (
+            float(slave_trade.call_entry_fee_usd or 0)
+            + float(slave_trade.put_entry_fee_usd or 0)
+            + float(slave_trade.call_exit_fee_usd or 0)
+            + float(slave_trade.put_exit_fee_usd or 0)
+        )
+        realized = float(gross) - max(0.0, fees)
+        slave_trade.realized_pnl = round(realized, 6)
+        return float(slave_trade.realized_pnl)
+
+    async def _fetch_slave_leg_offer(
+        self,
+        client: DeltaClient,
+        *,
+        product_id: int | None,
+        symbol: str | None,
+        upnl_map: dict[int, dict[str, Any]] | None,
+    ) -> float:
+        """Best offer (ask) for a short leg — same close reference as master UPL@Offer."""
+        pid = int(product_id or 0)
+        if upnl_map and pid > 0:
+            row = upnl_map.get(pid) or {}
+            try:
+                offer = float(row.get("best_offer") or 0)
+            except (TypeError, ValueError):
+                offer = 0.0
+            if offer > 0:
+                return offer
+        sym = str(symbol or "").strip()
+        if sym:
+            try:
+                return float(await client.get_short_exit_price(sym) or 0)
+            except Exception:
+                try:
+                    return float(await client.get_mark_price(sym) or 0)
+                except Exception:
+                    return 0.0
+        return 0.0
+
+    async def _compute_open_slave_mtm(
+        self,
+        *,
+        client: DeltaClient,
+        slave_trade: SlaveTrade,
+        slip_pct: float,
+        settings: Any,
+        master_trade_id: int,
+    ) -> dict[str, float] | None:
+        """
+        Slave basket MTM from OWN fills + live offers (master conventions).
+
+        gross = Σ (entry − offer) × qty × CV
+        net   = compute_net_mtm(gross, fees_paid, est_exit, slip, exit_spread)
+        """
+        from backend.config import OPTIONS_CONTRACT_VALUE
+        from backend.core.fees import compute_net_mtm, estimate_option_trading_fee
+        from backend.core.spread_utils import estimate_and_log_exit_spread_usd
+
+        call_pid = getattr(slave_trade, "call_product_id", None)
+        put_pid = getattr(slave_trade, "put_product_id", None)
+        if not call_pid or not put_pid:
+            return None
+
+        qty = abs(int(slave_trade.actual_quantity or 0))
+        call_fill = float(slave_trade.call_fill_price or 0)
+        put_fill = float(slave_trade.put_fill_price or 0)
+        if qty <= 0 or call_fill <= 0 or put_fill <= 0:
+            return None
+
+        pids = [int(call_pid), int(put_pid)]
+        try:
+            upnl_map = await client.get_positions_upnl(pids)
+        except Exception:
+            upnl_map = {}
+
+        call_offer = await self._fetch_slave_leg_offer(
+            client,
+            product_id=int(call_pid),
+            symbol=getattr(slave_trade, "call_symbol", None),
+            upnl_map=upnl_map,
+        )
+        put_offer = await self._fetch_slave_leg_offer(
+            client,
+            product_id=int(put_pid),
+            symbol=getattr(slave_trade, "put_symbol", None),
+            upnl_map=upnl_map,
+        )
+        if call_offer <= 0 or put_offer <= 0:
+            return None
+
+        cv = float(OPTIONS_CONTRACT_VALUE)
+        call_gross = (call_fill - call_offer) * qty * cv
+        put_gross = (put_fill - put_offer) * qty * cv
+        gross_mtm = float(call_gross + put_gross)
+
+        fees_paid = max(
+            0.0,
+            float(slave_trade.call_entry_fee_usd or 0)
+            + float(slave_trade.put_entry_fee_usd or 0),
+        )
+
+        btc = 0.0
+        try:
+            btc = float(await client.get_btc_index_price() or 0)
+        except Exception:
+            btc = 0.0
+
+        est_exit = 0.0
+        if btc > 0:
+            est_exit += estimate_option_trading_fee(
+                option_price=call_offer,
+                quantity_lots=qty,
+                btc_index_price=btc,
+            )
+            est_exit += estimate_option_trading_fee(
+                option_price=put_offer,
+                quantity_lots=qty,
+                btc_index_price=btc,
+            )
+
+        expected_exit_spread = 0.0
+        for sym, offer in (
+            (str(getattr(slave_trade, "call_symbol", "") or ""), call_offer),
+            (str(getattr(slave_trade, "put_symbol", "") or ""), put_offer),
+        ):
+            if offer > 0 and sym:
+                expected_exit_spread += await estimate_and_log_exit_spread_usd(
+                    symbol=sym,
+                    offer_price=offer,
+                    quantity=qty,
+                    settings=settings,
+                    kind="basket",
+                    client=client,
+                    log_id=int(master_trade_id),
+                )
+
+        slip_fields = compute_net_mtm(
+            gross_mtm=gross_mtm,
+            fees_paid=fees_paid,
+            est_exit_fees=est_exit,
+            slippage_pct=float(slip_pct),
+            expected_exit_spread_usd=expected_exit_spread,
+        )
+        return {
+            "gross_mtm": round(gross_mtm, 4),
+            "fees_paid": round(fees_paid, 6),
+            "est_exit_fees": round(float(est_exit), 6),
+            "expected_exit_spread_usd": round(float(expected_exit_spread), 6),
+            "net_mtm": float(slip_fields["net_mtm"]),
+            "call_offer": call_offer,
+            "put_offer": put_offer,
+        }
+
+    async def update_all_slave_mtm(
+        self,
+        master_trade_id: int,
+        master_net_mtm: float | None = None,
+    ) -> None:
+        """
+        Compute each open SlaveTrade's net_mtm from that slave's own fills + offers.
+
+        Never copies the master MTM except as an explicit fallback for pre-schema
+        rows missing product ids (mtm_source='copied').
+        """
+        from backend.database import get_or_create_auto_settings
+
+        mid = int(master_trade_id)
+        master_net = (
+            float(master_net_mtm)
+            if master_net_mtm is not None
+            else None
+        )
+        if master_net is None:
+            try:
+                from backend.engine.bot_engine import bot_engine as _be
+
+                st = _be.position_tracker.get(mid)
+                if st is not None:
+                    master_net = float(getattr(st, "last_net_mtm", 0) or 0)
+            except Exception:
+                master_net = 0.0
+        if master_net is None:
+            master_net = 0.0
+
         with self.db_factory() as db:
             slave_trades = (
                 db.query(SlaveTrade)
                 .filter(
-                    SlaveTrade.master_trade_id == int(master_trade_id),
+                    SlaveTrade.master_trade_id == mid,
                     SlaveTrade.status == "active",
                 )
                 .all()
             )
             if not slave_trades:
-                logger.debug(
-                    "No active slave trades for master %s",
-                    master_trade_id,
-                )
                 return
+
+            settings = get_or_create_auto_settings(db)
+            master_row = db.query(Trade).filter(Trade.id == mid).first()
+            slip_pct = float(
+                getattr(master_row, "slippage_pct", None) or 2.0
+            ) if master_row is not None else 2.0
 
             for slave_trade in slave_trades:
                 slave = (
@@ -4389,44 +4597,112 @@ class MirrorEngine:
                 if slave is None or not slave.is_active:
                     continue
 
-                # Virtual/paper: no real Delta positions — keep last_mtm from overview
-                if is_virtual_slave_trade(slave, slave_trade):
-                    logger.debug(
-                        "Slave '%s' MTM skip (virtual SlaveTrade %s)",
-                        slave.name,
-                        slave_trade.id,
-                    )
+                call_pid = getattr(slave_trade, "call_product_id", None)
+                put_pid = getattr(slave_trade, "put_product_id", None)
+                has_pids = bool(call_pid) and bool(put_pid)
+
+                if not has_pids:
+                    # Pre-cf60d78 row — fall back to scaled master (legacy only)
+                    mult = float(slave.qty_multiplier or 1.0)
+                    copied = round(float(master_net) * mult, 4)
+                    slave_trade.last_mtm = copied
+                    slave_trade.net_mtm = copied
+                    slave_trade.mtm_source = "copied"
+                    slave_trade.last_updated = get_utc_now()
+                    db.commit()
+                    st_id = int(slave_trade.id)
+                    if st_id not in self._slave_mtm_fallback_logged:
+                        self._slave_mtm_fallback_logged.add(st_id)
+                        logger.warning(
+                            "[SLAVE_MTM_FALLBACK] slave_trade=%s | "
+                            "reason=missing_product_ids",
+                            st_id,
+                        )
+                        log_and_buffer(
+                            "SLAVE_MTM_FALLBACK",
+                            mid,
+                            {
+                                "slave_trade": st_id,
+                                "slave": int(slave.id),
+                                "reason": "missing_product_ids",
+                            },
+                        )
                     continue
 
                 client = self._get_slave_client(slave)
                 try:
-                    # UPL@Offer via get_positions_upnl (best_ask, never API
-                    # unrealized_pnl / mark-only).
-                    upnl_map = await client.get_positions_upnl()
-                    total_upnl = 0.0
-                    for row in upnl_map.values():
-                        try:
-                            size = float(row.get("size") or 0)
-                        except (TypeError, ValueError):
-                            size = 0.0
-                        if size == 0:
-                            continue
-                        total_upnl += float(row.get("upnl") or 0.0)
+                    computed = await self._compute_open_slave_mtm(
+                        client=client,
+                        slave_trade=slave_trade,
+                        slip_pct=slip_pct,
+                        settings=settings,
+                        master_trade_id=mid,
+                    )
+                    if computed is None:
+                        logger.warning(
+                            "Slave '%s' MTM compute failed (no offers) "
+                            "slave_trade=%s — leaving prior net_mtm",
+                            slave.name,
+                            slave_trade.id,
+                        )
+                        continue
 
-                    old_mtm = float(slave_trade.last_mtm or 0.0)
-                    slave_trade.last_mtm = round(total_upnl, 4)
+                    gross = float(computed["gross_mtm"])
+                    net = float(computed["net_mtm"])
+                    fees = float(computed["fees_paid"])
+                    spread = float(computed["expected_exit_spread_usd"])
+                    slave_trade.last_mtm = gross
+                    slave_trade.net_mtm = net
+                    slave_trade.mtm_source = "computed"
                     slave_trade.last_updated = get_utc_now()
                     db.commit()
 
+                    if abs(float(master_net)) > 1e-9:
+                        # Scale master by this slave's multiplier so 0% ≈ still-copied
+                        master_scaled = float(master_net) * float(
+                            slave.qty_multiplier or 1.0
+                        )
+                        if abs(master_scaled) > 1e-9:
+                            divergence_pct = (
+                                (net - master_scaled) / abs(master_scaled)
+                            ) * 100.0
+                        else:
+                            divergence_pct = (
+                                0.0 if abs(net) < 1e-9 else 100.0
+                            )
+                    else:
+                        divergence_pct = 0.0 if abs(net) < 1e-9 else 100.0
+
+                    log_and_buffer(
+                        "SLAVE_MTM",
+                        mid,
+                        {
+                            "slave": int(slave.id),
+                            "slave_trade": int(slave_trade.id),
+                            "gross": round(gross, 4),
+                            "fees": round(fees, 6),
+                            "spread": round(spread, 6),
+                            "net_mtm": round(net, 4),
+                            "master_net_mtm": round(float(master_net), 4),
+                            "divergence_pct": round(divergence_pct, 4),
+                        },
+                    )
                     logger.info(
-                        "Slave '%s' MTM updated (UPL@Offer): %s → %.4f",
-                        slave.name,
-                        old_mtm,
-                        total_upnl,
+                        "[SLAVE_MTM] slave=%s | slave_trade=%s | gross=%s | "
+                        "fees=%s | spread=%s | net_mtm=%s | master_net_mtm=%s | "
+                        "divergence_pct=%s",
+                        slave.id,
+                        slave_trade.id,
+                        round(gross, 4),
+                        round(fees, 6),
+                        round(spread, 6),
+                        round(net, 4),
+                        round(float(master_net), 4),
+                        round(divergence_pct, 4),
                     )
                 except Exception as exc:
                     logger.warning(
-                        "Slave '%s' MTM fetch failed: %s",
+                        "Slave '%s' MTM compute failed: %s",
                         slave.name,
                         exc,
                     )
@@ -4435,7 +4711,10 @@ class MirrorEngine:
                     except Exception:
                         pass
                 finally:
-                    await client.close()
+                    try:
+                        await client.close()
+                    except Exception:
+                        pass
 
     # After this many consecutive close failures, only retry every Nth sweep
     _SWEEP_BACKOFF_AFTER = 3

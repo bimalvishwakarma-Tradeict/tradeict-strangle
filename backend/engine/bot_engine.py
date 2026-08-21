@@ -2143,7 +2143,8 @@ class BotEngine:
                 ):
                     asyncio.create_task(
                         mirror_mod.mirror_engine.update_all_slave_mtm(
-                            trade_state.trade_id
+                            trade_state.trade_id,
+                            master_net_mtm=net_mtm_val,
                         )
                     )
             except Exception as exc:
@@ -2181,7 +2182,8 @@ class BotEngine:
                 ):
                     asyncio.create_task(
                         mirror_mod.mirror_engine.update_all_slave_mtm(
-                            trade_state.trade_id
+                            trade_state.trade_id,
+                            master_net_mtm=net_mtm_val,
                         )
                     )
             except Exception as exc:

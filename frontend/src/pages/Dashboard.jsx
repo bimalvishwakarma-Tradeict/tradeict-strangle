@@ -137,6 +137,7 @@ function AccountOverviewRow({
   availableUsd,
   availableInr,
   netMtm,
+  mtmSource,
   mtmSyncIso,
   targetUsd,
   isExpanded,
@@ -148,6 +149,12 @@ function AccountOverviewRow({
   const syncAge = formatSyncAge(mtmSyncIso)
   const syncSecs = syncAgeSeconds(mtmSyncIso)
   const syncStale = syncSecs != null && syncSecs > 60
+  const mtmSourceLabel =
+    mtmSource === 'computed'
+      ? 'computed'
+      : mtmSource === 'copied'
+        ? 'copied (legacy row)'
+        : null
 
   return (
     <>
@@ -221,6 +228,15 @@ function AccountOverviewRow({
           ) : (
             <>
               <div>{formatSignedMoney(netMtm)}</div>
+              {mtmSourceLabel ? (
+                <div
+                  className={`text-[10px] font-normal ${
+                    mtmSource === 'copied' ? 'text-yellow-300' : 'text-gray-500'
+                  }`}
+                >
+                  {mtmSourceLabel}
+                </div>
+              ) : null}
               {syncAge ? (
                 <div
                   className={`text-[10px] font-normal ${
@@ -399,7 +415,15 @@ function MultiAccountOverview({ overview }) {
                   </div>
                   <div className="flex flex-wrap gap-x-4 gap-y-0.5 pt-1 text-[11px] text-gray-400">
                     <span>Gross MTM: <span className={mtmClass(st.gross_mtm)}>{formatSignedMoney(st.gross_mtm)}</span></span>
-                    <span>Net MTM: <span className={mtmClass(slaveMtm)}>{formatSignedMoney(slaveMtm)}</span></span>
+                    <span>
+                      Net MTM:{' '}
+                      <span className={mtmClass(slaveMtm)}>{formatSignedMoney(slaveMtm)}</span>
+                      {st.mtm_source === 'computed' ? (
+                        <span className="ml-1 text-gray-500">computed</span>
+                      ) : st.mtm_source === 'copied' ? (
+                        <span className="ml-1 text-yellow-300">copied (legacy row)</span>
+                      ) : null}
+                    </span>
                     {syncAge && <span className={syncStale ? 'text-yellow-300' : 'text-gray-500'}>sync: {syncAge}{syncStale ? ' ⚠️' : ''}</span>}
                     {st.expiry_date && <span>Expiry: {st.expiry_date}</span>}
                   </div>
@@ -430,6 +454,7 @@ function MultiAccountOverview({ overview }) {
                   }
                   availableInr={slave.available_inr}
                   netMtm={slaveMtm}
+                  mtmSource={st?.mtm_source ?? null}
                   mtmSyncIso={slaveMtmUpdated}
                   targetUsd={st?.profit_target_usd ?? null}
                   isExpanded={Boolean(expanded[key])}
