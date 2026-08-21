@@ -759,6 +759,10 @@ def _migrate_schema() -> None:
                 "adjustment_premium_tolerance_pct",
                 "FLOAT NOT NULL DEFAULT 40.0",
             ),
+            (
+                "entry_premium_match_tolerance_pct",
+                "FLOAT NOT NULL DEFAULT 25.0",
+            ),
         ]
         for col_name, col_type in hedge_setting_cols:
             if col_name not in at_cols:

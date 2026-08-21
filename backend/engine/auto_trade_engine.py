@@ -562,7 +562,146 @@ class AutoTradeEngine:
             trade_type = str(
                 getattr(settings, "trade_type", None) or "straddle"
             ).lower().strip()
-            if trade_type == "strangle":
+            strike_mode = str(
+                getattr(settings, "strike_selection_mode", None)
+                or "fixed_premium"
+            ).lower().strip()
+            hedge_on = bool(getattr(settings, "hedge_enabled", False))
+
+            if hedge_on and strike_mode == "theta_based":
+                from backend.core.hedge_theta import (
+                    HedgeThetaError,
+                    get_hedge_theta,
+                    select_theta_based_strikes,
+                )
+                from backend.engine.hedge_lifecycle import get_active_hedge
+
+                if hedge_position_id is None:
+                    raise RuntimeError(
+                        "theta_based entry requires an active hedge"
+                    )
+                hedge_row = get_active_hedge(
+                    db,
+                    account_id=int(account.id),
+                    underlying=str(underlying),
+                )
+                if hedge_row is None:
+                    raise RuntimeError(
+                        f"Active hedge #{hedge_position_id} not found for "
+                        "theta_based strike selection"
+                    )
+                theta_info = await get_hedge_theta(client, hedge_row)
+                hedge_call_th = abs(float(theta_info["call_theta"]))
+                mult = float(
+                    getattr(settings, "theta_multiplier", None) or 3.0
+                )
+                required_th = hedge_call_th * mult
+                if required_th <= 0:
+                    raise RuntimeError(
+                        "theta_based entry: hedge call_theta is zero"
+                    )
+                und_key = str(settings.underlying).upper().strip()
+                price_map = {
+                    "BTC": "BTCUSD",
+                    "ETH": "ETHUSD",
+                    "XAU": "XAUUSD",
+                }
+                price_symbol = price_map.get(
+                    und_key,
+                    und_key if und_key.endswith("USD") else f"{und_key}USD",
+                )
+                spot = float(await client.get_underlying_price(price_symbol))
+                short_chain = await client.get_option_chain(
+                    und_key, expiry_str
+                )
+                if not short_chain:
+                    raise RuntimeError(
+                        f"Empty option chain for {settings.underlying} "
+                        f"{expiry_str}"
+                    )
+                tol = getattr(
+                    settings, "entry_premium_match_tolerance_pct", None
+                )
+                try:
+                    picks = select_theta_based_strikes(
+                        short_chain,
+                        spot,
+                        required_th,
+                        hedge_call_theta=hedge_call_th,
+                        theta_multiplier=mult,
+                        log_hedge_id=int(hedge_position_id),
+                        log_trade_id=0,
+                        entry_premium_match_tolerance_pct=(
+                            float(tol) if tol is not None else None
+                        ),
+                    )
+                except HedgeThetaError as exc:
+                    raise RuntimeError(
+                        f"theta_based strike selection failed: {exc}"
+                    ) from exc
+                call_pick = picks["call"]
+                put_pick = picks["put"]
+                call_pid = int(call_pick.get("product_id") or 0)
+                put_pid = int(put_pick.get("product_id") or 0)
+                call_sym = str(call_pick.get("symbol") or "")
+                put_sym = str(put_pick.get("symbol") or "")
+                if call_pid <= 0 or put_pid <= 0:
+                    # Resolve from chain if product_id missing
+                    call_row = next(
+                        (
+                            r
+                            for r in short_chain
+                            if abs(
+                                float(r["strike"]) - float(call_pick["strike"])
+                            )
+                            < 0.01
+                        ),
+                        None,
+                    )
+                    put_row = next(
+                        (
+                            r
+                            for r in short_chain
+                            if abs(
+                                float(r["strike"]) - float(put_pick["strike"])
+                            )
+                            < 0.01
+                        ),
+                        None,
+                    )
+                    if call_row is None or put_row is None:
+                        raise RuntimeError(
+                            "theta_based entry: selected strikes not on chain"
+                        )
+                    call_pid = int(call_row.get("call_product_id") or 0)
+                    put_pid = int(put_row.get("put_product_id") or 0)
+                    call_sym = str(call_row.get("call_symbol") or "")
+                    put_sym = str(put_row.get("put_symbol") or "")
+                straddle = {
+                    "call_strike": float(call_pick["strike"]),
+                    "call_symbol": call_sym,
+                    "call_product_id": call_pid,
+                    "call_premium": float(call_pick["premium"]),
+                    "put_strike": float(put_pick["strike"]),
+                    "put_symbol": put_sym,
+                    "put_product_id": put_pid,
+                    "put_premium": float(put_pick["premium"]),
+                    "spot_price": float(spot),
+                    "expiry_date": expiry_str,
+                    "underlying": str(settings.underlying).upper().strip(),
+                    "trade_type": "strangle",
+                    "strike": float(call_pick["strike"]),
+                }
+                logger.info(
+                    "THETA_BASED: call_strike=%s put_strike=%s "
+                    "call=%.2f put=%.2f deviation_pct=%.2f",
+                    straddle["call_strike"],
+                    straddle["put_strike"],
+                    straddle["call_premium"],
+                    straddle["put_premium"],
+                    float(picks.get("premium_deviation_pct") or 0),
+                )
+            elif trade_type == "strangle":
                 target_prem = float(
                     getattr(settings, "target_premium_per_side", None) or 150.0
                 )
@@ -580,14 +719,15 @@ class AutoTradeEngine:
                 straddle = await client.find_atm_straddle(
                     str(settings.underlying), expiry_str
                 )
-            logger.info(
-                "%s: call_strike=%s put_strike=%s call=%.2f put=%.2f",
-                trade_type.upper(),
-                straddle.get("call_strike", straddle.get("strike")),
-                straddle.get("put_strike", straddle.get("strike")),
-                straddle["call_premium"],
-                straddle["put_premium"],
-            )
+            if not (hedge_on and strike_mode == "theta_based"):
+                logger.info(
+                    "%s: call_strike=%s put_strike=%s call=%.2f put=%.2f",
+                    trade_type.upper(),
+                    straddle.get("call_strike", straddle.get("strike")),
+                    straddle.get("put_strike", straddle.get("strike")),
+                    straddle["call_premium"],
+                    straddle["put_premium"],
+                )
 
             qty = max(1, int(settings.quantity))
             call_mark = float(straddle["call_premium"])

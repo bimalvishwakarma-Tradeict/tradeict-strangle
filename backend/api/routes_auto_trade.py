@@ -88,6 +88,9 @@ class AutoTradeSettingsSchema(BaseModel):
     adjustment_premium_tolerance_pct: float = Field(
         default=40.0, ge=5, le=200
     )
+    entry_premium_match_tolerance_pct: float = Field(
+        default=25.0, ge=5, le=100
+    )
 
     @field_validator("trade_type")
     @classmethod
@@ -332,6 +335,11 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "adjustment_premium_tolerance_pct", None)
             if getattr(s, "adjustment_premium_tolerance_pct", None) is not None
             else 40.0
+        ),
+        "entry_premium_match_tolerance_pct": float(
+            getattr(s, "entry_premium_match_tolerance_pct", None)
+            if getattr(s, "entry_premium_match_tolerance_pct", None) is not None
+            else 25.0
         ),
         # Placeholder until Step 4 supplies live order margin
         "order_margin_per_lot": None,
@@ -593,6 +601,9 @@ async def update_auto_trade_settings(
     )
     settings.adjustment_premium_tolerance_pct = float(
         payload.adjustment_premium_tolerance_pct
+    )
+    settings.entry_premium_match_tolerance_pct = float(
+        payload.entry_premium_match_tolerance_pct
     )
 
     settings.updated_at = get_ist_now()

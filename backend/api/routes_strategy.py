@@ -483,6 +483,7 @@ async def theta_preview(
                 spot,
                 required,
                 hedge_call_theta=hedge_call_theta,
+                theta_multiplier=multiplier,
                 log_hedge_id=_active_hedge_id(db),
             )
         except HedgeThetaError as exc:
@@ -694,6 +695,7 @@ async def target_preview(
                 spot,
                 required,
                 hedge_call_theta=hedge_call_theta,
+                theta_multiplier=multiplier,
                 log_hedge_id=_active_hedge_id(db),
             )
         except HedgeThetaError as exc:

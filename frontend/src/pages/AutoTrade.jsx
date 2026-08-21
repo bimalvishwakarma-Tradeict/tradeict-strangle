@@ -123,6 +123,9 @@ function applyStatusToForm(data, setters) {
   setters.setMarginBufferPct(String(data.margin_buffer_pct ?? 50))
   setters.setStrikeSelectionMode(data.strike_selection_mode || 'fixed_premium')
   setters.setThetaMultiplier(String(data.theta_multiplier ?? 3))
+  setters.setEntryPremiumMatchTolerancePct(
+    String(data.entry_premium_match_tolerance_pct ?? 25),
+  )
   setters.setTargetMode(data.target_mode || 'payoff_pct')
   setters.setTargetThetaPct(String(data.target_theta_pct ?? 150))
   setters.setCooldownAfterLossMinutes(
@@ -213,6 +216,8 @@ export default function AutoTrade() {
   const [strikeSelectionMode, setStrikeSelectionMode] =
     useState('fixed_premium')
   const [thetaMultiplier, setThetaMultiplier] = useState('3')
+  const [entryPremiumMatchTolerancePct, setEntryPremiumMatchTolerancePct] =
+    useState('25')
   const [targetMode, setTargetMode] = useState('payoff_pct')
   const [targetThetaPct, setTargetThetaPct] = useState('150')
   const [cooldownAfterLossMinutes, setCooldownAfterLossMinutes] =
@@ -268,6 +273,7 @@ export default function AutoTrade() {
       setMarginBufferPct,
       setStrikeSelectionMode,
       setThetaMultiplier,
+      setEntryPremiumMatchTolerancePct,
       setTargetMode,
       setTargetThetaPct,
       setCooldownAfterLossMinutes,
@@ -551,6 +557,10 @@ export default function AutoTrade() {
       theta_multiplier: Math.min(
         20,
         Math.max(0.01, Number(thetaMultiplier) || 3),
+      ),
+      entry_premium_match_tolerance_pct: Math.min(
+        100,
+        Math.max(5, Number(entryPremiumMatchTolerancePct) || 25),
       ),
       target_mode: hedgeEnabled
         ? targetMode || 'payoff_pct'
@@ -1702,6 +1712,29 @@ export default function AutoTrade() {
             onChange={(e) => setThetaMultiplier(e.target.value)}
             className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
           />
+        </label>
+        <label
+          className={`block text-sm text-gray-300 ${
+            hedgeEnabled && strikeSelectionMode === 'theta_based'
+              ? ''
+              : 'opacity-40'
+          }`}
+        >
+          Entry premium match tolerance (%)
+          <input
+            type="number"
+            min={5}
+            max={100}
+            step={1}
+            value={entryPremiumMatchTolerancePct}
+            disabled={!hedgeEnabled || strikeSelectionMode !== 'theta_based'}
+            onChange={(e) => setEntryPremiumMatchTolerancePct(e.target.value)}
+            className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
+          />
+          <span className="mt-1 block text-xs text-gray-500">
+            Warns in logs when the put premium diverges from the theta-selected
+            call by more than this %. Entry still proceeds — default 25%.
+          </span>
         </label>
 
         <div className="rounded-lg border border-gray-700/80 bg-gray-900/50 p-3">

@@ -25,6 +25,8 @@ _IMPORTANT_EVENTS = frozenset(
         "ADJUSTMENT_HOLD",
         "ADJUSTMENT_ABORT",
         "ADJUSTMENT_PREMIUM_MISS",
+        "ENTRY_STRIKE_SELECT",
+        "ENTRY_PREMIUM_MISS",
         "NEW_STRIKE_SELECTED",
         "ADJUSTMENT_DELTA_VERIFY",
         "BASELINE_RESET",
@@ -91,6 +93,8 @@ _IMPORTANT_EVENTS = frozenset(
         "SPREAD_EST",
         "HEDGE_THETA_LOG",
         "THETA_FALLBACK",
+        "ENTRY_STRIKE_SELECT",
+        "ENTRY_PREMIUM_MISS",
         "HEDGE_EXPIRY_SKIP",
         "HEDGE_GATE",
         "HEDGE_GATE_BLOCK",
@@ -287,6 +291,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_THETA_LOG",
         "HEDGE_SETTINGS_UPDATE",
         "NEW_STRIKE_SELECTED",
+        "ENTRY_STRIKE_SELECT",
     ):
         bot_log.info(msg)
     elif event_type in (
@@ -295,6 +300,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "THETA_FALLBACK",
         "HEDGE_EXPIRY_SKIP",
         "ADJUSTMENT_PREMIUM_MISS",
+        "ENTRY_PREMIUM_MISS",
     ):
         bot_log.warning(msg)
     else:

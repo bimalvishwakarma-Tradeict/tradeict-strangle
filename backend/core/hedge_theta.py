@@ -447,15 +447,24 @@ async def get_hedge_theta(
 
 
 def _side_premium(row: dict[str, Any], side: str) -> float:
+    """
+    Premium for strike matching — prefer mark (same as adjustment / strangle).
+
+    Preferring ask caused far-OTM puts to win: near-ATM puts often have wide
+    asks, so abs(ask − target) looked worse than a cheap far put's tight ask.
+    """
     if side == "call":
         return float(
-            row.get("call_ask")
-            or row.get("call_mark_price")
+            row.get("call_mark_price")
             or row.get("call_bid")
+            or row.get("call_ask")
             or 0
         )
     return float(
-        row.get("put_ask") or row.get("put_mark_price") or row.get("put_bid") or 0
+        row.get("put_mark_price")
+        or row.get("put_bid")
+        or row.get("put_ask")
+        or 0
     )
 
 
@@ -464,19 +473,42 @@ def _side_theta(row: dict[str, Any], side: str) -> float:
     return abs(float(row.get(key) or 0))
 
 
+def _resolve_entry_premium_tolerance(explicit: float | None) -> float:
+    """Clamp entry_premium_match_tolerance_pct to [5, 100]; default 25."""
+    if explicit is not None:
+        return max(5.0, min(100.0, float(explicit)))
+    try:
+        from backend.database import SessionLocal, get_or_create_auto_settings
+
+        with SessionLocal() as _db:
+            _settings = get_or_create_auto_settings(_db)
+            raw = getattr(_settings, "entry_premium_match_tolerance_pct", None)
+            if raw is not None:
+                return max(5.0, min(100.0, float(raw)))
+    except Exception as exc:
+        logger.warning(
+            "entry_premium_match_tolerance_pct read failed: %s", exc
+        )
+    return 25.0
+
+
 def select_theta_based_strikes(
     chain: list[dict[str, Any]],
     spot: float,
     required_theta: float,
     *,
     hedge_call_theta: float | None = None,
+    theta_multiplier: float | None = None,
     log_hedge_id: int = 0,
+    log_trade_id: int = 0,
+    entry_premium_match_tolerance_pct: float | None = None,
 ) -> dict[str, Any]:
     """
     Call-by-theta / put-by-premium-match on the SHORT expiry chain.
 
     CALL: OTM only (strike > spot); furthest whose |theta| >= required_theta.
-    PUT:  OTM only (strike < spot); closest premium to the chosen call.
+    PUT:  OTM only (strike < spot); scan full put chain, minimise
+          abs(put_premium − call_premium). Tie-break: nearer ATM (higher strike).
 
     When required_theta exceeds every |theta| on the chain, falls back to the
     nearest OTM call (near-ATM / high-gamma). Selection logic unchanged —
@@ -511,6 +543,9 @@ def select_theta_based_strikes(
     fallback_used = bool(req > max_available_theta)
 
     hct = abs(float(hedge_call_theta)) if hedge_call_theta is not None else 0.0
+    mult = float(theta_multiplier) if theta_multiplier is not None else (
+        (req / hct) if hct > 0 else 0.0
+    )
     max_usable_multiplier = (
         (max_available_theta / hct) if hct > 0 else 0.0
     )
@@ -536,15 +571,40 @@ def select_theta_based_strikes(
     if call_premium <= 0:
         raise HedgeThetaError("Chosen call premium unavailable")
 
-    put_row = min(
-        put_rows,
-        key=lambda r: abs(_side_premium(r, "put") - call_premium),
-    )
+    # Full put-chain closest premium match (never stop at first below/above)
+    put_candidates: list[tuple[float, float, dict[str, Any]]] = []
+    for row in put_rows:
+        prem = _side_premium(row, "put")
+        if prem <= 0:
+            continue
+        # Sort key: abs diff, then nearer ATM (higher put strike → lower -strike)
+        put_candidates.append(
+            (abs(prem - call_premium), -float(row["strike"]), row)
+        )
+    candidates_scanned = len(put_candidates)
+    if not put_candidates:
+        raise HedgeThetaError("No OTM put strikes with usable premium on chain")
+    put_candidates.sort(key=lambda t: (t[0], t[1]))
+    put_row = put_candidates[0][2]
 
     call_theta = _side_theta(call_row, "call")
     put_theta = _side_theta(put_row, "put")
     call_strike = float(call_row["strike"])
     put_strike = float(put_row["strike"])
+    put_premium = _side_premium(put_row, "put")
+    total_basket_theta = call_theta + put_theta
+    premium_deviation_pct = (
+        abs(put_premium - call_premium) / call_premium * 100.0
+        if call_premium > 0
+        else 0.0
+    )
+    theta_vs_required_pct = (
+        (total_basket_theta / req * 100.0) if req > 0 else 0.0
+    )
+    tolerance_pct = _resolve_entry_premium_tolerance(
+        entry_premium_match_tolerance_pct
+    )
+    trade_ref = int(log_trade_id or log_hedge_id or 0)
 
     if fallback_used:
         shortfall_pct = (
@@ -572,24 +632,100 @@ def select_theta_based_strikes(
         except Exception as exc:
             logger.warning("THETA_FALLBACK log_and_buffer failed: %s", exc)
 
+    select_summary = (
+        f"[ENTRY_STRIKE_SELECT] trade={trade_ref} | method=theta | "
+        f"spot={round(float(spot), 2)} | "
+        f"hedge_call_theta={round(hct, 4)} | "
+        f"multiplier={round(mult, 4)} | "
+        f"required_theta={round(req, 4)} | "
+        f"call_strike={call_strike} call_premium={round(call_premium, 2)} "
+        f"call_theta={round(call_theta, 4)} | "
+        f"put_strike={put_strike} put_premium={round(put_premium, 2)} "
+        f"put_theta={round(put_theta, 4)} | "
+        f"premium_deviation_pct={round(premium_deviation_pct, 2)} | "
+        f"total_basket_theta={round(total_basket_theta, 4)} | "
+        f"theta_vs_required_pct={round(theta_vs_required_pct, 2)} | "
+        f"candidates_scanned={candidates_scanned}"
+    )
+    try:
+        log_and_buffer(
+            "ENTRY_STRIKE_SELECT",
+            trade_ref,
+            {
+                "trade": trade_ref,
+                "method": "theta",
+                "spot": round(float(spot), 2),
+                "hedge_call_theta": round(hct, 4),
+                "multiplier": round(mult, 4),
+                "required_theta": round(req, 4),
+                "call_strike": call_strike,
+                "call_premium": round(call_premium, 2),
+                "call_theta": round(call_theta, 4),
+                "put_strike": put_strike,
+                "put_premium": round(put_premium, 2),
+                "put_theta": round(put_theta, 4),
+                "premium_deviation_pct": round(premium_deviation_pct, 2),
+                "total_basket_theta": round(total_basket_theta, 4),
+                "theta_vs_required_pct": round(theta_vs_required_pct, 2),
+                "candidates_scanned": candidates_scanned,
+                "summary": select_summary,
+            },
+        )
+    except Exception as exc:
+        logger.warning("ENTRY_STRIKE_SELECT log_and_buffer failed: %s", exc)
+
+    if premium_deviation_pct > tolerance_pct:
+        miss_summary = (
+            f"[ENTRY_PREMIUM_MISS] trade={trade_ref} | "
+            f"target={round(call_premium, 2)} | "
+            f"selected={round(put_premium, 2)} | "
+            f"deviation_pct={round(premium_deviation_pct, 2)} | "
+            f"tolerance_pct={round(tolerance_pct, 2)} | "
+            f"call_strike={call_strike} | put_strike={put_strike}"
+        )
+        try:
+            log_and_buffer(
+                "ENTRY_PREMIUM_MISS",
+                trade_ref,
+                {
+                    "trade": trade_ref,
+                    "target": round(call_premium, 2),
+                    "selected": round(put_premium, 2),
+                    "deviation_pct": round(premium_deviation_pct, 2),
+                    "tolerance_pct": round(tolerance_pct, 2),
+                    "call_strike": call_strike,
+                    "put_strike": put_strike,
+                    "summary": miss_summary,
+                },
+            )
+        except Exception as exc:
+            logger.warning("ENTRY_PREMIUM_MISS log_and_buffer failed: %s", exc)
+
     return {
         "call": {
             "strike": call_strike,
             "premium": round(call_premium, 2),
             "theta": round(call_theta, 4),
             "chain_limit": bool(chain_limit),
+            "symbol": str(call_row.get("call_symbol") or ""),
+            "product_id": int(call_row.get("call_product_id") or 0),
         },
         "put": {
             "strike": put_strike,
-            "premium": round(_side_premium(put_row, "put"), 2),
+            "premium": round(put_premium, 2),
             "theta": round(put_theta, 4),
             "premium_matched": True,
+            "symbol": str(put_row.get("put_symbol") or ""),
+            "product_id": int(put_row.get("put_product_id") or 0),
         },
-        "combined_theta": round(call_theta + put_theta, 4),
+        "combined_theta": round(total_basket_theta, 4),
         "required_theta": round(req, 4),
         "max_available_theta": round(float(max_available_theta), 4),
         "fallback_used": bool(fallback_used),
         "max_usable_multiplier": round(float(max_usable_multiplier), 4),
+        "premium_deviation_pct": round(premium_deviation_pct, 2),
+        "candidates_scanned": candidates_scanned,
+        "theta_vs_required_pct": round(theta_vs_required_pct, 2),
     }
 
 

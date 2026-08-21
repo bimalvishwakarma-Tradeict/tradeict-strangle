@@ -386,6 +386,10 @@ class AutoTradeSettings(Base):
     adjustment_premium_tolerance_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=40.0
     )
+    # Max |put − call| / call × 100 at theta entry; warn only, still enter
+    entry_premium_match_tolerance_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, default=25.0
+    )
 
     # Demo/virtual mode — places virtual trades without real Delta orders
     is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
