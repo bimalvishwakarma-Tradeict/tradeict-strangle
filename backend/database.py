@@ -954,6 +954,61 @@ def _migrate_schema() -> None:
                 )
             )
 
+    if "structures" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE structures (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        account_kind VARCHAR(10) NOT NULL,
+                        slave_account_id INTEGER
+                            REFERENCES slave_accounts (id),
+                        earner_user_id VARCHAR(64),
+                        hedge_position_id INTEGER NOT NULL
+                            REFERENCES hedge_positions (id),
+                        underlying VARCHAR(20) NOT NULL,
+                        status VARCHAR(20) NOT NULL DEFAULT 'active',
+                        opened_at DATETIME NOT NULL,
+                        closed_at DATETIME,
+                        close_reason VARCHAR(50)
+                    )
+                    """
+                )
+            )
+    if "structure_legs" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE structure_legs (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        structure_id INTEGER NOT NULL
+                            REFERENCES structures (id),
+                        leg_role VARCHAR(20) NOT NULL,
+                        basket_seq INTEGER,
+                        adj_seq INTEGER NOT NULL DEFAULT 0,
+                        product_id INTEGER NOT NULL,
+                        symbol VARCHAR(100),
+                        strike FLOAT,
+                        side VARCHAR(4) NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        entry_order_id VARCHAR(100),
+                        opened_at DATETIME NOT NULL,
+                        closed_at DATETIME,
+                        close_reason VARCHAR(50)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS "
+                    "ix_structure_legs_product_opened "
+                    "ON structure_legs (product_id, opened_at)"
+                )
+            )
+
 
 def get_usd_inr_rate(db: Session) -> float:
     """Return configured USD→INR rate from global auto_trade_settings row."""

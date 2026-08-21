@@ -2375,6 +2375,20 @@ class BotEngine:
             trade_row.exit_time = get_utc_now()
             trade_row.exit_reason = reason
             final_pnl = recompute_trade_realized_pnl(db, trade_row)
+            try:
+                from backend.engine.structure_ledger import (
+                    record_master_basket_exit,
+                )
+
+                record_master_basket_exit(
+                    db, trade_row, reason=str(reason or "")
+                )
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger master basket exit failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
             legs_for_sanity = (
                 db.query(Leg)
                 .filter(
@@ -3169,6 +3183,20 @@ class BotEngine:
             trade_row.exit_reason = reason
             # Single source of truth: sum of closed legs (not incremental paths)
             final_pnl = recompute_trade_realized_pnl(exit_db, trade_row)
+            try:
+                from backend.engine.structure_ledger import (
+                    record_master_basket_exit,
+                )
+
+                record_master_basket_exit(
+                    exit_db, trade_row, reason=str(reason or "")
+                )
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger master basket exit failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
             all_legs_for_sanity = (
                 exit_db.query(Leg)
                 .filter(

@@ -725,6 +725,17 @@ async def _persist_strangle_trade(
     db.refresh(trade)
     db.refresh(call_leg)
     db.refresh(put_leg)
+    try:
+        from backend.engine.structure_ledger import record_master_basket_entry
+
+        record_master_basket_entry(db, trade, call_leg, put_leg)
+        db.commit()
+    except Exception as ledger_exc:
+        logger.error(
+            "structure ledger master basket entry failed: %s",
+            ledger_exc,
+            exc_info=True,
+        )
     return trade, call_leg, put_leg
 
 

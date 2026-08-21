@@ -918,6 +918,17 @@ async def open_hedge(
                 "quantity": qty,
             },
         )
+        try:
+            from backend.engine.structure_ledger import record_master_hedge_open
+
+            record_master_hedge_open(db, hedge_row)
+            db.commit()
+        except Exception as ledger_exc:
+            logger.error(
+                "structure ledger master hedge open failed (hedge stays open): %s",
+                ledger_exc,
+                exc_info=True,
+            )
         # Mirror long straddle to slaves — never roll back master on failure
         try:
             import backend.engine.mirror_engine as mirror_module
@@ -1420,6 +1431,17 @@ async def close_hedge(
             )[:500]
         else:
             hedge.last_error = None
+
+        try:
+            from backend.engine.structure_ledger import record_master_hedge_close
+
+            record_master_hedge_close(db, hedge, reason=reason_norm)
+        except Exception as ledger_exc:
+            logger.error(
+                "structure ledger master hedge close failed: %s",
+                ledger_exc,
+                exc_info=True,
+            )
 
         db.commit()
         db.refresh(hedge)

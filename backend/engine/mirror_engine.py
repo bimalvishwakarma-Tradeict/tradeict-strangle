@@ -955,6 +955,31 @@ class MirrorEngine:
             )
             db.add(virt_trade)
             db.commit()
+            try:
+                from backend.engine.structure_ledger import (
+                    record_slave_basket_entry,
+                )
+                from backend.models import Trade as MasterTrade
+
+                master_row = (
+                    db.query(MasterTrade)
+                    .filter(MasterTrade.id == int(master_trade_id))
+                    .first()
+                )
+                if master_row is not None:
+                    record_slave_basket_entry(
+                        db,
+                        slave_trade=virt_trade,
+                        slave_account_id=int(slave.id),
+                        master_trade=master_row,
+                    )
+                    db.commit()
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger slave basket entry failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
             self._log_slave_trade_detail(
                 slave_id=int(slave.id),
                 master_trade_id=int(master_trade_id),
@@ -1262,6 +1287,33 @@ class MirrorEngine:
             slave.updated_at = get_utc_now()
             db.commit()
 
+            if status == "active":
+                try:
+                    from backend.engine.structure_ledger import (
+                        record_slave_basket_entry,
+                    )
+                    from backend.models import Trade as MasterTrade
+
+                    master_row = (
+                        db.query(MasterTrade)
+                        .filter(MasterTrade.id == int(master_trade_id))
+                        .first()
+                    )
+                    if master_row is not None:
+                        record_slave_basket_entry(
+                            db,
+                            slave_trade=slave_trade,
+                            slave_account_id=int(slave.id),
+                            master_trade=master_row,
+                        )
+                        db.commit()
+                except Exception as ledger_exc:
+                    logger.error(
+                        "structure ledger slave basket entry failed: %s",
+                        ledger_exc,
+                        exc_info=True,
+                    )
+
             self._log_slave_trade_detail(
                 slave_id=int(slave.id),
                 master_trade_id=int(master_trade_id),
@@ -1459,6 +1511,38 @@ class MirrorEngine:
                 )
                 if st:
                     leg = str(triggered_leg_type).lower()
+                    try:
+                        from backend.engine.structure_ledger import (
+                            record_slave_adjustment,
+                        )
+                        from backend.models import Trade as MasterTrade
+
+                        master_row = (
+                            virt_db.query(MasterTrade)
+                            .filter(
+                                MasterTrade.id
+                                == int(st.master_trade_id or 0)
+                            )
+                            .first()
+                        )
+                        record_slave_adjustment(
+                            virt_db,
+                            slave_trade=st,
+                            slave_account_id=int(slave.id),
+                            master_trade=master_row,
+                            triggered_leg=leg,
+                            new_product_id=int(new_product_id),
+                            new_symbol=str(new_symbol or ""),
+                            new_strike=float(new_strike or 0),
+                            new_order_id="VIRTUAL",
+                            reason="ADJUSTMENT",
+                        )
+                    except Exception as ledger_exc:
+                        logger.error(
+                            "structure ledger slave adjustment failed: %s",
+                            ledger_exc,
+                            exc_info=True,
+                        )
                     if leg == "call":
                         st.call_order_id = "VIRTUAL"
                         st.call_product_id = int(new_product_id)
@@ -1713,6 +1797,39 @@ class MirrorEngine:
             if leg == "call":
                 slave_trade.call_order_id = new_order_id or None
                 slave_trade.call_sl_order_id = None
+                # Ledger BEFORE product_id update so open window uses prior role row
+                try:
+                    from backend.engine.structure_ledger import (
+                        record_slave_adjustment,
+                    )
+                    from backend.models import Trade as MasterTrade
+
+                    master_row = (
+                        db.query(MasterTrade)
+                        .filter(
+                            MasterTrade.id
+                            == int(slave_trade.master_trade_id or 0)
+                        )
+                        .first()
+                    )
+                    record_slave_adjustment(
+                        db,
+                        slave_trade=slave_trade,
+                        slave_account_id=int(slave.id),
+                        master_trade=master_row,
+                        triggered_leg=leg,
+                        new_product_id=new_pid,
+                        new_symbol=str(new_symbol or ""),
+                        new_strike=float(new_strike or 0),
+                        new_order_id=new_order_id or None,
+                        reason="ADJUSTMENT",
+                    )
+                except Exception as ledger_exc:
+                    logger.error(
+                        "structure ledger slave adjustment failed: %s",
+                        ledger_exc,
+                        exc_info=True,
+                    )
                 slave_trade.call_product_id = new_pid
                 slave_trade.call_symbol = str(new_symbol or "")
                 slave_trade.call_strike = float(new_strike or 0)
@@ -1721,6 +1838,38 @@ class MirrorEngine:
             else:
                 slave_trade.put_order_id = new_order_id or None
                 slave_trade.put_sl_order_id = None
+                try:
+                    from backend.engine.structure_ledger import (
+                        record_slave_adjustment,
+                    )
+                    from backend.models import Trade as MasterTrade
+
+                    master_row = (
+                        db.query(MasterTrade)
+                        .filter(
+                            MasterTrade.id
+                            == int(slave_trade.master_trade_id or 0)
+                        )
+                        .first()
+                    )
+                    record_slave_adjustment(
+                        db,
+                        slave_trade=slave_trade,
+                        slave_account_id=int(slave.id),
+                        master_trade=master_row,
+                        triggered_leg=leg,
+                        new_product_id=new_pid,
+                        new_symbol=str(new_symbol or ""),
+                        new_strike=float(new_strike or 0),
+                        new_order_id=new_order_id or None,
+                        reason="ADJUSTMENT",
+                    )
+                except Exception as ledger_exc:
+                    logger.error(
+                        "structure ledger slave adjustment failed: %s",
+                        ledger_exc,
+                        exc_info=True,
+                    )
                 slave_trade.put_product_id = new_pid
                 slave_trade.put_symbol = str(new_symbol or "")
                 slave_trade.put_strike = float(new_strike or 0)
@@ -2364,6 +2513,19 @@ class MirrorEngine:
             )
             db.add(row)
             db.commit()
+            try:
+                from backend.engine.structure_ledger import record_slave_hedge_open
+
+                record_slave_hedge_open(
+                    db, slave_hedge=row, slave_account=slave
+                )
+                db.commit()
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger slave hedge open failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
             log_and_buffer(
                 "SLAVE_HEDGE_OPEN",
                 int(master_hedge_id),
@@ -2615,6 +2777,19 @@ class MirrorEngine:
             )
             db.add(row)
             db.commit()
+            try:
+                from backend.engine.structure_ledger import record_slave_hedge_open
+
+                record_slave_hedge_open(
+                    db, slave_hedge=row, slave_account=slave
+                )
+                db.commit()
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger slave hedge open failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
 
             log_and_buffer(
                 "SLAVE_HEDGE_OPEN",
@@ -3118,6 +3293,21 @@ class MirrorEngine:
             sh.exit_reason = reason
             sh.exit_time = get_utc_now()
             sh.last_error = None
+            try:
+                from backend.engine.structure_ledger import record_slave_hedge_close
+
+                record_slave_hedge_close(
+                    db,
+                    slave_hedge=sh,
+                    slave_account_id=slave_id,
+                    reason=str(reason or ""),
+                )
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger slave hedge close failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
             db.commit()
             return True
 
@@ -3262,6 +3452,21 @@ class MirrorEngine:
             sh.exit_reason = reason
             sh.exit_time = get_utc_now()
             sh.last_error = None
+            try:
+                from backend.engine.structure_ledger import record_slave_hedge_close
+
+                record_slave_hedge_close(
+                    db,
+                    slave_hedge=sh,
+                    slave_account_id=slave_id,
+                    reason=str(reason or ""),
+                )
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger slave hedge close failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
             db.commit()
             return True
         except Exception as exc:
@@ -3829,6 +4034,33 @@ class MirrorEngine:
                     st.exit_reason = str(reason or "")[:50]
                     self._apply_slave_realized_pnl(st)
                     st.last_updated = get_utc_now()
+                    try:
+                        from backend.engine.structure_ledger import (
+                            record_slave_basket_exit,
+                        )
+                        from backend.models import Trade as MasterTrade
+
+                        master_row = (
+                            virt_db.query(MasterTrade)
+                            .filter(
+                                MasterTrade.id
+                                == int(st.master_trade_id or 0)
+                            )
+                            .first()
+                        )
+                        record_slave_basket_exit(
+                            virt_db,
+                            slave_trade=st,
+                            slave_account_id=int(slave.id),
+                            master_trade=master_row,
+                            reason=str(reason or ""),
+                        )
+                    except Exception as ledger_exc:
+                        logger.error(
+                            "structure ledger slave basket exit failed: %s",
+                            ledger_exc,
+                            exc_info=True,
+                        )
                     virt_db.commit()
                     logger.info(
                         "VIRTUAL EXIT done: slave='%s' slave_trade_id=%s "
@@ -4260,6 +4492,33 @@ class MirrorEngine:
             self._apply_slave_realized_pnl(slave_trade)
             slave_trade.last_error = None
             slave_trade.last_updated = get_utc_now()
+            try:
+                from backend.engine.structure_ledger import (
+                    record_slave_basket_exit,
+                )
+                from backend.models import Trade as MasterTrade
+
+                master_row = (
+                    db.query(MasterTrade)
+                    .filter(
+                        MasterTrade.id
+                        == int(slave_trade.master_trade_id or 0)
+                    )
+                    .first()
+                )
+                record_slave_basket_exit(
+                    db,
+                    slave_trade=slave_trade,
+                    slave_account_id=int(slave.id),
+                    master_trade=master_row,
+                    reason=str(reason or ""),
+                )
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger slave basket exit failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
             db.commit()
 
             logger.info(

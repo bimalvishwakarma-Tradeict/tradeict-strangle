@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -788,3 +789,77 @@ class HedgeThetaLog(Base):
     hedge: Mapped[HedgePosition] = relationship(
         "HedgePosition", back_populates="theta_logs"
     )
+
+
+class Structure(Base):
+    """
+    One structure per account per hedge (MASTER + each funded SLAVE).
+
+    Recording-only ledger for earner attribution — no P&L stored here.
+    """
+
+    __tablename__ = "structures"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # MASTER | SLAVE
+    account_kind: Mapped[str] = mapped_column(String(10), nullable=False)
+    slave_account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("slave_accounts.id"), nullable=True
+    )
+    # Copied from slave_accounts at SLAVE structure creation
+    earner_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Master hedge this structure belongs to (same id for master + slaves)
+    hedge_position_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("hedge_positions.id"), nullable=False
+    )
+    underlying: Mapped[str] = mapped_column(String(20), nullable=False)
+    # active | closed
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    close_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    legs: Mapped[list["StructureLeg"]] = relationship(
+        "StructureLeg", back_populates="structure"
+    )
+
+
+class StructureLeg(Base):
+    """
+    One bot-placed leg window. Attribution key = (product_id, opened_at..closed_at).
+    """
+
+    __tablename__ = "structure_legs"
+    __table_args__ = (
+        Index("ix_structure_legs_product_opened", "product_id", "opened_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    structure_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("structures.id"), nullable=False
+    )
+    # HEDGE_CALL | HEDGE_PUT | BASKET_CALL | BASKET_PUT
+    leg_role: Mapped[str] = mapped_column(String(20), nullable=False)
+    basket_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 0 = original, 1..n = adjustments
+    adj_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    product_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # BUY | SELL
+    side: Mapped[str] = mapped_column(String(4), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    entry_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    close_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    structure: Mapped[Structure] = relationship("Structure", back_populates="legs")

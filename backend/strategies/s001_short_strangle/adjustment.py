@@ -1746,6 +1746,25 @@ class AdjustmentExecutor:
                 committed_new_entry,
                 committed_new_entry,
             )
+            try:
+                from backend.engine.structure_ledger import (
+                    record_master_adjustment,
+                )
+
+                record_master_adjustment(
+                    db_session,
+                    trade,
+                    old_leg=triggered_leg,
+                    new_leg=new_leg,
+                    reason="ADJUSTMENT",
+                )
+                db_session.commit()
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger master adjustment failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
             logger.info(
                 "Adjustment baseline reset: "
                 "triggered_leg entry=%s baseline=%s "

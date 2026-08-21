@@ -95,6 +95,7 @@ _IMPORTANT_EVENTS = frozenset(
         "HEDGE_CASCADE",
         "HEDGE_PNL",
         "STRUCTURE_PNL",
+        "STRUCTURE_LEG",
         "HEDGE_SL_CHECK",
         "HEDGE_SL_FIRE",
         "HEDGE_ROLL_PENDING",
@@ -246,7 +247,9 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
     now = get_ist_now().strftime("%H:%M:%S IST")
     detail_str = " | ".join(f"{k}={v}" for k, v in details.items())
     # Hedge lifecycle passes hedge_position.id — never label those as Trade#
-    if str(event_type).startswith("HEDGE_"):
+    if str(event_type).startswith("HEDGE_") or str(event_type).startswith(
+        "STRUCTURE_"
+    ) or str(event_type).startswith("SLAVE_HEDGE_"):
         entity = f"Hedge#{trade_id}"
     else:
         entity = f"Trade#{trade_id}"
@@ -345,6 +348,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_UNWIND",
         "HEDGE_PNL",
         "STRUCTURE_PNL",
+        "STRUCTURE_LEG",
         "SPREAD_EST",
         "HEDGE_GATE",
         "HEDGE_THETA_LOG",
