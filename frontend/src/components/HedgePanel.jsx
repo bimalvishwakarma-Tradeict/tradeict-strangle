@@ -370,8 +370,27 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                   Close Hedge #{hedge.id}?
                 </h3>
                 <p className="mt-3 text-sm text-gray-300">
-                  This will close BOTH legs (call and put) at market with
+                  This will close BOTH hedge legs (call and put) at market with
                   reduce-only orders.
+                </p>
+                <p className="mt-2 text-sm text-amber-200">
+                  {Number(hedge.open_basket_count) > 0 ? (
+                    <>
+                      It will also close{' '}
+                      <span className="font-semibold">
+                        {Number(hedge.open_basket_count)} open basket
+                        {Number(hedge.open_basket_count) === 1 ? '' : 's'}
+                      </span>{' '}
+                      under this hedge and all mirrored slave positions. Short
+                      strikes were sized for this hedge — they cannot stay open
+                      alone.
+                    </>
+                  ) : (
+                    <>
+                      No open baskets are linked to this hedge right now. If any
+                      appear before confirm completes, they will be closed too.
+                    </>
+                  )}
                 </p>
                 <p className="mt-2 text-sm font-medium text-gray-200">
                   This action cannot be undone.
@@ -397,7 +416,12 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                     className="inline-flex items-center gap-2 rounded-md bg-red-600 px-3 py-1.5 text-sm font-bold text-white hover:bg-red-500 disabled:opacity-50"
                   >
                     {loading && <LoadingSpinner size="sm" color="white" />}
-                    Yes, Close Both Legs
+                    Yes, Close Hedge
+                    {Number(hedge.open_basket_count) > 0
+                      ? ` + ${Number(hedge.open_basket_count)} Basket${
+                          Number(hedge.open_basket_count) === 1 ? '' : 's'
+                        }`
+                      : ''}
                   </button>
                 </div>
               </>

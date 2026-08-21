@@ -24,7 +24,7 @@ from backend.core.hedge_theta import (
 )
 from backend.core.time_utils import get_hours_to_expiry, get_ist_now, is_pre_expiry_window
 from backend.engine.order_executor import OrderExecutor
-from backend.models import Account, AutoTradeSettings, HedgePosition, HedgeThetaLog
+from backend.models import Account, AutoTradeSettings, HedgePosition, HedgeThetaLog, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -707,6 +707,97 @@ async def open_hedge(
         raise HedgeOpenError("unexpected", str(exc), hedge=hedge_row) from exc
 
 
+async def _cascade_close_baskets_under_hedge(
+    hedge_id: int,
+    db: Session,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """
+    Close every active short basket linked to this hedge via close_master_trade.
+
+    Baskets close FIRST so shorts are never live without their hedge.
+    Returns counts + failed trade ids. Caller must NOT close the hedge if
+    baskets_failed > 0.
+    """
+    from backend.config import ExitReason, TradeStatus
+    from backend.engine.bot_engine import bot_engine
+
+    hid = int(hedge_id)
+    baskets = (
+        db.query(Trade)
+        .filter(
+            Trade.hedge_position_id == hid,
+            Trade.status == TradeStatus.ACTIVE.value,
+        )
+        .order_by(Trade.id.asc())
+        .all()
+    )
+    trade_ids = [int(t.id) for t in baskets]
+    closed_ids: list[int] = []
+    failed_ids: list[int] = []
+
+    for tid in trade_ids:
+        try:
+            await bot_engine.close_master_trade(
+                trade_id=tid,
+                reason=ExitReason.HEDGE_CLOSED.value,
+                db=db,
+                trade_state=bot_engine.position_tracker.get(tid),
+            )
+        except Exception as exc:
+            logger.critical(
+                "[HEDGE_CASCADE] close_master_trade failed trade=%s hedge=%s: %s",
+                tid,
+                hid,
+                exc,
+                exc_info=True,
+            )
+            failed_ids.append(tid)
+            continue
+
+        # close_master_trade uses its own sessions — re-query status
+        db.expire_all()
+        row = db.query(Trade).filter(Trade.id == tid).first()
+        st = str(row.status or "").lower() if row is not None else "missing"
+        if st == TradeStatus.ACTIVE.value:
+            failed_ids.append(tid)
+            logger.critical(
+                "[HEDGE_CASCADE] trade=%s still active after close "
+                "hedge=%s status=%s",
+                tid,
+                hid,
+                st,
+            )
+        else:
+            closed_ids.append(tid)
+
+    result = {
+        "reason": reason,
+        "baskets_found": len(trade_ids),
+        "baskets_closed": len(closed_ids),
+        "baskets_failed": len(failed_ids),
+        "closed_trade_ids": closed_ids,
+        "failed_trade_ids": failed_ids,
+    }
+    _hedge_log("HEDGE_CASCADE", hid, result)
+    return result
+
+
+def count_active_baskets_for_hedge(db: Session, hedge_id: int) -> int:
+    """Active short baskets stamped with this hedge_position_id."""
+    from backend.config import TradeStatus
+
+    return (
+        db.query(Trade)
+        .filter(
+            Trade.hedge_position_id == int(hedge_id),
+            Trade.status == TradeStatus.ACTIVE.value,
+        )
+        .count()
+    )
+
+
 async def close_hedge(
     hedge_id: int,
     reason: str,
@@ -715,9 +806,10 @@ async def close_hedge(
     client: DeltaClient,
 ) -> HedgePosition:
     """
-    Close both long straddle legs with verify-before / reduce_only / verify-after.
+    Close linked short baskets first, then both long hedge legs.
 
     Real exit fills only — never books 0.0. Unverified flat → status=exit_failed.
+    If any basket fails to close, the hedge is NOT closed (HEDGE_CLOSE_BLOCKED).
     Protected by a per-hedge asyncio.Lock.
     """
     hid = int(hedge_id)
@@ -783,6 +875,30 @@ async def close_hedge(
                 "put_product_id": put_pid,
             },
         )
+
+        # Baskets FIRST — never leave shorts live without their hedge
+        cascade = await _cascade_close_baskets_under_hedge(
+            hid, db, reason=reason_norm
+        )
+        if int(cascade.get("baskets_failed") or 0) > 0:
+            failed_ids = list(cascade.get("failed_trade_ids") or [])
+            err = (
+                f"Cannot close hedge #{hid}: baskets still open "
+                f"{failed_ids} — will retry next cycle"
+            )
+            _hedge_log(
+                "HEDGE_CLOSE_BLOCKED",
+                hid,
+                {
+                    "hedge_id": hid,
+                    "failed_trade_ids": failed_ids,
+                    "reason": reason_norm,
+                    "baskets_found": cascade.get("baskets_found"),
+                    "baskets_closed": cascade.get("baskets_closed"),
+                },
+                critical=True,
+            )
+            raise HedgeCloseError("cascade", err, hedge=hedge)
 
         call_exists, call_size = await _verify_leg(
             client, leg="call_pre", product_id=call_pid, hedge_id=hid
@@ -1622,6 +1738,7 @@ async def build_active_hedge_live(
         "entry_put_iv": hedge.entry_put_iv,
         "current_call_iv": current_call_iv,
         "current_put_iv": current_put_iv,
+        "open_basket_count": count_active_baskets_for_hedge(db, hid),
     }
 
 

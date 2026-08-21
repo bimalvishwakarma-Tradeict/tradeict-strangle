@@ -87,3 +87,5 @@ class ExitReason(str, Enum):
     NO_STRIKE_AVAILABLE = "NO_STRIKE_AVAILABLE"
     NO_HEDGE_STRIKE_AVAILABLE = "NO_HEDGE_STRIKE_AVAILABLE"
     NO_OTHER_STRIKE_IN_CONVERSION = "NO_OTHER_STRIKE_IN_CONVERSION"
+    # Baskets closed because their linked long hedge was closed
+    HEDGE_CLOSED = "HEDGE_CLOSED"
