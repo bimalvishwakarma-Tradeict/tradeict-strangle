@@ -506,7 +506,8 @@ def select_theta_based_strikes(
     """
     Call-by-theta / put-by-premium-match on the SHORT expiry chain.
 
-    CALL: OTM only (strike > spot); furthest whose |theta| >= required_theta.
+    CALL: OTM only (strike > spot); scan full call chain, pick the
+          highest strike whose |theta| >= required_theta (furthest OTM).
     PUT:  OTM only (strike < spot); scan full put chain, minimise
           abs(put_premium − call_premium). Tie-break: nearer ATM (higher strike).
 
@@ -550,22 +551,29 @@ def select_theta_based_strikes(
         (max_available_theta / hct) if hct > 0 else 0.0
     )
 
-    # Walk outward (ascending strike); keep last that still meets required_theta
-    last_ok: dict[str, Any] | None = None
-    for row in call_rows:
-        if _side_theta(row, "call") >= req:
-            last_ok = row
-        else:
-            break
-
-    if last_ok is None:
-        # Nearest OTM already below floor — stay there
+    # Full OTM call scan — furthest (highest strike) with |theta| >= required.
+    # Do NOT break on the first failure: a mid-chain theta dip/zero quote must
+    # not hide farther strikes that still qualify.
+    qualifying_calls: list[dict[str, Any]] = [
+        row for row in call_rows if _side_theta(row, "call") >= req
+    ]
+    qualifying_strikes_count = len(qualifying_calls)
+    highest_qualifying_strike: float | None = None
+    if qualifying_calls:
+        highest_row = max(
+            qualifying_calls, key=lambda r: float(r["strike"])
+        )
+        highest_qualifying_strike = float(highest_row["strike"])
+        call_row = highest_row
+        chain_limit = highest_row is call_rows[-1] or (
+            abs(float(highest_row["strike"]) - float(call_rows[-1]["strike"]))
+            < 0.01
+        )
+    else:
+        # No strike met the floor — nearest OTM (existing chain-limit path
+        # observability stays via THETA_FALLBACK when req > max_available)
         call_row = call_rows[0]
         chain_limit = False
-    else:
-        call_row = last_ok
-        # Ran out of strikes while still meeting the floor
-        chain_limit = last_ok is call_rows[-1]
 
     call_premium = _side_premium(call_row, "call")
     if call_premium <= 0:
@@ -592,6 +600,10 @@ def select_theta_based_strikes(
     call_strike = float(call_row["strike"])
     put_strike = float(put_row["strike"])
     put_premium = _side_premium(put_row, "put")
+    selected_is_highest = (
+        highest_qualifying_strike is not None
+        and abs(call_strike - highest_qualifying_strike) < 0.01
+    )
     total_basket_theta = call_theta + put_theta
     premium_deviation_pct = (
         abs(put_premium - call_premium) / call_premium * 100.0
@@ -632,6 +644,45 @@ def select_theta_based_strikes(
         except Exception as exc:
             logger.warning("THETA_FALLBACK log_and_buffer failed: %s", exc)
 
+    if (
+        qualifying_strikes_count > 0
+        and highest_qualifying_strike is not None
+        and not selected_is_highest
+    ):
+        highest_theta = next(
+            (
+                _side_theta(r, "call")
+                for r in qualifying_calls
+                if abs(float(r["strike"]) - highest_qualifying_strike) < 0.01
+            ),
+            0.0,
+        )
+        suboptimal_summary = (
+            f"[THETA_SELECT_SUBOPTIMAL] trade={trade_ref} | "
+            f"selected_strike={call_strike} selected_theta={round(call_theta, 4)} | "
+            f"highest_qualifying_strike={highest_qualifying_strike} "
+            f"highest_theta={round(highest_theta, 4)} | "
+            f"required_theta={round(req, 4)}"
+        )
+        try:
+            log_and_buffer(
+                "THETA_SELECT_SUBOPTIMAL",
+                trade_ref,
+                {
+                    "trade": trade_ref,
+                    "selected_strike": call_strike,
+                    "selected_theta": round(call_theta, 4),
+                    "highest_qualifying_strike": highest_qualifying_strike,
+                    "highest_theta": round(highest_theta, 4),
+                    "required_theta": round(req, 4),
+                    "summary": suboptimal_summary,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "THETA_SELECT_SUBOPTIMAL log_and_buffer failed: %s", exc
+            )
+
     select_summary = (
         f"[ENTRY_STRIKE_SELECT] trade={trade_ref} | method=theta | "
         f"spot={round(float(spot), 2)} | "
@@ -645,7 +696,10 @@ def select_theta_based_strikes(
         f"premium_deviation_pct={round(premium_deviation_pct, 2)} | "
         f"total_basket_theta={round(total_basket_theta, 4)} | "
         f"theta_vs_required_pct={round(theta_vs_required_pct, 2)} | "
-        f"candidates_scanned={candidates_scanned}"
+        f"candidates_scanned={candidates_scanned} | "
+        f"qualifying_strikes_count={qualifying_strikes_count} | "
+        f"highest_qualifying_strike={highest_qualifying_strike} | "
+        f"selected_is_highest={selected_is_highest}"
     )
     try:
         log_and_buffer(
@@ -668,6 +722,9 @@ def select_theta_based_strikes(
                 "total_basket_theta": round(total_basket_theta, 4),
                 "theta_vs_required_pct": round(theta_vs_required_pct, 2),
                 "candidates_scanned": candidates_scanned,
+                "qualifying_strikes_count": qualifying_strikes_count,
+                "highest_qualifying_strike": highest_qualifying_strike,
+                "selected_is_highest": bool(selected_is_highest),
                 "summary": select_summary,
             },
         )
@@ -726,6 +783,9 @@ def select_theta_based_strikes(
         "premium_deviation_pct": round(premium_deviation_pct, 2),
         "candidates_scanned": candidates_scanned,
         "theta_vs_required_pct": round(theta_vs_required_pct, 2),
+        "qualifying_strikes_count": qualifying_strikes_count,
+        "highest_qualifying_strike": highest_qualifying_strike,
+        "selected_is_highest": bool(selected_is_highest),
     }
 
 

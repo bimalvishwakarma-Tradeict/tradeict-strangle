@@ -27,6 +27,7 @@ _IMPORTANT_EVENTS = frozenset(
         "ADJUSTMENT_PREMIUM_MISS",
         "ENTRY_STRIKE_SELECT",
         "ENTRY_PREMIUM_MISS",
+        "THETA_SELECT_SUBOPTIMAL",
         "NEW_STRIKE_SELECTED",
         "ADJUSTMENT_DELTA_VERIFY",
         "BASELINE_RESET",
@@ -95,6 +96,7 @@ _IMPORTANT_EVENTS = frozenset(
         "THETA_FALLBACK",
         "ENTRY_STRIKE_SELECT",
         "ENTRY_PREMIUM_MISS",
+        "THETA_SELECT_SUBOPTIMAL",
         "HEDGE_EXPIRY_SKIP",
         "HEDGE_GATE",
         "HEDGE_GATE_BLOCK",
@@ -301,6 +303,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_EXPIRY_SKIP",
         "ADJUSTMENT_PREMIUM_MISS",
         "ENTRY_PREMIUM_MISS",
+        "THETA_SELECT_SUBOPTIMAL",
     ):
         bot_log.warning(msg)
     else:
