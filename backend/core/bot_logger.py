@@ -190,7 +190,12 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
     """Log a structured bot event to file/console."""
     now = get_ist_now().strftime("%H:%M:%S IST")
     detail_str = " | ".join(f"{k}={v}" for k, v in details.items())
-    msg = f"[{event_type}] Trade#{trade_id} @ {now} | {detail_str}"
+    # Hedge lifecycle passes hedge_position.id — never label those as Trade#
+    if str(event_type).startswith("HEDGE_"):
+        entity = f"Hedge#{trade_id}"
+    else:
+        entity = f"Trade#{trade_id}"
+    msg = f"[{event_type}] {entity} @ {now} | {detail_str}"
 
     if event_type in (
         "ERROR",
@@ -203,6 +208,12 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "INTEGRITY_NAKED",
         "BRACKET_SL_ANOMALY",
         "PNL_SANITY_FAIL",
+        "HEDGE_OPEN_FAIL",
+        "HEDGE_CLOSE_FAIL",
+        "HEDGE_CLOSE_BLOCKED",
+        "HEDGE_AFFORD_BLOCK",
+        "HEDGE_GATE_BLOCK",
+        "HEDGE_GATE_BACKOFF",
     ):
         bot_log.error(msg)
     elif event_type in (
@@ -252,6 +263,19 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MIRROR_EXIT",
         "SLAVE_SWEEP",
         "BRACKET_SL",
+        # Hedge audit trail — must survive INFO-level production logging
+        "HEDGE_CASCADE",
+        "HEDGE_OPEN_START",
+        "HEDGE_OPEN_DONE",
+        "HEDGE_CLOSE_START",
+        "HEDGE_CLOSE_DONE",
+        "HEDGE_CLOSE_SKIP",
+        "HEDGE_VERIFY",
+        "HEDGE_UNWIND",
+        "HEDGE_PNL",
+        "HEDGE_GATE",
+        "HEDGE_THETA_LOG",
+        "HEDGE_SETTINGS_UPDATE",
     ):
         bot_log.info(msg)
     elif event_type in (
