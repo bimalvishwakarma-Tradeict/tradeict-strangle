@@ -504,16 +504,19 @@ def select_theta_based_strikes(
     entry_premium_match_tolerance_pct: float | None = None,
 ) -> dict[str, Any]:
     """
-    Call-by-theta / put-by-premium-match on the SHORT expiry chain.
+    Call-by-premium / put-by-premium-match on the SHORT expiry chain.
+
+    required_theta is the numeric target from abs(hedge_call_theta) × multiplier;
+    it is applied as required_call_premium (not as a theta floor).
 
     CALL: OTM only (strike > spot); scan full call chain, pick the
-          highest strike whose |theta| >= required_theta (furthest OTM).
+          highest strike whose premium >= required_call_premium (furthest OTM).
     PUT:  OTM only (strike < spot); scan full put chain, minimise
           abs(put_premium − call_premium). Tie-break: nearer ATM (higher strike).
 
-    When required_theta exceeds every |theta| on the chain, falls back to the
-    nearest OTM call (near-ATM / high-gamma). Selection logic unchanged —
-    observability fields are returned and logged.
+    When no OTM call premium meets the floor, falls back to the nearest OTM
+    call and logs [PREMIUM_TARGET_UNREACHABLE]. [THETA_FALLBACK] still fires
+    when the numeric target exceeds max |theta| on the chain (observability).
     """
     from backend.core.bot_logger import log_and_buffer
 
@@ -523,6 +526,7 @@ def select_theta_based_strikes(
         )
 
     sorted_rows = sorted(chain, key=lambda r: float(r["strike"]))
+    # Strictly OTM only — never ATM/ITM to satisfy the premium floor
     call_rows = [r for r in sorted_rows if float(r["strike"]) > float(spot)]
     put_rows = [r for r in sorted_rows if float(r["strike"]) < float(spot)]
 
@@ -531,7 +535,7 @@ def select_theta_based_strikes(
     if not put_rows:
         raise HedgeThetaError("No OTM put strikes (strike < spot) on short chain")
 
-    # Highest |theta| anywhere on the short chain (call or put)
+    # Highest |theta| anywhere on the short chain (call or put) — observability
     max_available_theta = 0.0
     for row in sorted_rows:
         max_available_theta = max(
@@ -540,8 +544,10 @@ def select_theta_based_strikes(
             _side_theta(row, "put"),
         )
 
-    req = float(required_theta)
-    fallback_used = bool(req > max_available_theta)
+    # Same numeric as abs(hedge_call_theta)*multiplier — applied as premium floor
+    required_call_premium = float(required_theta)
+    req = required_call_premium
+    theta_fallback_used = bool(req > max_available_theta)
 
     hct = abs(float(hedge_call_theta)) if hedge_call_theta is not None else 0.0
     mult = float(theta_multiplier) if theta_multiplier is not None else (
@@ -551,14 +557,15 @@ def select_theta_based_strikes(
         (max_available_theta / hct) if hct > 0 else 0.0
     )
 
-    # Full OTM call scan — furthest (highest strike) with |theta| >= required.
-    # Do NOT break on the first failure: a mid-chain theta dip/zero quote must
-    # not hide farther strikes that still qualify.
+    # Full OTM call scan — furthest (highest strike) with premium >= required.
     qualifying_calls: list[dict[str, Any]] = [
-        row for row in call_rows if _side_theta(row, "call") >= req
+        row
+        for row in call_rows
+        if _side_premium(row, "call") >= required_call_premium
     ]
     qualifying_strikes_count = len(qualifying_calls)
     highest_qualifying_strike: float | None = None
+    premium_fallback_used = False
     if qualifying_calls:
         highest_row = max(
             qualifying_calls, key=lambda r: float(r["strike"])
@@ -570,10 +577,10 @@ def select_theta_based_strikes(
             < 0.01
         )
     else:
-        # No strike met the floor — nearest OTM (existing chain-limit path
-        # observability stays via THETA_FALLBACK when req > max_available)
+        # Required exceeds even nearest-OTM premium — take nearest OTM
         call_row = call_rows[0]
         chain_limit = False
+        premium_fallback_used = True
 
     call_premium = _side_premium(call_row, "call")
     if call_premium <= 0:
@@ -613,11 +620,54 @@ def select_theta_based_strikes(
     theta_vs_required_pct = (
         (total_basket_theta / req * 100.0) if req > 0 else 0.0
     )
+    premium_margin_pct = (
+        ((call_premium - required_call_premium) / required_call_premium * 100.0)
+        if required_call_premium > 0
+        else 0.0
+    )
+    strikes_above_selected = sum(
+        1 for r in call_rows if float(r["strike"]) > call_strike + 0.01
+    )
     tolerance_pct = _resolve_entry_premium_tolerance(
         entry_premium_match_tolerance_pct
     )
     trade_ref = int(log_trade_id or log_hedge_id or 0)
 
+    if premium_fallback_used:
+        details = {
+            "hedge": int(log_hedge_id or 0),
+            "required": round(required_call_premium, 4),
+            "best_available": round(call_premium, 4),
+            "strike": call_strike,
+            "spot": round(float(spot), 2),
+            "summary": (
+                f"[PREMIUM_TARGET_UNREACHABLE] "
+                f"required={round(required_call_premium, 4)} | "
+                f"best_available={round(call_premium, 4)} | "
+                f"strike={call_strike} | spot={round(float(spot), 2)}"
+            ),
+        }
+        try:
+            log_and_buffer(
+                "PREMIUM_TARGET_UNREACHABLE",
+                int(log_hedge_id or 0),
+                details,
+            )
+        except Exception as exc:
+            logger.warning(
+                "PREMIUM_TARGET_UNREACHABLE log_and_buffer failed: %s", exc
+            )
+        logger.warning(
+            "[PREMIUM_TARGET_UNREACHABLE] required=%s best_available=%s "
+            "strike=%s spot=%s",
+            round(required_call_premium, 4),
+            round(call_premium, 4),
+            call_strike,
+            round(float(spot), 2),
+        )
+
+    # Observability: numeric target still exceeds max chain |theta|
+    fallback_used = bool(theta_fallback_used)
     if fallback_used:
         shortfall_pct = (
             ((req - max_available_theta) / req * 100.0) if req > 0 else 0.0
@@ -649,9 +699,9 @@ def select_theta_based_strikes(
         and highest_qualifying_strike is not None
         and not selected_is_highest
     ):
-        highest_theta = next(
+        highest_prem = next(
             (
-                _side_theta(r, "call")
+                _side_premium(r, "call")
                 for r in qualifying_calls
                 if abs(float(r["strike"]) - highest_qualifying_strike) < 0.01
             ),
@@ -659,10 +709,11 @@ def select_theta_based_strikes(
         )
         suboptimal_summary = (
             f"[THETA_SELECT_SUBOPTIMAL] trade={trade_ref} | "
-            f"selected_strike={call_strike} selected_theta={round(call_theta, 4)} | "
+            f"selected_strike={call_strike} "
+            f"selected_premium={round(call_premium, 4)} | "
             f"highest_qualifying_strike={highest_qualifying_strike} "
-            f"highest_theta={round(highest_theta, 4)} | "
-            f"required_theta={round(req, 4)}"
+            f"highest_premium={round(highest_prem, 4)} | "
+            f"required_call_premium={round(required_call_premium, 4)}"
         )
         try:
             log_and_buffer(
@@ -671,10 +722,10 @@ def select_theta_based_strikes(
                 {
                     "trade": trade_ref,
                     "selected_strike": call_strike,
-                    "selected_theta": round(call_theta, 4),
+                    "selected_premium": round(call_premium, 4),
                     "highest_qualifying_strike": highest_qualifying_strike,
-                    "highest_theta": round(highest_theta, 4),
-                    "required_theta": round(req, 4),
+                    "highest_premium": round(highest_prem, 4),
+                    "required_call_premium": round(required_call_premium, 4),
                     "summary": suboptimal_summary,
                 },
             )
@@ -684,22 +735,24 @@ def select_theta_based_strikes(
             )
 
     select_summary = (
-        f"[ENTRY_STRIKE_SELECT] trade={trade_ref} | method=theta | "
+        f"[ENTRY_STRIKE_SELECT] trade={trade_ref} | method=premium | "
         f"spot={round(float(spot), 2)} | "
         f"hedge_call_theta={round(hct, 4)} | "
         f"multiplier={round(mult, 4)} | "
-        f"required_theta={round(req, 4)} | "
-        f"call_strike={call_strike} call_premium={round(call_premium, 2)} "
-        f"call_theta={round(call_theta, 4)} | "
+        f"required_call_premium={round(required_call_premium, 4)} | "
+        f"selected_call_premium={round(call_premium, 2)} | "
+        f"premium_margin_pct={round(premium_margin_pct, 2)} | "
+        f"strikes_above_selected={strikes_above_selected} | "
+        f"call_strike={call_strike} call_theta={round(call_theta, 4)} | "
         f"put_strike={put_strike} put_premium={round(put_premium, 2)} "
         f"put_theta={round(put_theta, 4)} | "
         f"premium_deviation_pct={round(premium_deviation_pct, 2)} | "
         f"total_basket_theta={round(total_basket_theta, 4)} | "
-        f"theta_vs_required_pct={round(theta_vs_required_pct, 2)} | "
         f"candidates_scanned={candidates_scanned} | "
         f"qualifying_strikes_count={qualifying_strikes_count} | "
         f"highest_qualifying_strike={highest_qualifying_strike} | "
-        f"selected_is_highest={selected_is_highest}"
+        f"selected_is_highest={selected_is_highest} | "
+        f"premium_fallback_used={premium_fallback_used}"
     )
     try:
         log_and_buffer(
@@ -707,11 +760,15 @@ def select_theta_based_strikes(
             trade_ref,
             {
                 "trade": trade_ref,
-                "method": "theta",
+                "method": "premium",
                 "spot": round(float(spot), 2),
                 "hedge_call_theta": round(hct, 4),
                 "multiplier": round(mult, 4),
-                "required_theta": round(req, 4),
+                "required_call_premium": round(required_call_premium, 4),
+                "required_theta": round(req, 4),  # alias — same numeric
+                "selected_call_premium": round(call_premium, 2),
+                "premium_margin_pct": round(premium_margin_pct, 2),
+                "strikes_above_selected": strikes_above_selected,
                 "call_strike": call_strike,
                 "call_premium": round(call_premium, 2),
                 "call_theta": round(call_theta, 4),
@@ -725,6 +782,7 @@ def select_theta_based_strikes(
                 "qualifying_strikes_count": qualifying_strikes_count,
                 "highest_qualifying_strike": highest_qualifying_strike,
                 "selected_is_highest": bool(selected_is_highest),
+                "premium_fallback_used": bool(premium_fallback_used),
                 "summary": select_summary,
             },
         )
@@ -777,8 +835,13 @@ def select_theta_based_strikes(
         },
         "combined_theta": round(total_basket_theta, 4),
         "required_theta": round(req, 4),
+        "required_call_premium": round(required_call_premium, 4),
+        "selected_call_premium": round(call_premium, 2),
+        "premium_margin_pct": round(premium_margin_pct, 2),
+        "strikes_above_selected": strikes_above_selected,
         "max_available_theta": round(float(max_available_theta), 4),
         "fallback_used": bool(fallback_used),
+        "premium_fallback_used": bool(premium_fallback_used),
         "max_usable_multiplier": round(float(max_usable_multiplier), 4),
         "premium_deviation_pct": round(premium_deviation_pct, 2),
         "candidates_scanned": candidates_scanned,

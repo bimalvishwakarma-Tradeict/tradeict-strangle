@@ -2009,8 +2009,9 @@ export default function AutoTrade() {
             className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
           />
           <span className="mt-1 block text-xs text-gray-500">
-            Warns in logs when the put premium diverges from the theta-selected
-            call by more than this %. Entry still proceeds — default 25%.
+            Warns in logs when the put premium diverges from the
+            premium-selected call by more than this %. Entry still proceeds —
+            default 25%.
           </span>
         </label>
 
@@ -2054,24 +2055,43 @@ export default function AutoTrade() {
                 </span>
               </p>
               <p>
-                Required per call{' '}
+                Required call premium{' '}
                 <span className="text-white">
-                  {Number(thetaPreview.required_theta).toFixed(2)}
+                  {Number(
+                    thetaPreview.required_call_premium ??
+                      thetaPreview.required_theta,
+                  ).toFixed(2)}
                 </span>
-                {thetaPreview.max_available_theta != null ? (
+                {thetaPreview.premium_margin_pct != null ? (
                   <span className="text-gray-500">
                     {' '}
-                    (chain max {Number(thetaPreview.max_available_theta).toFixed(2)})
+                    (margin {Number(thetaPreview.premium_margin_pct).toFixed(1)}
+                    %)
                   </span>
                 ) : null}
               </p>
+              {thetaPreview.premium_fallback_used ? (
+                <p className="rounded border border-rose-600/50 bg-rose-950/40 px-2 py-2 text-xs font-semibold text-amber-300">
+                  PREMIUM TARGET UNREACHABLE - required{' '}
+                  {Number(
+                    thetaPreview.required_call_premium ??
+                      thetaPreview.required_theta,
+                  ).toFixed(2)}
+                  , best available{' '}
+                  {Number(
+                    thetaPreview.selected_call_premium ??
+                      thetaPreview.call?.premium ??
+                      0,
+                  ).toFixed(2)}
+                  . Falling back to nearest OTM call.
+                </p>
+              ) : null}
               {thetaPreview.fallback_used ? (
                 <p className="rounded border border-rose-600/50 bg-rose-950/40 px-2 py-2 text-xs font-semibold text-amber-300">
                   THETA TARGET UNREACHABLE - required{' '}
                   {Number(thetaPreview.required_theta).toFixed(2)}, chain max{' '}
                   {Number(thetaPreview.max_available_theta ?? 0).toFixed(2)}.
-                  Falling back to nearest-ATM strikes (near-straddle, high
-                  gamma). Max usable multiplier right now:{' '}
+                  Max usable multiplier right now:{' '}
                   {Number(thetaPreview.max_usable_multiplier ?? 0).toFixed(2)}
                 </p>
               ) : null}
@@ -2080,10 +2100,21 @@ export default function AutoTrade() {
                 <span className="text-emerald-300">
                   {Math.round(Number(thetaPreview.call?.strike))}
                 </span>{' '}
-                (theta {Number(thetaPreview.call?.theta).toFixed(2)},{' '}
-                {formatMoney(thetaPreview.call?.premium)})
-                {thetaPreview.fallback_used ? (
-                  <span className="text-rose-400"> [THETA FALLBACK]</span>
+                (premium{' '}
+                {formatMoney(
+                  thetaPreview.selected_call_premium ??
+                    thetaPreview.call?.premium,
+                )}
+                , θ {Number(thetaPreview.call?.theta).toFixed(2)})
+                {thetaPreview.strikes_above_selected != null ? (
+                  <span className="text-gray-500">
+                    {' '}
+                    · {Number(thetaPreview.strikes_above_selected)} strikes
+                    above
+                  </span>
+                ) : null}
+                {thetaPreview.premium_fallback_used ? (
+                  <span className="text-rose-400"> [PREMIUM FALLBACK]</span>
                 ) : thetaPreview.call?.chain_limit ? (
                   <span className="text-amber-400"> [chain limit]</span>
                 ) : null}
@@ -2212,13 +2243,22 @@ export default function AutoTrade() {
                   ({formatMoney(targetPreview.max_profit_usd)})
                 </span>
               </p>
+              {targetPreview.premium_fallback_used ? (
+                <p className="rounded border border-rose-600/50 bg-rose-950/40 px-2 py-2 text-xs font-semibold text-amber-300">
+                  PREMIUM TARGET UNREACHABLE - required{' '}
+                  {Number(
+                    targetPreview.required_call_premium ??
+                      targetPreview.required_theta,
+                  ).toFixed(2)}
+                  . Nearest OTM call used for max-profit estimate.
+                </p>
+              ) : null}
               {targetPreview.fallback_used ? (
                 <p className="rounded border border-rose-600/50 bg-rose-950/40 px-2 py-2 text-xs font-semibold text-amber-300">
                   THETA TARGET UNREACHABLE - required{' '}
                   {Number(targetPreview.required_theta).toFixed(2)}, chain max{' '}
                   {Number(targetPreview.max_available_theta ?? 0).toFixed(2)}.
-                  Falling back to nearest-ATM strikes (near-straddle, high
-                  gamma). Max usable multiplier right now:{' '}
+                  Max usable multiplier right now:{' '}
                   {Number(targetPreview.max_usable_multiplier ?? 0).toFixed(2)}
                 </p>
               ) : (

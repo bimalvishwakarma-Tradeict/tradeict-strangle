@@ -354,7 +354,8 @@ async def theta_preview(
     What theta_based strike selection would pick right now (no orders).
 
     Hedge supplies CALL-leg theta only. Short strikes come from the SHORT
-    basket expiry chain: call-by-theta, put-by-premium-match.
+    basket expiry chain: call-by-premium (floor = hedge_call_theta ×
+    multiplier), put-by-premium-match.
     Works with no query params (reads saved auto-trade settings).
     """
     from datetime import date as date_cls
@@ -499,10 +500,11 @@ async def theta_preview(
         short_expiry_str = short_exp.isoformat()
 
         logger.info(
-            "[STRIKE_SELECT_THETA] hedge_call_theta=%.4f theta_multiplier=%.4f "
-            "required_theta=%.4f short_expiry=%s spot=%.2f "
+            "[STRIKE_SELECT_PREMIUM] hedge_call_theta=%.4f theta_multiplier=%.4f "
+            "required_call_premium=%.4f short_expiry=%s spot=%.2f "
             "call=%s put=%s coverage=%.2f hedge_total_theta=%.4f "
-            "fallback_used=%s max_available_theta=%.4f max_usable_multiplier=%.4f",
+            "premium_fallback_used=%s strikes_above_selected=%s "
+            "premium_margin_pct=%.2f",
             hedge_call_theta,
             multiplier,
             required,
@@ -512,9 +514,9 @@ async def theta_preview(
             picks["put"],
             coverage,
             hedge_total,
-            picks.get("fallback_used"),
-            picks.get("max_available_theta") or 0,
-            picks.get("max_usable_multiplier") or 0,
+            picks.get("premium_fallback_used"),
+            picks.get("strikes_above_selected") or 0,
+            picks.get("premium_margin_pct") or 0,
         )
 
         return {
@@ -525,8 +527,13 @@ async def theta_preview(
             "theta_multiplier": multiplier,
             "multiplier": multiplier,
             "required_theta": round(required, 4),
+            "required_call_premium": round(required, 4),
+            "selected_call_premium": picks.get("selected_call_premium"),
+            "premium_margin_pct": picks.get("premium_margin_pct"),
+            "strikes_above_selected": picks.get("strikes_above_selected"),
             "max_available_theta": picks.get("max_available_theta"),
             "fallback_used": bool(picks.get("fallback_used")),
+            "premium_fallback_used": bool(picks.get("premium_fallback_used")),
             "max_usable_multiplier": picks.get("max_usable_multiplier"),
             "short_expiry": short_expiry_str,
             "short_expiry_date": short_expiry_str,
@@ -562,8 +569,8 @@ async def target_preview(
     """
     Theta-multiplier target vs max profit of the SAME strikes as theta-preview.
 
-    Strike selection uses hedge CALL theta (shared with theta-preview).
-    Target USD uses hedge TOTAL theta (both legs) — covers full daily hedge cost.
+    Strike selection uses hedge CALL theta × multiplier as a premium floor
+    (shared with theta-preview). Target USD uses hedge TOTAL theta (both legs).
     """
     from datetime import date as date_cls
 
@@ -679,6 +686,7 @@ async def target_preview(
             }
 
         # Same selection input as theta-preview: CALL leg theta × multiplier
+        # applied as required_call_premium
         hedge_call_theta = abs(float(hedge["call_theta"]))
         required = hedge_call_theta * multiplier
         if required <= 0:
@@ -736,7 +744,8 @@ async def target_preview(
             "quantity=%s contract_size=%s target_usd=%.4f max_profit_usd=%.4f "
             "pct_of_max=%.1f reachability=%s short_expiry=%s "
             "call_strike=%s call_premium=%.2f put_strike=%s put_premium=%.2f "
-            "fallback_used=%s max_available_theta=%.4f",
+            "required_call_premium=%.4f premium_fallback_used=%s "
+            "strikes_above_selected=%s",
             total_theta,
             tgt_pct,
             qty,
@@ -750,8 +759,9 @@ async def target_preview(
             call_premium,
             put_strike,
             put_premium,
-            picks.get("fallback_used"),
-            picks.get("max_available_theta") or 0,
+            required,
+            picks.get("premium_fallback_used"),
+            picks.get("strikes_above_selected") or 0,
         )
 
         return {
@@ -769,8 +779,13 @@ async def target_preview(
             "band": reachability,
             "band_label": band_label,
             "required_theta": round(required, 4),
+            "required_call_premium": round(required, 4),
+            "selected_call_premium": picks.get("selected_call_premium"),
+            "premium_margin_pct": picks.get("premium_margin_pct"),
+            "strikes_above_selected": picks.get("strikes_above_selected"),
             "max_available_theta": picks.get("max_available_theta"),
             "fallback_used": bool(picks.get("fallback_used")),
+            "premium_fallback_used": bool(picks.get("premium_fallback_used")),
             "max_usable_multiplier": picks.get("max_usable_multiplier"),
             "short_expiry": short_expiry_str,
             "call_strike": call_strike,
