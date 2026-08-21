@@ -815,7 +815,7 @@ def select_theta_based_strikes(
             logger.warning(
                 "PREMIUM_TARGET_UNREACHABLE log_and_buffer failed: %s", exc
             )
-        logger.warning(
+        logger.info(
             "[PREMIUM_TARGET_UNREACHABLE] required=%s best_available=%s "
             "strike=%s spot=%s",
             round(required_call_premium, 4),

@@ -1046,6 +1046,17 @@ class ShortStrangleStrategy(BaseStrategy):
                     "target_new_premium": round(final_target, 2),
                 },
             )
+            logger.info(
+                "[ADJUSTMENT_TARGET_PREMIUM] trade_id=%s final_target=%.2f "
+                "other_leg_offer=%s",
+                int(getattr(trade, "id", 0) or 0),
+                final_target,
+                (
+                    round(untouched_for_log, 2)
+                    if untouched_for_log is not None
+                    else None
+                ),
+            )
         except Exception:
             pass
 

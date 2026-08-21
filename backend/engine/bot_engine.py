@@ -2066,7 +2066,7 @@ class BotEngine:
             # inside the limit (guards against any net_mtm misuse in strategy).
             if exit_reason == "STOPLOSS" and stoploss > 0:
                 if gross_mtm_for_stoploss > -stoploss:
-                    logger.critical(
+                    logger.warning(
                         "[SL_FALSE_TRIGGER_BLOCKED] Trade#%s — strategy "
                         "returned STOPLOSS but gross_mtm_for_stoploss=%.4f "
                         "> -stoploss=%.4f (net_mtm=%.4f). Ignoring SL exit.",
@@ -4102,7 +4102,7 @@ class BotEngine:
                                 success_status="partial",
                                 failure_status="exit_failed",
                             )
-                            logger.info(
+                            logger.critical(
                                 "[MIRROR_PARTIAL_ADJ] master_trade_id=%s "
                                 "leg=%s product_id=%s slaves_total=%s "
                                 "slaves_closed=%s slaves_failed=%s",

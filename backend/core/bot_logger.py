@@ -133,6 +133,17 @@ _IMPORTANT_EVENTS = frozenset(
         "SLAVE_HEDGE_UNWIND",
         "REENTRY_RESCHEDULED",
         "REENTRY_NOT_RESCHEDULED",
+        "HEDGE_TARGET_FIRE",
+        "HEDGE_TARGET_HELD",
+        "SL_FALSE_TRIGGER_BLOCKED",
+        "MAX_ADJUSTMENTS_REACHED",
+        "MIRROR_PARTIAL_ADJ",
+        "ADJUSTMENT_TARGET",
+        "ADJUSTMENT_TARGET_PREMIUM",
+        "ADJUSTMENT_COUNT_UPDATED",
+        "PREMIUM_TARGET_UNREACHABLE",
+        "NO_STRIKE_AVAILABLE",
+        "NO_HEDGE_STRIKE_AVAILABLE",
     }
 )
 
@@ -260,6 +271,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ORPHAN_BASKET",
         "HEDGE_ROLL_FORCED",
         "HEDGE_AUTO_REOPEN_FAILED",
+        "MIRROR_PARTIAL_ADJ",
     ):
         bot_log.error(msg)
     elif event_type in (
@@ -283,6 +295,9 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_ROLL_EXECUTE",
         "HEDGE_DTE_CONFIG_INVALID",
         "HEDGE_AUTO_REOPEN",
+        "HEDGE_TARGET_FIRE",
+        "SL_FALSE_TRIGGER_BLOCKED",
+        "MAX_ADJUSTMENTS_REACHED",
     ):
         bot_log.warning(msg)
     elif event_type in (
@@ -350,6 +365,13 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "SLAVE_HEDGE_UNWIND",
         "REENTRY_RESCHEDULED",
         "REENTRY_NOT_RESCHEDULED",
+        "HEDGE_TARGET_HELD",
+        "ADJUSTMENT_TARGET",
+        "ADJUSTMENT_TARGET_PREMIUM",
+        "ADJUSTMENT_COUNT_UPDATED",
+        "PREMIUM_TARGET_UNREACHABLE",
+        "NO_STRIKE_AVAILABLE",
+        "NO_HEDGE_STRIKE_AVAILABLE",
     ):
         bot_log.info(msg)
     elif event_type in (

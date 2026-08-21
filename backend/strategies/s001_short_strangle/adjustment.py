@@ -432,7 +432,7 @@ class AdjustmentExecutor:
                 if "SAME_STRIKE_HOLD" in msg and (
                     "no other" in msg.lower() or "no alternate" in msg.lower()
                 ):
-                    logger.critical(
+                    logger.info(
                         "[NO_STRIKE_AVAILABLE] Trade %s leg=%s — no farther OTM "
                         "strike on chain. EXITING BASKET. triggered_strike=%s",
                         trade.id,
@@ -473,7 +473,7 @@ class AdjustmentExecutor:
                 abs(float(plan.new_strike) - float(triggered_leg.strike)) < 0.01
                 or int(plan.new_product_id) == int(triggered_leg.product_id)
             ):
-                logger.critical(
+                logger.info(
                     "[NO_STRIKE_AVAILABLE] Trade %s leg=%s — replacement equals "
                     "current strike. EXITING BASKET. triggered_strike=%s",
                     trade.id,
@@ -638,7 +638,7 @@ class AdjustmentExecutor:
                         hedge_pid,
                     )
                 except Exception as exc:
-                    logger.critical(
+                    logger.info(
                         "[NO_HEDGE_STRIKE_AVAILABLE] Trade %s — no hedge strike "
                         "on chain. EXITING BASKET. triggered_strike=%s err=%s",
                         trade.id,
