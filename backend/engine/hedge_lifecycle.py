@@ -737,6 +737,12 @@ async def _cascade_close_baskets_under_hedge(
     closed_ids: list[int] = []
     failed_ids: list[int] = []
 
+    _hedge_log(
+        "HEDGE_CASCADE",
+        hid,
+        {"hedge": hid, "baskets_found": len(trade_ids), "phase": "start"},
+    )
+
     for tid in trade_ids:
         try:
             await bot_engine.close_master_trade(
@@ -746,12 +752,16 @@ async def _cascade_close_baskets_under_hedge(
                 trade_state=bot_engine.position_tracker.get(tid),
             )
         except Exception as exc:
-            logger.critical(
-                "[HEDGE_CASCADE] close_master_trade failed trade=%s hedge=%s: %s",
-                tid,
+            _hedge_log(
+                "HEDGE_CASCADE",
                 hid,
-                exc,
-                exc_info=True,
+                {
+                    "hedge": hid,
+                    "trade_id": tid,
+                    "error": str(exc),
+                    "phase": "basket_exception",
+                },
+                critical=True,
             )
             failed_ids.append(tid)
             continue
@@ -762,23 +772,29 @@ async def _cascade_close_baskets_under_hedge(
         st = str(row.status or "").lower() if row is not None else "missing"
         if st == TradeStatus.ACTIVE.value:
             failed_ids.append(tid)
-            logger.critical(
-                "[HEDGE_CASCADE] trade=%s still active after close "
-                "hedge=%s status=%s",
-                tid,
+            _hedge_log(
+                "HEDGE_CASCADE",
                 hid,
-                st,
+                {
+                    "hedge": hid,
+                    "trade_id": tid,
+                    "status": st,
+                    "phase": "still_active",
+                },
+                critical=True,
             )
         else:
             closed_ids.append(tid)
 
     result = {
+        "hedge": hid,
         "reason": reason,
         "baskets_found": len(trade_ids),
         "baskets_closed": len(closed_ids),
         "baskets_failed": len(failed_ids),
         "closed_trade_ids": closed_ids,
         "failed_trade_ids": failed_ids,
+        "phase": "done",
     }
     _hedge_log("HEDGE_CASCADE", hid, result)
     return result
@@ -890,8 +906,8 @@ async def close_hedge(
                 "HEDGE_CLOSE_BLOCKED",
                 hid,
                 {
-                    "hedge_id": hid,
-                    "failed_trade_ids": failed_ids,
+                    "hedge": hid,
+                    "failed_baskets": failed_ids,
                     "reason": reason_norm,
                     "baskets_found": cascade.get("baskets_found"),
                     "baskets_closed": cascade.get("baskets_closed"),
