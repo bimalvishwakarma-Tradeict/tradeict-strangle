@@ -112,12 +112,12 @@ function applyStatusToForm(data, setters) {
   setters.setHedgeSlFloorPct(String(data.hedge_sl_floor_pct ?? 25))
   setters.setHedgeTargetMultiple(String(data.hedge_target_multiple ?? 3))
   setters.setSpreadMode(
-    String(data.spread_mode || 'AUTO').toUpperCase() === 'MANUAL'
-      ? 'MANUAL'
-      : 'AUTO',
+    String(data.spread_mode || 'MANUAL').toUpperCase() === 'AUTO'
+      ? 'AUTO'
+      : 'MANUAL',
   )
-  setters.setBasketExitSpreadPct(String(data.basket_exit_spread_pct ?? 0.5))
-  setters.setHedgeExitSpreadPct(String(data.hedge_exit_spread_pct ?? 2.7))
+  setters.setBasketExitSpreadPct(String(data.basket_exit_spread_pct ?? 4))
+  setters.setHedgeExitSpreadPct(String(data.hedge_exit_spread_pct ?? 4))
   setters.setSpreadCapPct(String(data.spread_cap_pct ?? 8))
   setters.setMarginBufferPct(String(data.margin_buffer_pct ?? 50))
   setters.setStrikeSelectionMode(data.strike_selection_mode || 'fixed_premium')
@@ -203,9 +203,9 @@ export default function AutoTrade() {
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
   const [hedgeSlFloorPct, setHedgeSlFloorPct] = useState('25')
   const [hedgeTargetMultiple, setHedgeTargetMultiple] = useState('3')
-  const [spreadMode, setSpreadMode] = useState('AUTO')
-  const [basketExitSpreadPct, setBasketExitSpreadPct] = useState('0.5')
-  const [hedgeExitSpreadPct, setHedgeExitSpreadPct] = useState('2.7')
+  const [spreadMode, setSpreadMode] = useState('MANUAL')
+  const [basketExitSpreadPct, setBasketExitSpreadPct] = useState('4')
+  const [hedgeExitSpreadPct, setHedgeExitSpreadPct] = useState('4')
   const [spreadCapPct, setSpreadCapPct] = useState('8')
   const [marginBufferPct, setMarginBufferPct] = useState('50')
   const [strikeSelectionMode, setStrikeSelectionMode] =
@@ -1879,30 +1879,37 @@ export default function AutoTrade() {
         <h2 className="text-sm font-semibold text-white">Spread Estimation</h2>
         <p className="text-xs text-gray-500">
           Used when estimating exit spread for short-basket net MTM and hedge
-          structure P&amp;L. Auto measures live from the L2 book; Manual uses
-          your fixed %. Cap always applies.
+          structure P&amp;L. Manual is the recommended default. Auto measures
+          live from the L2 book. Cap always applies.
         </p>
         <fieldset className="space-y-2">
           <legend className="text-sm text-gray-300">Mode</legend>
-          <label className="flex items-center gap-2 text-sm text-gray-200">
-            <input
-              type="radio"
-              name="spreadMode"
-              checked={spreadMode === 'AUTO'}
-              onChange={() => setSpreadMode('AUTO')}
-              className="accent-amber-500"
-            />
-            Auto (from live order book)
-          </label>
-          <label className="flex items-center gap-2 text-sm text-gray-200">
+          <label className="flex items-start gap-2 text-sm text-gray-200">
             <input
               type="radio"
               name="spreadMode"
               checked={spreadMode === 'MANUAL'}
               onChange={() => setSpreadMode('MANUAL')}
-              className="accent-amber-500"
+              className="mt-1 accent-amber-500"
             />
-            Manual
+            <span>Manual</span>
+          </label>
+          <label className="flex items-start gap-2 text-sm text-gray-200">
+            <input
+              type="radio"
+              name="spreadMode"
+              checked={spreadMode === 'AUTO'}
+              onChange={() => setSpreadMode('AUTO')}
+              className="mt-1 accent-amber-500"
+            />
+            <span>
+              Auto (from live order book)
+              <span className="mt-1 block text-xs font-normal text-amber-400/90">
+                Auto reads top-of-book only. On thin books the real fill is
+                worse, so Auto tends to under-estimate cost. Manual is
+                recommended.
+              </span>
+            </span>
           </label>
         </fieldset>
         <div className="grid gap-4 sm:grid-cols-2">
@@ -1926,14 +1933,10 @@ export default function AutoTrade() {
               <span className="mt-1 block text-xs text-red-400">
                 {basketExitSpreadPctError}
               </span>
-            ) : basketExitSpreadPctError ? (
-              <span className="mt-1 block text-xs text-red-400">
-                {basketExitSpreadPctError} (used as AUTO fallback)
-              </span>
             ) : (
               <span className="mt-1 block text-xs text-gray-500">
-                Manual override / AUTO fallback for daily short baskets (legacy
-                default 0.5%).
+                Applied when Manual is selected (also used as AUTO fallback).
+                Default 4%.
               </span>
             )}
           </label>
@@ -1957,14 +1960,10 @@ export default function AutoTrade() {
               <span className="mt-1 block text-xs text-red-400">
                 {hedgeExitSpreadPctError}
               </span>
-            ) : hedgeExitSpreadPctError ? (
-              <span className="mt-1 block text-xs text-red-400">
-                {hedgeExitSpreadPctError} (used as AUTO fallback)
-              </span>
             ) : (
               <span className="mt-1 block text-xs text-gray-500">
-                Manual override / AUTO fallback for monthly hedge (default
-                2.7%).
+                Applied when Manual is selected (also used as AUTO fallback).
+                Default 4%.
               </span>
             )}
           </label>

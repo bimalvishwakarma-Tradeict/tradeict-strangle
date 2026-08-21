@@ -149,9 +149,9 @@ class AutoTradeHedgeBudgetSettings(BaseModel):
 class AutoTradeSpreadSettings(BaseModel):
     """Exit-spread estimation mode + manual % + hard cap."""
 
-    spread_mode: str = Field(default="AUTO")
-    basket_exit_spread_pct: float = Field(default=0.5, ge=0, le=20)
-    hedge_exit_spread_pct: float = Field(default=2.7, ge=0, le=20)
+    spread_mode: str = Field(default="MANUAL")
+    basket_exit_spread_pct: float = Field(default=4.0, ge=0, le=20)
+    hedge_exit_spread_pct: float = Field(default=4.0, ge=0, le=20)
     spread_cap_pct: float = Field(default=8.0, ge=0, le=20)
 
     @field_validator("spread_mode")

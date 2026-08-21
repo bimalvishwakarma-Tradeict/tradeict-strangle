@@ -11,9 +11,10 @@ from backend.core.fees import estimate_expected_exit_spread_usd
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASKET_EXIT_SPREAD_PCT = 0.5  # matches legacy spread_factor=0.005
-DEFAULT_HEDGE_EXIT_SPREAD_PCT = 2.7
+DEFAULT_BASKET_EXIT_SPREAD_PCT = 4.0
+DEFAULT_HEDGE_EXIT_SPREAD_PCT = 4.0
 DEFAULT_SPREAD_CAP_PCT = 8.0
+DEFAULT_SPREAD_MODE = "MANUAL"
 
 
 def _configured_pct(settings: Any, kind: str) -> float:
@@ -44,9 +45,11 @@ def _spread_cap_pct(settings: Any) -> float:
 
 
 def _spread_mode(settings: Any) -> str:
-    mode = str(getattr(settings, "spread_mode", None) or "AUTO").upper().strip()
+    mode = str(
+        getattr(settings, "spread_mode", None) or DEFAULT_SPREAD_MODE
+    ).upper().strip()
     if mode not in {"AUTO", "MANUAL"}:
-        return "AUTO"
+        return DEFAULT_SPREAD_MODE
     return mode
 
 
@@ -66,6 +69,24 @@ async def _l2_bid_ask(client: Any, symbol: str) -> tuple[float, float] | None:
         logger.debug("L2 fetch failed for %s: %s", symbol, exc)
         return None
     return None
+
+
+async def _observe_auto_pct(
+    client: Any | None, symbol: str
+) -> float | None:
+    """
+    Informational top-of-book spread % — never used for USD in MANUAL mode.
+
+    Returns None when L2 is unavailable (caller logs observed_auto_pct=NA).
+    """
+    book = await _l2_bid_ask(client, str(symbol or ""))
+    if book is None:
+        return None
+    bid, ask = book
+    mid = (bid + ask) / 2.0
+    if mid <= 0:
+        return None
+    return max(0.0, (ask - bid) / mid * 100.0)
 
 
 async def get_exit_spread_pct(
@@ -138,6 +159,9 @@ async def estimate_and_log_exit_spread_usd(
 
     USD formula unchanged from fees.estimate_expected_exit_spread_usd
     (offer × qty × CV × pct/100).
+
+    In MANUAL mode, also observes L2 top-of-book % for comparison only —
+    observed_auto_pct never affects the USD applied.
     """
     capped, raw, source = await get_exit_spread_pct_detail(
         symbol, settings, kind, client=client
@@ -148,19 +172,42 @@ async def estimate_and_log_exit_spread_usd(
         contract_value=contract_value,
         spread_factor=float(capped) / 100.0,
     )
-    details = {
-        "kind": str(kind),
-        "symbol": str(symbol or ""),
-        "mode": source,
-        "raw_pct": round(float(raw), 6),
-        "capped_pct": round(float(capped), 6),
-        "usd": round(float(usd), 6),
-        "summary": (
-            f"[SPREAD_EST] kind={kind} symbol={symbol} mode={source} "
-            f"raw_pct={round(float(raw), 6)} capped_pct={round(float(capped), 6)} "
-            f"usd={round(float(usd), 6)}"
-        ),
-    }
+
+    if source == "MANUAL":
+        observed = await _observe_auto_pct(client, str(symbol or ""))
+        observed_str = (
+            "NA" if observed is None else round(float(observed), 6)
+        )
+        details = {
+            "kind": str(kind),
+            "symbol": str(symbol or ""),
+            "mode": "MANUAL",
+            "manual_pct": round(float(capped), 6),
+            "observed_auto_pct": observed_str,
+            "usd": round(float(usd), 6),
+            "summary": (
+                f"[SPREAD_EST] kind={kind} symbol={symbol} mode=MANUAL | "
+                f"manual_pct={round(float(capped), 6)} | "
+                f"observed_auto_pct={observed_str} | "
+                f"usd={round(float(usd), 6)}"
+            ),
+        }
+    else:
+        details = {
+            "kind": str(kind),
+            "symbol": str(symbol or ""),
+            "mode": source,
+            "raw_pct": round(float(raw), 6),
+            "capped_pct": round(float(capped), 6),
+            "usd": round(float(usd), 6),
+            "summary": (
+                f"[SPREAD_EST] kind={kind} symbol={symbol} mode={source} "
+                f"raw_pct={round(float(raw), 6)} "
+                f"capped_pct={round(float(capped), 6)} "
+                f"usd={round(float(usd), 6)}"
+            ),
+        }
+
     try:
         log_and_buffer("SPREAD_EST", int(log_id or 0), details)
     except Exception as exc:

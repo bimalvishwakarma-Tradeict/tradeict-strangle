@@ -343,15 +343,15 @@ class AutoTradeSettings(Base):
     hedge_target_multiple: Mapped[float] = mapped_column(
         Float, nullable=False, default=3.0
     )
-    # Exit-spread estimate: AUTO (L2) default, MANUAL override, hard cap always
+    # Exit-spread estimate: MANUAL default (AUTO under-estimates on thin books)
     spread_mode: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="AUTO"
+        String(20), nullable=False, default="MANUAL"
     )
     basket_exit_spread_pct: Mapped[float] = mapped_column(
-        Float, nullable=False, default=0.5
+        Float, nullable=False, default=4.0
     )
     hedge_exit_spread_pct: Mapped[float] = mapped_column(
-        Float, nullable=False, default=2.7
+        Float, nullable=False, default=4.0
     )
     spread_cap_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=8.0
