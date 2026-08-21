@@ -667,6 +667,20 @@ class BotEngine:
         # exchange manual close, crash mid-close). Runs even if auto-trade is off.
         await self._sweep_orphan_baskets()
 
+        # Slave orphan baskets + hedge health — same invariant on customer accounts
+        try:
+            import backend.engine.mirror_engine as mirror_mod
+
+            me = mirror_mod.mirror_engine or self.mirror_engine
+            if me is not None:
+                await me.sweep_orphan_slave_baskets()
+        except Exception as slave_orphan_exc:
+            logger.critical(
+                "[SLAVE_ORPHAN_BASKET] sweep failed: %s",
+                slave_orphan_exc,
+                exc_info=True,
+            )
+
         count = len(self.position_tracker.get_all_active())
         if self._last_trade_count != count:
             logger.info("Active trades in tracker: %s", count)

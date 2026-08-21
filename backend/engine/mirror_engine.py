@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,7 +19,7 @@ from backend.core.encryption import decrypt
 from backend.core.time_utils import get_ist_now
 from backend.database import SessionLocal, get_active_slave_accounts
 from backend.models import SlaveAccount, SlaveHedgePosition, SlaveTrade, Trade
-from backend.config import MAX_SLAVE_QTY, OPTIONS_CONTRACT_VALUE, TradeStatus
+from backend.config import MAX_SLAVE_QTY, OPTIONS_CONTRACT_VALUE, ExitReason, TradeStatus
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,111 @@ class MirrorEngine:
             lock = asyncio.Lock()
             self._slave_hedge_locks[sid] = lock
         return lock
+
+    @staticmethod
+    def _slave_hedge_status_is_alive(status: str | None) -> bool:
+        """True when slave hedge still protects baskets (matches master sweep)."""
+        s = str(status or "").lower().strip()
+        return s in {"active", "pending_close"}
+
+    def _resolve_master_hedge_id_for_trade(
+        self, db: Any, master_trade_id: int
+    ) -> int | None:
+        """
+        Current master hedge for a basket: trade.hedge_position_id, else any
+        alive master HedgePosition (hedge mode with unstamped trade).
+        """
+        from backend.models import HedgePosition
+
+        trade = (
+            db.query(Trade)
+            .filter(Trade.id == int(master_trade_id))
+            .first()
+        )
+        if trade is not None and getattr(trade, "hedge_position_id", None):
+            return int(trade.hedge_position_id)
+        alive = (
+            db.query(HedgePosition)
+            .filter(HedgePosition.status.in_(("active", "pending_close")))
+            .order_by(HedgePosition.id.desc())
+            .first()
+        )
+        if alive is not None:
+            return int(alive.id)
+        return None
+
+    def _get_alive_slave_hedge(
+        self,
+        db: Any,
+        *,
+        slave_id: int,
+        master_hedge_id: int,
+    ) -> SlaveHedgePosition | None:
+        return (
+            db.query(SlaveHedgePosition)
+            .filter(
+                SlaveHedgePosition.slave_account_id == int(slave_id),
+                SlaveHedgePosition.master_hedge_id == int(master_hedge_id),
+                SlaveHedgePosition.status.in_(("active", "pending_close")),
+            )
+            .first()
+        )
+
+    def _structure_hedge_pids_for_slave(
+        self, db: Any, slave_id: int
+    ) -> set[int]:
+        """Product ids of structure hedges that must survive basket exits."""
+        rows = (
+            db.query(SlaveHedgePosition)
+            .filter(
+                SlaveHedgePosition.slave_account_id == int(slave_id),
+                SlaveHedgePosition.status.in_(
+                    ("active", "pending_close", "partial", "exit_failed", "error")
+                ),
+            )
+            .all()
+        )
+        pids: set[int] = set()
+        for row in rows:
+            for attr in ("call_product_id", "put_product_id"):
+                try:
+                    pid = int(getattr(row, attr, 0) or 0)
+                except (TypeError, ValueError):
+                    pid = 0
+                if pid > 0:
+                    pids.add(pid)
+        return pids
+
+    def _assert_slave_hedge_close_allowed(
+        self, *, slave_id: int, reason: str
+    ) -> bool:
+        """
+        Only the master hedge-close cascade may close a slave structure hedge.
+        Returns True if allowed; logs CRITICAL and returns False otherwise.
+        """
+        reason_norm = str(reason or "").upper().strip()
+        # Cascade passes HEDGE_STOPLOSS / HEDGE_TARGET / … from close_hedge
+        from backend.engine.hedge_lifecycle import VALID_HEDGE_EXIT_REASONS
+
+        allowed = reason_norm in VALID_HEDGE_EXIT_REASONS or reason_norm.startswith(
+            "HEDGE_"
+        )
+        if allowed:
+            return True
+        logger.critical(
+            "[SLAVE_HEDGE_PROTECTED] slave=%s | attempted_by=%s",
+            slave_id,
+            reason_norm or "unknown",
+        )
+        log_and_buffer(
+            "SLAVE_HEDGE_PROTECTED",
+            0,
+            {
+                "slave": int(slave_id),
+                "attempted_by": reason_norm or "unknown",
+            },
+        )
+        return False
 
     def _get_slave_client(self, slave: SlaveAccount) -> DeltaClient:
         """Create DeltaClient for a slave account."""
@@ -525,6 +631,48 @@ class MirrorEngine:
         master_bracket_sl_call: float | None = None,
         master_bracket_sl_put: float | None = None,
     ) -> None:
+        # --- No naked baskets: require alive slave hedge under master hedge ---
+        master_hedge_id = self._resolve_master_hedge_id_for_trade(
+            db, int(master_trade_id)
+        )
+        if master_hedge_id is not None:
+            alive_hedge = self._get_alive_slave_hedge(
+                db,
+                slave_id=int(slave.id),
+                master_hedge_id=int(master_hedge_id),
+            )
+            if alive_hedge is None:
+                logger.error(
+                    "[SLAVE_ENTRY_BLOCK] slave=%s | guard=no_slave_hedge | "
+                    "master_hedge=%s | master_trade=%s",
+                    slave.id,
+                    master_hedge_id,
+                    master_trade_id,
+                )
+                log_and_buffer(
+                    "SLAVE_ENTRY_BLOCK",
+                    int(master_trade_id),
+                    {
+                        "slave": int(slave.id),
+                        "guard": "no_slave_hedge",
+                        "master_hedge": int(master_hedge_id),
+                        "master_trade": int(master_trade_id),
+                    },
+                )
+                skip_trade = SlaveTrade(
+                    slave_account_id=int(slave.id),
+                    master_trade_id=int(master_trade_id),
+                    actual_quantity=0,
+                    status="skipped_no_hedge",
+                    last_error=(
+                        f"no_slave_hedge master_hedge={master_hedge_id}"
+                    )[:500],
+                    error_count=0,
+                )
+                db.add(skip_trade)
+                db.commit()
+                return
+
         # Fetch master + fresh slave capital for capital-based qty calculation
         master_margin_used: float | None = None
         master_total_capital: float | None = None
@@ -2761,6 +2909,10 @@ class MirrorEngine:
         """Sell both long legs, verify flat, mark slave_hedge_positions closed."""
         sh = slave_hedge
         slave_id = int(slave.id)
+        if not self._assert_slave_hedge_close_allowed(
+            slave_id=slave_id, reason=reason
+        ):
+            return False
         call_pid = int(getattr(sh, "call_product_id", 0) or 0)
         put_pid = int(getattr(sh, "put_product_id", 0) or 0)
         qty = max(1, int(getattr(sh, "quantity", 1) or 1))
@@ -3509,6 +3661,10 @@ class MirrorEngine:
 
         client = self._get_slave_client(slave)
         stored_qty = max(1, int(slave_trade.actual_quantity or 1))
+        # Structure long straddle must survive normal basket exits
+        protected_hedge_pids = self._structure_hedge_pids_for_slave(
+            db, int(slave.id)
+        )
 
         try:
             # Cancel SL orders first
@@ -3595,12 +3751,15 @@ class MirrorEngine:
                 if matched or extras:
                     targets = matched + extras
                 else:
-                    # No hints matched and no shorts found via filter —
-                    # close entire option book for this dedicated slave
-                    targets = list(live_positions)
+                    # No hints matched — close SHORTS only; never structure hedge
+                    targets = [
+                        p
+                        for p in live_positions
+                        if float(p.get("size") or 0) < 0
+                    ]
                     logger.warning(
-                        "[MIRROR_EXIT] Slave '%s' — closing ALL %s live "
-                        "option positions (hints stale or empty)",
+                        "[MIRROR_EXIT] Slave '%s' — closing %s short "
+                        "option positions (hints stale; hedge protected)",
                         slave.name,
                         len(targets),
                     )
@@ -3652,6 +3811,41 @@ class MirrorEngine:
                         }
                     )
 
+            # Hard rule: never sell structure-hedge longs on a basket exit path
+            if protected_hedge_pids and targets:
+                filtered_targets: list[dict[str, Any]] = []
+                for p in targets:
+                    try:
+                        pid = int(p.get("product_id") or 0)
+                        size = float(p.get("size") or 0)
+                    except (TypeError, ValueError):
+                        filtered_targets.append(p)
+                        continue
+                    # Longs on structure hedge products are protected
+                    if pid in protected_hedge_pids and (
+                        size > 0
+                        or str(p.get("_fallback_side") or "").lower() == "sell"
+                    ):
+                        logger.critical(
+                            "[SLAVE_HEDGE_PROTECTED] slave=%s | "
+                            "attempted_by=%s",
+                            slave.id,
+                            reason,
+                        )
+                        log_and_buffer(
+                            "SLAVE_HEDGE_PROTECTED",
+                            int(slave_trade.master_trade_id or 0),
+                            {
+                                "slave": int(slave.id),
+                                "attempted_by": str(reason),
+                                "product_id": pid,
+                                "path": "_mirror_exit_to_slave",
+                            },
+                        )
+                        continue
+                    filtered_targets.append(p)
+                targets = filtered_targets
+
             closed_count = 0
             target_pids: set[int] = set()
             for pos in targets:
@@ -3660,15 +3854,33 @@ class MirrorEngine:
                 sym = str(pos.get("product_symbol") or "")
                 if pid <= 0 or size == 0:
                     continue
+                # Belt-and-suspenders: skip protected longs even if filter missed
+                if pid in protected_hedge_pids and size > 0:
+                    logger.critical(
+                        "[SLAVE_HEDGE_PROTECTED] slave=%s | attempted_by=%s",
+                        slave.id,
+                        reason,
+                    )
+                    continue
                 target_pids.add(pid)
                 close_size = max(1, abs(int(size)))
                 if size < 0:
                     side = "buy"  # close short
                 else:
-                    side = "sell"  # close long hedge
+                    side = "sell"  # close long (conversion hedge only)
                 # Explicit fallback override when inventing hint rows
                 if pos.get("_fallback_side"):
                     side = str(pos["_fallback_side"])
+                if (
+                    pid in protected_hedge_pids
+                    and str(side).lower() == "sell"
+                ):
+                    logger.critical(
+                        "[SLAVE_HEDGE_PROTECTED] slave=%s | attempted_by=%s",
+                        slave.id,
+                        reason,
+                    )
+                    continue
                 try:
                     await client.place_order(
                         product_id=pid,
@@ -3716,9 +3928,11 @@ class MirrorEngine:
                             retry_exc,
                         )
 
-            # Products that must be flat: hints + anything we tried to close
+            # Products that must be flat: basket hints + closed targets ONLY
+            # (never require structure hedge longs to be flat)
             check_pids = set(hint_ids) | target_pids
             check_pids.discard(0)
+            check_pids -= protected_hedge_pids
 
             # VERIFY flat before marking closed — never trust order success alone
             await asyncio.sleep(2)
@@ -3987,6 +4201,236 @@ class MirrorEngine:
     # After this many consecutive close failures, only retry every Nth sweep
     _SWEEP_BACKOFF_AFTER = 3
     _SWEEP_BACKOFF_EVERY = 6  # generations between retries once backed off
+
+    async def sweep_orphan_slave_baskets(self) -> dict[str, int]:
+        """
+        Close slave baskets whose structure hedge is missing or not alive.
+
+        pending_close counts as alive (same as master orphan sweep).
+        Verifies exchange flat before marking closed. Runs every monitor cycle.
+        """
+        from backend.models import HedgePosition
+
+        orphans_found = 0
+        orphans_closed = 0
+        slaves_active = 0
+        with_hedge = 0
+        without_hedge = 0
+        baskets_open = 0
+
+        with self.db_factory() as db:
+            active_slaves = get_active_slave_accounts(db)
+            slaves_active = len(active_slaves)
+
+            for slave in active_slaves:
+                alive = (
+                    db.query(SlaveHedgePosition)
+                    .filter(
+                        SlaveHedgePosition.slave_account_id == int(slave.id),
+                        SlaveHedgePosition.status.in_(
+                            ("active", "pending_close")
+                        ),
+                    )
+                    .count()
+                )
+                if alive > 0:
+                    with_hedge += 1
+                else:
+                    without_hedge += 1
+
+            open_statuses = (
+                "active",
+                "partial",
+                "partial_adjustment",
+                "adjust_close_failed",
+                "exit_failed",
+                "error",
+            )
+            open_baskets = (
+                db.query(SlaveTrade)
+                .filter(SlaveTrade.status.in_(open_statuses))
+                .order_by(SlaveTrade.id.asc())
+                .all()
+            )
+            baskets_open = len(open_baskets)
+            now = datetime.now(timezone.utc)
+
+            for st in open_baskets:
+                slave = (
+                    db.query(SlaveAccount)
+                    .filter(SlaveAccount.id == int(st.slave_account_id))
+                    .first()
+                )
+                if slave is None:
+                    continue
+
+                master_hedge_id = self._resolve_master_hedge_id_for_trade(
+                    db, int(st.master_trade_id)
+                )
+                slave_hedge: SlaveHedgePosition | None = None
+                hedge_status = "missing"
+                if master_hedge_id is not None:
+                    slave_hedge = (
+                        db.query(SlaveHedgePosition)
+                        .filter(
+                            SlaveHedgePosition.slave_account_id
+                            == int(slave.id),
+                            SlaveHedgePosition.master_hedge_id
+                            == int(master_hedge_id),
+                        )
+                        .order_by(SlaveHedgePosition.id.desc())
+                        .first()
+                    )
+                    if slave_hedge is not None:
+                        hedge_status = str(slave_hedge.status or "missing")
+                    else:
+                        mh = (
+                            db.query(HedgePosition)
+                            .filter(HedgePosition.id == int(master_hedge_id))
+                            .first()
+                        )
+                        if mh is not None:
+                            hedge_status = (
+                                f"slave_missing(master={mh.status})"
+                            )
+
+                if slave_hedge is not None and self._slave_hedge_status_is_alive(
+                    hedge_status
+                ):
+                    continue
+
+                if master_hedge_id is None and slave_hedge is None:
+                    master_trade = (
+                        db.query(Trade)
+                        .filter(Trade.id == int(st.master_trade_id))
+                        .first()
+                    )
+                    if (
+                        master_trade is None
+                        or getattr(master_trade, "hedge_position_id", None)
+                        is None
+                    ):
+                        continue
+
+                orphans_found += 1
+                exit_time = (
+                    getattr(slave_hedge, "exit_time", None)
+                    if slave_hedge is not None
+                    else None
+                )
+                if exit_time is None and master_hedge_id is not None:
+                    mh = (
+                        db.query(HedgePosition)
+                        .filter(HedgePosition.id == int(master_hedge_id))
+                        .first()
+                    )
+                    if mh is not None:
+                        exit_time = getattr(mh, "exit_time", None)
+                orphan_sec = 0
+                if exit_time is not None:
+                    et = exit_time
+                    if getattr(et, "tzinfo", None) is None:
+                        et = et.replace(tzinfo=timezone.utc)
+                    orphan_sec = max(
+                        0,
+                        int(
+                            (now - et.astimezone(timezone.utc)).total_seconds()
+                        ),
+                    )
+
+                logger.critical(
+                    "[SLAVE_ORPHAN_BASKET] slave=%s | slave_trade=%s | "
+                    "master_trade=%s | hedge_status=%s | "
+                    "orphan_duration_sec=%s",
+                    slave.id,
+                    st.id,
+                    st.master_trade_id,
+                    hedge_status,
+                    orphan_sec,
+                )
+                log_and_buffer(
+                    "SLAVE_ORPHAN_BASKET",
+                    int(st.master_trade_id or 0),
+                    {
+                        "slave": int(slave.id),
+                        "slave_trade": int(st.id),
+                        "master_trade": int(st.master_trade_id),
+                        "hedge_status": hedge_status,
+                        "orphan_duration_sec": orphan_sec,
+                        "master_hedge": master_hedge_id,
+                    },
+                )
+
+                call_pid, put_pid = self._master_trade_call_put_pids(
+                    db, int(st.master_trade_id)
+                )
+                try:
+                    await self._mirror_exit_to_slave(
+                        slave=slave,
+                        slave_trade=st,
+                        call_product_id=call_pid,
+                        put_product_id=put_pid,
+                        reason=ExitReason.ORPHAN_NO_HEDGE.value,
+                        db=db,
+                        hedge_product_id=None,
+                    )
+                except Exception as close_exc:
+                    logger.critical(
+                        "[SLAVE_ORPHAN_BASKET] close raised slave_trade=%s: %s",
+                        st.id,
+                        close_exc,
+                        exc_info=True,
+                    )
+                    continue
+
+                db.expire_all()
+                refreshed = (
+                    db.query(SlaveTrade)
+                    .filter(SlaveTrade.id == int(st.id))
+                    .first()
+                )
+                if (
+                    refreshed is not None
+                    and str(refreshed.status or "").lower() == "closed"
+                ):
+                    orphans_closed += 1
+                else:
+                    logger.critical(
+                        "[SLAVE_ORPHAN_BASKET] slave_trade=%s still not "
+                        "closed after exit (status=%s) — will retry",
+                        st.id,
+                        getattr(refreshed, "status", None),
+                    )
+
+        log_and_buffer(
+            "SLAVE_HEDGE_HEALTH",
+            0,
+            {
+                "slaves_active": slaves_active,
+                "with_hedge": with_hedge,
+                "without_hedge": without_hedge,
+                "baskets_open": baskets_open,
+                "orphans_found": orphans_found,
+                "orphans_closed": orphans_closed,
+            },
+        )
+        logger.info(
+            "[SLAVE_HEDGE_HEALTH] slaves_active=%s | with_hedge=%s | "
+            "without_hedge=%s | baskets_open=%s | orphans_found=%s",
+            slaves_active,
+            with_hedge,
+            without_hedge,
+            baskets_open,
+            orphans_found,
+        )
+        return {
+            "slaves_active": slaves_active,
+            "with_hedge": with_hedge,
+            "without_hedge": without_hedge,
+            "baskets_open": baskets_open,
+            "orphans_found": orphans_found,
+            "orphans_closed": orphans_closed,
+        }
 
     async def sweep_open_slave_trades(self) -> dict[str, int]:
         """
