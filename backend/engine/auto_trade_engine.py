@@ -1150,6 +1150,19 @@ class AutoTradeEngine:
                     ),
                 },
             )
+            logger.info(
+                "[BASKET_TARGET_SET] trade=%s | mode=%s | target_usd=%s | "
+                "hedge_total_theta=%s | multiple=%s",
+                int(trade.id),
+                target_source,
+                round(profit_target_usd, 6),
+                (
+                    round(float(hedge_theta_at_entry), 4)
+                    if hedge_theta_at_entry is not None
+                    else None
+                ),
+                round(float(target_info["basket_target_multiple"]), 4),
+            )
 
             from backend.core.fees import (
                 compute_entry_spread_usd,

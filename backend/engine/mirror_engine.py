@@ -642,7 +642,7 @@ class MirrorEngine:
                 master_hedge_id=int(master_hedge_id),
             )
             if alive_hedge is None:
-                logger.error(
+                logger.info(
                     "[SLAVE_ENTRY_BLOCK] slave=%s | guard=no_slave_hedge | "
                     "master_hedge=%s | master_trade=%s",
                     slave.id,
@@ -2116,7 +2116,7 @@ class MirrorEngine:
                 * _CONTRACT_SIZE
                 * _HEDGE_AFFORD_BUFFER
             )
-            logger.error(
+            logger.info(
                 "[SLAVE_HEDGE_SKIP] slave=%s | reason=insufficient_capital | "
                 "required=%.4f | available=%.4f",
                 slave_id,
@@ -2682,23 +2682,34 @@ class MirrorEngine:
         baskets_failed = 0
         failed_basket_ids: list[int] = []
         hedge_closed = False
+        # Never-placed rows are not live baskets to count/close
+        _ignore_statuses = {"skipped_low_capital", "skipped_no_hedge"}
 
         try:
-            # --- a. Close open slave baskets under this master hedge ---
-            open_slave_trades: list[SlaveTrade] = []
+            # Every slave basket under this master hedge (already-closed
+            # included) — found must count all we consider, not only open.
+            considered: list[SlaveTrade] = []
             if master_trade_ids:
-                open_slave_trades = (
+                considered = (
                     db.query(SlaveTrade)
                     .filter(
                         SlaveTrade.slave_account_id == slave_id,
                         SlaveTrade.master_trade_id.in_(master_trade_ids),
-                        SlaveTrade.status != "closed",
                     )
+                    .order_by(SlaveTrade.id.asc())
                     .all()
                 )
-            baskets_found = len(open_slave_trades)
+            considered = [
+                st
+                for st in considered
+                if str(st.status or "").lower() not in _ignore_statuses
+            ]
+            baskets_found = len(considered)
 
-            for st in open_slave_trades:
+            # --- a. Close any still-open slave baskets ---
+            for st in considered:
+                if str(st.status or "").lower() == "closed":
+                    continue
                 mid = int(st.master_trade_id)
                 call_pid, put_pid = self._master_trade_call_put_pids(db, mid)
                 try:
@@ -2722,23 +2733,15 @@ class MirrorEngine:
 
             # --- b. Exchange verify — do not trust DB status alone ---
             db.expire_all()
+            check_ids = {int(st.id) for st in considered}
             check_trades: list[SlaveTrade] = []
-            if master_trade_ids:
+            if check_ids:
                 check_trades = (
                     db.query(SlaveTrade)
-                    .filter(
-                        SlaveTrade.slave_account_id == slave_id,
-                        SlaveTrade.master_trade_id.in_(master_trade_ids),
-                    )
+                    .filter(SlaveTrade.id.in_(list(check_ids)))
+                    .order_by(SlaveTrade.id.asc())
                     .all()
                 )
-            # Ignore never-placed capital skips — no live positions to clear
-            _ignore = {"skipped_low_capital"}
-            check_trades = [
-                st
-                for st in check_trades
-                if str(st.status or "").lower() not in _ignore
-            ]
 
             if not check_trades:
                 baskets_closed = 0
@@ -2826,6 +2829,10 @@ class MirrorEngine:
                 finally:
                     if client is not None:
                         await client.close()
+
+            # Invariant: found always covers closed
+            if baskets_closed > baskets_found:
+                baskets_found = baskets_closed
 
             if baskets_failed > 0:
                 logger.critical(
