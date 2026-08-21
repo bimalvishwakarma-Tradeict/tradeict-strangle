@@ -710,12 +710,18 @@ export default function AutoTrade() {
   }, [loading, refreshPreviews])
 
   const handleSave = async () => {
-    if (hedgeSlFloorPctError || hedgeTargetMultipleError || spreadSettingsError) {
+    if (
+      hedgeSlFloorPctError ||
+      hedgeTargetMultipleError ||
+      minHedgeDteError ||
+      spreadSettingsError
+    ) {
       setToast({
         type: 'error',
         message:
           hedgeSlFloorPctError ||
           hedgeTargetMultipleError ||
+          minHedgeDteError ||
           spreadSettingsError ||
           'Fix validation errors before saving',
       })
