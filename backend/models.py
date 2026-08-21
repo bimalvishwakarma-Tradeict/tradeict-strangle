@@ -135,6 +135,14 @@ class Trade(Base):
     hedge_position_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("hedge_positions.id"), nullable=True
     )
+    # How profit_target_usd was set at entry: THETA | PCT
+    target_source: Mapped[str | None] = mapped_column(
+        String(10), nullable=True, default=None
+    )
+    # Hedge TOTAL straddle theta per BTC locked at basket entry (THETA mode)
+    hedge_theta_at_entry: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
 
     account: Mapped[Account] = relationship("Account", back_populates="trades")
     hedge_position: Mapped[HedgePosition | None] = relationship(
@@ -394,12 +402,19 @@ class AutoTradeSettings(Base):
     theta_multiplier: Mapped[float] = mapped_column(
         Float, nullable=False, default=3.0
     )
-    # payoff_pct | theta_multiplier
+    # payoff_pct | theta_multiplier  (legacy basket target UI / preview)
     target_mode: Mapped[str] = mapped_column(
         String(30), nullable=False, default="payoff_pct"
     )
     target_theta_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=150.0
+    )
+    # Live basket profit target: THETA (hedge total theta × multiple) | PCT
+    basket_target_mode: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="THETA"
+    )
+    basket_target_multiple: Mapped[float] = mapped_column(
+        Float, nullable=False, default=1.5
     )
     # hedge lots = short basket qty × this ratio (default 1:1)
     hedge_qty_ratio: Mapped[float] = mapped_column(

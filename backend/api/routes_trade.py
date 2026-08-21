@@ -1808,6 +1808,12 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             or None,
             "tp_pct": float(getattr(state.trade, "tp_pct", None) or 50.0),
             "sl_pct": float(getattr(state.trade, "sl_pct", None) or 100.0),
+            "target_source": getattr(state.trade, "target_source", None),
+            "hedge_theta_at_entry": (
+                float(getattr(state.trade, "hedge_theta_at_entry", None))
+                if getattr(state.trade, "hedge_theta_at_entry", None) is not None
+                else None
+            ),
             "pnl_pct_of_target": round(pnl_pct, 2),
             "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
             "adjustment_count": int(

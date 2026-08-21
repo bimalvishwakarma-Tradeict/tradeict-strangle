@@ -446,6 +446,164 @@ async def get_hedge_theta(
     )
 
 
+async def compute_basket_profit_target_at_entry(
+    *,
+    settings: Any,
+    client: DeltaClient,
+    hedge: Any | None,
+    quantity: int,
+    credit_usd: float,
+    call_fill: float,
+    put_fill: float,
+    call_fee: float | None,
+    put_fee: float | None,
+    call_symbol: str,
+    put_symbol: str,
+    tp_pct: float,
+    btc_index: float,
+) -> dict[str, Any]:
+    """
+    Lock basket profit_target_usd at entry.
+
+    THETA mode (and active hedge):
+      target = basket_target_multiple × hedge_total_theta × qty × CONTRACT_SIZE
+    PCT mode (or no hedge):
+      target = credit_usd × tp_pct / 100
+
+    Caps at 90% of max_achievable when the raw target is unreachable.
+    """
+    from backend.core.fees import estimate_option_trading_fee
+    from backend.core.spread_utils import estimate_and_log_exit_spread_usd
+
+    qty = max(1, int(quantity))
+    credit = max(0.0, float(credit_usd or 0.0))
+    mode_raw = str(
+        getattr(settings, "basket_target_mode", None) or "THETA"
+    ).upper().strip()
+    mode = "THETA" if mode_raw == "THETA" else "PCT"
+    multiple = float(
+        getattr(settings, "basket_target_multiple", None)
+        if getattr(settings, "basket_target_multiple", None) is not None
+        else 1.5
+    )
+    multiple = max(0.1, min(10.0, multiple))
+
+    entry_fees = max(0.0, float(call_fee or 0.0)) + max(
+        0.0, float(put_fee or 0.0)
+    )
+    est_exit_fees = 0.0
+    btc = float(btc_index or 0.0)
+    if btc > 0:
+        if float(call_fill) > 0:
+            est_exit_fees += estimate_option_trading_fee(
+                option_price=float(call_fill),
+                quantity_lots=qty,
+                btc_index_price=btc,
+            )
+        if float(put_fill) > 0:
+            est_exit_fees += estimate_option_trading_fee(
+                option_price=float(put_fill),
+                quantity_lots=qty,
+                btc_index_price=btc,
+            )
+
+    est_exit_spread = 0.0
+    try:
+        if call_symbol and float(call_fill) > 0:
+            est_exit_spread += await estimate_and_log_exit_spread_usd(
+                symbol=str(call_symbol),
+                offer_price=float(call_fill),
+                quantity=qty,
+                settings=settings,
+                kind="basket",
+                client=client,
+                log_id=0,
+            )
+        if put_symbol and float(put_fill) > 0:
+            est_exit_spread += await estimate_and_log_exit_spread_usd(
+                symbol=str(put_symbol),
+                offer_price=float(put_fill),
+                quantity=qty,
+                settings=settings,
+                kind="basket",
+                client=client,
+                log_id=0,
+            )
+    except Exception as exc:
+        logger.warning(
+            "basket target exit-spread estimate failed: %s", exc, exc_info=True
+        )
+        # Fallback: manual % of credit
+        spread_pct = float(
+            getattr(settings, "basket_exit_spread_pct", None)
+            if getattr(settings, "basket_exit_spread_pct", None) is not None
+            else 4.0
+        )
+        est_exit_spread = credit * (max(0.0, spread_pct) / 100.0)
+
+    friction = entry_fees + est_exit_fees + max(0.0, float(est_exit_spread))
+    max_achievable = max(0.0, credit - friction)
+
+    hedge_theta: float | None = None
+    target_source = "PCT"
+    raw_target = round(credit * float(tp_pct) / 100.0, 6)
+
+    if mode == "THETA" and hedge is not None:
+        try:
+            theta_info = await get_hedge_theta(client, hedge)
+            hedge_theta = abs(float(theta_info.get("total_theta") or 0.0))
+            if hedge_theta > 0:
+                raw_target = round(
+                    multiple * hedge_theta * qty * CONTRACT_SIZE, 6
+                )
+                target_source = "THETA"
+            else:
+                logger.warning(
+                    "basket THETA target: hedge total_theta is 0 — falling "
+                    "back to PCT"
+                )
+        except Exception as exc:
+            logger.warning(
+                "basket THETA target: get_hedge_theta failed (%s) — "
+                "falling back to PCT",
+                exc,
+            )
+
+    capped = False
+    profit_target = float(raw_target)
+    capture_before_cap = (
+        (raw_target / max_achievable * 100.0) if max_achievable > 0 else 0.0
+    )
+    if max_achievable > 0 and profit_target > max_achievable:
+        capped = True
+        profit_target = round(max_achievable * 0.9, 6)
+    profit_target = max(0.0, float(profit_target))
+
+    capture_required_pct = (
+        (profit_target / max_achievable * 100.0) if max_achievable > 0 else 0.0
+    )
+
+    return {
+        "profit_target_usd": round(profit_target, 6),
+        "raw_target_usd": round(float(raw_target), 6),
+        "target_source": target_source,
+        "hedge_theta_at_entry": (
+            round(float(hedge_theta), 6) if hedge_theta is not None else None
+        ),
+        "basket_target_multiple": round(multiple, 4),
+        "credit_usd": round(credit, 6),
+        "entry_fees": round(entry_fees, 6),
+        "est_exit_fees": round(est_exit_fees, 6),
+        "est_exit_spread": round(float(est_exit_spread), 6),
+        "friction": round(friction, 6),
+        "max_achievable": round(max_achievable, 6),
+        "capture_required_pct": round(capture_required_pct, 2),
+        "capture_required_pct_raw": round(float(capture_before_cap), 2),
+        "capped": bool(capped),
+        "mode": mode,
+    }
+
+
 def _side_premium(row: dict[str, Any], side: str) -> float:
     """
     Premium for strike matching — prefer mark (same as adjustment / strangle).

@@ -894,6 +894,12 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
           <span className="font-semibold text-green-400">
             🎯 Target{' '}
             <span className="text-base font-bold">+${fmtMoney(target)}</span>
+            {String(trade.target_source || '').toUpperCase() === 'THETA' &&
+            trade.hedge_theta_at_entry != null ? (
+              <span className="ml-1 text-[11px] font-normal text-gray-400">
+                ({Number(trade.hedge_theta_at_entry).toFixed(1)}θ)
+              </span>
+            ) : null}
           </span>
           <span className="font-semibold text-red-400">
             🛑 SL{' '}
@@ -1123,9 +1129,30 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
               <span className="text-base font-bold text-green-400">
                 +${fmtMoney(target)}
               </span>
-              <span className="ml-2 text-xs text-gray-400">
-                [{fmtMoney(tpPctLocked)}% of ${fmtMoney(initialMax)} max]
-              </span>
+              {String(trade.target_source || '').toUpperCase() === 'THETA' &&
+              trade.hedge_theta_at_entry != null ? (
+                <span className="ml-2 text-xs text-gray-400">
+                  (
+                  {(() => {
+                    const th = Number(trade.hedge_theta_at_entry)
+                    const qty = Math.max(
+                      1,
+                      Number(call.quantity || put.quantity || trade.quantity || 1),
+                    )
+                    const cv = 0.001
+                    const mult =
+                      th > 0 && qty > 0 ? target / (th * qty * cv) : 0
+                    const capture =
+                      initialMax > 0 ? (target / initialMax) * 100 : 0
+                    return `${Number(mult).toFixed(1)}x hedge theta ${Number(th).toFixed(1)} · ${Number(capture).toFixed(0)}% capture`
+                  })()}
+                  )
+                </span>
+              ) : (
+                <span className="ml-2 text-xs text-gray-400">
+                  [{fmtMoney(tpPctLocked)}% of ${fmtMoney(initialMax)} max]
+                </span>
+              )}
             </span>
           </div>
           <div className="flex flex-wrap items-baseline justify-between gap-2">

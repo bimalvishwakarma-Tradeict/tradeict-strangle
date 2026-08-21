@@ -752,6 +752,19 @@ def _migrate_schema() -> None:
                     )
                 )
 
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        for col_name, col_type in (
+            ("target_source", "VARCHAR(10)"),
+            ("hedge_theta_at_entry", "FLOAT"),
+        ):
+            if col_name not in trade_cols:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}"
+                        )
+                    )
+
     # Hedge mode settings columns + theta log table
     inspector = inspect(engine)
     tables = inspector.get_table_names()
@@ -787,6 +800,8 @@ def _migrate_schema() -> None:
             ("theta_multiplier", "FLOAT NOT NULL DEFAULT 3.0"),
             ("target_mode", "VARCHAR(30) NOT NULL DEFAULT 'payoff_pct'"),
             ("target_theta_pct", "FLOAT NOT NULL DEFAULT 150.0"),
+            ("basket_target_mode", "VARCHAR(10) NOT NULL DEFAULT 'THETA'"),
+            ("basket_target_multiple", "FLOAT NOT NULL DEFAULT 1.5"),
             ("hedge_qty_ratio", "FLOAT NOT NULL DEFAULT 1.0"),
             ("cooldown_after_loss_minutes", "INTEGER NOT NULL DEFAULT 120"),
             (

@@ -89,6 +89,8 @@ class AutoTradeSettingsSchema(BaseModel):
     theta_multiplier: float = Field(default=3.0, gt=0, le=20)
     target_mode: str = "payoff_pct"  # payoff_pct | theta_multiplier
     target_theta_pct: float = Field(default=150.0, ge=10, le=1000)
+    basket_target_mode: str = "THETA"  # THETA | PCT
+    basket_target_multiple: float = Field(default=1.5, ge=0.1, le=10)
     cooldown_after_loss_minutes: int = Field(default=120, ge=0, le=1440)
     adjustment_premium_tolerance_pct: float = Field(
         default=40.0, ge=5, le=200
@@ -150,6 +152,14 @@ class AutoTradeSettingsSchema(BaseModel):
             raise ValueError(
                 "target_mode must be 'payoff_pct' or 'theta_multiplier'"
             )
+        return normalized
+
+    @field_validator("basket_target_mode")
+    @classmethod
+    def validate_basket_target_mode(cls, v: str) -> str:
+        normalized = str(v or "THETA").upper().strip()
+        if normalized not in {"THETA", "PCT"}:
+            raise ValueError("basket_target_mode must be 'THETA' or 'PCT'")
         return normalized
 
     @field_validator("spread_mode")
@@ -362,6 +372,14 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "target_theta_pct", None)
             if getattr(s, "target_theta_pct", None) is not None
             else 150.0
+        ),
+        "basket_target_mode": str(
+            getattr(s, "basket_target_mode", None) or "THETA"
+        ).upper(),
+        "basket_target_multiple": float(
+            getattr(s, "basket_target_multiple", None)
+            if getattr(s, "basket_target_multiple", None) is not None
+            else 1.5
         ),
         "cooldown_after_loss_minutes": int(
             getattr(s, "cooldown_after_loss_minutes", None)
@@ -643,6 +661,10 @@ async def update_auto_trade_settings(
         settings.target_mode = "payoff_pct"
     settings.theta_multiplier = float(payload.theta_multiplier)
     settings.target_theta_pct = float(payload.target_theta_pct)
+    settings.basket_target_mode = str(
+        payload.basket_target_mode or "THETA"
+    ).upper().strip()
+    settings.basket_target_multiple = float(payload.basket_target_multiple)
     settings.cooldown_after_loss_minutes = int(
         payload.cooldown_after_loss_minutes
     )

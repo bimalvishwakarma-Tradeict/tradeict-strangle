@@ -937,8 +937,68 @@ class AutoTradeEngine:
                 (call_fill + put_fill) * qty * float(OPTIONS_CONTRACT_VALUE),
                 6,
             )
-            profit_target_usd = round(initial_max_profit * tp_pct / 100.0, 2)
             stoploss_usd = round(initial_max_profit * sl_pct / 100.0, 2)
+
+            from backend.core.hedge_theta import (
+                compute_basket_profit_target_at_entry,
+            )
+            from backend.engine.hedge_lifecycle import get_active_hedge
+
+            hedge_for_target = None
+            if hedge_position_id is not None:
+                hedge_for_target = get_active_hedge(
+                    db,
+                    account_id=int(account.id),
+                    underlying=str(underlying),
+                )
+            btc_for_target = 0.0
+            try:
+                und_key = str(settings.underlying).upper().strip()
+                price_map = {
+                    "BTC": "BTCUSD",
+                    "ETH": "ETHUSD",
+                    "XAU": "XAUUSD",
+                }
+                price_symbol = price_map.get(
+                    und_key,
+                    und_key if und_key.endswith("USD") else f"{und_key}USD",
+                )
+                btc_for_target = float(
+                    await client.get_underlying_price(price_symbol)
+                )
+            except Exception:
+                btc_for_target = 0.0
+
+            target_info = await compute_basket_profit_target_at_entry(
+                settings=settings,
+                client=client,
+                hedge=hedge_for_target,
+                quantity=qty,
+                credit_usd=float(initial_max_profit),
+                call_fill=float(call_fill),
+                put_fill=float(put_fill),
+                call_fee=call_fee,
+                put_fee=put_fee,
+                call_symbol=str(straddle.get("call_symbol") or ""),
+                put_symbol=str(straddle.get("put_symbol") or ""),
+                tp_pct=float(tp_pct),
+                btc_index=btc_for_target,
+            )
+            profit_target_usd = float(target_info["profit_target_usd"])
+            target_source = str(target_info["target_source"])
+            hedge_theta_at_entry = target_info.get("hedge_theta_at_entry")
+
+            if target_info.get("capped"):
+                logger.warning(
+                    "[TARGET_UNREACHABLE] target=%s max_achievable=%s "
+                    "credit=%s friction=%s capture_required_pct=%s "
+                    "(capping at 90%% of max_achievable)",
+                    target_info["raw_target_usd"],
+                    target_info["max_achievable"],
+                    target_info["credit_usd"],
+                    target_info["friction"],
+                    target_info["capture_required_pct"],
+                )
 
             now_utc = datetime.now(timezone.utc)
             now_ist = get_ist_now()
@@ -987,6 +1047,12 @@ class AutoTradeEngine:
                     if hedge_position_id is not None
                     else None
                 ),
+                target_source=target_source,
+                hedge_theta_at_entry=(
+                    float(hedge_theta_at_entry)
+                    if hedge_theta_at_entry is not None
+                    else None
+                ),
             )
             db.add(trade)
             db.flush()
@@ -1000,6 +1066,84 @@ class AutoTradeEngine:
                 stoploss_usd=stoploss_usd,
                 tp_pct=tp_pct,
                 sl_pct=sl_pct,
+            )
+
+            # Re-emit TARGET_UNREACHABLE with real trade id if capped
+            if target_info.get("capped"):
+                log_and_buffer(
+                    "TARGET_UNREACHABLE",
+                    int(trade.id),
+                    {
+                        "trade": int(trade.id),
+                        "target": round(
+                            float(target_info["raw_target_usd"]), 6
+                        ),
+                        "max_achievable": round(
+                            float(target_info["max_achievable"]), 6
+                        ),
+                        "credit": round(float(target_info["credit_usd"]), 6),
+                        "friction": round(float(target_info["friction"]), 6),
+                        "capture_required_pct": round(
+                            float(
+                                target_info.get(
+                                    "capture_required_pct_raw",
+                                    target_info["capture_required_pct"],
+                                )
+                            ),
+                            2,
+                        ),
+                        "summary": (
+                            f"[TARGET_UNREACHABLE] trade={int(trade.id)} | "
+                            f"target="
+                            f"{round(float(target_info['raw_target_usd']), 6)} | "
+                            f"max_achievable="
+                            f"{round(float(target_info['max_achievable']), 6)} | "
+                            f"credit="
+                            f"{round(float(target_info['credit_usd']), 6)} | "
+                            f"friction="
+                            f"{round(float(target_info['friction']), 6)} | "
+                            f"capture_required_pct="
+                            f"{round(float(target_info.get('capture_required_pct_raw', target_info['capture_required_pct'])), 2)}"
+                        ),
+                    },
+                )
+
+            log_and_buffer(
+                "BASKET_TARGET_SET",
+                int(trade.id),
+                {
+                    "trade": int(trade.id),
+                    "mode": target_source,
+                    "hedge_total_theta": (
+                        round(float(hedge_theta_at_entry), 4)
+                        if hedge_theta_at_entry is not None
+                        else None
+                    ),
+                    "multiple": round(
+                        float(target_info["basket_target_multiple"]), 4
+                    ),
+                    "target_usd": round(profit_target_usd, 6),
+                    "credit": round(float(target_info["credit_usd"]), 6),
+                    "friction": round(float(target_info["friction"]), 6),
+                    "capture_required_pct": round(
+                        float(target_info["capture_required_pct"]), 2
+                    ),
+                    "capped": bool(target_info.get("capped")),
+                    "summary": (
+                        f"[BASKET_TARGET_SET] trade={int(trade.id)} | "
+                        f"mode={target_source} | "
+                        f"hedge_total_theta="
+                        f"{round(float(hedge_theta_at_entry), 4) if hedge_theta_at_entry is not None else 'n/a'} | "
+                        f"multiple="
+                        f"{round(float(target_info['basket_target_multiple']), 4)} | "
+                        f"target_usd={round(profit_target_usd, 6)} | "
+                        f"credit={round(float(target_info['credit_usd']), 6)} | "
+                        f"friction={round(float(target_info['friction']), 6)} | "
+                        f"capture_required_pct="
+                        f"{round(float(target_info['capture_required_pct']), 2)} | "
+                        f"capped={bool(target_info.get('capped'))}"
+                    ),
+                },
             )
 
             from backend.core.fees import (

@@ -140,6 +140,12 @@ function applyStatusToForm(data, setters) {
   )
   setters.setTargetMode(data.target_mode || 'payoff_pct')
   setters.setTargetThetaPct(String(data.target_theta_pct ?? 150))
+  setters.setBasketTargetMode(
+    String(data.basket_target_mode || 'THETA').toUpperCase() === 'PCT'
+      ? 'PCT'
+      : 'THETA',
+  )
+  setters.setBasketTargetMultiple(String(data.basket_target_multiple ?? 1.5))
   setters.setCooldownAfterLossMinutes(
     String(data.cooldown_after_loss_minutes ?? 120),
   )
@@ -238,6 +244,8 @@ export default function AutoTrade() {
     useState('25')
   const [targetMode, setTargetMode] = useState('payoff_pct')
   const [targetThetaPct, setTargetThetaPct] = useState('150')
+  const [basketTargetMode, setBasketTargetMode] = useState('THETA')
+  const [basketTargetMultiple, setBasketTargetMultiple] = useState('1.5')
   const [cooldownAfterLossMinutes, setCooldownAfterLossMinutes] =
     useState('120')
   const [orderMarginPerLot, setOrderMarginPerLot] = useState(null)
@@ -300,6 +308,8 @@ export default function AutoTrade() {
       setEntryPremiumMatchTolerancePct,
       setTargetMode,
       setTargetThetaPct,
+      setBasketTargetMode,
+      setBasketTargetMultiple,
       setCooldownAfterLossMinutes,
       setOrderMarginPerLot,
       setIsEnabled,
@@ -610,6 +620,11 @@ export default function AutoTrade() {
       target_theta_pct: Math.min(
         1000,
         Math.max(10, Number(targetThetaPct) || 150),
+      ),
+      basket_target_mode: basketTargetMode === 'PCT' ? 'PCT' : 'THETA',
+      basket_target_multiple: Math.min(
+        10,
+        Math.max(0.1, Number(basketTargetMultiple) || 1.5),
       ),
       cooldown_after_loss_minutes: Math.min(
         1440,
@@ -2141,6 +2156,65 @@ export default function AutoTrade() {
             <p className="text-sm text-gray-500">Loading preview…</p>
           )}
         </div>
+      </section>
+
+      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
+        <h2 className="text-sm font-semibold text-white">BASKET PROFIT TARGET</h2>
+        <p className="text-xs text-gray-500">
+          The basket must cover the hedge&apos;s daily theta bleed plus a
+          margin. Theta mode locks target at entry from hedge total straddle
+          theta × multiple × qty × 0.001.
+        </p>
+        <div className="space-y-2">
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="radio"
+              name="basket_target_mode"
+              checked={basketTargetMode === 'THETA'}
+              onChange={() => setBasketTargetMode('THETA')}
+              className="mt-1"
+            />
+            <span className="text-sm text-gray-300">
+              Theta — multiple of hedge daily total theta
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="radio"
+              name="basket_target_mode"
+              checked={basketTargetMode === 'PCT'}
+              onChange={() => setBasketTargetMode('PCT')}
+              className="mt-1"
+            />
+            <span className="text-sm text-gray-300">
+              Percent — % of basket credit (legacy)
+            </span>
+          </label>
+        </div>
+        {basketTargetMode === 'THETA' ? (
+          <label className="block text-sm text-gray-300">
+            Basket target multiple
+            <input
+              type="number"
+              min={0.1}
+              max={10}
+              step={0.1}
+              value={basketTargetMultiple}
+              onChange={(e) => setBasketTargetMultiple(e.target.value)}
+              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+            />
+            <span className="mt-1 block text-xs text-gray-500">
+              target_usd = multiple × hedge_total_theta × qty × 0.001. Default
+              1.5 covers daily hedge theta plus a 50% cushion. Strike selection
+              still uses CALL-leg theta × strike multiplier (separate).
+            </span>
+          </label>
+        ) : (
+          <p className="text-xs text-gray-500">
+            Uses Profit Target % of max premium (above) when Percent mode is
+            selected.
+          </p>
+        )}
       </section>
 
       <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">

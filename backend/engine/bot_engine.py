@@ -5162,6 +5162,15 @@ class BotEngine:
             or None,
             "tp_pct": float(getattr(trade_state.trade, "tp_pct", None) or 50.0),
             "sl_pct": float(getattr(trade_state.trade, "sl_pct", None) or 100.0),
+            "target_source": getattr(
+                trade_state.trade, "target_source", None
+            ),
+            "hedge_theta_at_entry": (
+                float(getattr(trade_state.trade, "hedge_theta_at_entry", None))
+                if getattr(trade_state.trade, "hedge_theta_at_entry", None)
+                is not None
+                else None
+            ),
             "hours_to_expiry": get_hours_to_expiry(trade_state.trade.expiry_date),
             "status": "active",
             "is_settling": settling["is_settling"],
