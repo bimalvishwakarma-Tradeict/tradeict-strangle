@@ -85,6 +85,8 @@ class ExitReason(str, Enum):
     MAX_ADJUSTMENTS_REACHED = "MAX_ADJUSTMENTS_REACHED"
     ADJ_LOW_PREMIUM_EXIT = "ADJ_LOW_PREMIUM_EXIT"
     NO_STRIKE_AVAILABLE = "NO_STRIKE_AVAILABLE"
+    # Adjustment: no farther-OTM strike left on the chain — close basket
+    CHAIN_EXHAUSTED = "CHAIN_EXHAUSTED"
     NO_HEDGE_STRIKE_AVAILABLE = "NO_HEDGE_STRIKE_AVAILABLE"
     NO_OTHER_STRIKE_IN_CONVERSION = "NO_OTHER_STRIKE_IN_CONVERSION"
     # Baskets closed because their linked long hedge was closed

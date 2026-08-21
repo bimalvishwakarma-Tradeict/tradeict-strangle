@@ -372,18 +372,60 @@ class AdjustmentExecutor:
                 )
             except Exception as exc:
                 msg = str(exc)
-                # Wrong-direction / no farther-OTM candidate — leave untouched
+                # ADJUSTMENT_ABORT / reason=no_valid_strike → close basket.
+                # find_adjustment_strike only raises ADJUSTMENT_ABORT for
+                # no_valid_strike (chain exhausted or wrong-direction guard).
                 if "ADJUSTMENT_ABORT" in msg:
-                    logger.error(
-                        "[ADJUSTMENT_ABORT] Trade %s leg=%s — %s "
-                        "(leaving position untouched)",
-                        trade.id,
+                    spot_px = 0.0
+                    try:
+                        und_key = str(
+                            getattr(trade, "underlying", None) or "BTC"
+                        ).upper()
+                        price_sym = UNDERLYING_SYMBOLS.get(und_key, und_key)
+                        spot_px = float(
+                            await delta_client.get_underlying_price(price_sym)
+                        )
+                    except Exception:
+                        spot_px = 0.0
+                    old_strike_abort = float(triggered_leg.strike)
+                    chain_details = {
+                        "trade": int(trade.id),
+                        "leg": triggered_leg_type,
+                        "old_strike": old_strike_abort,
+                        "target_premium": round(float(target_premium), 4),
+                        "spot": round(spot_px, 2),
+                        "summary": (
+                            f"[CHAIN_EXHAUSTED] trade={int(trade.id)} | "
+                            f"leg={triggered_leg_type} | "
+                            f"old_strike={old_strike_abort} | "
+                            f"target_premium="
+                            f"{round(float(target_premium), 4)} | "
+                            f"spot={round(spot_px, 2)}"
+                        ),
+                    }
+                    try:
+                        log_and_buffer(
+                            "CHAIN_EXHAUSTED",
+                            int(trade.id),
+                            chain_details,
+                        )
+                    except Exception:
+                        pass
+                    logger.warning(
+                        "[CHAIN_EXHAUSTED] trade=%s | leg=%s | "
+                        "old_strike=%s | target_premium=%s | spot=%s",
+                        int(trade.id),
                         triggered_leg_type,
-                        msg,
+                        old_strike_abort,
+                        round(float(target_premium), 4),
+                        round(spot_px, 2),
                     )
                     return AdjustmentResult(
                         success=False,
-                        old_strike=float(triggered_leg.strike),
+                        requires_basket_exit=True,
+                        close_basket=True,
+                        exit_reason="CHAIN_EXHAUSTED",
+                        old_strike=old_strike_abort,
                         error_message=msg[:500],
                     )
                 # No alternate strike on chain → EXIT basket (do not HOLD)

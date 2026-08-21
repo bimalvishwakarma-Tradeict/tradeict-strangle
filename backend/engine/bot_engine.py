@@ -1426,14 +1426,29 @@ class BotEngine:
             filled,
         )
 
-    def _maybe_schedule_auto_reentry(self, underlying: str) -> None:
-        """Schedule auto re-entry if AutoTradeEngine is enabled for this underlying."""
+    def _maybe_schedule_auto_reentry(
+        self, underlying: str, exit_reason: str | None = None
+    ) -> None:
+        """Schedule auto re-entry if AutoTradeEngine is enabled for this underlying.
+
+        Loss exits (STOPLOSS, MAX_ADJUSTMENTS_REACHED, CHAIN_EXHAUSTED) use
+        cooldown_after_loss_minutes when configured; other reasons use
+        re_entry_delay_minutes.
+        """
         if not getattr(self, "auto_trade_engine", None):
             return
         if not underlying:
             return
         try:
             from backend.database import get_or_create_auto_settings
+            from backend.config import ExitReason
+
+            loss_reasons = {
+                ExitReason.STOPLOSS.value,
+                ExitReason.MAX_ADJUSTMENTS_REACHED.value,
+                ExitReason.CHAIN_EXHAUSTED.value,
+            }
+            reason = str(exit_reason or "").strip().upper()
 
             with self.db_factory() as db:
                 settings = get_or_create_auto_settings(db)
@@ -1441,12 +1456,23 @@ class BotEngine:
                     return
                 if str(settings.underlying).upper() != str(underlying).upper():
                     return
-                delay = int(settings.re_entry_delay_minutes or 1)
+                if reason in loss_reasons:
+                    delay = int(
+                        getattr(settings, "cooldown_after_loss_minutes", None)
+                        if getattr(
+                            settings, "cooldown_after_loss_minutes", None
+                        )
+                        is not None
+                        else 120
+                    )
+                else:
+                    delay = int(settings.re_entry_delay_minutes or 1)
                 self.auto_trade_engine.schedule_reentry(underlying, delay)
                 logger.info(
-                    "Auto re-entry scheduled for %s in %s min",
+                    "Auto re-entry scheduled for %s in %s min (reason=%s)",
                     underlying,
                     delay,
+                    reason or "n/a",
                 )
         except Exception as exc:
             logger.warning("Could not schedule auto re-entry: %s", exc)
@@ -2370,7 +2396,8 @@ class BotEngine:
         self._maybe_schedule_auto_reentry(
             str(getattr(trade_row, "underlying", "") or "")
             if trade_row is not None
-            else ""
+            else "",
+            exit_reason=reason,
         )
 
         try:
@@ -3176,7 +3203,8 @@ class BotEngine:
 
         # Step 8: Schedule auto re-entry
         self._maybe_schedule_auto_reentry(
-            str(getattr(trade, "underlying", "") or "")
+            str(getattr(trade, "underlying", "") or ""),
+            exit_reason=reason,
         )
 
         # Step 9: Broadcast
@@ -3947,6 +3975,8 @@ class BotEngine:
                     if not getattr(result, "exit_reason", None):
                         if "CONVERSION_DISABLED" in err_msg.upper():
                             exit_reason = "CONVERSION_DISABLED_EXIT"
+                        elif "CHAIN_EXHAUSTED" in err_msg.upper():
+                            exit_reason = "CHAIN_EXHAUSTED"
                         elif "NO_STRIKE_AVAILABLE" in err_msg.upper():
                             exit_reason = "NO_STRIKE_AVAILABLE"
                         elif "NO_HEDGE_STRIKE" in err_msg.upper():
