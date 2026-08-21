@@ -548,6 +548,16 @@ class HedgePosition(Base):
     # Master margin per lot — used later for slave sizing
     order_margin_per_lot: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Long-hedge MTM mirrors short-basket net_mtm / gross_mtm_for_stoploss
+    # (calculation + logging only — no exit triggers use these yet)
+    entry_spread_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    hedge_net_mtm: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    hedge_gross_for_sl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    cum_closed_basket_pnl: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
+    structure_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
     is_bot_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
 

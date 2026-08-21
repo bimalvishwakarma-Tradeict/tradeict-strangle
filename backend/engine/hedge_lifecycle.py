@@ -14,7 +14,7 @@ from backend.config import OPTIONS_CONTRACT_VALUE
 from backend.core.bot_logger import log_and_buffer
 from backend.core.chain_utils import annotate_atm
 from backend.core.delta_client import DeltaAPIError, DeltaClient, _extract_live_quote
-from backend.core.fees import estimate_option_trading_fee
+from backend.core.fees import compute_slippage_amount, estimate_option_trading_fee
 from backend.core.hedge_theta import (
     ExpiryNotAvailableError,
     HedgeThetaError,
@@ -406,11 +406,21 @@ async def open_hedge(
         put_ask = float(
             row.get("put_ask") or row.get("put_mark_price") or 0
         )
+        call_bid_entry = float(row.get("call_bid") or 0)
+        put_bid_entry = float(row.get("put_bid") or 0)
         if call_ask <= 0 or put_ask <= 0:
             raise HedgeOpenError(
                 "afford",
                 "Cannot estimate hedge cost — missing call/put ask on chain",
             )
+
+        # Half-spread paper loss at open (ask − bid) × qty × CV — both legs
+        entry_spread_usd = 0.0
+        if call_bid_entry > 0:
+            entry_spread_usd += (call_ask - call_bid_entry) * qty * CONTRACT_SIZE
+        if put_bid_entry > 0:
+            entry_spread_usd += (put_ask - put_bid_entry) * qty * CONTRACT_SIZE
+        entry_spread_usd = max(0.0, float(entry_spread_usd))
 
         est_cost_per_lot = (call_ask + put_ask) * CONTRACT_SIZE
         est_cost = est_cost_per_lot * qty
@@ -665,6 +675,11 @@ async def open_hedge(
             entry_call_iv=call_iv if call_iv > 0 else None,
             entry_put_iv=put_iv if put_iv > 0 else None,
             order_margin_per_lot=None,
+            entry_spread_usd=float(entry_spread_usd),
+            hedge_net_mtm=0.0,
+            hedge_gross_for_sl=0.0,
+            cum_closed_basket_pnl=0.0,
+            structure_pnl=0.0,
             is_bot_managed=True,
             last_error=None,
         )
@@ -684,6 +699,7 @@ async def open_hedge(
                 "call_fill": call_fill,
                 "put_fill": put_fill,
                 "cost_usd": round(cost_usd, 4),
+                "entry_spread_usd": round(float(entry_spread_usd), 6),
                 "entry_total_theta": entry_total_theta,
                 "call_size": call_size,
                 "expiry": expiry.isoformat(),
@@ -1229,18 +1245,183 @@ def compute_long_hedge_pnl(
     }
 
 
+def _cum_closed_basket_pnl(db: Session, hedge_id: int) -> float:
+    """
+    Sum realized_pnl of closed baskets stamped to this hedge.
+
+    ALREADY REALIZED — do not apply spread, fee, or slippage adjustments.
+    """
+    from backend.config import TradeStatus
+    from sqlalchemy import func
+
+    raw = (
+        db.query(func.coalesce(func.sum(Trade.realized_pnl), 0.0))
+        .filter(
+            Trade.hedge_position_id == int(hedge_id),
+            Trade.status == TradeStatus.CLOSED.value,
+        )
+        .scalar()
+    )
+    return float(raw or 0.0)
+
+
+def _open_basket_net_mtm(
+    db: Session,
+    hedge_id: int,
+    position_tracker: Any | None,
+) -> float:
+    """Sum last_net_mtm of active baskets under this hedge (0 if none / unknown)."""
+    from backend.config import TradeStatus
+
+    if position_tracker is None:
+        return 0.0
+    active = (
+        db.query(Trade)
+        .filter(
+            Trade.hedge_position_id == int(hedge_id),
+            Trade.status == TradeStatus.ACTIVE.value,
+        )
+        .all()
+    )
+    total = 0.0
+    for trade in active:
+        state = position_tracker.get(int(trade.id))
+        if state is None:
+            continue
+        total += float(getattr(state, "last_net_mtm", 0.0) or 0.0)
+    return float(total)
+
+
+def compute_hedge_net_mtm_fields(
+    *,
+    call_bid: float,
+    put_bid: float,
+    call_entry: float,
+    put_entry: float,
+    quantity: int,
+    entry_fees: float,
+    estimated_exit_fees: float,
+    entry_spread_usd: float,
+    slippage_pct: float = 2.0,
+) -> dict[str, float]:
+    """
+    Long-hedge net_mtm / gross_for_sl (mirror of short-basket convention).
+
+    hedge_net_mtm = Σ(bid − ask_at_entry)×qty×CV − fees − est_exit − est_slip
+    hedge_gross_for_sl = hedge_net_mtm + entry_spread_usd
+    """
+    qty = max(1, int(quantity or 1))
+    # ask_at_entry stored as fill_price (bought at ask)
+    gross = (
+        (float(call_bid) - float(call_entry)) * qty * CONTRACT_SIZE
+        + (float(put_bid) - float(put_entry)) * qty * CONTRACT_SIZE
+    )
+    fees_paid = max(0.0, float(entry_fees or 0.0))
+    est_exit = max(0.0, float(estimated_exit_fees or 0.0))
+    est_slip = compute_slippage_amount(gross, slippage_pct)
+    hedge_net = gross - fees_paid - est_exit - est_slip
+    entry_spread = max(0.0, float(entry_spread_usd or 0.0))
+    hedge_gross_sl = hedge_net + entry_spread
+    return {
+        "gross_upnl": float(gross),
+        "hedge_fees_paid": float(fees_paid),
+        "hedge_est_exit_fees": float(est_exit),
+        "hedge_est_exit_slippage_usd": float(est_slip),
+        "hedge_net_mtm": float(hedge_net),
+        "entry_spread_usd": float(entry_spread),
+        "hedge_gross_for_sl": float(hedge_gross_sl),
+    }
+
+
+def persist_structure_pnl(
+    hedge: HedgePosition,
+    db: Session,
+    *,
+    call_bid: float,
+    put_bid: float,
+    est_exit_fees: float,
+    position_tracker: Any | None = None,
+) -> dict[str, float]:
+    """
+    Compute + persist hedge_net_mtm / structure_pnl columns (no exit triggers).
+
+    Logs [STRUCTURE_PNL] once per successful cycle via log_and_buffer.
+    """
+    hid = int(hedge.id)
+    qty = max(1, int(hedge.quantity or 1))
+    call_entry = float(hedge.call_fill_price or 0)
+    put_entry = float(hedge.put_fill_price or 0)
+    entry_fees = float(hedge.call_entry_fee_usd or 0) + float(
+        hedge.put_entry_fee_usd or 0
+    )
+    entry_spread = float(getattr(hedge, "entry_spread_usd", 0.0) or 0.0)
+
+    mtm = compute_hedge_net_mtm_fields(
+        call_bid=float(call_bid),
+        put_bid=float(put_bid),
+        call_entry=call_entry,
+        put_entry=put_entry,
+        quantity=qty,
+        entry_fees=entry_fees,
+        estimated_exit_fees=float(est_exit_fees),
+        entry_spread_usd=entry_spread,
+    )
+    cum_closed = _cum_closed_basket_pnl(db, hid)
+    open_basket = _open_basket_net_mtm(db, hid, position_tracker)
+    structure = (
+        float(mtm["hedge_net_mtm"]) + float(cum_closed) + float(open_basket)
+    )
+
+    hedge.hedge_net_mtm = float(mtm["hedge_net_mtm"])
+    hedge.hedge_gross_for_sl = float(mtm["hedge_gross_for_sl"])
+    hedge.cum_closed_basket_pnl = float(cum_closed)
+    hedge.structure_pnl = float(structure)
+    db.commit()
+    db.refresh(hedge)
+
+    details = {
+        "hedge": hid,
+        "hedge_net": round(float(mtm["hedge_net_mtm"]), 6),
+        "hedge_gross_sl": round(float(mtm["hedge_gross_for_sl"]), 6),
+        "entry_spread": round(float(entry_spread), 6),
+        "cum_closed": round(float(cum_closed), 6),
+        "open_basket": round(float(open_basket), 6),
+        "structure": round(float(structure), 6),
+        "summary": (
+            f"[STRUCTURE_PNL] hedge={hid} | "
+            f"hedge_net={round(float(mtm['hedge_net_mtm']), 6)} | "
+            f"hedge_gross_sl={round(float(mtm['hedge_gross_for_sl']), 6)} | "
+            f"entry_spread={round(float(entry_spread), 6)} | "
+            f"cum_closed={round(float(cum_closed), 6)} | "
+            f"open_basket={round(float(open_basket), 6)} | "
+            f"structure={round(float(structure), 6)}"
+        ),
+    }
+    _hedge_log("STRUCTURE_PNL", hid, details)
+    return {
+        "hedge_net_mtm": float(mtm["hedge_net_mtm"]),
+        "hedge_gross_for_sl": float(mtm["hedge_gross_for_sl"]),
+        "entry_spread_usd": float(entry_spread),
+        "cum_closed_basket_pnl": float(cum_closed),
+        "open_basket_net_mtm": float(open_basket),
+        "structure_pnl": float(structure),
+    }
+
+
 async def evaluate_and_maybe_close_hedge(
     hedge: HedgePosition,
     db: Session,
     *,
     client: DeltaClient,
     btc_index: float,
+    position_tracker: Any | None = None,
 ) -> HedgePosition | None:
     """
     One monitoring cycle for a single active hedge.
 
     Returns the closed row if a close was triggered, else None.
     Skips evaluation (no close) if either bid cannot be fetched.
+    Structure P&L columns are updated every successful cycle (no new triggers).
     """
     hid = int(hedge.id)
     call_sym = str(hedge.call_symbol or "")
@@ -1297,6 +1478,24 @@ async def evaluate_and_maybe_close_hedge(
             option_price=float(put_bid),
             quantity_lots=qty,
             btc_index_price=btc,
+        )
+
+    # Calculation only — does NOT change target/SL/expiry triggers below
+    try:
+        persist_structure_pnl(
+            hedge,
+            db,
+            call_bid=float(call_bid),
+            put_bid=float(put_bid),
+            est_exit_fees=est_exit,
+            position_tracker=position_tracker,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[STRUCTURE_PNL] persist failed hedge_id=%s: %s",
+            hid,
+            exc,
+            exc_info=True,
         )
 
     pnl = compute_long_hedge_pnl(
@@ -1763,6 +1962,7 @@ async def monitor_active_hedges(
     *,
     client: DeltaClient,
     btc_index: float,
+    position_tracker: Any | None = None,
 ) -> list[HedgePosition]:
     """
     Evaluate every active hedge this cycle.
@@ -1794,6 +1994,7 @@ async def monitor_active_hedges(
                 db,
                 client=client,
                 btc_index=btc_index,
+                position_tracker=position_tracker,
             )
             if result is not None and str(result.status or "").lower() == "closed":
                 closed.append(result)
@@ -1839,6 +2040,13 @@ def hedge_to_dict(h: HedgePosition) -> dict[str, Any]:
         "entry_call_iv": h.entry_call_iv,
         "entry_put_iv": h.entry_put_iv,
         "order_margin_per_lot": h.order_margin_per_lot,
+        "entry_spread_usd": float(getattr(h, "entry_spread_usd", 0.0) or 0.0),
+        "hedge_net_mtm": float(getattr(h, "hedge_net_mtm", 0.0) or 0.0),
+        "hedge_gross_for_sl": float(getattr(h, "hedge_gross_for_sl", 0.0) or 0.0),
+        "cum_closed_basket_pnl": float(
+            getattr(h, "cum_closed_basket_pnl", 0.0) or 0.0
+        ),
+        "structure_pnl": float(getattr(h, "structure_pnl", 0.0) or 0.0),
         "is_bot_managed": bool(h.is_bot_managed),
         "last_error": h.last_error,
         "cost_usd": (

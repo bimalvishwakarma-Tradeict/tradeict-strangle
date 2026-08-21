@@ -366,6 +366,7 @@ class BotEngine:
                     db,
                     client=self.delta_client,
                     btc_index=float(btc or 0),
+                    position_tracker=self.position_tracker,
                 )
                 for h in closed:
                     try:

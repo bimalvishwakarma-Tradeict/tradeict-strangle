@@ -632,12 +632,37 @@ def _migrate_schema() -> None:
                         entry_call_iv FLOAT,
                         entry_put_iv FLOAT,
                         order_margin_per_lot FLOAT,
+                        entry_spread_usd FLOAT NOT NULL DEFAULT 0.0,
+                        hedge_net_mtm FLOAT NOT NULL DEFAULT 0.0,
+                        hedge_gross_for_sl FLOAT NOT NULL DEFAULT 0.0,
+                        cum_closed_basket_pnl FLOAT NOT NULL DEFAULT 0.0,
+                        structure_pnl FLOAT NOT NULL DEFAULT 0.0,
                         is_bot_managed BOOLEAN NOT NULL DEFAULT 1,
                         last_error VARCHAR(500)
                     )
                     """
                 )
             )
+    else:
+        hp_cols = {
+            col["name"] for col in inspector.get_columns("hedge_positions")
+        }
+        hedge_pnl_cols = [
+            ("entry_spread_usd", "FLOAT NOT NULL DEFAULT 0.0"),
+            ("hedge_net_mtm", "FLOAT NOT NULL DEFAULT 0.0"),
+            ("hedge_gross_for_sl", "FLOAT NOT NULL DEFAULT 0.0"),
+            ("cum_closed_basket_pnl", "FLOAT NOT NULL DEFAULT 0.0"),
+            ("structure_pnl", "FLOAT NOT NULL DEFAULT 0.0"),
+        ]
+        for col_name, col_type in hedge_pnl_cols:
+            if col_name not in hp_cols:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE hedge_positions "
+                            f"ADD COLUMN {col_name} {col_type}"
+                        )
+                    )
     if "slave_hedge_positions" not in tables:
         with engine.begin() as conn:
             conn.execute(
