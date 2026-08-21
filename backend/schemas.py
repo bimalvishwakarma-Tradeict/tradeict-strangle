@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AccountConnectRequest(BaseModel):
@@ -136,12 +136,28 @@ class TradeExitRequest(BaseModel):
 
 
 class AutoTradeHedgeBudgetSettings(BaseModel):
-    """Hedge fixed SL + floor % + structure target multiple."""
+    """Hedge fixed SL + floor % + structure target multiple + roll DTE."""
 
     hedge_fixed_sl_usd: float = Field(default=2.0, ge=0.1, le=1000)
     hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
     min_hedge_dte: int = Field(default=15, ge=5, le=60)
+    hedge_roll_dte: int = Field(default=10, ge=1, le=30)
+    hedge_roll_hard_dte: int = Field(default=5, ge=1, le=30)
+
+    @model_validator(mode="after")
+    def validate_dte_ordering(self) -> AutoTradeHedgeBudgetSettings:
+        hard = int(self.hedge_roll_hard_dte)
+        roll = int(self.hedge_roll_dte)
+        min_dte = int(self.min_hedge_dte)
+        if not (hard < roll < min_dte):
+            raise ValueError(
+                "Require hedge_roll_hard_dte < hedge_roll_dte < min_hedge_dte "
+                f"(got hard={hard}, roll={roll}, min={min_dte}). "
+                "Roll DTE must be below Minimum hedge DTE, otherwise a newly "
+                "opened hedge would immediately start rolling."
+            )
+        return self
 
 
 class AutoTradeSpreadSettings(BaseModel):

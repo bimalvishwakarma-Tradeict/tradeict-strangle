@@ -104,6 +104,8 @@ function applyStatusToForm(data, setters) {
     data.hedge_expiry_dte == null ? '' : String(data.hedge_expiry_dte),
   )
   setters.setMinHedgeDte(String(data.min_hedge_dte ?? 15))
+  setters.setHedgeRollDte(String(data.hedge_roll_dte ?? 10))
+  setters.setHedgeRollHardDte(String(data.hedge_roll_hard_dte ?? 5))
   setters.setHedgeTargetUsd(
     data.hedge_target_usd == null ? '' : String(data.hedge_target_usd),
   )
@@ -205,6 +207,8 @@ export default function AutoTrade() {
   const [hedgeExpiryNeedsRepick, setHedgeExpiryNeedsRepick] = useState(false)
   const [hedgeExpiryDte, setHedgeExpiryDte] = useState('')
   const [minHedgeDte, setMinHedgeDte] = useState('15')
+  const [hedgeRollDte, setHedgeRollDte] = useState('10')
+  const [hedgeRollHardDte, setHedgeRollHardDte] = useState('5')
   const [hedgeTargetUsd, setHedgeTargetUsd] = useState('')
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
   const [hedgeFixedSlUsd, setHedgeFixedSlUsd] = useState('2')
@@ -264,6 +268,8 @@ export default function AutoTrade() {
       setHedgeExpiryNeedsRepick,
       setHedgeExpiryDte,
       setMinHedgeDte,
+      setHedgeRollDte,
+      setHedgeRollHardDte,
       setHedgeTargetUsd,
       setHedgeStoplossUsd,
       setHedgeFixedSlUsd,
@@ -536,6 +542,11 @@ export default function AutoTrade() {
         null,
       hedge_expiry_dte: null,
       min_hedge_dte: Math.min(60, Math.max(5, Number(minHedgeDte) || 15)),
+      hedge_roll_dte: Math.min(30, Math.max(1, Number(hedgeRollDte) || 10)),
+      hedge_roll_hard_dte: Math.min(
+        30,
+        Math.max(1, Number(hedgeRollHardDte) || 5),
+      ),
       hedge_target_usd:
         hedgeTargetUsd === '' || hedgeTargetUsd == null
           ? null
@@ -628,6 +639,48 @@ export default function AutoTrade() {
     if (n < 5 || n > 60) return 'Must be between 5 and 60'
     return null
   }, [minHedgeDte])
+
+  const hedgeRollDteError = useMemo(() => {
+    const n = Number(hedgeRollDte)
+    if (hedgeRollDte === '' || Number.isNaN(n)) {
+      return 'Must be between 1 and 30'
+    }
+    if (n < 1 || n > 30) return 'Must be between 1 and 30'
+    return null
+  }, [hedgeRollDte])
+
+  const hedgeRollHardDteError = useMemo(() => {
+    const n = Number(hedgeRollHardDte)
+    if (hedgeRollHardDte === '' || Number.isNaN(n)) {
+      return 'Must be between 1 and 30'
+    }
+    if (n < 1 || n > 30) return 'Must be between 1 and 30'
+    return null
+  }, [hedgeRollHardDte])
+
+  const hedgeDteOrderingError = useMemo(() => {
+    if (minHedgeDteError || hedgeRollDteError || hedgeRollHardDteError) {
+      return null
+    }
+    const minN = Number(minHedgeDte)
+    const rollN = Number(hedgeRollDte)
+    const hardN = Number(hedgeRollHardDte)
+    if (!(hardN < rollN && rollN < minN)) {
+      return (
+        'Require Force roll < Roll < Minimum hedge DTE. ' +
+        'Roll DTE must be below Minimum hedge DTE, otherwise a newly opened ' +
+        'hedge would immediately start rolling.'
+      )
+    }
+    return null
+  }, [
+    minHedgeDte,
+    hedgeRollDte,
+    hedgeRollHardDte,
+    minHedgeDteError,
+    hedgeRollDteError,
+    hedgeRollHardDteError,
+  ])
 
   const basketExitSpreadPctError = useMemo(() => {
     const n = Number(basketExitSpreadPct)
@@ -731,6 +784,9 @@ export default function AutoTrade() {
       hedgeSlFloorPctError ||
       hedgeTargetMultipleError ||
       minHedgeDteError ||
+      hedgeRollDteError ||
+      hedgeRollHardDteError ||
+      hedgeDteOrderingError ||
       spreadSettingsError
     ) {
       setToast({
@@ -739,6 +795,9 @@ export default function AutoTrade() {
           hedgeSlFloorPctError ||
           hedgeTargetMultipleError ||
           minHedgeDteError ||
+          hedgeRollDteError ||
+          hedgeRollHardDteError ||
+          hedgeDteOrderingError ||
           spreadSettingsError ||
           'Fix validation errors before saving',
       })
@@ -765,6 +824,9 @@ export default function AutoTrade() {
       hedgeSlFloorPctError ||
       hedgeTargetMultipleError ||
       minHedgeDteError ||
+      hedgeRollDteError ||
+      hedgeRollHardDteError ||
+      hedgeDteOrderingError ||
       spreadSettingsError
     ) {
       setToast({
@@ -773,6 +835,9 @@ export default function AutoTrade() {
           hedgeSlFloorPctError ||
           hedgeTargetMultipleError ||
           minHedgeDteError ||
+          hedgeRollDteError ||
+          hedgeRollHardDteError ||
+          hedgeDteOrderingError ||
           spreadSettingsError ||
           'Fix validation errors before enabling',
       })
@@ -1441,7 +1506,9 @@ export default function AutoTrade() {
               onChange={(e) => setMinHedgeDte(e.target.value)}
               disabled={!hedgeEnabled}
               className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
-                minHedgeDteError ? 'border-red-500' : 'border-gray-600'
+                minHedgeDteError || hedgeDteOrderingError
+                  ? 'border-red-500'
+                  : 'border-gray-600'
               }`}
             />
             {minHedgeDteError ? (
@@ -1457,6 +1524,70 @@ export default function AutoTrade() {
               </span>
             )}
           </label>
+          <label className="block text-sm text-gray-300">
+            Roll at DTE
+            <input
+              type="number"
+              min={1}
+              max={30}
+              step={1}
+              value={hedgeRollDte}
+              onChange={(e) => setHedgeRollDte(e.target.value)}
+              disabled={!hedgeEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+                hedgeRollDteError || hedgeDteOrderingError
+                  ? 'border-red-500'
+                  : 'border-gray-600'
+              }`}
+            />
+            {hedgeRollDteError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {hedgeRollDteError}
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                Start the roll countdown when the hedge reaches this DTE. The
+                hedge waits for the open basket to close, then closes.
+              </span>
+            )}
+          </label>
+          <label className="block text-sm text-gray-300">
+            Force roll at DTE
+            <input
+              type="number"
+              min={1}
+              max={30}
+              step={1}
+              value={hedgeRollHardDte}
+              onChange={(e) => setHedgeRollHardDte(e.target.value)}
+              disabled={!hedgeEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+                hedgeRollHardDteError || hedgeDteOrderingError
+                  ? 'border-red-500'
+                  : 'border-gray-600'
+              }`}
+            />
+            {hedgeRollHardDteError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {hedgeRollHardDteError}
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                Hard deadline. At this DTE the hedge closes even if a basket is
+                still open - the cascade closes the basket first.
+              </span>
+            )}
+          </label>
+          <div className="sm:col-span-2 rounded-md border border-gray-700/80 bg-gray-950/40 px-3 py-2 text-xs text-gray-400">
+            Opens at &gt;= {Number(minHedgeDte) || '—'} DTE &nbsp;→&nbsp; rolls
+            at {Number(hedgeRollDte) || '—'} DTE &nbsp;→&nbsp; forced at{' '}
+            {Number(hedgeRollHardDte) || '—'} DTE
+            {hedgeDteOrderingError ? (
+              <span className="mt-1 block text-red-400">
+                {hedgeDteOrderingError}
+              </span>
+            ) : null}
+          </div>
           <label className="block text-sm text-gray-300">
             Hedge target ($)
             <input

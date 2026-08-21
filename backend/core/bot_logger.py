@@ -111,6 +111,7 @@ _IMPORTANT_EVENTS = frozenset(
         "HEDGE_AFFORD_BLOCK",
         "HEDGE_UNWIND",
         "HEDGE_SETTINGS_UPDATE",
+        "HEDGE_DTE_CONFIG_INVALID",
     }
 )
 
@@ -256,6 +257,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "DB_AUDIT_SKIP",
         "HEDGE_ROLL_PENDING",
         "HEDGE_ROLL_EXECUTE",
+        "HEDGE_DTE_CONFIG_INVALID",
     ):
         bot_log.warning(msg)
     elif event_type in (

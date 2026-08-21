@@ -159,10 +159,15 @@ class AutoTradeSettingsSchema(BaseModel):
 
     @model_validator(mode="after")
     def validate_hedge_money_when_enabled(self) -> AutoTradeSettingsSchema:
-        if int(self.hedge_roll_hard_dte) >= int(self.hedge_roll_dte):
+        hard = int(self.hedge_roll_hard_dte)
+        roll = int(self.hedge_roll_dte)
+        min_dte = int(self.min_hedge_dte)
+        if not (hard < roll < min_dte):
             raise ValueError(
-                "hedge_roll_hard_dte must be < hedge_roll_dte "
-                f"(got hard={self.hedge_roll_hard_dte}, roll={self.hedge_roll_dte})"
+                "Require hedge_roll_hard_dte < hedge_roll_dte < min_hedge_dte "
+                f"(got hard={hard}, roll={roll}, min={min_dte}). "
+                "Roll DTE must be below Minimum hedge DTE, otherwise a newly "
+                "opened hedge would immediately start rolling."
             )
         if not self.hedge_enabled:
             return self

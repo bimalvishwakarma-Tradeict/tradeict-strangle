@@ -46,6 +46,51 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_bot_logger()
     logger.info("Database initialized / tables ready")
 
+    # Surface invalid hedge DTE ordering once (do not auto-correct)
+    try:
+        from backend.core.bot_logger import log_and_buffer
+        from backend.database import get_or_create_auto_settings
+
+        with SessionLocal() as db:
+            settings = get_or_create_auto_settings(db)
+            min_dte = int(
+                getattr(settings, "min_hedge_dte", None)
+                if getattr(settings, "min_hedge_dte", None) is not None
+                else 15
+            )
+            roll_dte = int(
+                getattr(settings, "hedge_roll_dte", None)
+                if getattr(settings, "hedge_roll_dte", None) is not None
+                else 10
+            )
+            hard_dte = int(
+                getattr(settings, "hedge_roll_hard_dte", None)
+                if getattr(settings, "hedge_roll_hard_dte", None) is not None
+                else 5
+            )
+            if not (hard_dte < roll_dte < min_dte):
+                log_and_buffer(
+                    "HEDGE_DTE_CONFIG_INVALID",
+                    0,
+                    {
+                        "min": min_dte,
+                        "roll": roll_dte,
+                        "hard": hard_dte,
+                        "summary": (
+                            f"[HEDGE_DTE_CONFIG_INVALID] min={min_dte} | "
+                            f"roll={roll_dte} | hard={hard_dte}"
+                        ),
+                    },
+                )
+                logger.warning(
+                    "[HEDGE_DTE_CONFIG_INVALID] min=%s roll=%s hard=%s",
+                    min_dte,
+                    roll_dte,
+                    hard_dte,
+                )
+    except Exception as exc:
+        logger.warning("Hedge DTE config check skipped: %s", exc)
+
     # DB consistency audit FIRST — before engines load positions / place trades
     try:
         fixes, warnings = await verify_db_consistency(SessionLocal)
