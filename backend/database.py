@@ -738,6 +738,8 @@ def _migrate_schema() -> None:
             ("hedge_expiry_dte", "INTEGER DEFAULT NULL"),
             ("hedge_target_usd", "FLOAT DEFAULT NULL"),
             ("hedge_stoploss_usd", "FLOAT DEFAULT NULL"),
+            ("hedge_sl_floor_pct", "FLOAT NOT NULL DEFAULT 25.0"),
+            ("hedge_target_multiple", "FLOAT NOT NULL DEFAULT 3.0"),
             ("margin_buffer_pct", "FLOAT NOT NULL DEFAULT 50.0"),
             (
                 "strike_selection_mode",

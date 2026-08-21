@@ -336,6 +336,13 @@ class AutoTradeSettings(Base):
     hedge_expiry_dte: Mapped[int | None] = mapped_column(Integer, nullable=True)
     hedge_target_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     hedge_stoploss_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Settings only until structure SL/target logic consumes them
+    hedge_sl_floor_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, default=25.0
+    )
+    hedge_target_multiple: Mapped[float] = mapped_column(
+        Float, nullable=False, default=3.0
+    )
     margin_buffer_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=50.0
     )

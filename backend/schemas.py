@@ -132,6 +132,20 @@ class TradeExitRequest(BaseModel):
     reason: str = "MANUAL_EMERGENCY"
 
 
+# --- Auto Trade settings (hedge budget fields; full schema in routes_auto_trade) ---
+
+
+class AutoTradeHedgeBudgetSettings(BaseModel):
+    """
+    Hedge SL floor + structure target multiple.
+
+    Settings surface only — engine does not consume these yet.
+    """
+
+    hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
+    hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
+
+
 # --- Slave account schemas ---
 
 

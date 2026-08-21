@@ -70,6 +70,9 @@ class AutoTradeSettingsSchema(BaseModel):
     hedge_expiry_dte: int | None = Field(default=None, ge=0, le=365)
     hedge_target_usd: float | None = Field(default=None, gt=0)
     hedge_stoploss_usd: float | None = Field(default=None, gt=0)
+    # Settings only — not consumed by hedge logic yet
+    hedge_sl_floor_pct: float = Field(default=25.0, ge=0, le=100)
+    hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
     margin_buffer_pct: float = Field(default=50.0, ge=0, le=200)
     strike_selection_mode: str = "fixed_premium"  # fixed_premium | theta_based
     theta_multiplier: float = Field(default=3.0, gt=0, le=20)
@@ -252,6 +255,16 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             float(s.hedge_stoploss_usd)
             if getattr(s, "hedge_stoploss_usd", None) is not None
             else None
+        ),
+        "hedge_sl_floor_pct": float(
+            getattr(s, "hedge_sl_floor_pct", None)
+            if getattr(s, "hedge_sl_floor_pct", None) is not None
+            else 25.0
+        ),
+        "hedge_target_multiple": float(
+            getattr(s, "hedge_target_multiple", None)
+            if getattr(s, "hedge_target_multiple", None) is not None
+            else 3.0
         ),
         "margin_buffer_pct": float(
             getattr(s, "margin_buffer_pct", None)
@@ -513,6 +526,8 @@ async def update_auto_trade_settings(
         if payload.hedge_stoploss_usd is not None
         else None
     )
+    settings.hedge_sl_floor_pct = float(payload.hedge_sl_floor_pct)
+    settings.hedge_target_multiple = float(payload.hedge_target_multiple)
     settings.margin_buffer_pct = float(payload.margin_buffer_pct)
     # When hedge is off, force modes that require a live hedge back to defaults
     if settings.hedge_enabled:

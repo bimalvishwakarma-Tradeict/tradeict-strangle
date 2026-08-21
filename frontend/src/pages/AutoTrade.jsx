@@ -109,6 +109,8 @@ function applyStatusToForm(data, setters) {
   setters.setHedgeStoplossUsd(
     data.hedge_stoploss_usd == null ? '' : String(data.hedge_stoploss_usd),
   )
+  setters.setHedgeSlFloorPct(String(data.hedge_sl_floor_pct ?? 25))
+  setters.setHedgeTargetMultiple(String(data.hedge_target_multiple ?? 3))
   setters.setMarginBufferPct(String(data.margin_buffer_pct ?? 50))
   setters.setStrikeSelectionMode(data.strike_selection_mode || 'fixed_premium')
   setters.setThetaMultiplier(String(data.theta_multiplier ?? 3))
@@ -191,6 +193,8 @@ export default function AutoTrade() {
   const [hedgeExpiryDte, setHedgeExpiryDte] = useState('')
   const [hedgeTargetUsd, setHedgeTargetUsd] = useState('')
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
+  const [hedgeSlFloorPct, setHedgeSlFloorPct] = useState('25')
+  const [hedgeTargetMultiple, setHedgeTargetMultiple] = useState('3')
   const [marginBufferPct, setMarginBufferPct] = useState('50')
   const [strikeSelectionMode, setStrikeSelectionMode] =
     useState('fixed_premium')
@@ -240,6 +244,8 @@ export default function AutoTrade() {
       setHedgeExpiryDte,
       setHedgeTargetUsd,
       setHedgeStoplossUsd,
+      setHedgeSlFloorPct,
+      setHedgeTargetMultiple,
       setMarginBufferPct,
       setStrikeSelectionMode,
       setThetaMultiplier,
@@ -509,6 +515,8 @@ export default function AutoTrade() {
         hedgeStoplossUsd === '' || hedgeStoplossUsd == null
           ? null
           : Number(hedgeStoplossUsd),
+      hedge_sl_floor_pct: Number(hedgeSlFloorPct),
+      hedge_target_multiple: Number(hedgeTargetMultiple),
       margin_buffer_pct: Math.min(
         200,
         Math.max(0, Number(marginBufferPct) || 0),
@@ -548,6 +556,28 @@ export default function AutoTrade() {
     const cpl = Number(orderMarginPerLot) * (1 + buf / 100)
     return Number.isFinite(cpl) ? `$${cpl.toFixed(2)}` : '--'
   }, [orderMarginPerLot, marginBufferPct, hedgePreview])
+
+  const hedgeSlFloorPctError = useMemo(() => {
+    const n = Number(hedgeSlFloorPct)
+    if (hedgeSlFloorPct === '' || Number.isNaN(n)) {
+      return 'Enter a number between 0 and 100'
+    }
+    if (n < 0 || n > 100) {
+      return 'Must be between 0 and 100'
+    }
+    return null
+  }, [hedgeSlFloorPct])
+
+  const hedgeTargetMultipleError = useMemo(() => {
+    const n = Number(hedgeTargetMultiple)
+    if (hedgeTargetMultiple === '' || Number.isNaN(n)) {
+      return 'Enter a number between 0.5 and 20'
+    }
+    if (n < 0.5 || n > 20) {
+      return 'Must be between 0.5 and 20'
+    }
+    return null
+  }, [hedgeTargetMultiple])
 
   const buildPreviewParams = useCallback(() => {
     const dte = Math.max(0, Number(expiryDte) || 1)
@@ -617,6 +647,16 @@ export default function AutoTrade() {
   }, [loading, refreshPreviews])
 
   const handleSave = async () => {
+    if (hedgeSlFloorPctError || hedgeTargetMultipleError) {
+      setToast({
+        type: 'error',
+        message:
+          hedgeSlFloorPctError ||
+          hedgeTargetMultipleError ||
+          'Fix validation errors before saving',
+      })
+      return
+    }
     setSaving(true)
     try {
       const updated = await saveAutoTradeSettings(buildPayload())
@@ -634,6 +674,16 @@ export default function AutoTrade() {
   }
 
   const handleEnable = async () => {
+    if (hedgeSlFloorPctError || hedgeTargetMultipleError) {
+      setToast({
+        type: 'error',
+        message:
+          hedgeSlFloorPctError ||
+          hedgeTargetMultipleError ||
+          'Fix validation errors before enabling',
+      })
+      return
+    }
     setToggling(true)
     try {
       // Persist current form first so enable uses latest params
@@ -1319,6 +1369,61 @@ export default function AutoTrade() {
               Default for the next hedge open only — edit a live hedge on the
               Dashboard panel.
             </span>
+          </label>
+          <label className="block text-sm text-gray-300">
+            Hedge SL Floor (%)
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={hedgeSlFloorPct}
+              onChange={(e) => setHedgeSlFloorPct(e.target.value)}
+              disabled={!hedgeEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+                hedgeSlFloorPctError
+                  ? 'border-red-500'
+                  : 'border-gray-600'
+              }`}
+            />
+            {hedgeSlFloorPctError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {hedgeSlFloorPctError}
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                Minimum hedge stoploss as % of the fixed SL. Prevents the SL
+                budget going negative after basket losses.
+              </span>
+            )}
+          </label>
+          <label className="block text-sm text-gray-300">
+            Hedge Target (x monthly)
+            <input
+              type="number"
+              min={0.5}
+              max={20}
+              step={0.1}
+              value={hedgeTargetMultiple}
+              onChange={(e) => setHedgeTargetMultiple(e.target.value)}
+              disabled={!hedgeEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+                hedgeTargetMultipleError
+                  ? 'border-red-500'
+                  : 'border-gray-600'
+              }`}
+            />
+            {hedgeTargetMultipleError ? (
+              <span className="mt-1 block text-xs text-red-400">
+                {hedgeTargetMultipleError}
+              </span>
+            ) : (
+              <span className="mt-1 block text-xs text-gray-500">
+                Close the whole structure when profit reaches this multiple of
+                expected monthly earnings. Keep this large - a small target
+                forces frequent hedge rolls and spread eats the profit.
+              </span>
+            )}
           </label>
           <label className="block text-sm text-gray-300 sm:col-span-2">
             Margin buffer (%)
