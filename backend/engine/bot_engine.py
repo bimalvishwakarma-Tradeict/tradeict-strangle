@@ -460,13 +460,16 @@ class BotEngine:
                     )
                     orphan_sec = 0
                     if exit_time is not None:
-                        et = exit_time
-                        if et.tzinfo is None:
-                            et = et.replace(tzinfo=timezone.utc)
-                        orphan_sec = max(
-                            0,
-                            int((now - et.astimezone(timezone.utc)).total_seconds()),
+                        from backend.core.time_utils import duration_seconds_since
+
+                        secs, _unreliable = duration_seconds_since(
+                            exit_time,
+                            table="hedge_positions",
+                            row_id=hid,
+                            end=now,
+                            skip_if_legacy=False,  # trading — log only
                         )
+                        orphan_sec = int(secs or 0)
 
                     tid = int(trade.id)
                     log_and_buffer(

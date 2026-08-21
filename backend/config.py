@@ -52,6 +52,14 @@ OPTION_FEE_RATE: float = float(os.getenv("OPTION_FEE_RATE", "0.00010"))  # 0.010
 PREMIUM_CAP_RATE: float = float(os.getenv("PREMIUM_CAP_RATE", "0.035"))  # 3.5% of premium
 GST_RATE: float = float(os.getenv("GST_RATE", "0.18"))  # 18% GST on base fee
 
+# Phase-1 UTC timestamp writer cutover (commit b52d738, 2026-08-21 23:37:49 IST).
+# Rows with timestamps BEFORE this instant may be mixed IST or UTC wall-clock;
+# do not trust duration/ordering across tables for those rows. Not migrated.
+TZ_CUTOVER_UTC: str = os.getenv(
+    "TZ_CUTOVER_UTC",
+    "2026-08-21T18:07:49+00:00",
+)
+
 
 class TradeStatus(str, Enum):
     ACTIVE = "active"

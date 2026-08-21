@@ -4567,15 +4567,24 @@ class MirrorEngine:
                         exit_time = getattr(mh, "exit_time", None)
                 orphan_sec = 0
                 if exit_time is not None:
-                    et = exit_time
-                    if getattr(et, "tzinfo", None) is None:
-                        et = et.replace(tzinfo=timezone.utc)
-                    orphan_sec = max(
-                        0,
-                        int(
-                            (now - et.astimezone(timezone.utc)).total_seconds()
+                    from backend.core.time_utils import duration_seconds_since
+
+                    secs, _unreliable = duration_seconds_since(
+                        exit_time,
+                        table=(
+                            "slave_hedge_positions"
+                            if slave_hedge is not None
+                            else "hedge_positions"
                         ),
+                        row_id=(
+                            getattr(slave_hedge, "id", None)
+                            if slave_hedge is not None
+                            else master_hedge_id
+                        ),
+                        end=now,
+                        skip_if_legacy=False,  # trading — log only
                     )
+                    orphan_sec = int(secs or 0)
 
                 logger.critical(
                     "[SLAVE_ORPHAN_BASKET] slave=%s | slave_trade=%s | "

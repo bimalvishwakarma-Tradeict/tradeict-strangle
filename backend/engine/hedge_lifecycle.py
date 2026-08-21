@@ -93,15 +93,17 @@ def compute_hedge_structure_target(
 
 def _hedge_days_held(hedge: HedgePosition) -> float:
     """Fractional days since hedge.entry_time (UTC), or 0 if missing."""
-    if hedge.entry_time is None:
-        return 0.0
-    et = hedge.entry_time
-    if et.tzinfo is None:
-        et = et.replace(tzinfo=timezone.utc)
-    return max(
-        0.0,
-        (_utc_now() - et.astimezone(timezone.utc)).total_seconds() / 86400.0,
+    from backend.core.time_utils import duration_seconds_since
+
+    secs, _unreliable = duration_seconds_since(
+        hedge.entry_time,
+        table="hedge_positions",
+        row_id=getattr(hedge, "id", None),
+        skip_if_legacy=False,  # trading path — log only, keep prior behaviour
     )
+    if secs is None:
+        return 0.0
+    return max(0.0, secs / 86400.0)
 
 
 def _hedge_entry_cost_usd(hedge: HedgePosition) -> float:
@@ -2644,15 +2646,19 @@ async def build_active_hedge_live(
     days_to_expiry = round(hours_left / 24.0, 4)
 
     days_since_entry: float | None = None
+    days_since_entry_unreliable = False
     if hedge.entry_time is not None:
-        et = hedge.entry_time
-        if et.tzinfo is None:
-            et = et.replace(tzinfo=timezone.utc)
-        days_since_entry = round(
-            max(0.0, (_utc_now() - et.astimezone(timezone.utc)).total_seconds())
-            / 86400.0,
-            4,
+        from backend.core.time_utils import duration_seconds_since
+
+        secs, unreliable = duration_seconds_since(
+            hedge.entry_time,
+            table="hedge_positions",
+            row_id=getattr(hedge, "id", None),
+            skip_if_legacy=True,  # analytics/live status — do not trust pre-cutover
         )
+        days_since_entry_unreliable = unreliable
+        if secs is not None:
+            days_since_entry = round(secs / 86400.0, 4)
 
     call_bid = await _fetch_strict_bid(client, call_sym) if call_sym else None
     put_bid = await _fetch_strict_bid(client, put_sym) if put_sym else None
@@ -2749,7 +2755,17 @@ async def build_active_hedge_live(
         else 10
     )
     min_hold = max(0, min(60, min_hold))
-    days_held = round(_hedge_days_held(hedge), 4)
+    from backend.core.time_utils import duration_seconds_since
+
+    _held_secs, days_held_tz_unreliable = duration_seconds_since(
+        hedge.entry_time,
+        table="hedge_positions",
+        row_id=getattr(hedge, "id", None),
+        skip_if_legacy=True,  # live status report — null if pre-cutover
+    )
+    days_held = (
+        round(_held_secs / 86400.0, 4) if _held_secs is not None else None
+    )
     tgt = compute_hedge_structure_target(
         entry_cost_usd=entry_cost_live,
         expected_monthly_pct=monthly_pct,
@@ -2815,6 +2831,7 @@ async def build_active_hedge_live(
         "days_to_expiry": days_to_expiry,
         "hours_to_expiry": round(hours_left, 4),
         "days_since_entry": days_since_entry,
+        "days_since_entry_tz_unreliable": days_since_entry_unreliable,
         "call": {
             "symbol": call_sym or None,
             "entry_fill": call_entry if call_entry > 0 else None,
@@ -2857,6 +2874,7 @@ async def build_active_hedge_live(
         "expected_monthly_usd": round(float(tgt["monthly_usd"]), 4),
         "hedge_min_hold_days": min_hold,
         "days_held": days_held,
+        "days_held_tz_unreliable": days_held_tz_unreliable,
         "entry_call_iv": hedge.entry_call_iv,
         "entry_put_iv": hedge.entry_put_iv,
         "current_call_iv": current_call_iv,

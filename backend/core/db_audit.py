@@ -59,33 +59,43 @@ async def verify_db_consistency(
                 exit_time = getattr(trade, "exit_time", None)
                 if exit_time is not None:
                     try:
-                        et = _as_ist(exit_time)
-                        age_s = (get_utc_now() - as_utc(et)).total_seconds() if as_utc(et) else 0.0
-                        if age_s < _EXIT_TIME_GRACE_SECONDS:
-                            logger.info(
-                                "[DB_AUDIT_SKIP] trade_id=%s recent "
-                                "exit_time age_s=%.1f — grace period",
-                                trade.id,
-                                age_s,
-                            )
-                            try:
-                                from backend.core.bot_logger import log_and_buffer
+                        from backend.core.time_utils import duration_seconds_since
 
-                                log_and_buffer(
-                                    "DB_AUDIT_SKIP",
-                                    int(trade.id),
-                                    {
-                                        "reason": "exit_time_grace",
-                                        "age_s": round(age_s, 1),
-                                        "existing_reason": str(
-                                            getattr(trade, "exit_reason", None)
-                                            or ""
-                                        ),
-                                    },
+                        age_s_opt, unreliable = duration_seconds_since(
+                            exit_time,
+                            table="trades",
+                            row_id=trade.id,
+                            skip_if_legacy=True,  # grace is analytics-adjacent
+                        )
+                        if unreliable or age_s_opt is None:
+                            pass  # [TZ_LEGACY_ROW] already logged; skip grace
+                        else:
+                            age_s = float(age_s_opt)
+                            if age_s < _EXIT_TIME_GRACE_SECONDS:
+                                logger.info(
+                                    "[DB_AUDIT_SKIP] trade_id=%s recent "
+                                    "exit_time age_s=%.1f — grace period",
+                                    trade.id,
+                                    age_s,
                                 )
-                            except Exception:
-                                pass
-                            continue
+                                try:
+                                    from backend.core.bot_logger import log_and_buffer
+
+                                    log_and_buffer(
+                                        "DB_AUDIT_SKIP",
+                                        int(trade.id),
+                                        {
+                                            "reason": "exit_time_grace",
+                                            "age_s": round(age_s, 1),
+                                            "existing_reason": str(
+                                                getattr(trade, "exit_reason", None)
+                                                or ""
+                                            ),
+                                        },
+                                    )
+                                except Exception:
+                                    pass
+                                continue
                     except Exception as grace_exc:
                         logger.warning(
                             "[DB_AUDIT] grace check failed trade=%s: %s",

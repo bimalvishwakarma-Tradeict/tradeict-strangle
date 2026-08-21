@@ -21,6 +21,7 @@ from backend.config import (
     IST,
     PRE_EXPIRY_MINUTES,
     SETTLING_PERIOD_MINUTES,
+    TZ_CUTOVER_UTC,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,73 @@ def as_utc(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=_UTC)
     return dt.astimezone(_UTC)
+
+
+def get_tz_cutover_utc() -> datetime:
+    """Timezone writer cutover instant (aware UTC)."""
+    raw = str(TZ_CUTOVER_UTC or "").strip()
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_UTC)
+    return dt.astimezone(_UTC)
+
+
+def is_pre_tz_cutover(dt: datetime | None) -> bool:
+    """True when ``dt`` is strictly before TZ_CUTOVER_UTC (legacy / mixed zone)."""
+    aware = as_utc(dt)
+    if aware is None:
+        return False
+    return aware < get_tz_cutover_utc()
+
+
+def warn_tz_legacy_row(
+    table: str,
+    row_id: Any,
+    timestamp: datetime | None,
+) -> bool:
+    """
+    Log WARNING if timestamp is pre-cutover. Returns True when legacy.
+
+    Call before any duration or cross-table ordering that uses this stamp.
+    """
+    if timestamp is None or not is_pre_tz_cutover(timestamp):
+        return False
+    ts = as_utc(timestamp)
+    logger.warning(
+        "[TZ_LEGACY_ROW] table=%s | id=%s | timestamp=%s",
+        table,
+        row_id,
+        ts.isoformat() if ts is not None else None,
+    )
+    return True
+
+
+def duration_seconds_since(
+    start: datetime | None,
+    *,
+    table: str,
+    row_id: Any,
+    end: datetime | None = None,
+    skip_if_legacy: bool = False,
+) -> tuple[float | None, bool]:
+    """
+    Seconds from ``start`` to ``end`` (default: now UTC).
+
+    Returns ``(seconds, unreliable)``. When ``skip_if_legacy`` and start is
+    pre-cutover, returns ``(None, True)`` after logging [TZ_LEGACY_ROW].
+    Trading call sites should pass ``skip_if_legacy=False`` (log only) so
+    behaviour is unchanged; reports/analytics should skip.
+    """
+    if start is None:
+        return None, False
+    legacy = warn_tz_legacy_row(table, row_id, start)
+    if legacy and skip_if_legacy:
+        return None, True
+    start_utc = as_utc(start)
+    end_utc = as_utc(end) if end is not None else get_utc_now()
+    if start_utc is None or end_utc is None:
+        return None, legacy
+    return max(0.0, (end_utc - start_utc).total_seconds()), legacy
 
 
 def get_settling_info(
