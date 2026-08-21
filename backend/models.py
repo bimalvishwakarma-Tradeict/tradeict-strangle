@@ -551,6 +551,32 @@ class SlaveTrade(Base):
     call_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     put_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Live contract identity — required for per-slave P&L (next task)
+    call_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    put_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    call_symbol: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    put_symbol: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    call_strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    call_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    call_entry_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_entry_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    call_exit_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    put_exit_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_spread_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_mtm: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    exit_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    exit_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 'computed' | 'copied' — UI can tell which figure it is during transition
+    mtm_source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="copied"
+    )
+
     # "active" | "closed" | "error" | "partial"
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
 

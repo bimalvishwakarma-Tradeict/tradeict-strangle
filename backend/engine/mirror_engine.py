@@ -16,6 +16,7 @@ if str(_ROOT) not in sys.path:
 from backend.core.bot_logger import log_and_buffer
 from backend.core.delta_client import DeltaClient
 from backend.core.encryption import decrypt
+from backend.core.fees import compute_entry_spread_usd
 from backend.core.time_utils import get_ist_now
 from backend.database import SessionLocal, get_active_slave_accounts
 from backend.models import SlaveAccount, SlaveHedgePosition, SlaveTrade, Trade
@@ -553,6 +554,78 @@ class MirrorEngine:
         oid = order_result.get("order_id") or order_result.get("id")
         return str(oid) if oid is not None else ""
 
+    @staticmethod
+    def _fee_from_order(order_result: dict[str, Any] | None) -> float:
+        if not order_result or not isinstance(order_result, dict):
+            return 0.0
+        for src in (order_result, order_result.get("raw") or {}):
+            if not isinstance(src, dict):
+                continue
+            for field in ("paid_commission", "commission"):
+                try:
+                    val = abs(float(src.get(field) or 0))
+                except (TypeError, ValueError):
+                    val = 0.0
+                if val > 0:
+                    return val
+        return 0.0
+
+    async def _resolve_order_fee(
+        self,
+        client: DeltaClient,
+        order_result: dict[str, Any] | None,
+    ) -> float:
+        fee = self._fee_from_order(order_result)
+        if fee > 0:
+            return fee
+        oid = self._order_id(order_result)
+        if not oid or str(oid).upper() == "VIRTUAL":
+            return 0.0
+        try:
+            return abs(float(await client.get_order_commission(oid) or 0))
+        except Exception:
+            return 0.0
+
+    def _log_slave_trade_detail(
+        self,
+        *,
+        slave_id: int,
+        master_trade_id: int,
+        qty: int,
+        call_symbol: str,
+        call_fill: float,
+        put_symbol: str,
+        put_fill: float,
+        entry_spread: float,
+        entry_fees: float,
+    ) -> None:
+        log_and_buffer(
+            "SLAVE_TRADE_DETAIL",
+            int(master_trade_id),
+            {
+                "slave": int(slave_id),
+                "master_trade": int(master_trade_id),
+                "qty": int(qty),
+                "call": f"{call_symbol}@{call_fill}",
+                "put": f"{put_symbol}@{put_fill}",
+                "entry_spread": round(float(entry_spread), 6),
+                "entry_fees": round(float(entry_fees), 6),
+            },
+        )
+        logger.info(
+            "[SLAVE_TRADE_DETAIL] slave=%s | master_trade=%s | qty=%s | "
+            "call=%s@%s | put=%s@%s | entry_spread=%s | entry_fees=%s",
+            slave_id,
+            master_trade_id,
+            qty,
+            call_symbol,
+            call_fill,
+            put_symbol,
+            put_fill,
+            round(float(entry_spread), 6),
+            round(float(entry_fees), 6),
+        )
+
     async def mirror_trade_entry(
         self,
         master_trade_id: int,
@@ -843,18 +916,54 @@ class MirrorEngine:
                 master_put_strike,
                 slave_qty,
             )
+            virt_call_fill = float(master_call_fill or 0)
+            virt_put_fill = float(master_put_fill or 0)
+            virt_entry_spread = (
+                compute_entry_spread_usd(
+                    sent_price=virt_call_fill,
+                    fill_price=virt_call_fill,
+                    quantity=slave_qty,
+                    is_long=False,
+                )
+                + compute_entry_spread_usd(
+                    sent_price=virt_put_fill,
+                    fill_price=virt_put_fill,
+                    quantity=slave_qty,
+                    is_long=False,
+                )
+            )
             virt_trade = SlaveTrade(
                 slave_account_id=int(slave.id),
                 master_trade_id=int(master_trade_id),
                 actual_quantity=slave_qty,
-                call_fill_price=float(master_call_fill or 0),
-                put_fill_price=float(master_put_fill or 0),
+                call_fill_price=virt_call_fill,
+                put_fill_price=virt_put_fill,
                 call_order_id="VIRTUAL",
                 put_order_id="VIRTUAL",
+                call_product_id=int(call_product_id),
+                put_product_id=int(put_product_id),
+                call_symbol=str(master_call_symbol or ""),
+                put_symbol=str(master_put_symbol or ""),
+                call_strike=float(master_call_strike or 0),
+                put_strike=float(master_put_strike or 0),
+                call_entry_fee_usd=0.0,
+                put_entry_fee_usd=0.0,
+                entry_spread_usd=float(virt_entry_spread or 0.0),
                 status="active",
             )
             db.add(virt_trade)
             db.commit()
+            self._log_slave_trade_detail(
+                slave_id=int(slave.id),
+                master_trade_id=int(master_trade_id),
+                qty=slave_qty,
+                call_symbol=str(master_call_symbol or ""),
+                call_fill=virt_call_fill,
+                put_symbol=str(master_put_symbol or ""),
+                put_fill=virt_put_fill,
+                entry_spread=float(virt_entry_spread or 0.0),
+                entry_fees=0.0,
+            )
             logger.info(
                 "VIRTUAL TRADE created: slave='%s' slave_trade_id=%s",
                 slave.name,
@@ -1098,6 +1207,23 @@ class MirrorEngine:
                     slave.name,
                 )
 
+            call_entry_fee = await self._resolve_order_fee(client, call_order)
+            put_entry_fee = await self._resolve_order_fee(client, put_order)
+            entry_spread = (
+                compute_entry_spread_usd(
+                    sent_price=float(master_call_fill or 0),
+                    fill_price=float(call_fill or 0),
+                    quantity=slave_qty,
+                    is_long=False,
+                )
+                + compute_entry_spread_usd(
+                    sent_price=float(master_put_fill or 0),
+                    fill_price=float(put_fill or 0),
+                    quantity=slave_qty,
+                    is_long=False,
+                )
+            )
+
             slave_trade = SlaveTrade(
                 slave_account_id=int(slave.id),
                 master_trade_id=int(master_trade_id),
@@ -1108,6 +1234,15 @@ class MirrorEngine:
                 actual_quantity=slave_qty,
                 call_fill_price=call_fill,
                 put_fill_price=put_fill,
+                call_product_id=int(call_product_id),
+                put_product_id=int(put_product_id),
+                call_symbol=str(master_call_symbol or ""),
+                put_symbol=str(master_put_symbol or ""),
+                call_strike=float(master_call_strike or 0),
+                put_strike=float(master_put_strike or 0),
+                call_entry_fee_usd=float(call_entry_fee or 0.0),
+                put_entry_fee_usd=float(put_entry_fee or 0.0),
+                entry_spread_usd=float(entry_spread or 0.0),
                 status=status,
                 last_error=last_error,
                 error_count=err_count,
@@ -1124,6 +1259,18 @@ class MirrorEngine:
             slave.last_connected_at = get_ist_now()
             slave.updated_at = get_ist_now()
             db.commit()
+
+            self._log_slave_trade_detail(
+                slave_id=int(slave.id),
+                master_trade_id=int(master_trade_id),
+                qty=slave_qty,
+                call_symbol=str(master_call_symbol or ""),
+                call_fill=float(call_fill or 0),
+                put_symbol=str(master_put_symbol or ""),
+                put_fill=float(put_fill or 0),
+                entry_spread=float(entry_spread or 0.0),
+                entry_fees=float(call_entry_fee or 0) + float(put_entry_fee or 0),
+            )
 
             logger.info(
                 "Slave '%s' trade mirrored status=%s (expiry=%s)",
@@ -1312,8 +1459,14 @@ class MirrorEngine:
                     leg = str(triggered_leg_type).lower()
                     if leg == "call":
                         st.call_order_id = "VIRTUAL"
+                        st.call_product_id = int(new_product_id)
+                        st.call_symbol = str(new_symbol or "")
+                        st.call_strike = float(new_strike or 0)
                     else:
                         st.put_order_id = "VIRTUAL"
+                        st.put_product_id = int(new_product_id)
+                        st.put_symbol = str(new_symbol or "")
+                        st.put_strike = float(new_strike or 0)
                     virt_db.commit()
             return
 
@@ -1538,8 +1691,18 @@ class MirrorEngine:
                 slave_trade.last_updated = get_ist_now()
                 if leg == "call":
                     slave_trade.call_order_id = new_order_id or None
+                    slave_trade.call_product_id = new_pid
+                    slave_trade.call_symbol = str(new_symbol or "")
+                    slave_trade.call_strike = float(new_strike or 0)
+                    if new_fill > 0:
+                        slave_trade.call_fill_price = new_fill
                 else:
                     slave_trade.put_order_id = new_order_id or None
+                    slave_trade.put_product_id = new_pid
+                    slave_trade.put_symbol = str(new_symbol or "")
+                    slave_trade.put_strike = float(new_strike or 0)
+                    if new_fill > 0:
+                        slave_trade.put_fill_price = new_fill
                 slave.connection_status = "error"
                 slave.last_error = msg[:500]
                 db.commit()
@@ -1548,11 +1711,17 @@ class MirrorEngine:
             if leg == "call":
                 slave_trade.call_order_id = new_order_id or None
                 slave_trade.call_sl_order_id = None
+                slave_trade.call_product_id = new_pid
+                slave_trade.call_symbol = str(new_symbol or "")
+                slave_trade.call_strike = float(new_strike or 0)
                 if new_fill > 0:
                     slave_trade.call_fill_price = new_fill
             else:
                 slave_trade.put_order_id = new_order_id or None
                 slave_trade.put_sl_order_id = None
+                slave_trade.put_product_id = new_pid
+                slave_trade.put_symbol = str(new_symbol or "")
+                slave_trade.put_strike = float(new_strike or 0)
                 if new_fill > 0:
                     slave_trade.put_fill_price = new_fill
 
@@ -3650,6 +3819,12 @@ class MirrorEngine:
                     )
                     st.call_sl_order_id = None
                     st.put_sl_order_id = None
+                    st.call_exit_price = float(st.call_fill_price or 0) or None
+                    st.put_exit_price = float(st.put_fill_price or 0) or None
+                    st.call_exit_fee_usd = 0.0
+                    st.put_exit_fee_usd = 0.0
+                    st.exit_time = get_ist_now()
+                    st.exit_reason = str(reason or "")[:50]
                     st.last_updated = get_ist_now()
                     virt_db.commit()
                     logger.info(
@@ -3664,6 +3839,16 @@ class MirrorEngine:
                 reason=f"virtual_master_exit:{reason}",
                 allow_virtual=True,
             )
+            slave_trade.call_exit_price = float(
+                slave_trade.call_fill_price or 0
+            ) or None
+            slave_trade.put_exit_price = float(
+                slave_trade.put_fill_price or 0
+            ) or None
+            slave_trade.call_exit_fee_usd = 0.0
+            slave_trade.put_exit_fee_usd = 0.0
+            slave_trade.exit_time = get_ist_now()
+            slave_trade.exit_reason = str(reason or "")[:50]
             return
 
         client = self._get_slave_client(slave)
@@ -3855,6 +4040,17 @@ class MirrorEngine:
 
             closed_count = 0
             target_pids: set[int] = set()
+            exit_by_pid: dict[int, dict[str, float]] = {}
+            call_pid_hint = int(
+                getattr(slave_trade, "call_product_id", None)
+                or call_product_id
+                or 0
+            )
+            put_pid_hint = int(
+                getattr(slave_trade, "put_product_id", None)
+                or put_product_id
+                or 0
+            )
             for pos in targets:
                 pid = int(pos.get("product_id") or 0)
                 size = float(pos.get("size") or 0)
@@ -3888,8 +4084,9 @@ class MirrorEngine:
                         reason,
                     )
                     continue
+                close_order: dict[str, Any] | None = None
                 try:
-                    await client.place_order(
+                    close_order = await client.place_order(
                         product_id=pid,
                         size=close_size,
                         side=side,
@@ -3908,7 +4105,7 @@ class MirrorEngine:
                 except Exception as close_exc:
                     # Retry without reduce_only (some accounts reject it)
                     try:
-                        await client.place_order(
+                        close_order = await client.place_order(
                             product_id=pid,
                             size=close_size,
                             side=side,
@@ -3934,6 +4131,24 @@ class MirrorEngine:
                             close_exc,
                             retry_exc,
                         )
+                        continue
+                if close_order is not None:
+                    try:
+                        exit_fill = float(
+                            await client.resolve_fill_price(
+                                close_order, symbol_for_fallback=sym or None
+                            )
+                            or 0.0
+                        )
+                    except Exception:
+                        exit_fill = 0.0
+                    exit_fee = await self._resolve_order_fee(
+                        client, close_order
+                    )
+                    exit_by_pid[pid] = {
+                        "fill": exit_fill,
+                        "fee": float(exit_fee or 0.0),
+                    }
 
             # Products that must be flat: basket hints + closed targets ONLY
             # (never require structure hedge longs to be flat)
@@ -4019,6 +4234,23 @@ class MirrorEngine:
                 return
             slave_trade.call_sl_order_id = None
             slave_trade.put_sl_order_id = None
+            # Populate exit fills/fees from close orders (no P&L math yet)
+            call_exit = exit_by_pid.get(call_pid_hint)
+            put_exit = exit_by_pid.get(put_pid_hint)
+            if call_exit:
+                if float(call_exit.get("fill") or 0) > 0:
+                    slave_trade.call_exit_price = float(call_exit["fill"])
+                slave_trade.call_exit_fee_usd = float(
+                    call_exit.get("fee") or 0.0
+                )
+            if put_exit:
+                if float(put_exit.get("fill") or 0) > 0:
+                    slave_trade.put_exit_price = float(put_exit["fill"])
+                slave_trade.put_exit_fee_usd = float(
+                    put_exit.get("fee") or 0.0
+                )
+            slave_trade.exit_time = get_ist_now()
+            slave_trade.exit_reason = str(reason or "")[:50]
             slave_trade.last_error = None
             slave_trade.last_updated = get_ist_now()
             db.commit()

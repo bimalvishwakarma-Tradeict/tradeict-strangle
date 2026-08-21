@@ -521,6 +521,39 @@ def _migrate_schema() -> None:
                         "ADD COLUMN is_virtual BOOLEAN DEFAULT 0"
                     )
                 )
+    if "slave_trades" in tables:
+        st_cols = {
+            col["name"] for col in inspector.get_columns("slave_trades")
+        }
+        for col_name, col_type in (
+            ("call_product_id", "INTEGER"),
+            ("put_product_id", "INTEGER"),
+            ("call_symbol", "VARCHAR(100)"),
+            ("put_symbol", "VARCHAR(100)"),
+            ("call_strike", "FLOAT"),
+            ("put_strike", "FLOAT"),
+            ("call_exit_price", "FLOAT"),
+            ("put_exit_price", "FLOAT"),
+            ("call_entry_fee_usd", "FLOAT"),
+            ("put_entry_fee_usd", "FLOAT"),
+            ("call_exit_fee_usd", "FLOAT"),
+            ("put_exit_fee_usd", "FLOAT"),
+            ("entry_spread_usd", "FLOAT NOT NULL DEFAULT 0.0"),
+            ("realized_pnl", "FLOAT"),
+            ("net_mtm", "FLOAT NOT NULL DEFAULT 0.0"),
+            ("exit_time", "DATETIME"),
+            ("exit_reason", "VARCHAR(50)"),
+            ("mtm_source", "VARCHAR(20) NOT NULL DEFAULT 'copied'"),
+        ):
+            if col_name not in st_cols:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE slave_trades "
+                            f"ADD COLUMN {col_name} {col_type}"
+                        )
+                    )
+                st_cols.add(col_name)
     if "trades" in tables:
         trade_cols = {col["name"] for col in inspector.get_columns("trades")}
         if "is_demo" not in trade_cols:
