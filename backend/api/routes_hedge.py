@@ -286,6 +286,9 @@ async def list_structures(
                     ),
                     "entry_cost": entry_cost,
                     "hedge_net_mtm": hedge_net,
+                    "hedge_net_source": str(
+                        getattr(h, "hedge_net_source", None) or "live"
+                    ),
                     "status": h.status,
                     "entry_time": _ist_iso(h.entry_time),
                     "exit_time": _ist_iso(h.exit_time),

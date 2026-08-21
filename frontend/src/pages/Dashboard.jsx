@@ -803,6 +803,12 @@ function StructureHistoryCard({ structure }) {
               <span className={pnlColor(hedge.hedge_net_mtm)}>
                 {formatSignedMoney(hedge.hedge_net_mtm)}
               </span>
+              {String(hedge.hedge_net_source || '').toLowerCase() ===
+              'reconstructed' ? (
+                <span className="ml-2 text-[10px] font-normal text-gray-500">
+                  reconstructed from fills - exit spread not captured
+                </span>
+              ) : null}
             </div>
             <div>
               Entry cost:{' '}

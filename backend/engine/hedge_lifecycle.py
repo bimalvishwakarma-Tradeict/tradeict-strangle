@@ -2549,6 +2549,9 @@ def hedge_to_dict(h: HedgePosition) -> dict[str, Any]:
             getattr(h, "cum_closed_basket_pnl", 0.0) or 0.0
         ),
         "structure_pnl": float(getattr(h, "structure_pnl", 0.0) or 0.0),
+        "hedge_net_source": str(
+            getattr(h, "hedge_net_source", None) or "live"
+        ),
         "is_bot_managed": bool(h.is_bot_managed),
         "last_error": h.last_error,
         "cost_usd": (

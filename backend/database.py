@@ -637,6 +637,7 @@ def _migrate_schema() -> None:
                         hedge_gross_for_sl FLOAT NOT NULL DEFAULT 0.0,
                         cum_closed_basket_pnl FLOAT NOT NULL DEFAULT 0.0,
                         structure_pnl FLOAT NOT NULL DEFAULT 0.0,
+                        hedge_net_source VARCHAR(20) NOT NULL DEFAULT 'live',
                         is_bot_managed BOOLEAN NOT NULL DEFAULT 1,
                         last_error VARCHAR(500)
                     )
@@ -653,6 +654,7 @@ def _migrate_schema() -> None:
             ("hedge_gross_for_sl", "FLOAT NOT NULL DEFAULT 0.0"),
             ("cum_closed_basket_pnl", "FLOAT NOT NULL DEFAULT 0.0"),
             ("structure_pnl", "FLOAT NOT NULL DEFAULT 0.0"),
+            ("hedge_net_source", "VARCHAR(20) NOT NULL DEFAULT 'live'"),
         ]
         for col_name, col_type in hedge_pnl_cols:
             if col_name not in hp_cols:

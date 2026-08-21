@@ -601,6 +601,10 @@ class HedgePosition(Base):
         Float, nullable=False, default=0.0
     )
     structure_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # 'live' = computed by monitor; 'reconstructed' = backfilled from fill/exit prices
+    hedge_net_source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="live"
+    )
 
     is_bot_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
