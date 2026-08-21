@@ -1621,17 +1621,16 @@ class DeltaClient:
         require_farther_otm: bool = False,
     ) -> dict[str, Any]:
         """
-        CORE ADJUSTMENT RULE (mandatory once trigger fires):
+        Find a strike whose mark is nearest to target_premium.
 
-        Exit triggered leg and sell the strike whose premium is >= the
-        other open leg's offer, choosing the LOWEST such premium
-        (closest from above). If none exist, fall back to nearest mark.
+        Adjustment path (require_farther_otm=True):
+          - CALL: only strikes > exclude_strike (farther OTM / UP)
+          - PUT:  only strikes < exclude_strike (farther OTM / DOWN)
+          - Pick closest abs(mark − target); tie-break farther OTM
+          - Never rolls toward the money; empty directional pool → error
 
-        - Exclude current strike (same-strike adjust = fees only)
-        - Primary: mark >= target_premium, then lowest mark
-        - Fallback: abs(mark - target_premium) nearest
-        - Tie-break: prefer farther OTM (call higher / put lower)
-        - Always returns a strike if any other exists — never HOLD for imperfect match
+        Legacy path (require_farther_otm=False): keep prior above_offer then
+        nearest fallback (used by non-adjustment callers / tests).
         """
         leg = leg_type.lower().strip()
         if leg not in {"call", "put"}:
@@ -1650,12 +1649,15 @@ class DeltaClient:
 
         mark_key = "call_mark_price" if leg == "call" else "put_mark_price"
         excl = float(exclude_strike) if exclude_strike is not None else None
+        direction = "UP" if leg == "call" else "DOWN"
 
         pool: list[dict[str, Any]] = []
+        candidates_scanned = 0
         for row in chain:
             strike = _safe_float(row.get("strike"), default=-1.0)
             if strike < 0:
                 continue
+            candidates_scanned += 1
             if excl is not None and abs(strike - excl) < 0.01:
                 continue
             if require_farther_otm and excl is not None:
@@ -1672,8 +1674,8 @@ class DeltaClient:
             raise DeltaAPIError(
                 404,
                 (
-                    f"SAME_STRIKE_HOLD: no other {leg} strike on chain "
-                    f"(exclude={excl}, target={target:.2f})"
+                    f"NO_VALID_STRIKE: no {leg} strike {direction} from "
+                    f"exclude={excl} for target={target:.2f}"
                 ),
             )
 
@@ -1686,33 +1688,60 @@ class DeltaClient:
             return (prem_diff, otm_rank)
 
         def _at_or_above_key(row: dict[str, Any]) -> tuple[float, float]:
-            # Lowest premium among those >= target (closest from above)
             strike = _safe_float(row.get("strike"))
             mark = _safe_float(row.get(mark_key))
             otm_rank = -strike if leg == "call" else strike
             return (mark, otm_rank)
 
-        at_or_above = [
-            row
-            for row in pool
-            if _safe_float(row.get(mark_key)) >= target
-        ]
-        if at_or_above:
-            best = min(at_or_above, key=_at_or_above_key)
-            match_mode = "above_offer"
-        else:
-            # Fallback: no strike >= target — keep prior nearest behavior
+        if require_farther_otm:
+            # Adjustment: closest to target among farther-OTM only
             best = min(pool, key=_nearest_key)
-            match_mode = "fallback_nearest"
+            match_mode = "closest_farther_otm"
+        else:
+            at_or_above = [
+                row
+                for row in pool
+                if _safe_float(row.get(mark_key)) >= target
+            ]
+            if at_or_above:
+                best = min(at_or_above, key=_at_or_above_key)
+                match_mode = "above_offer"
+            else:
+                best = min(pool, key=_nearest_key)
+                match_mode = "fallback_nearest"
 
         best_mark = _safe_float(best.get(mark_key))
         best_strike = _safe_float(best.get("strike"))
-        # Copy so caller can read selection method without mutating chain cache
+        # Hard directional guard (belt-and-suspenders)
+        if require_farther_otm and excl is not None:
+            if leg == "call" and best_strike <= excl:
+                raise DeltaAPIError(
+                    404,
+                    (
+                        f"NO_VALID_STRIKE: call candidate {best_strike} not UP "
+                        f"from {excl} (target={target:.2f})"
+                    ),
+                )
+            if leg == "put" and best_strike >= excl:
+                raise DeltaAPIError(
+                    404,
+                    (
+                        f"NO_VALID_STRIKE: put candidate {best_strike} not DOWN "
+                        f"from {excl} (target={target:.2f})"
+                    ),
+                )
+
         result = dict(best)
         result["_match_method"] = match_mode
+        result["_direction"] = direction
+        result["_candidates_scanned"] = int(candidates_scanned)
+        result["_old_strike"] = excl
+        result["_deviation_pct"] = (
+            abs(best_mark - target) / target * 100.0 if target > 0 else 0.0
+        )
         logger.info(
-            "Premium match (mandatory adjust): %s strike=%s mark=%.2f "
-            "target=%.2f diff=%.2f exclude=%s mode=%s",
+            "Premium match: %s strike=%s mark=%.2f target=%.2f diff=%.2f "
+            "exclude=%s mode=%s direction=%s scanned=%s",
             leg,
             best_strike,
             best_mark,
@@ -1720,6 +1749,8 @@ class DeltaClient:
             abs(best_mark - target),
             excl,
             match_mode,
+            direction,
+            candidates_scanned,
         )
         return result
 

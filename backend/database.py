@@ -755,6 +755,10 @@ def _migrate_schema() -> None:
             ("target_theta_pct", "FLOAT NOT NULL DEFAULT 150.0"),
             ("hedge_qty_ratio", "FLOAT NOT NULL DEFAULT 1.0"),
             ("cooldown_after_loss_minutes", "INTEGER NOT NULL DEFAULT 120"),
+            (
+                "adjustment_premium_tolerance_pct",
+                "FLOAT NOT NULL DEFAULT 40.0",
+            ),
         ]
         for col_name, col_type in hedge_setting_cols:
             if col_name not in at_cols:

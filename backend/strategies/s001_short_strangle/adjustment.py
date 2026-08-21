@@ -372,6 +372,20 @@ class AdjustmentExecutor:
                 )
             except Exception as exc:
                 msg = str(exc)
+                # Wrong-direction / no farther-OTM candidate — leave untouched
+                if "ADJUSTMENT_ABORT" in msg:
+                    logger.error(
+                        "[ADJUSTMENT_ABORT] Trade %s leg=%s — %s "
+                        "(leaving position untouched)",
+                        trade.id,
+                        triggered_leg_type,
+                        msg,
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        old_strike=float(triggered_leg.strike),
+                        error_message=msg[:500],
+                    )
                 # No alternate strike on chain → EXIT basket (do not HOLD)
                 if "SAME_STRIKE_HOLD" in msg and (
                     "no other" in msg.lower() or "no alternate" in msg.lower()

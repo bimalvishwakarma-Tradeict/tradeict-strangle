@@ -382,6 +382,10 @@ class AutoTradeSettings(Base):
     cooldown_after_loss_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=120
     )
+    # Max allowed |selected − target| / target × 100 on adjustment strike pick
+    adjustment_premium_tolerance_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, default=40.0
+    )
 
     # Demo/virtual mode — places virtual trades without real Delta orders
     is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

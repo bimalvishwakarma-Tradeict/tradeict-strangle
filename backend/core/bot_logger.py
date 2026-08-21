@@ -23,6 +23,9 @@ _IMPORTANT_EVENTS = frozenset(
         "ADJUSTMENT_DONE",
         "ADJUSTMENT_FAIL",
         "ADJUSTMENT_HOLD",
+        "ADJUSTMENT_ABORT",
+        "ADJUSTMENT_PREMIUM_MISS",
+        "NEW_STRIKE_SELECTED",
         "ADJUSTMENT_DELTA_VERIFY",
         "BASELINE_RESET",
         "PARTIAL_ADJUSTMENT",
@@ -218,6 +221,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_AFFORD_BLOCK",
         "HEDGE_GATE_BLOCK",
         "HEDGE_GATE_BACKOFF",
+        "ADJUSTMENT_ABORT",
     ):
         bot_log.error(msg)
     elif event_type in (
@@ -282,6 +286,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_GATE",
         "HEDGE_THETA_LOG",
         "HEDGE_SETTINGS_UPDATE",
+        "NEW_STRIKE_SELECTED",
     ):
         bot_log.info(msg)
     elif event_type in (
@@ -289,6 +294,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MIRROR_ADJ_FAIL",
         "THETA_FALLBACK",
         "HEDGE_EXPIRY_SKIP",
+        "ADJUSTMENT_PREMIUM_MISS",
     ):
         bot_log.warning(msg)
     else:

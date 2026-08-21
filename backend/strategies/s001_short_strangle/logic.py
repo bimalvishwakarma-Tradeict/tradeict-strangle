@@ -1049,56 +1049,195 @@ class ShortStrangleStrategy(BaseStrategy):
         except Exception:
             pass
 
-        # Prefer premium >= target (closest from above); never below
-        # unless no such strike exists (then nearest fallback inside client).
-        row = await delta_client.find_strike_by_premium(
-            underlying=underlying_symbol,
-            expiry_date=expiry_str,
-            leg_type=leg,
-            target_premium=float(final_target),
-            exclude_strike=float(current_strike) if current_strike is not None else None,
-            require_farther_otm=False,
+        # Directional farther-OTM search only (never roll toward the money).
+        # Closest premium to target among UP calls / DOWN puts.
+        from backend.core.bot_logger import log_and_buffer
+        from backend.core.delta_client import DeltaAPIError
+
+        trade_id = int(getattr(trade, "id", 0) or 0)
+        old_strike = (
+            float(current_strike) if current_strike is not None else None
         )
+        direction = "UP" if leg == "call" else "DOWN"
+
+        tolerance_pct = 40.0
+        try:
+            from backend.database import SessionLocal, get_or_create_auto_settings
+
+            with SessionLocal() as _db:
+                _settings = get_or_create_auto_settings(_db)
+                tolerance_pct = float(
+                    getattr(_settings, "adjustment_premium_tolerance_pct", None)
+                    or 40.0
+                )
+        except Exception as exc:
+            logger.warning(
+                "find_adjustment_strike: tolerance setting read failed: %s",
+                exc,
+            )
+        tolerance_pct = max(5.0, min(200.0, tolerance_pct))
+
+        try:
+            row = await delta_client.find_strike_by_premium(
+                underlying=underlying_symbol,
+                expiry_date=expiry_str,
+                leg_type=leg,
+                target_premium=float(final_target),
+                exclude_strike=old_strike,
+                require_farther_otm=True,
+            )
+        except DeltaAPIError as exc:
+            best_candidate = None
+            try:
+                log_and_buffer(
+                    "ADJUSTMENT_ABORT",
+                    trade_id,
+                    {
+                        "trade": trade_id,
+                        "leg": leg,
+                        "reason": "no_valid_strike",
+                        "old_strike": old_strike,
+                        "target_premium": round(final_target, 4),
+                        "best_candidate": best_candidate,
+                        "error": str(exc),
+                        "summary": (
+                            f"[ADJUSTMENT_ABORT] trade={trade_id} leg={leg} "
+                            f"reason=no_valid_strike | old_strike={old_strike} "
+                            f"target_premium={round(final_target, 4)} "
+                            f"best_candidate={best_candidate}"
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+            raise ValueError(
+                f"ADJUSTMENT_ABORT: no valid {leg} strike {direction} from "
+                f"{old_strike} for target={final_target:.2f}: {exc}"
+            ) from exc
 
         new_strike = float(row.get("strike") or 0)
         mark_key = "call_mark_price" if leg == "call" else "put_mark_price"
         new_premium = float(row.get(mark_key) or 0)
-        method = str(row.get("_match_method") or "above_offer")
+        method = str(row.get("_match_method") or "closest_farther_otm")
+        candidates_scanned = int(row.get("_candidates_scanned") or 0)
+        deviation_pct = float(
+            row.get("_deviation_pct")
+            if row.get("_deviation_pct") is not None
+            else (
+                abs(new_premium - final_target) / final_target * 100.0
+                if final_target > 0
+                else 0.0
+            )
+        )
         other_offer = (
             float(untouched_for_log)
             if untouched_for_log is not None
             else float(other_leg_current_premium)
         )
-        logger.info(
-            "NEW_STRIKE_SELECTED | selected_premium=%.1f | other_leg_offer=%.1f | "
-            "method=%s | selected_strike=%s | target_new_premium=%.1f",
-            new_premium,
-            other_offer,
-            method,
-            new_strike,
-            final_target,
-        )
-        try:
-            from backend.core.bot_logger import log_and_buffer
 
+        # Hard directional guard — never roll toward the money
+        invalid_direction = False
+        if old_strike is not None:
+            if leg == "call" and new_strike <= old_strike:
+                invalid_direction = True
+            if leg == "put" and new_strike >= old_strike:
+                invalid_direction = True
+        if invalid_direction:
+            try:
+                log_and_buffer(
+                    "ADJUSTMENT_ABORT",
+                    trade_id,
+                    {
+                        "trade": trade_id,
+                        "leg": leg,
+                        "reason": "no_valid_strike",
+                        "old_strike": old_strike,
+                        "target_premium": round(final_target, 4),
+                        "best_candidate": new_strike,
+                        "selected_premium": round(new_premium, 4),
+                        "summary": (
+                            f"[ADJUSTMENT_ABORT] trade={trade_id} leg={leg} "
+                            f"reason=no_valid_strike | old_strike={old_strike} "
+                            f"target_premium={round(final_target, 4)} "
+                            f"best_candidate={new_strike}"
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+            raise ValueError(
+                f"ADJUSTMENT_ABORT: {leg} candidate {new_strike} not {direction} "
+                f"from {old_strike} (target={final_target:.2f})"
+            )
+
+        if old_strike is not None and abs(new_strike - old_strike) < 0.01:
+            raise ValueError(
+                f"SAME_STRIKE_HOLD: nearest match is still {new_strike} "
+                f"(no alternate strike for {leg})"
+            )
+
+        if deviation_pct > tolerance_pct:
+            try:
+                log_and_buffer(
+                    "ADJUSTMENT_PREMIUM_MISS",
+                    trade_id,
+                    {
+                        "trade": trade_id,
+                        "target": round(final_target, 4),
+                        "selected": round(new_premium, 4),
+                        "deviation_pct": round(deviation_pct, 2),
+                        "tolerance_pct": tolerance_pct,
+                        "summary": (
+                            f"[ADJUSTMENT_PREMIUM_MISS] trade={trade_id} "
+                            f"target={round(final_target, 4)} "
+                            f"selected={round(new_premium, 4)} "
+                            f"deviation_pct={round(deviation_pct, 2)}"
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+            logger.warning(
+                "[ADJUSTMENT_PREMIUM_MISS] trade=%s target=%.2f selected=%.2f "
+                "deviation_pct=%.1f (tolerance=%.1f) — proceeding (direction OK)",
+                trade_id,
+                final_target,
+                new_premium,
+                deviation_pct,
+                tolerance_pct,
+            )
+
+        try:
             log_and_buffer(
                 "NEW_STRIKE_SELECTED",
-                int(getattr(trade, "id", 0) or 0),
+                trade_id,
                 {
                     "selected_premium": round(new_premium, 4),
                     "other_leg_offer": round(other_offer, 4),
                     "target_new_premium": round(final_target, 4),
                     "method": method,
                     "selected_strike": new_strike,
+                    "old_strike": old_strike,
+                    "direction": direction,
+                    "candidates_scanned": candidates_scanned,
+                    "deviation_pct": round(deviation_pct, 2),
                 },
             )
         except Exception:
             pass
-        if current_strike is not None and abs(new_strike - float(current_strike)) < 0.01:
-            raise ValueError(
-                f"SAME_STRIKE_HOLD: nearest match is still {new_strike} "
-                f"(no alternate strike for {leg})"
-            )
+        logger.info(
+            "NEW_STRIKE_SELECTED | old_strike=%s | selected_strike=%s | "
+            "direction=%s | selected_premium=%.1f | target_new_premium=%.1f | "
+            "deviation_pct=%.1f | candidates_scanned=%s | method=%s",
+            old_strike,
+            new_strike,
+            direction,
+            new_premium,
+            final_target,
+            deviation_pct,
+            candidates_scanned,
+            method,
+        )
 
         if leg == "call":
             new_symbol = str(row.get("call_symbol", ""))

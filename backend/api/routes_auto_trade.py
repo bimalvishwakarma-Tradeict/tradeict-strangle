@@ -85,6 +85,9 @@ class AutoTradeSettingsSchema(BaseModel):
     target_mode: str = "payoff_pct"  # payoff_pct | theta_multiplier
     target_theta_pct: float = Field(default=150.0, ge=10, le=1000)
     cooldown_after_loss_minutes: int = Field(default=120, ge=0, le=1440)
+    adjustment_premium_tolerance_pct: float = Field(
+        default=40.0, ge=5, le=200
+    )
 
     @field_validator("trade_type")
     @classmethod
@@ -324,6 +327,11 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "cooldown_after_loss_minutes", None)
             if getattr(s, "cooldown_after_loss_minutes", None) is not None
             else 120
+        ),
+        "adjustment_premium_tolerance_pct": float(
+            getattr(s, "adjustment_premium_tolerance_pct", None)
+            if getattr(s, "adjustment_premium_tolerance_pct", None) is not None
+            else 40.0
         ),
         # Placeholder until Step 4 supplies live order margin
         "order_margin_per_lot": None,
@@ -582,6 +590,9 @@ async def update_auto_trade_settings(
     settings.target_theta_pct = float(payload.target_theta_pct)
     settings.cooldown_after_loss_minutes = int(
         payload.cooldown_after_loss_minutes
+    )
+    settings.adjustment_premium_tolerance_pct = float(
+        payload.adjustment_premium_tolerance_pct
     )
 
     settings.updated_at = get_ist_now()
