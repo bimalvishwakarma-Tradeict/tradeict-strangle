@@ -143,6 +143,7 @@ _IMPORTANT_EVENTS = frozenset(
         "ADJUSTMENT_LIMIT_UNSET",
         "MIRROR_PARTIAL_ADJ",
         "LEDGER_RECONCILE",
+        "LEDGER_RECONCILE_ALERT",
         "ADJUSTMENT_TARGET",
         "ADJUSTMENT_TARGET_PREMIUM",
         "ADJUSTMENT_COUNT_UPDATED",
@@ -279,7 +280,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_ROLL_FORCED",
         "HEDGE_AUTO_REOPEN_FAILED",
         "MIRROR_PARTIAL_ADJ",
-        "LEDGER_RECONCILE",
+        "LEDGER_RECONCILE_ALERT",
     ):
         bot_log.error(msg)
     elif event_type in (
@@ -385,6 +386,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "PREMIUM_TARGET_UNREACHABLE",
         "NO_STRIKE_AVAILABLE",
         "NO_HEDGE_STRIKE_AVAILABLE",
+        "LEDGER_RECONCILE",
     ):
         bot_log.info(msg)
     elif event_type in (

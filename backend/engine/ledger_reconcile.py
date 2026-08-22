@@ -341,26 +341,22 @@ def counts_by_kind(findings: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def log_reconcile_findings(result: dict[str, Any]) -> None:
-    """Emit ERROR per finding (or INFO clean) — money-critical observability."""
+    """
+    findings == 0 → one INFO summary (LEDGER_RECONCILE)
+    findings > 0  → ERROR summary + one ERROR line per finding
+                    (LEDGER_RECONCILE_ALERT + logger.error for error.log)
+    """
     findings = list(result.get("findings") or [])
     skipped_pre = int(result.get("skipped_pre_ledger") or 0)
     skipped_pos = int(result.get("skipped_no_position") or 0)
+    n = len(findings)
 
-    summary = (
-        f"[LEDGER_RECONCILE] findings={len(findings)} "
-        f"skipped_pre_ledger={skipped_pre} skipped_no_position={skipped_pos}"
-    )
-    # Always on the module logger at INFO so the job is visibly alive
-    logger.info(summary)
-
-    if not findings:
-        logger.info("[LEDGER_RECONCILE] clean findings=0")
+    if n == 0:
         try:
             log_and_buffer(
                 "LEDGER_RECONCILE",
                 0,
                 {
-                    "note": "clean",
                     "findings": 0,
                     "skipped_pre_ledger": skipped_pre,
                     "skipped_no_position": skipped_pos,
@@ -368,7 +364,31 @@ def log_reconcile_findings(result: dict[str, Any]) -> None:
             )
         except Exception as exc:
             logger.warning("LEDGER_RECONCILE buffer failed: %s", exc)
+            logger.info(
+                "[LEDGER_RECONCILE] findings=0 skipped_pre_ledger=%s "
+                "skipped_no_position=%s",
+                skipped_pre,
+                skipped_pos,
+            )
         return
+
+    # Summary at ERROR — money-critical gaps exist
+    summary_details = {
+        "findings": n,
+        "skipped_pre_ledger": skipped_pre,
+        "skipped_no_position": skipped_pos,
+    }
+    logger.error(
+        "[LEDGER_RECONCILE] findings=%s skipped_pre_ledger=%s "
+        "skipped_no_position=%s",
+        n,
+        skipped_pre,
+        skipped_pos,
+    )
+    try:
+        log_and_buffer("LEDGER_RECONCILE_ALERT", 0, summary_details)
+    except Exception as exc:
+        logger.warning("LEDGER_RECONCILE_ALERT buffer failed: %s", exc)
 
     for f in findings:
         kind = str(f.get("kind") or "")
@@ -377,8 +397,6 @@ def log_reconcile_findings(result: dict[str, Any]) -> None:
         structure = f.get("structure_id")
         leg = f.get("leg_id")
         pid = f.get("product_id")
-        # Direct ERROR on this logger — must reach error.log regardless of
-        # bot_activity classification (RULE 5).
         logger.error(
             "[LEDGER_RECONCILE] kind=%s slave=%s master_trade=%s "
             "structure=%s leg=%s product_id=%s",
@@ -391,7 +409,7 @@ def log_reconcile_findings(result: dict[str, Any]) -> None:
         )
         try:
             log_and_buffer(
-                "LEDGER_RECONCILE",
+                "LEDGER_RECONCILE_ALERT",
                 int(master or 0),
                 {
                     "kind": kind,
@@ -404,4 +422,4 @@ def log_reconcile_findings(result: dict[str, Any]) -> None:
                 },
             )
         except Exception as exc:
-            logger.warning("LEDGER_RECONCILE buffer failed: %s", exc)
+            logger.warning("LEDGER_RECONCILE_ALERT buffer failed: %s", exc)
