@@ -564,7 +564,7 @@ class MirrorEngine:
             [int(st.id) for st in owning_trades],
         )
 
-        # Close each conflicting position (reduce_only preferred)
+        # Close each conflicting position — reduce_only only (never drop flag)
         for pos in conflicting:
             try:
                 pid = int(pos.get("product_id") or 0)
@@ -573,39 +573,29 @@ class MirrorEngine:
                 continue
             if pid <= 0 or size == 0:
                 continue
-            close_size = max(1, abs(int(size)))
-            side = "buy" if size < 0 else "sell"
-            try:
-                await client.place_order(
-                    product_id=pid,
-                    size=close_size,
-                    side=side,
-                    reduce_only=True,
+            ok, _order, err = await self._close_with_reduce_only(
+                client=client,
+                slave=slave,
+                product_id=pid,
+                signed_size=size,
+                master_trade_id=int(master_trade_id),
+                path="_resolve_entry_conflicts",
+            )
+            if not ok:
+                logger.error(
+                    "[SLAVE_CONFLICT_RESOLVE] slave='%s' close FAILED "
+                    "pid=%s: %s",
+                    slave.name,
+                    pid,
+                    err,
                 )
-            except Exception as close_exc:
-                try:
-                    await client.place_order(
-                        product_id=pid,
-                        size=close_size,
-                        side=side,
-                    )
-                except Exception as retry_exc:
-                    logger.error(
-                        "[SLAVE_CONFLICT_RESOLVE] slave='%s' close FAILED "
-                        "pid=%s: %s / %s",
-                        slave.name,
-                        pid,
-                        close_exc,
-                        retry_exc,
-                    )
-                    return "failed"
+                return "failed"
             logger.info(
                 "[SLAVE_CONFLICT_RESOLVE] slave='%s' closed pid=%s "
-                "size=%s side=%s",
+                "size=%s",
                 slave.name,
                 pid,
-                close_size,
-                side,
+                size,
             )
 
         for st in owning_trades:
@@ -1568,6 +1558,150 @@ class MirrorEngine:
                 except (TypeError, ValueError):
                     return 0.0
         return None
+
+    @staticmethod
+    def _is_reduce_only_unsupported(exc: BaseException) -> bool:
+        """True when Delta rejects reduce_only as unsupported for the account."""
+        msg = str(exc).lower()
+        needles = (
+            "reduce_only",
+            "reduce only",
+            "reduce-only",
+            "invalid reduce",
+            "unsupported reduce",
+        )
+        return any(n in msg for n in needles)
+
+    async def _close_with_reduce_only(
+        self,
+        *,
+        client: DeltaClient,
+        slave: SlaveAccount,
+        product_id: int,
+        signed_size: float,
+        master_trade_id: int = 0,
+        path: str = "",
+        max_retries: int = 2,
+        backoff_seconds: float = 0.5,
+    ) -> tuple[bool, dict[str, Any] | None, str]:
+        """
+        Close a position with reduce_only=True only. Never drops the flag.
+
+        On exception: re-read live size. Flat → treat first order as success.
+        Still open → retry with live size + reduce_only (max ``max_retries``).
+        If Delta rejects reduce_only specifically: leave position, do not open
+        an opposite naked order.
+
+        Returns (ok, last_order_or_None, error_or_empty).
+        """
+        pid = int(product_id)
+        slave_id = int(getattr(slave, "id", 0) or 0)
+        live_size = float(signed_size)
+        last_order: dict[str, Any] | None = None
+        last_err = ""
+
+        if abs(live_size) <= 1e-9:
+            return True, None, ""
+
+        for attempt in range(0, int(max_retries) + 1):
+            close_size = max(1, abs(int(round(live_size))))
+            side = "buy" if live_size < 0 else "sell"
+            try:
+                last_order = await client.place_order(
+                    product_id=pid,
+                    size=close_size,
+                    side=side,
+                    reduce_only=True,
+                )
+                return True, last_order, ""
+            except Exception as close_exc:
+                last_err = str(close_exc)
+                if self._is_reduce_only_unsupported(close_exc):
+                    logger.error(
+                        "[SLAVE_CLOSE] slave=%s product_id=%s reduce_only "
+                        "NOT SUPPORTED on this account — leaving position "
+                        "untouched (will NOT place without reduce_only) "
+                        "err=%s path=%s",
+                        slave_id,
+                        pid,
+                        close_exc,
+                        path,
+                    )
+                    log_and_buffer(
+                        "SLAVE_CLOSE_REDUCE_ONLY_UNSUPPORTED",
+                        int(master_trade_id or 0),
+                        {
+                            "slave": slave_id,
+                            "product_id": pid,
+                            "error": last_err[:300],
+                            "path": path,
+                        },
+                    )
+                    return False, None, "reduce_only_unsupported"
+
+                # Exception ≠ proof the order never filled — re-read live size
+                await asyncio.sleep(float(backoff_seconds))
+                live_before = live_size
+                try:
+                    positions = await client.get_option_positions()
+                except Exception as pos_exc:
+                    last_err = (
+                        f"close_failed then positions fetch failed: "
+                        f"{close_exc} / {pos_exc}"
+                    )
+                    log_and_buffer(
+                        "SLAVE_CLOSE_RETRY",
+                        int(master_trade_id or 0),
+                        {
+                            "slave": slave_id,
+                            "product_id": pid,
+                            "attempt": attempt + 1,
+                            "live_size_before": live_before,
+                            "reason": "positions_fetch_failed",
+                            "path": path,
+                        },
+                    )
+                    if attempt >= int(max_retries):
+                        return False, None, last_err
+                    continue
+
+                rechecked = self._position_size_for_product(positions, pid)
+                if rechecked is None or abs(float(rechecked)) <= 1e-9:
+                    log_and_buffer(
+                        "SLAVE_CLOSE_RETRY",
+                        int(master_trade_id or 0),
+                        {
+                            "slave": slave_id,
+                            "product_id": pid,
+                            "attempt": attempt + 1,
+                            "live_size_before": live_before,
+                            "reason": "flat_after_exception_treat_success",
+                            "path": path,
+                        },
+                    )
+                    return True, last_order, ""
+
+                live_size = float(rechecked)
+                reason = f"still_open:{last_err[:120]}"
+                log_and_buffer(
+                    "SLAVE_CLOSE_RETRY",
+                    int(master_trade_id or 0),
+                    {
+                        "slave": slave_id,
+                        "product_id": pid,
+                        "attempt": attempt + 1,
+                        "live_size_before": live_size,
+                        "reason": reason,
+                        "path": path,
+                    },
+                )
+                if attempt >= int(max_retries):
+                    return False, None, (
+                        f"close_failed after {max_retries} retries: {last_err}"
+                    )
+                await asyncio.sleep(float(backoff_seconds))
+
+        return False, None, last_err or "close_failed"
 
     async def _mirror_adjustment_to_slave(
         self,
@@ -4782,55 +4916,45 @@ class MirrorEngine:
                         reason,
                     )
                     continue
-                close_order: dict[str, Any] | None = None
-                close_ts = get_utc_now()
-                try:
-                    close_order = await client.place_order(
-                        product_id=pid,
-                        size=close_size,
-                        side=side,
-                        reduce_only=True,
+                # Hint rows invent size sign from _fallback_side
+                signed_for_close = float(size)
+                if pos.get("_fallback_side"):
+                    fb = str(pos["_fallback_side"]).lower()
+                    signed_for_close = (
+                        -abs(float(stored_qty))
+                        if fb == "buy"
+                        else abs(float(stored_qty))
                     )
-                    closed_count += 1
-                    logger.info(
-                        "[MIRROR_EXIT] Slave '%s' closed %s product=%s "
-                        "size=%s side=%s",
+                close_ts = get_utc_now()
+                ok, close_order, err = await self._close_with_reduce_only(
+                    client=client,
+                    slave=slave,
+                    product_id=pid,
+                    signed_size=signed_for_close,
+                    master_trade_id=int(slave_trade.master_trade_id or 0),
+                    path="_mirror_exit_to_slave",
+                )
+                if not ok:
+                    logger.error(
+                        "[MIRROR_EXIT] Slave '%s' FAILED close "
+                        "product=%s size=%s side=%s: %s",
                         slave.name,
-                        sym,
                         pid,
                         close_size,
                         side,
+                        err,
                     )
-                except Exception as close_exc:
-                    # Retry without reduce_only (some accounts reject it)
-                    try:
-                        close_order = await client.place_order(
-                            product_id=pid,
-                            size=close_size,
-                            side=side,
-                        )
-                        closed_count += 1
-                        logger.info(
-                            "[MIRROR_EXIT] Slave '%s' closed %s product=%s "
-                            "size=%s side=%s (retry no reduce_only)",
-                            slave.name,
-                            sym,
-                            pid,
-                            close_size,
-                            side,
-                        )
-                    except Exception as retry_exc:
-                        logger.error(
-                            "[MIRROR_EXIT] Slave '%s' FAILED close "
-                            "product=%s size=%s side=%s: %s / %s",
-                            slave.name,
-                            pid,
-                            close_size,
-                            side,
-                            close_exc,
-                            retry_exc,
-                        )
-                        continue
+                    continue
+                closed_count += 1
+                logger.info(
+                    "[MIRROR_EXIT] Slave '%s' closed %s product=%s "
+                    "size=%s side=%s",
+                    slave.name,
+                    sym,
+                    pid,
+                    close_size,
+                    side,
+                )
                 if close_order is not None:
                     try:
                         exit_fill = float(
@@ -4847,6 +4971,14 @@ class MirrorEngine:
                     exit_by_pid[pid] = {
                         "fill": exit_fill,
                         "fee": float(exit_fee or 0.0),
+                        "closed_at": close_ts,
+                        "fill_at": get_utc_now(),
+                    }
+                else:
+                    # Flat after exception — no order payload; still record close time
+                    exit_by_pid[pid] = {
+                        "fill": 0.0,
+                        "fee": 0.0,
                         "closed_at": close_ts,
                         "fill_at": get_utc_now(),
                     }
