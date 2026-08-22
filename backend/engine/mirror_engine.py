@@ -2678,6 +2678,9 @@ class MirrorEngine:
         master_bracket_sl: float | None = None,
     ) -> None:
         """
+        # Conversion Mode is OFF by default. Do not enable until this path
+        # has been tested end-to-end on a slave with a live hedge.
+
         AUDIT-7: Mirror conversion-mode entry to slaves.
 
         1) BUY long hedge (no bracket SL)
@@ -2754,33 +2757,270 @@ class MirrorEngine:
         master_bracket_sl: float | None,
         db: Any,
     ) -> None:
-        # Caller MUST hold the per-slave lock.
+        """
+        # Conversion Mode is OFF by default. Do not enable until this path
+        # has been tested end-to-end on a slave with a live hedge.
+
+        Caller MUST hold the per-slave lock.
+
+        1) BUY conversion hedge (open — live qty from old other short)
+        2) Close old other short via _close_with_reduce_only
+        3) Open new other short (same live qty)
+        Ledger rows written for each step; LEDGER_MISS if no structure.
+        """
         client = self._get_slave_client(slave)
-        qty = max(1, int(slave_trade.actual_quantity or 1))
         leg = str(other_leg_type).lower()
         master_trade_id = int(slave_trade.master_trade_id or 0)
+        slave_id = int(slave.id)
+        hedge_pid = int(hedge_product_id)
+        old_pid = int(old_other_product_id)
+        new_pid = int(new_other_product_id)
+        # Hedge matches triggered side = opposite of the other short
+        hedge_is_call = leg == "put"
         try:
-            # 1) Buy hedge — long, no bracket SL
+            from backend.engine.structure_ledger import (
+                KIND_SLAVE,
+                ROLE_BASKET_CALL,
+                ROLE_BASKET_PUT,
+                ROLE_HEDGE_CALL,
+                ROLE_HEDGE_PUT,
+                _next_adj_seq,
+                close_leg,
+                find_open_leg,
+                get_active_structure,
+                open_leg,
+            )
+            from backend.models import Trade as MasterTrade
+
+            master_row = (
+                db.query(MasterTrade)
+                .filter(MasterTrade.id == master_trade_id)
+                .first()
+            )
+            hid = (
+                getattr(master_row, "hedge_position_id", None)
+                if master_row is not None
+                else None
+            )
+            struct = None
+            if hid is not None:
+                struct = get_active_structure(
+                    db,
+                    hedge_position_id=int(hid),
+                    account_kind=KIND_SLAVE,
+                    slave_account_id=slave_id,
+                )
+            if struct is None:
+                log_and_buffer(
+                    "LEDGER_MISS",
+                    master_trade_id,
+                    {
+                        "slave": slave_id,
+                        "reason": "no_active_structure",
+                        "path": "mirror_conversion",
+                    },
+                )
+                logger.error(
+                    "[LEDGER_MISS] slave=%s reason=no_active_structure -- "
+                    "conversion ledger NOT recorded",
+                    slave_id,
+                )
+
+            # --- Live book: size from old other short (never stored qty) ---
+            live_positions = await client.get_option_positions()
+            old_live = self._position_size_for_product(live_positions, old_pid)
+            if old_live is None or abs(float(old_live)) <= 1e-9:
+                msg = (
+                    f"conversion_abort: old other product {old_pid} "
+                    f"not live on slave (size={old_live})"
+                )
+                log_and_buffer(
+                    "SLAVE_CONVERSION",
+                    master_trade_id,
+                    {
+                        "slave": slave_id,
+                        "op": "abort",
+                        "product_id": old_pid,
+                        "live_size_before": old_live,
+                        "size_used": 0,
+                        "reason": "old_other_not_live",
+                    },
+                )
+                slave_trade.last_error = msg[:500]
+                slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+                db.commit()
+                return
+
+            entry_qty = max(1, abs(int(round(float(old_live)))))
+            basket_seq = (
+                getattr(master_row, "basket_seq_in_structure", None)
+                if master_row is not None
+                else None
+            )
+            bs = int(basket_seq) if basket_seq is not None else None
+            other_role = (
+                ROLE_BASKET_CALL if leg == "call" else ROLE_BASKET_PUT
+            )
+            hedge_role = (
+                ROLE_HEDGE_CALL if hedge_is_call else ROLE_HEDGE_PUT
+            )
+
+            # --- 1) BUY conversion hedge (open) ---
+            hedge_live_before = self._position_size_for_product(
+                live_positions, hedge_pid
+            )
+            hedge_open_ts = get_utc_now()
             hedge_order = await client.place_order(
-                product_id=int(hedge_product_id),
-                size=qty,
+                product_id=hedge_pid,
+                size=entry_qty,
                 side="buy",
             )
-            logger.info(
-                "Slave '%s' hedge bought: product=%s order=%s",
-                slave.name,
-                hedge_product_id,
-                self._order_id(hedge_order),
+            hedge_fill_ts = get_utc_now()
+            log_and_buffer(
+                "SLAVE_CONVERSION",
+                master_trade_id,
+                {
+                    "slave": slave_id,
+                    "op": "open",
+                    "product_id": hedge_pid,
+                    "live_size_before": hedge_live_before,
+                    "size_used": entry_qty,
+                    "reason": "conversion_hedge_buy",
+                },
             )
-
-            # 2) Close old other short
-            await client.place_order(
-                product_id=int(old_other_product_id),
-                size=qty,
-                side="buy",
+            post_hedge = await client.get_option_positions()
+            hedge_live_after = self._position_size_for_product(
+                post_hedge, hedge_pid
             )
+            if (
+                hedge_live_after is None
+                or float(hedge_live_after) <= 1e-9
+            ):
+                raise RuntimeError(
+                    f"conversion hedge buy not on book product={hedge_pid} "
+                    f"live_after={hedge_live_after}"
+                )
+            if struct is not None:
+                open_leg(
+                    db,
+                    structure=struct,
+                    leg_role=hedge_role,
+                    product_id=hedge_pid,
+                    side="BUY",
+                    quantity=entry_qty,
+                    symbol=str(hedge_symbol or ""),
+                    strike=None,
+                    basket_seq=None,
+                    adj_seq=_next_adj_seq(
+                        db,
+                        structure_id=int(struct.id),
+                        leg_role=hedge_role,
+                        basket_seq=None,
+                    ),
+                    entry_order_id=self._order_id(hedge_order),
+                    opened_at=hedge_open_ts,
+                    fill_at=hedge_fill_ts,
+                )
 
-            # 3) Open new other short — absolute master bracket SL
+            # --- 2) Close old other short (reduce_only + live size) ---
+            old_live_now = self._position_size_for_product(post_hedge, old_pid)
+            if old_live_now is None or abs(float(old_live_now)) <= 1e-9:
+                old_close_ts = get_utc_now()
+                old_close_fill_ts = old_close_ts
+                log_and_buffer(
+                    "SLAVE_CONVERSION",
+                    master_trade_id,
+                    {
+                        "slave": slave_id,
+                        "op": "close",
+                        "product_id": old_pid,
+                        "live_size_before": old_live_now,
+                        "size_used": 0,
+                        "reason": "old_other_already_flat",
+                    },
+                )
+                if struct is not None:
+                    open_row = find_open_leg(
+                        db,
+                        structure_id=int(struct.id),
+                        leg_role=other_role,
+                        basket_seq=bs,
+                        product_id=old_pid,
+                    )
+                    if open_row is None:
+                        open_row = find_open_leg(
+                            db,
+                            structure_id=int(struct.id),
+                            leg_role=other_role,
+                            basket_seq=bs,
+                        )
+                    if open_row is not None:
+                        close_leg(
+                            db,
+                            open_row,
+                            reason="CONVERSION",
+                            closed_at=old_close_ts,
+                            structure=struct,
+                            fill_at=old_close_fill_ts,
+                        )
+            else:
+                old_close_ts = get_utc_now()
+                ok_close, _ord, close_err = await self._close_with_reduce_only(
+                    client=client,
+                    slave=slave,
+                    product_id=old_pid,
+                    signed_size=float(old_live_now),
+                    master_trade_id=master_trade_id,
+                    path="mirror_conversion_old_other",
+                )
+                old_close_fill_ts = get_utc_now()
+                size_used = max(1, abs(int(round(float(old_live_now)))))
+                log_and_buffer(
+                    "SLAVE_CONVERSION",
+                    master_trade_id,
+                    {
+                        "slave": slave_id,
+                        "op": "close",
+                        "product_id": old_pid,
+                        "live_size_before": old_live_now,
+                        "size_used": size_used,
+                        "reason": (
+                            "old_other_close_ok"
+                            if ok_close
+                            else f"old_other_close_fail:{close_err[:80]}"
+                        ),
+                    },
+                )
+                if not ok_close:
+                    raise RuntimeError(
+                        f"conversion old other close failed: {close_err}"
+                    )
+                if struct is not None:
+                    open_row = find_open_leg(
+                        db,
+                        structure_id=int(struct.id),
+                        leg_role=other_role,
+                        basket_seq=bs,
+                        product_id=old_pid,
+                    )
+                    if open_row is None:
+                        open_row = find_open_leg(
+                            db,
+                            structure_id=int(struct.id),
+                            leg_role=other_role,
+                            basket_seq=bs,
+                        )
+                    if open_row is not None:
+                        close_leg(
+                            db,
+                            open_row,
+                            reason="CONVERSION",
+                            closed_at=old_close_ts,
+                            structure=struct,
+                            fill_at=old_close_fill_ts,
+                        )
+
+            # --- 3) Open new other short ---
             new_sl = None
             new_sl_limit = None
             if (
@@ -2795,13 +3035,36 @@ class MirrorEngine:
                     "master_bracket_sl — placing without bracket",
                     slave.name,
                 )
+            pre_new = await client.get_option_positions()
+            new_live_before = self._position_size_for_product(pre_new, new_pid)
+            new_open_ts = get_utc_now()
             new_order = await client.place_order(
-                product_id=int(new_other_product_id),
-                size=qty,
+                product_id=new_pid,
+                size=entry_qty,
                 side="sell",
                 bracket_stop_loss_price=new_sl,
                 bracket_stop_loss_limit_price=new_sl_limit,
             )
+            new_fill_ts = get_utc_now()
+            log_and_buffer(
+                "SLAVE_CONVERSION",
+                master_trade_id,
+                {
+                    "slave": slave_id,
+                    "op": "open",
+                    "product_id": new_pid,
+                    "live_size_before": new_live_before,
+                    "size_used": entry_qty,
+                    "reason": "conversion_new_other_short",
+                },
+            )
+            post_new = await client.get_option_positions()
+            new_live_after = self._position_size_for_product(post_new, new_pid)
+            if new_live_after is None or float(new_live_after) >= -1e-9:
+                raise RuntimeError(
+                    f"conversion new other short missing product={new_pid} "
+                    f"live_after={new_live_after}"
+                )
             new_fill = float(
                 await client.resolve_fill_price(
                     new_order, symbol_for_fallback=new_other_symbol
@@ -2809,14 +3072,42 @@ class MirrorEngine:
                 or 0.0
             )
             new_order_id = self._order_id(new_order)
+            if struct is not None:
+                open_leg(
+                    db,
+                    structure=struct,
+                    leg_role=other_role,
+                    product_id=new_pid,
+                    side="SELL",
+                    quantity=entry_qty,
+                    symbol=str(new_other_symbol or ""),
+                    strike=float(new_other_strike or 0) or None,
+                    basket_seq=bs,
+                    adj_seq=_next_adj_seq(
+                        db,
+                        structure_id=int(struct.id),
+                        leg_role=other_role,
+                        basket_seq=bs,
+                    ),
+                    entry_order_id=new_order_id,
+                    opened_at=new_open_ts,
+                    fill_at=new_fill_ts,
+                )
+
             if leg == "call":
                 slave_trade.call_order_id = new_order_id or None
                 slave_trade.call_sl_order_id = None
+                slave_trade.call_product_id = new_pid
+                slave_trade.call_symbol = str(new_other_symbol or "")
+                slave_trade.call_strike = float(new_other_strike or 0)
                 if new_fill > 0:
                     slave_trade.call_fill_price = new_fill
             else:
                 slave_trade.put_order_id = new_order_id or None
                 slave_trade.put_sl_order_id = None
+                slave_trade.put_product_id = new_pid
+                slave_trade.put_symbol = str(new_other_symbol or "")
+                slave_trade.put_strike = float(new_other_strike or 0)
                 if new_fill > 0:
                     slave_trade.put_fill_price = new_fill
 
@@ -2824,13 +3115,6 @@ class MirrorEngine:
             slave.connection_status = "connected"
             slave.last_connected_at = get_utc_now()
             db.commit()
-            logger.info(
-                "✅ Slave '%s' conversion mirrored (hedge + %s replace) "
-                "bracket_sl=%s",
-                slave.name,
-                leg,
-                new_sl,
-            )
             log_and_buffer(
                 "BRACKET_SL",
                 int(master_trade_id),
@@ -4637,7 +4921,12 @@ class MirrorEngine:
         master_trade_id: int,
         hedge_product_id: int,
     ) -> None:
-        """AUDIT-7: SELL-close legacy conversion hedge on active slaves."""
+        """
+        # Conversion Mode is OFF by default. Do not enable until this path
+        # has been tested end-to-end on a slave with a live hedge.
+
+        AUDIT-7: SELL-close legacy conversion hedge on active slaves.
+        """
         if not hedge_product_id:
             return
         with self.db_factory() as db:
@@ -4666,6 +4955,7 @@ class MirrorEngine:
                         slave=slave,
                         slave_trade=slave_trade,
                         hedge_product_id=int(hedge_product_id),
+                        db=db,
                     )
 
     async def _mirror_conversion_hedge_close_to_slave(
@@ -4674,30 +4964,161 @@ class MirrorEngine:
         slave: SlaveAccount,
         slave_trade: SlaveTrade,
         hedge_product_id: int,
+        db: Any,
     ) -> None:
-        # Caller MUST hold the per-slave lock.
+        """
+        # Conversion Mode is OFF by default. Do not enable until this path
+        # has been tested end-to-end on a slave with a live hedge.
+
+        Caller MUST hold the per-slave lock.
+
+        Closes conversion long via _close_with_reduce_only using LIVE size.
+        Writes structure_leg closed_at; [LEDGER_MISS] if no structure.
+        """
         client = self._get_slave_client(slave)
-        qty = max(1, int(slave_trade.actual_quantity or 1))
+        hedge_pid = int(hedge_product_id)
+        slave_id = int(slave.id)
+        master_trade_id = int(slave_trade.master_trade_id or 0)
         try:
-            exists = await client.verify_position_exists(
-                int(hedge_product_id)
+            from backend.engine.structure_ledger import (
+                KIND_SLAVE,
+                ROLE_HEDGE_CALL,
+                ROLE_HEDGE_PUT,
+                close_leg,
+                find_open_leg,
+                get_active_structure,
             )
-            if exists:
-                await client.place_order(
-                    product_id=int(hedge_product_id),
-                    size=qty,
-                    side="sell",
+            from backend.models import Trade as MasterTrade
+
+            positions = await client.get_option_positions()
+            live_size = self._position_size_for_product(positions, hedge_pid)
+            if live_size is None or abs(float(live_size)) <= 1e-9:
+                log_and_buffer(
+                    "SLAVE_CONVERSION",
+                    master_trade_id,
+                    {
+                        "slave": slave_id,
+                        "op": "close",
+                        "product_id": hedge_pid,
+                        "live_size_before": live_size,
+                        "size_used": 0,
+                        "reason": "hedge_already_flat",
+                    },
                 )
-                logger.info(
-                    "Slave '%s' conversion hedge closed (sell) "
-                    "product=%s",
-                    slave.name,
-                    hedge_product_id,
+                return
+
+            # Long hedge → signed size > 0; reduce_only sells live size
+            closed_at = get_utc_now()
+            ok, _ord, err = await self._close_with_reduce_only(
+                client=client,
+                slave=slave,
+                product_id=hedge_pid,
+                signed_size=float(live_size),
+                master_trade_id=master_trade_id,
+                path="mirror_conversion_hedge_close",
+            )
+            fill_at = get_utc_now()
+            size_used = max(1, abs(int(round(float(live_size)))))
+            log_and_buffer(
+                "SLAVE_CONVERSION",
+                master_trade_id,
+                {
+                    "slave": slave_id,
+                    "op": "close",
+                    "product_id": hedge_pid,
+                    "live_size_before": live_size,
+                    "size_used": size_used,
+                    "reason": (
+                        "conversion_hedge_close_ok"
+                        if ok
+                        else f"conversion_hedge_close_fail:{err[:80]}"
+                    ),
+                },
+            )
+            if not ok:
+                slave_trade.last_error = (
+                    f"conversion_hedge_close_failed: {err}"
+                )[:500]
+                slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+                db.commit()
+                return
+
+            master_row = (
+                db.query(MasterTrade)
+                .filter(MasterTrade.id == master_trade_id)
+                .first()
+            )
+            hid = (
+                getattr(master_row, "hedge_position_id", None)
+                if master_row is not None
+                else None
+            )
+            struct = None
+            if hid is not None:
+                struct = get_active_structure(
+                    db,
+                    hedge_position_id=int(hid),
+                    account_kind=KIND_SLAVE,
+                    slave_account_id=slave_id,
                 )
+            if struct is None:
+                log_and_buffer(
+                    "LEDGER_MISS",
+                    master_trade_id,
+                    {
+                        "slave": slave_id,
+                        "reason": "no_active_structure",
+                        "path": "mirror_conversion_hedge_close",
+                    },
+                )
+                logger.error(
+                    "[LEDGER_MISS] slave=%s reason=no_active_structure -- "
+                    "conversion hedge close NOT recorded",
+                    slave_id,
+                )
+                return
+
+            open_row = find_open_leg(
+                db,
+                structure_id=int(struct.id),
+                leg_role=ROLE_HEDGE_CALL,
+                basket_seq=None,
+                product_id=hedge_pid,
+            )
+            if open_row is None:
+                open_row = find_open_leg(
+                    db,
+                    structure_id=int(struct.id),
+                    leg_role=ROLE_HEDGE_PUT,
+                    basket_seq=None,
+                    product_id=hedge_pid,
+                )
+            if open_row is not None:
+                close_leg(
+                    db,
+                    open_row,
+                    reason="CONVERSION_HEDGE_CLOSE",
+                    closed_at=closed_at,
+                    structure=struct,
+                    fill_at=fill_at,
+                )
+                db.commit()
             else:
-                logger.warning(
-                    "Slave '%s' conversion hedge not on Delta — skip",
-                    slave.name,
+                logger.error(
+                    "[LEDGER_MISS] slave=%s reason=no_open_conversion_hedge_leg "
+                    "product_id=%s -- close NOT recorded",
+                    slave_id,
+                    hedge_pid,
+                )
+                log_and_buffer(
+                    "LEDGER_MISS",
+                    master_trade_id,
+                    {
+                        "slave": slave_id,
+                        "reason": "no_open_conversion_hedge_leg",
+                        "product_id": hedge_pid,
+                        "path": "mirror_conversion_hedge_close",
+                    },
                 )
         except Exception as exc:
             logger.error(
@@ -4705,6 +5126,10 @@ class MirrorEngine:
                 slave.name,
                 exc,
             )
+            try:
+                db.rollback()
+            except Exception:
+                pass
         finally:
             await client.close()
 
