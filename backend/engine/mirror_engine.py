@@ -5400,6 +5400,168 @@ class MirrorEngine:
         )
         return result
 
+    def _write_slave_product_leg_close_ledger(
+        self,
+        db: Any,
+        *,
+        slave: SlaveAccount,
+        slave_trade: SlaveTrade,
+        leg_type: str,
+        product_id: int,
+        closed_at: Any,
+        fill_at: Any = None,
+        reason: str = "LEG_CLOSE",
+    ) -> str:
+        """
+        Close one basket StructureLeg window for product_id.
+
+        Returns ``written`` or ``missing`` (no leg row / no structure).
+        """
+        from backend.engine.structure_ledger import (
+            ROLE_BASKET_CALL,
+            ROLE_BASKET_PUT,
+            close_leg,
+            find_open_leg,
+            get_active_structure,
+            KIND_SLAVE,
+            record_slave_adjustment_close,
+        )
+        from backend.models import StructureLeg, Trade as MasterTrade
+
+        slave_id = int(slave.id)
+        pid = int(product_id or 0)
+        leg = str(leg_type or "").lower()
+        master_row = (
+            db.query(MasterTrade)
+            .filter(MasterTrade.id == int(slave_trade.master_trade_id or 0))
+            .first()
+        )
+        closed_ok = record_slave_adjustment_close(
+            db,
+            slave_account_id=slave_id,
+            master_trade=master_row,
+            triggered_leg=leg,
+            reason=reason,
+            old_leg_closed_at=closed_at,
+            old_leg_fill_at=fill_at,
+            old_product_id=pid if pid > 0 else None,
+        )
+        if closed_ok:
+            return "written"
+
+        # Already closed, or never recorded — distinguish for LEDGER_MISS
+        hid = (
+            getattr(master_row, "hedge_position_id", None)
+            if master_row is not None
+            else None
+        )
+        if hid is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s product_id=%s reason=leg_not_found -- "
+                "closed on exchange but no leg row",
+                slave_id,
+                pid,
+            )
+            log_and_buffer(
+                "LEDGER_MISS",
+                int(slave_trade.master_trade_id or 0),
+                {
+                    "slave": slave_id,
+                    "product_id": pid,
+                    "reason": "leg_not_found",
+                    "note": "closed_on_exchange_but_no_leg_row",
+                },
+            )
+            return "missing"
+
+        struct = get_active_structure(
+            db,
+            hedge_position_id=int(hid),
+            account_kind=KIND_SLAVE,
+            slave_account_id=slave_id,
+        )
+        if struct is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s product_id=%s reason=leg_not_found -- "
+                "closed on exchange but no leg row",
+                slave_id,
+                pid,
+            )
+            log_and_buffer(
+                "LEDGER_MISS",
+                int(slave_trade.master_trade_id or 0),
+                {
+                    "slave": slave_id,
+                    "product_id": pid,
+                    "reason": "leg_not_found",
+                    "note": "closed_on_exchange_but_no_leg_row",
+                },
+            )
+            return "missing"
+
+        existing = (
+            db.query(StructureLeg)
+            .filter(
+                StructureLeg.structure_id == int(struct.id),
+                StructureLeg.product_id == pid,
+            )
+            .order_by(StructureLeg.id.desc())
+            .first()
+        )
+        if existing is not None and existing.closed_at is not None:
+            return "written"
+
+        role = ROLE_BASKET_CALL if leg == "call" else ROLE_BASKET_PUT
+        basket_seq = (
+            getattr(master_row, "basket_seq_in_structure", None)
+            if master_row is not None
+            else None
+        )
+        bs = int(basket_seq) if basket_seq is not None else None
+        open_row = find_open_leg(
+            db,
+            structure_id=int(struct.id),
+            leg_role=role,
+            basket_seq=bs,
+            product_id=pid if pid > 0 else None,
+        )
+        if open_row is None and pid > 0:
+            open_row = find_open_leg(
+                db,
+                structure_id=int(struct.id),
+                leg_role=role,
+                basket_seq=bs,
+            )
+        if open_row is not None and closed_at is not None:
+            close_leg(
+                db,
+                open_row,
+                reason=reason,
+                closed_at=closed_at,
+                structure=struct,
+                fill_at=fill_at,
+            )
+            db.flush()
+            return "written"
+
+        logger.error(
+            "[LEDGER_MISS] slave=%s product_id=%s reason=leg_not_found -- "
+            "closed on exchange but no leg row",
+            slave_id,
+            pid,
+        )
+        log_and_buffer(
+            "LEDGER_MISS",
+            int(slave_trade.master_trade_id or 0),
+            {
+                "slave": slave_id,
+                "product_id": pid,
+                "reason": "leg_not_found",
+                "note": "closed_on_exchange_but_no_leg_row",
+            },
+        )
+        return "missing"
+
     async def _mirror_leg_close_to_slave(
         self,
         slave: SlaveAccount,
@@ -5419,6 +5581,7 @@ class MirrorEngine:
         """
         leg = str(leg_type).lower()
         target_pid = int(product_id)
+        master_trade_id = int(slave_trade.master_trade_id or 0)
 
         def _mark_failure(msg: str) -> None:
             slave_trade.last_error = msg[:500]
@@ -5443,10 +5606,28 @@ class MirrorEngine:
             db.commit()
 
         if is_virtual_slave_trade(slave, slave_trade):
-            logger.info(
-                "[MIRROR_LEG_CLOSE] VIRTUAL slave='%s' leg=%s — DB only",
-                slave.name,
-                leg,
+            closed_at = get_utc_now()
+            ledger = self._write_slave_product_leg_close_ledger(
+                db,
+                slave=slave,
+                slave_trade=slave_trade,
+                leg_type=leg,
+                product_id=target_pid,
+                closed_at=closed_at,
+                fill_at=closed_at,
+                reason="LEG_CLOSE",
+            )
+            log_and_buffer(
+                "SLAVE_LEG_CLOSE",
+                master_trade_id,
+                {
+                    "slave": int(slave.id),
+                    "product_id": target_pid,
+                    "live_size": 0,
+                    "ledger": ledger,
+                    "outcome": "ok",
+                    "virtual": True,
+                },
             )
             if leg == "call":
                 slave_trade.call_order_id = "VIRTUAL_CLOSED"
@@ -5485,11 +5666,17 @@ class MirrorEngine:
             except Exception as pos_exc:
                 fetch_ok = False
                 live_positions = []
-                logger.error(
-                    "[MIRROR_LEG_CLOSE] slave='%s' get_option_positions "
-                    "FAILED: %s — not treating as flat",
-                    slave.name,
-                    pos_exc,
+                log_and_buffer(
+                    "SLAVE_LEG_CLOSE",
+                    master_trade_id,
+                    {
+                        "slave": int(slave.id),
+                        "product_id": target_pid,
+                        "live_size": None,
+                        "ledger": "missing",
+                        "outcome": "failed",
+                        "reason": f"positions_fetch:{pos_exc}",
+                    },
                 )
 
             if not fetch_ok:
@@ -5497,72 +5684,74 @@ class MirrorEngine:
                     f"leg_close_failed: positions fetch failed for {leg} "
                     f"product={target_pid}"
                 )
-                logger.critical(
-                    "[MIRROR_LEG_CLOSE] slave='%s' %s",
-                    slave.name,
-                    msg,
-                )
                 _mark_failure(msg)
                 return False
 
             live_size = self._position_size_for_product(
                 live_positions, target_pid
             )
-            logger.info(
-                "[MIRROR_LEG_CLOSE] slave='%s' stage=pre_close "
-                "product_id=%s live_size=%s",
-                slave.name,
-                target_pid,
-                live_size,
-            )
+            # Timestamp BEFORE close order (or before treating as already flat)
+            closed_at = get_utc_now()
 
-            if live_size is None or live_size == 0:
-                logger.info(
-                    "[MIRROR_LEG_CLOSE] slave='%s' already_flat product=%s",
-                    slave.name,
-                    target_pid,
+            if live_size is None or abs(float(live_size)) <= 1e-9:
+                ledger = self._write_slave_product_leg_close_ledger(
+                    db,
+                    slave=slave,
+                    slave_trade=slave_trade,
+                    leg_type=leg,
+                    product_id=target_pid,
+                    closed_at=closed_at,
+                    fill_at=closed_at,
+                    reason="LEG_CLOSE",
                 )
-            else:
-                close_size = max(1, abs(int(live_size)))
-                is_long = float(live_size) > 0
-                try:
-                    await client.close_position(
-                        product_id=target_pid,
-                        size=close_size,
-                        is_long=is_long,
-                    )
-                except Exception as close_exc:
-                    # Retry with reduce_only place_order
-                    side = "sell" if is_long else "buy"
-                    try:
-                        await client.place_order(
-                            product_id=target_pid,
-                            size=close_size,
-                            side=side,
-                            reduce_only=True,
-                        )
-                    except Exception as retry_exc:
-                        msg = (
-                            f"leg_close_failed: {leg} product={target_pid} "
-                            f"{retry_exc}"
-                        )
-                        logger.error(
-                            "[MIRROR_LEG_CLOSE] slave='%s' close FAILED "
-                            "product=%s: %s / %s",
-                            slave.name,
-                            target_pid,
-                            close_exc,
-                            retry_exc,
-                        )
-                        logger.critical(
-                            "[MIRROR_LEG_CLOSE] slave='%s' %s",
-                            slave.name,
-                            msg,
-                        )
-                        _mark_failure(msg)
-                        return False
+                log_and_buffer(
+                    "SLAVE_LEG_CLOSE",
+                    master_trade_id,
+                    {
+                        "slave": int(slave.id),
+                        "product_id": target_pid,
+                        "live_size": live_size if live_size is not None else 0,
+                        "ledger": ledger,
+                        "outcome": "ok",
+                        "reason": "already_flat",
+                    },
+                )
+                if leg == "call":
+                    slave_trade.call_sl_order_id = None
+                else:
+                    slave_trade.put_sl_order_id = None
+                _mark_success()
+                return True
 
-                await asyncio.sleep(2)
+            ok, _order, err = await self._close_with_reduce_only(
+                client=client,
+                slave=slave,
+                product_id=target_pid,
+                signed_size=float(live_size),
+                master_trade_id=master_trade_id,
+                path="_mirror_leg_close_to_slave",
+            )
+            fill_at = get_utc_now()
+            if not ok:
+                log_and_buffer(
+                    "SLAVE_LEG_CLOSE",
+                    master_trade_id,
+                    {
+                        "slave": int(slave.id),
+                        "product_id": target_pid,
+                        "live_size": live_size,
+                        "ledger": "missing",
+                        "outcome": "failed",
+                        "reason": err[:200],
+                    },
+                )
+                msg = (
+                    f"leg_close_failed: {leg} product={target_pid} {err}"
+                )
+                _mark_failure(msg)
+                return False
+
+            await asyncio.sleep(2)
 
             try:
                 verify_positions = await client.get_option_positions()
@@ -5570,24 +5759,23 @@ class MirrorEngine:
             except Exception as verify_exc:
                 verify_ok = False
                 verify_positions = []
-                logger.critical(
-                    "[MIRROR_LEG_CLOSE] slave='%s' VERIFY fetch FAILED: %s",
-                    slave.name,
-                    verify_exc,
+                log_and_buffer(
+                    "SLAVE_LEG_CLOSE",
+                    master_trade_id,
+                    {
+                        "slave": int(slave.id),
+                        "product_id": target_pid,
+                        "live_size": live_size,
+                        "ledger": "missing",
+                        "outcome": "failed",
+                        "reason": f"verify_fetch:{verify_exc}",
+                    },
                 )
 
             still = (
                 self._position_size_for_product(verify_positions, target_pid)
                 if verify_ok
                 else None
-            )
-            logger.info(
-                "[MIRROR_LEG_CLOSE] slave='%s' stage=post_close "
-                "product_id=%s expected=0 actual_size=%s verify_ok=%s",
-                slave.name,
-                target_pid,
-                still,
-                verify_ok,
             )
 
             if (not verify_ok) or (
@@ -5597,33 +5785,61 @@ class MirrorEngine:
                     f"leg_close_failed: {leg} product={target_pid} "
                     f"still_size={still} verify_ok={verify_ok}"
                 )
-                logger.critical(
-                    "[MIRROR_LEG_CLOSE] slave='%s' %s",
-                    slave.name,
-                    msg,
+                log_and_buffer(
+                    "SLAVE_LEG_CLOSE",
+                    master_trade_id,
+                    {
+                        "slave": int(slave.id),
+                        "product_id": target_pid,
+                        "live_size": still,
+                        "ledger": "missing",
+                        "outcome": "failed",
+                        "reason": msg[:200],
+                    },
                 )
                 _mark_failure(msg)
                 return False
+
+            ledger = self._write_slave_product_leg_close_ledger(
+                db,
+                slave=slave,
+                slave_trade=slave_trade,
+                leg_type=leg,
+                product_id=target_pid,
+                closed_at=closed_at,
+                fill_at=fill_at,
+                reason="LEG_CLOSE",
+            )
+            log_and_buffer(
+                "SLAVE_LEG_CLOSE",
+                master_trade_id,
+                {
+                    "slave": int(slave.id),
+                    "product_id": target_pid,
+                    "live_size": live_size,
+                    "ledger": ledger,
+                    "outcome": "ok",
+                },
+            )
 
             if leg == "call":
                 slave_trade.call_sl_order_id = None
             else:
                 slave_trade.put_sl_order_id = None
             _mark_success()
-            logger.info(
-                "[MIRROR_LEG_CLOSE] slave='%s' %s product=%s verified flat%s",
-                slave.name,
-                leg,
-                target_pid,
-                f" status={success_status}" if success_status else "",
-            )
             return True
         except Exception as exc:
-            logger.error(
-                "[MIRROR_LEG_CLOSE] slave='%s' exception: %s",
-                slave.name,
-                exc,
-                exc_info=True,
+            log_and_buffer(
+                "SLAVE_LEG_CLOSE",
+                master_trade_id,
+                {
+                    "slave": int(slave.id),
+                    "product_id": target_pid,
+                    "live_size": None,
+                    "ledger": "missing",
+                    "outcome": "failed",
+                    "reason": f"exception:{exc}",
+                },
             )
             try:
                 _mark_failure(f"leg_close_failed: exception {exc}")
@@ -7278,6 +7494,48 @@ class MirrorEngine:
                 live_nonzero.append(pos)
 
             if not live_nonzero:
+                # Already flat on exchange — still end attribution windows
+                exit_batch_ts = get_utc_now()
+                call_pid_hint = int(
+                    getattr(slave_trade, "call_product_id", 0) or 0
+                )
+                put_pid_hint = int(
+                    getattr(slave_trade, "put_product_id", 0) or 0
+                )
+                if call_pid_hint <= 0 or put_pid_hint <= 0:
+                    call_pid_hint, put_pid_hint = (
+                        self._master_trade_call_put_pids(
+                            db, int(master_trade_id)
+                        )
+                    )
+                for leg_name, pid in (
+                    ("call", call_pid_hint),
+                    ("put", put_pid_hint),
+                ):
+                    if pid <= 0:
+                        continue
+                    ledger = self._write_slave_product_leg_close_ledger(
+                        db,
+                        slave=slave,
+                        slave_trade=slave_trade,
+                        leg_type=leg_name,
+                        product_id=pid,
+                        closed_at=exit_batch_ts,
+                        fill_at=exit_batch_ts,
+                        reason="SWEEP_CLOSE",
+                    )
+                    log_and_buffer(
+                        "SLAVE_LEG_CLOSE",
+                        int(master_trade_id),
+                        {
+                            "slave": int(slave.id),
+                            "product_id": pid,
+                            "live_size": 0,
+                            "ledger": ledger,
+                            "outcome": "ok",
+                            "path": "sweep_already_flat",
+                        },
+                    )
                 if self._close_slave_trade(
                     slave,
                     slave_trade,
@@ -7287,54 +7545,57 @@ class MirrorEngine:
                     slave_trade.last_error = None
                     slave_trade.last_updated = get_utc_now()
                     db.commit()
-                    logger.info(
-                        "[SLAVE_SWEEP] slave='%s' slave_trade=%s verified "
-                        "flat → closed (master #%s)",
-                        slave.name,
-                        slave_trade.id,
-                        master_trade_id,
+                    log_and_buffer(
+                        "SLAVE_SWEEP",
+                        int(master_trade_id),
+                        {
+                            "slave": int(slave.id),
+                            "slave_trade": int(slave_trade.id),
+                            "outcome": "closed_ok",
+                            "reason": "sweep_verified_flat",
+                        },
                     )
                     return "closed_ok"
                 return "close_failed"
 
-            # Attempt real closes
+            # Attempt real closes via shared reduce_only helper
+            exit_batch_ts = get_utc_now()
+            closed_pids: dict[int, Any] = {}
             for pos in live_nonzero:
                 pid = int(pos.get("product_id") or 0)
                 size = float(pos.get("size") or 0)
-                close_size = max(1, abs(int(size)))
-                is_long = size > 0
-                try:
-                    await client.close_position(
-                        product_id=pid,
-                        size=close_size,
-                        is_long=is_long,
+                if pid <= 0 or abs(size) <= 1e-9:
+                    continue
+                closed_at = get_utc_now()
+                ok, _order, err = await self._close_with_reduce_only(
+                    client=client,
+                    slave=slave,
+                    product_id=pid,
+                    signed_size=float(size),
+                    master_trade_id=int(master_trade_id),
+                    path="_recover_slave_under_closed_master",
+                )
+                fill_at = get_utc_now()
+                if not ok:
+                    log_and_buffer(
+                        "SLAVE_LEG_CLOSE",
+                        int(master_trade_id),
+                        {
+                            "slave": int(slave.id),
+                            "product_id": pid,
+                            "live_size": size,
+                            "ledger": "missing",
+                            "outcome": "failed",
+                            "path": "sweep",
+                            "reason": err[:200],
+                        },
                     )
-                    logger.info(
-                        "[SLAVE_SWEEP] slave='%s' closed product=%s "
-                        "size=%s is_long=%s",
-                        slave.name,
-                        pid,
-                        close_size,
-                        is_long,
-                    )
-                except Exception as close_exc:
-                    side = "sell" if is_long else "buy"
-                    try:
-                        await client.place_order(
-                            product_id=pid,
-                            size=close_size,
-                            side=side,
-                            reduce_only=True,
-                        )
-                    except Exception as retry_exc:
-                        logger.error(
-                            "[SLAVE_SWEEP] slave='%s' close FAILED "
-                            "product=%s: %s / %s",
-                            slave.name,
-                            pid,
-                            close_exc,
-                            retry_exc,
-                        )
+                    continue
+                closed_pids[pid] = {
+                    "closed_at": closed_at,
+                    "fill_at": fill_at,
+                    "live_size": size,
+                }
 
             await asyncio.sleep(2)
             try:
@@ -7347,10 +7608,14 @@ class MirrorEngine:
                 slave_trade.error_count = int(slave_trade.error_count or 0) + 1
                 slave_trade.last_updated = get_utc_now()
                 db.commit()
-                logger.critical(
-                    "[SLAVE_SWEEP] slave='%s' verify UNREACHABLE: %s",
-                    slave.name,
-                    verify_exc,
+                log_and_buffer(
+                    "SLAVE_SWEEP",
+                    int(master_trade_id),
+                    {
+                        "slave": int(slave.id),
+                        "outcome": "unreachable",
+                        "reason": str(verify_exc)[:200],
+                    },
                 )
                 return "unreachable"
 
@@ -7381,14 +7646,99 @@ class MirrorEngine:
                 slave.connection_status = "error"
                 slave.last_error = slave_trade.last_error
                 db.commit()
-                logger.critical(
-                    "[SLAVE_SWEEP] slave='%s' slave_trade=%s still has "
-                    "positions after close: %s",
-                    slave.name,
-                    slave_trade.id,
-                    remaining,
+                log_and_buffer(
+                    "SLAVE_SWEEP",
+                    int(master_trade_id),
+                    {
+                        "slave": int(slave.id),
+                        "slave_trade": int(slave_trade.id),
+                        "outcome": "close_failed",
+                        "remaining": remaining,
+                    },
                 )
                 return "close_failed"
+
+            # Flat — write ledger for each closed product + any hint still open
+            call_pid_hint = int(
+                getattr(slave_trade, "call_product_id", 0) or 0
+            )
+            put_pid_hint = int(
+                getattr(slave_trade, "put_product_id", 0) or 0
+            )
+            if call_pid_hint <= 0 or put_pid_hint <= 0:
+                mc, mp = self._master_trade_call_put_pids(
+                    db, int(master_trade_id)
+                )
+                if call_pid_hint <= 0:
+                    call_pid_hint = mc
+                if put_pid_hint <= 0:
+                    put_pid_hint = mp
+
+            for leg_name, pid in (
+                ("call", call_pid_hint),
+                ("put", put_pid_hint),
+            ):
+                if pid <= 0:
+                    continue
+                meta = closed_pids.get(pid) or {}
+                closed_at = meta.get("closed_at") or exit_batch_ts
+                fill_at = meta.get("fill_at") or closed_at
+                live_sz = meta.get("live_size", 0)
+                ledger = self._write_slave_product_leg_close_ledger(
+                    db,
+                    slave=slave,
+                    slave_trade=slave_trade,
+                    leg_type=leg_name,
+                    product_id=pid,
+                    closed_at=closed_at,
+                    fill_at=fill_at,
+                    reason="SWEEP_CLOSE",
+                )
+                log_and_buffer(
+                    "SLAVE_LEG_CLOSE",
+                    int(master_trade_id),
+                    {
+                        "slave": int(slave.id),
+                        "product_id": pid,
+                        "live_size": live_sz,
+                        "ledger": ledger,
+                        "outcome": "ok",
+                        "path": "sweep",
+                    },
+                )
+            # Also close any other pids we closed that aren't call/put hints
+            for pid, meta in closed_pids.items():
+                if pid in (call_pid_hint, put_pid_hint):
+                    continue
+                # Infer leg from size sign was short → basket; use call role fallback
+                # Prefer matching slave_trade product fields
+                leg_guess = "call"
+                if int(getattr(slave_trade, "put_product_id", 0) or 0) == pid:
+                    leg_guess = "put"
+                elif int(getattr(slave_trade, "call_product_id", 0) or 0) == pid:
+                    leg_guess = "call"
+                ledger = self._write_slave_product_leg_close_ledger(
+                    db,
+                    slave=slave,
+                    slave_trade=slave_trade,
+                    leg_type=leg_guess,
+                    product_id=pid,
+                    closed_at=meta.get("closed_at") or exit_batch_ts,
+                    fill_at=meta.get("fill_at"),
+                    reason="SWEEP_CLOSE",
+                )
+                log_and_buffer(
+                    "SLAVE_LEG_CLOSE",
+                    int(master_trade_id),
+                    {
+                        "slave": int(slave.id),
+                        "product_id": pid,
+                        "live_size": meta.get("live_size"),
+                        "ledger": ledger,
+                        "outcome": "ok",
+                        "path": "sweep_extra_pid",
+                    },
+                )
 
             if self._close_slave_trade(
                 slave,
@@ -7399,12 +7749,15 @@ class MirrorEngine:
                 slave_trade.last_error = None
                 slave_trade.last_updated = get_utc_now()
                 db.commit()
-                logger.info(
-                    "[SLAVE_SWEEP] slave='%s' slave_trade=%s closed OK "
-                    "(master #%s)",
-                    slave.name,
-                    slave_trade.id,
-                    master_trade_id,
+                log_and_buffer(
+                    "SLAVE_SWEEP",
+                    int(master_trade_id),
+                    {
+                        "slave": int(slave.id),
+                        "slave_trade": int(slave_trade.id),
+                        "outcome": "closed_ok",
+                        "reason": "sweep_closed_ok",
+                    },
                 )
                 return "closed_ok"
             return "close_failed"
