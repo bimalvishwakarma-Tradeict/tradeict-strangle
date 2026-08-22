@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
@@ -38,6 +39,9 @@ FORCE_CLOSE_REASONS = frozenset(
     }
 )
 
+# Per-slave mutating-op lock acquire timeout (skip slave, do not block engine)
+_SLAVE_LOCK_TIMEOUT_S = 120.0
+
 
 def is_virtual_slave_trade(
     slave: SlaveAccount | None,
@@ -63,22 +67,66 @@ class MirrorEngine:
     active slave Delta accounts, scaled by each slave's qty_multiplier.
 
     Failures on one slave are non-fatal — remaining slaves still run.
+
+    Concurrency: one asyncio.Lock per slave serialises ALL mutating mirror
+    ops (entry, adjustment, exit, leg close, hedge open/close, sweeps,
+    conversion). That lock is process-local only — it does NOT protect
+    across uvicorn workers, processes, or restarts. Safe while the app
+    runs with a single worker (uvicorn --workers 1). Raising worker count
+    without an external lock would silently break this invariant.
     """
 
     def __init__(self, db_factory: Callable[[], Any] | None = None) -> None:
         self.db_factory = db_factory or SessionLocal
-        # Per-slave serialisation for hedge open (never half-open two legs concurrently)
-        self._slave_hedge_locks: dict[int, asyncio.Lock] = {}
+        # Per-slave lock for every mutating mirror operation (not hedge-only).
+        # Process-local asyncio.Lock — see class docstring.
+        self._slave_locks: dict[int, asyncio.Lock] = {}
         # SlaveTrade ids that already logged [SLAVE_MTM_FALLBACK] this process
         self._slave_mtm_fallback_logged: set[int] = set()
 
-    def _get_slave_hedge_lock(self, slave_id: int) -> asyncio.Lock:
+    def _get_slave_lock(self, slave_id: int) -> asyncio.Lock:
         sid = int(slave_id)
-        lock = self._slave_hedge_locks.get(sid)
+        lock = self._slave_locks.get(sid)
         if lock is None:
             lock = asyncio.Lock()
-            self._slave_hedge_locks[sid] = lock
+            self._slave_locks[sid] = lock
         return lock
+
+    @asynccontextmanager
+    async def _slave_op_lock(
+        self, slave_id: int, op: str
+    ) -> AsyncIterator[bool]:
+        """
+        Acquire the per-slave mutating-op lock (timeout → yield False).
+
+        Top-level public entry points only. Nested helpers must NOT call this —
+        asyncio.Lock is not re-entrant. Yields True if held, False on timeout
+        (caller skips this slave for the cycle).
+
+        Process-local only (uvicorn --workers 1). Not multi-worker safe.
+        """
+        sid = int(slave_id)
+        lock = self._get_slave_lock(sid)
+        try:
+            await asyncio.wait_for(
+                lock.acquire(), timeout=_SLAVE_LOCK_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            log_and_buffer(
+                "SLAVE_LOCK_TIMEOUT",
+                0,
+                {
+                    "slave": sid,
+                    "op": str(op),
+                    "waited": float(_SLAVE_LOCK_TIMEOUT_S),
+                },
+            )
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lock.release()
 
     @staticmethod
     def _slave_hedge_status_is_alive(status: str | None) -> bool:
@@ -796,25 +844,30 @@ class MirrorEngine:
             )
 
             for slave in slaves:
-                await self._mirror_entry_to_slave(
-                    slave=slave,
-                    master_trade_id=master_trade_id,
-                    call_product_id=call_product_id,
-                    put_product_id=put_product_id,
-                    master_call_qty=master_call_qty,
-                    master_put_qty=master_put_qty,
-                    master_call_strike=master_call_strike,
-                    master_put_strike=master_put_strike,
-                    master_call_symbol=master_call_symbol,
-                    master_put_symbol=master_put_symbol,
-                    master_call_fill=master_call_fill,
-                    master_put_fill=master_put_fill,
-                    expiry_date=expiry_date,
-                    underlying=underlying,
-                    db=db,
-                    master_bracket_sl_call=master_bracket_sl_call,
-                    master_bracket_sl_put=master_bracket_sl_put,
-                )
+                async with self._slave_op_lock(
+                    int(slave.id), "mirror_trade_entry"
+                ) as acquired:
+                    if not acquired:
+                        continue
+                    await self._mirror_entry_to_slave(
+                        slave=slave,
+                        master_trade_id=master_trade_id,
+                        call_product_id=call_product_id,
+                        put_product_id=put_product_id,
+                        master_call_qty=master_call_qty,
+                        master_put_qty=master_put_qty,
+                        master_call_strike=master_call_strike,
+                        master_put_strike=master_put_strike,
+                        master_call_symbol=master_call_symbol,
+                        master_put_symbol=master_put_symbol,
+                        master_call_fill=master_call_fill,
+                        master_put_fill=master_put_fill,
+                        expiry_date=expiry_date,
+                        underlying=underlying,
+                        db=db,
+                        master_bracket_sl_call=master_bracket_sl_call,
+                        master_bracket_sl_put=master_bracket_sl_put,
+                    )
 
     async def _mirror_entry_to_slave(
         self,
@@ -836,7 +889,7 @@ class MirrorEngine:
         master_bracket_sl_call: float | None = None,
         master_bracket_sl_put: float | None = None,
     ) -> None:
-        # --- No naked baskets: require live slave hedge under master hedge ---
+        # Caller MUST hold the per-slave lock.
         master_hedge_id = self._resolve_master_hedge_id_for_trade(
             db, int(master_trade_id)
         )
@@ -1771,18 +1824,23 @@ class MirrorEngine:
                 if not slave or not slave.is_active:
                     continue
 
-                await self._mirror_adjustment_to_slave(
-                    slave=slave,
-                    slave_trade=slave_trade,
-                    triggered_leg_type=triggered_leg_type,
-                    old_product_id=old_product_id,
-                    new_product_id=new_product_id,
-                    new_symbol=new_symbol,
-                    new_strike=new_strike,
-                    db=db,
-                    universal_sl_pct=uni_sl,
-                    master_bracket_sl=master_bracket_sl,
-                )
+                async with self._slave_op_lock(
+                    int(slave.id), "mirror_adjustment"
+                ) as acquired:
+                    if not acquired:
+                        continue
+                    await self._mirror_adjustment_to_slave(
+                        slave=slave,
+                        slave_trade=slave_trade,
+                        triggered_leg_type=triggered_leg_type,
+                        old_product_id=old_product_id,
+                        new_product_id=new_product_id,
+                        new_symbol=new_symbol,
+                        new_strike=new_strike,
+                        db=db,
+                        universal_sl_pct=uni_sl,
+                        master_bracket_sl=master_bracket_sl,
+                    )
 
     def _master_universal_sl_pct(
         self, db: Any, master_trade_id: int
@@ -2155,6 +2213,7 @@ class MirrorEngine:
         universal_sl_pct: float = 200.0,
         master_bracket_sl: float | None = None,
     ) -> None:
+        # Caller MUST hold the per-slave lock.
         # Virtual mode: track adjustment in DB but don't place real orders
         if bool(getattr(slave, "is_virtual", False)):
             logger.info(
@@ -2661,105 +2720,141 @@ class MirrorEngine:
                 if not slave or not slave.is_active:
                     continue
 
-                client = self._get_slave_client(slave)
-                qty = max(1, int(slave_trade.actual_quantity or 1))
-                leg = str(other_leg_type).lower()
-                try:
-                    # 1) Buy hedge — long, no bracket SL
-                    hedge_order = await client.place_order(
-                        product_id=int(hedge_product_id),
-                        size=qty,
-                        side="buy",
-                    )
-                    logger.info(
-                        "Slave '%s' hedge bought: product=%s order=%s",
-                        slave.name,
-                        hedge_product_id,
-                        self._order_id(hedge_order),
-                    )
-
-                    # 2) Close old other short
-                    await client.place_order(
-                        product_id=int(old_other_product_id),
-                        size=qty,
-                        side="buy",
+                async with self._slave_op_lock(
+                    int(slave.id), "mirror_conversion"
+                ) as acquired:
+                    if not acquired:
+                        continue
+                    await self._mirror_conversion_to_slave(
+                        slave=slave,
+                        slave_trade=slave_trade,
+                        hedge_product_id=hedge_product_id,
+                        hedge_symbol=hedge_symbol,
+                        old_other_product_id=old_other_product_id,
+                        new_other_product_id=new_other_product_id,
+                        new_other_symbol=new_other_symbol,
+                        new_other_strike=new_other_strike,
+                        other_leg_type=other_leg_type,
+                        master_bracket_sl=master_bracket_sl,
+                        db=db,
                     )
 
-                    # 3) Open new other short — absolute master bracket SL
-                    new_sl = None
-                    new_sl_limit = None
-                    if (
-                        master_bracket_sl is not None
-                        and float(master_bracket_sl) > 0
-                    ):
-                        new_sl = round(float(master_bracket_sl), 2)
-                        new_sl_limit = round(new_sl * 1.05, 2)
-                    else:
-                        logger.critical(
-                            "[BRACKET_SL] slave='%s' conversion missing "
-                            "master_bracket_sl — placing without bracket",
-                            slave.name,
-                        )
-                    new_order = await client.place_order(
-                        product_id=int(new_other_product_id),
-                        size=qty,
-                        side="sell",
-                        bracket_stop_loss_price=new_sl,
-                        bracket_stop_loss_limit_price=new_sl_limit,
-                    )
-                    new_fill = float(
-                        await client.resolve_fill_price(
-                            new_order, symbol_for_fallback=new_other_symbol
-                        )
-                        or 0.0
-                    )
-                    new_order_id = self._order_id(new_order)
-                    if leg == "call":
-                        slave_trade.call_order_id = new_order_id or None
-                        slave_trade.call_sl_order_id = None
-                        if new_fill > 0:
-                            slave_trade.call_fill_price = new_fill
-                    else:
-                        slave_trade.put_order_id = new_order_id or None
-                        slave_trade.put_sl_order_id = None
-                        if new_fill > 0:
-                            slave_trade.put_fill_price = new_fill
+    async def _mirror_conversion_to_slave(
+        self,
+        *,
+        slave: SlaveAccount,
+        slave_trade: SlaveTrade,
+        hedge_product_id: int,
+        hedge_symbol: str,
+        old_other_product_id: int,
+        new_other_product_id: int,
+        new_other_symbol: str,
+        new_other_strike: float,
+        other_leg_type: str,
+        master_bracket_sl: float | None,
+        db: Any,
+    ) -> None:
+        # Caller MUST hold the per-slave lock.
+        client = self._get_slave_client(slave)
+        qty = max(1, int(slave_trade.actual_quantity or 1))
+        leg = str(other_leg_type).lower()
+        master_trade_id = int(slave_trade.master_trade_id or 0)
+        try:
+            # 1) Buy hedge — long, no bracket SL
+            hedge_order = await client.place_order(
+                product_id=int(hedge_product_id),
+                size=qty,
+                side="buy",
+            )
+            logger.info(
+                "Slave '%s' hedge bought: product=%s order=%s",
+                slave.name,
+                hedge_product_id,
+                self._order_id(hedge_order),
+            )
 
-                    slave.last_error = None
-                    slave.connection_status = "connected"
-                    slave.last_connected_at = get_utc_now()
-                    db.commit()
-                    logger.info(
-                        "✅ Slave '%s' conversion mirrored (hedge + %s replace) "
-                        "bracket_sl=%s",
-                        slave.name,
-                        leg,
-                        new_sl,
-                    )
-                    log_and_buffer(
-                        "BRACKET_SL",
-                        int(master_trade_id),
-                        {
-                            "leg": leg,
-                            "slave": slave.name,
-                            "stop_price": new_sl,
-                            "source": "master_absolute",
-                            "stage": "conversion",
-                        },
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "❌ Slave '%s' conversion FAILED: %s", slave.name, exc
-                    )
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
-                    slave_trade.last_error = str(exc)[:500]
-                    slave_trade.error_count = int(slave_trade.error_count or 0) + 1
-                    db.commit()
-                finally:
-                    await client.close()
+            # 2) Close old other short
+            await client.place_order(
+                product_id=int(old_other_product_id),
+                size=qty,
+                side="buy",
+            )
+
+            # 3) Open new other short — absolute master bracket SL
+            new_sl = None
+            new_sl_limit = None
+            if (
+                master_bracket_sl is not None
+                and float(master_bracket_sl) > 0
+            ):
+                new_sl = round(float(master_bracket_sl), 2)
+                new_sl_limit = round(new_sl * 1.05, 2)
+            else:
+                logger.critical(
+                    "[BRACKET_SL] slave='%s' conversion missing "
+                    "master_bracket_sl — placing without bracket",
+                    slave.name,
+                )
+            new_order = await client.place_order(
+                product_id=int(new_other_product_id),
+                size=qty,
+                side="sell",
+                bracket_stop_loss_price=new_sl,
+                bracket_stop_loss_limit_price=new_sl_limit,
+            )
+            new_fill = float(
+                await client.resolve_fill_price(
+                    new_order, symbol_for_fallback=new_other_symbol
+                )
+                or 0.0
+            )
+            new_order_id = self._order_id(new_order)
+            if leg == "call":
+                slave_trade.call_order_id = new_order_id or None
+                slave_trade.call_sl_order_id = None
+                if new_fill > 0:
+                    slave_trade.call_fill_price = new_fill
+            else:
+                slave_trade.put_order_id = new_order_id or None
+                slave_trade.put_sl_order_id = None
+                if new_fill > 0:
+                    slave_trade.put_fill_price = new_fill
+
+            slave.last_error = None
+            slave.connection_status = "connected"
+            slave.last_connected_at = get_utc_now()
+            db.commit()
+            logger.info(
+                "✅ Slave '%s' conversion mirrored (hedge + %s replace) "
+                "bracket_sl=%s",
+                slave.name,
+                leg,
+                new_sl,
+            )
+            log_and_buffer(
+                "BRACKET_SL",
+                int(master_trade_id),
+                {
+                    "leg": leg,
+                    "slave": slave.name,
+                    "stop_price": new_sl,
+                    "source": "master_absolute",
+                    "stage": "conversion",
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "❌ Slave '%s' conversion FAILED: %s", slave.name, exc
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            slave_trade.last_error = str(exc)[:500]
+            slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+            db.commit()
+        finally:
+            await client.close()
 
     def _fit_hedge_qty_to_debit(
         self,
@@ -2918,7 +3013,12 @@ class MirrorEngine:
                 )
 
             for slave in slaves:
-                async with self._get_slave_hedge_lock(int(slave.id)):
+                async with self._slave_op_lock(
+                    int(slave.id), "mirror_hedge_open"
+                ) as acquired:
+                    if not acquired:
+                        skipped += 1
+                        continue
                     result = await self._mirror_hedge_open_to_slave(
                         slave=slave,
                         db=work_db,
@@ -2945,12 +3045,12 @@ class MirrorEngine:
                         stoploss_usd=stoploss_usd,
                         executor=OrderExecutor(),
                     )
-                if result == "opened":
-                    opened += 1
-                elif result == "skipped":
-                    skipped += 1
-                else:
-                    failed += 1
+                    if result == "opened":
+                        opened += 1
+                    elif result == "skipped":
+                        skipped += 1
+                    else:
+                        failed += 1
 
         log_and_buffer(
             "SLAVE_HEDGE_OPEN_SUMMARY",
@@ -3009,6 +3109,8 @@ class MirrorEngine:
     ) -> str:
         """
         Open long straddle on one slave. Returns 'opened' | 'skipped' | 'failed'.
+
+        Caller MUST hold the per-slave lock.
         """
         slave_id = int(slave.id)
         # Any live slave hedge blocks a second open (roll race / blocked close)
@@ -3674,7 +3776,12 @@ class MirrorEngine:
                     blocked += 1
                     continue
 
-                async with self._get_slave_hedge_lock(sid):
+                async with self._slave_op_lock(
+                    sid, "mirror_hedge_close"
+                ) as acquired:
+                    if not acquired:
+                        blocked += 1
+                        continue
                     outcome = await self._cascade_close_slave_hedge(
                         slave=slave,
                         slave_hedge=sh,
@@ -3683,10 +3790,10 @@ class MirrorEngine:
                         master_trade_ids=master_trade_ids,
                         reason=reason_norm,
                     )
-                if outcome.get("hedge_closed"):
-                    hedges_closed += 1
-                else:
-                    blocked += 1
+                    if outcome.get("hedge_closed"):
+                        hedges_closed += 1
+                    else:
+                        blocked += 1
 
         log_and_buffer(
             "SLAVE_HEDGE_CASCADE_SUMMARY",
@@ -3812,7 +3919,13 @@ class MirrorEngine:
                 )
                 return result
 
-            async with self._get_slave_hedge_lock(int(slave_id)):
+            async with self._slave_op_lock(
+                int(slave_id), "force_close_slave_structure"
+            ) as acquired:
+                if not acquired:
+                    result["success"] = False
+                    result["lock_timeout"] = True
+                    return result
                 for sh in alive_hedges:
                     master_hid = int(sh.master_hedge_id)
                     master_trade_ids = [
@@ -4026,7 +4139,11 @@ class MirrorEngine:
         master_trade_ids: list[int],
         reason: str,
     ) -> dict[str, Any]:
-        """Baskets → verify → hedge for one slave. Never naked-strangle."""
+        """
+        Baskets → verify → hedge for one slave. Never naked-strangle.
+
+        Caller MUST hold the per-slave lock.
+        """
         slave_id = int(slave.id)
         baskets_found = 0
         baskets_closed = 0
@@ -4540,37 +4657,56 @@ class MirrorEngine:
                 )
                 if not slave or not slave.is_active:
                     continue
-                client = self._get_slave_client(slave)
-                qty = max(1, int(slave_trade.actual_quantity or 1))
-                try:
-                    exists = await client.verify_position_exists(
-                        int(hedge_product_id)
+                async with self._slave_op_lock(
+                    int(slave.id), "mirror_conversion_hedge_close"
+                ) as acquired:
+                    if not acquired:
+                        continue
+                    await self._mirror_conversion_hedge_close_to_slave(
+                        slave=slave,
+                        slave_trade=slave_trade,
+                        hedge_product_id=int(hedge_product_id),
                     )
-                    if exists:
-                        await client.place_order(
-                            product_id=int(hedge_product_id),
-                            size=qty,
-                            side="sell",
-                        )
-                        logger.info(
-                            "Slave '%s' conversion hedge closed (sell) "
-                            "product=%s",
-                            slave.name,
-                            hedge_product_id,
-                        )
-                    else:
-                        logger.warning(
-                            "Slave '%s' conversion hedge not on Delta — skip",
-                            slave.name,
-                        )
-                except Exception as exc:
-                    logger.error(
-                        "Slave '%s' conversion hedge close FAILED: %s",
-                        slave.name,
-                        exc,
-                    )
-                finally:
-                    await client.close()
+
+    async def _mirror_conversion_hedge_close_to_slave(
+        self,
+        *,
+        slave: SlaveAccount,
+        slave_trade: SlaveTrade,
+        hedge_product_id: int,
+    ) -> None:
+        # Caller MUST hold the per-slave lock.
+        client = self._get_slave_client(slave)
+        qty = max(1, int(slave_trade.actual_quantity or 1))
+        try:
+            exists = await client.verify_position_exists(
+                int(hedge_product_id)
+            )
+            if exists:
+                await client.place_order(
+                    product_id=int(hedge_product_id),
+                    size=qty,
+                    side="sell",
+                )
+                logger.info(
+                    "Slave '%s' conversion hedge closed (sell) "
+                    "product=%s",
+                    slave.name,
+                    hedge_product_id,
+                )
+            else:
+                logger.warning(
+                    "Slave '%s' conversion hedge not on Delta — skip",
+                    slave.name,
+                )
+        except Exception as exc:
+            logger.error(
+                "Slave '%s' conversion hedge close FAILED: %s",
+                slave.name,
+                exc,
+            )
+        finally:
+            await client.close()
 
     async def mirror_leg_close(
         self,
@@ -4656,19 +4792,25 @@ class MirrorEngine:
                         db.commit()
                     continue
 
-                ok = await self._mirror_leg_close_to_slave(
-                    slave=slave,
-                    slave_trade=slave_trade,
-                    leg_type=leg,
-                    product_id=target_pid,
-                    db=db,
-                    success_status=success_status,
-                    failure_status=failure_status,
-                )
-                if ok:
-                    slaves_closed += 1
-                else:
-                    slaves_failed += 1
+                async with self._slave_op_lock(
+                    int(slave.id), "mirror_leg_close"
+                ) as acquired:
+                    if not acquired:
+                        slaves_failed += 1
+                        continue
+                    ok = await self._mirror_leg_close_to_slave(
+                        slave=slave,
+                        slave_trade=slave_trade,
+                        leg_type=leg,
+                        product_id=target_pid,
+                        db=db,
+                        success_status=success_status,
+                        failure_status=failure_status,
+                    )
+                    if ok:
+                        slaves_closed += 1
+                    else:
+                        slaves_failed += 1
 
         result = {
             "slaves_total": slaves_total,
@@ -4701,6 +4843,8 @@ class MirrorEngine:
         """
         Close one product on one slave. Returns True if verified flat (or
         already flat / virtual).
+
+        Caller MUST hold the per-slave lock.
         """
         leg = str(leg_type).lower()
         target_pid = int(product_id)
@@ -5009,15 +5153,20 @@ class MirrorEngine:
                 if not slave:
                     continue
 
-                await self._mirror_exit_to_slave(
-                    slave=slave,
-                    slave_trade=slave_trade,
-                    call_product_id=call_product_id,
-                    put_product_id=put_product_id,
-                    reason=reason,
-                    db=db,
-                    hedge_product_id=hedge_product_id,
-                )
+                async with self._slave_op_lock(
+                    int(slave.id), "mirror_exit"
+                ) as acquired:
+                    if not acquired:
+                        continue
+                    await self._mirror_exit_to_slave(
+                        slave=slave,
+                        slave_trade=slave_trade,
+                        call_product_id=call_product_id,
+                        put_product_id=put_product_id,
+                        reason=reason,
+                        db=db,
+                        hedge_product_id=hedge_product_id,
+                    )
 
     async def _mirror_exit_to_slave(
         self,
@@ -5029,6 +5178,7 @@ class MirrorEngine:
         db: Any,
         hedge_product_id: int | None = None,
     ) -> None:
+        # Caller MUST hold the per-slave lock.
         # Virtual mode: close in DB only — no real Delta orders
         if is_virtual_slave_trade(slave, slave_trade):
             logger.info(
@@ -6198,15 +6348,20 @@ class MirrorEngine:
                     db, int(st.master_trade_id)
                 )
                 try:
-                    await self._mirror_exit_to_slave(
-                        slave=slave,
-                        slave_trade=st,
-                        call_product_id=call_pid,
-                        put_product_id=put_pid,
-                        reason=ExitReason.ORPHAN_NO_HEDGE.value,
-                        db=db,
-                        hedge_product_id=None,
-                    )
+                    async with self._slave_op_lock(
+                        int(slave.id), "sweep_orphan_slave_baskets"
+                    ) as acquired:
+                        if not acquired:
+                            continue
+                        await self._mirror_exit_to_slave(
+                            slave=slave,
+                            slave_trade=st,
+                            call_product_id=call_pid,
+                            put_product_id=put_pid,
+                            reason=ExitReason.ORPHAN_NO_HEDGE.value,
+                            db=db,
+                            hedge_product_id=None,
+                        )
                 except Exception as close_exc:
                     logger.critical(
                         "[SLAVE_ORPHAN_BASKET] close raised slave_trade=%s: %s",
@@ -6360,12 +6515,18 @@ class MirrorEngine:
                                 )
                             continue
 
-                    outcome = await self._recover_slave_under_closed_master(
-                        slave=slave,
-                        slave_trade=st,
-                        master_trade_id=int(master_trade_id),
-                        db=db,
-                    )
+                    outcome = None
+                    async with self._slave_op_lock(
+                        int(slave.id), "sweep_open_slave_trades"
+                    ) as acquired:
+                        if not acquired:
+                            continue
+                        outcome = await self._recover_slave_under_closed_master(
+                            slave=slave,
+                            slave_trade=st,
+                            master_trade_id=int(master_trade_id),
+                            db=db,
+                        )
                     if outcome == "closed_ok":
                         closed_ok += 1
                     elif outcome == "unreachable":
@@ -6413,6 +6574,8 @@ class MirrorEngine:
         """
         Fetch live positions; if flat mark closed; else reduce_only close,
         verify, mark closed only on success. Returns outcome label.
+
+        Caller MUST hold the per-slave lock.
         """
         from backend.models import Leg
 
@@ -6671,6 +6834,9 @@ class MirrorEngine:
 
         Closed-master recovery lives in sweep_open_slave_trades /
         _recover_slave_under_closed_master (must verify Delta first).
+
+        Acquires the per-slave lock for each mutating check/retry. Caller
+        (sweep) must NOT hold the lock — nested acquisition would deadlock.
         """
         with self.db_factory() as db:
             master = (
@@ -6782,49 +6948,54 @@ class MirrorEngine:
                 if call_leg is None or put_leg is None:
                     continue
 
-                logger.info(
-                    "[SLAVE_RECONCILE] retrying mirror once for "
-                    "slave_trade=%s slave='%s' master=#%s",
-                    st.id,
-                    slave.name,
-                    master_trade_id,
-                )
-                st.last_error = (f"[RETRY_DONE] prior: {err}")[:500]
-                st.error_count = err_count + 1
-                st.status = "closed"  # clear slot so new entry can record
-                st.last_updated = get_utc_now()
-                db.commit()
-
-                try:
-                    await self._mirror_entry_to_slave(
-                        slave=slave,
-                        master_trade_id=int(master_trade_id),
-                        call_product_id=int(call_leg.product_id),
-                        put_product_id=int(put_leg.product_id),
-                        master_call_qty=int(call_leg.quantity or 1),
-                        master_put_qty=int(put_leg.quantity or 1),
-                        master_call_strike=float(call_leg.strike or 0),
-                        master_put_strike=float(put_leg.strike or 0),
-                        master_call_symbol=str(call_leg.symbol or ""),
-                        master_put_symbol=str(put_leg.symbol or ""),
-                        master_call_fill=float(
-                            call_leg.initial_premium or 0
-                        ),
-                        master_put_fill=float(
-                            put_leg.initial_premium or 0
-                        ),
-                        expiry_date=getattr(master, "expiry_date", None),
-                        underlying=str(
-                            getattr(master, "underlying", "") or ""
-                        ),
-                        db=db,
-                    )
-                except Exception as retry_exc:
-                    logger.warning(
-                        "[SLAVE_RECONCILE] retry failed slave_trade=%s: %s",
+                async with self._slave_op_lock(
+                    int(slave.id), "check_slave_integrity"
+                ) as acquired:
+                    if not acquired:
+                        continue
+                    logger.info(
+                        "[SLAVE_RECONCILE] retrying mirror once for "
+                        "slave_trade=%s slave='%s' master=#%s",
                         st.id,
-                        retry_exc,
+                        slave.name,
+                        master_trade_id,
                     )
+                    st.last_error = (f"[RETRY_DONE] prior: {err}")[:500]
+                    st.error_count = err_count + 1
+                    st.status = "closed"  # clear slot so new entry can record
+                    st.last_updated = get_utc_now()
+                    db.commit()
+
+                    try:
+                        await self._mirror_entry_to_slave(
+                            slave=slave,
+                            master_trade_id=int(master_trade_id),
+                            call_product_id=int(call_leg.product_id),
+                            put_product_id=int(put_leg.product_id),
+                            master_call_qty=int(call_leg.quantity or 1),
+                            master_put_qty=int(put_leg.quantity or 1),
+                            master_call_strike=float(call_leg.strike or 0),
+                            master_put_strike=float(put_leg.strike or 0),
+                            master_call_symbol=str(call_leg.symbol or ""),
+                            master_put_symbol=str(put_leg.symbol or ""),
+                            master_call_fill=float(
+                                call_leg.initial_premium or 0
+                            ),
+                            master_put_fill=float(
+                                put_leg.initial_premium or 0
+                            ),
+                            expiry_date=getattr(master, "expiry_date", None),
+                            underlying=str(
+                                getattr(master, "underlying", "") or ""
+                            ),
+                            db=db,
+                        )
+                    except Exception as retry_exc:
+                        logger.warning(
+                            "[SLAVE_RECONCILE] retry failed slave_trade=%s: %s",
+                            st.id,
+                            retry_exc,
+                        )
 
             # --- Active book: empty / naked one-legged ---
             slave_trades = (
@@ -6861,77 +7032,95 @@ class MirrorEngine:
                     )
                     continue
 
-                client = self._get_slave_client(slave)
-                try:
-                    slave_positions = await client.get_option_positions()
-                    if not slave_positions:
-                        logger.warning(
-                            "Slave '%s' has NO open positions but "
-                            "SlaveTrade %s is 'active'. Marking as closed.",
-                            slave.name,
-                            slave_trade.id,
-                        )
-                        if self._close_slave_trade(
-                            slave,
-                            slave_trade,
-                            reason="integrity_empty_book",
-                            allow_virtual=False,
-                        ):
-                            slave_trade.last_updated = get_utc_now()
-                            db.commit()
+                async with self._slave_op_lock(
+                    int(slave.id), "check_slave_integrity"
+                ) as acquired:
+                    if not acquired:
                         continue
-
-                    # Count distinct short option products (size < 0)
-                    short_pids: set[int] = set()
-                    for pos in slave_positions:
-                        try:
-                            size = float(pos.get("size") or 0)
-                            pid = int(pos.get("product_id") or 0)
-                        except (TypeError, ValueError):
-                            continue
-                        if size < 0 and pid > 0:
-                            short_pids.add(pid)
-
-                    if (
-                        master_open_legs >= 2
-                        and len(short_pids) == 1
-                    ):
-                        msg = (
-                            f"naked_one_leg: slave has {len(short_pids)} "
-                            f"short product(s) {sorted(short_pids)} while "
-                            f"master has {master_open_legs} open legs"
-                        )
-                        logger.critical(
-                            "[SLAVE_INTEGRITY] slave='%s' slave_trade=%s %s",
-                            slave.name,
-                            slave_trade.id,
-                            msg,
-                        )
-                        slave_trade.status = "partial_adjustment"
-                        slave_trade.last_error = msg[:500]
-                        slave_trade.error_count = (
-                            int(slave_trade.error_count or 0) + 1
-                        )
-                        slave_trade.last_updated = get_utc_now()
-                        slave.connection_status = "error"
-                        slave.last_error = msg[:500]
-                        db.commit()
-                    else:
-                        logger.debug(
-                            "Slave '%s' integrity OK: %s option positions "
-                            "(%s shorts)",
-                            slave.name,
-                            len(slave_positions),
-                            len(short_pids),
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "Slave '%s' integrity check failed: %s",
-                        slave.name,
-                        exc,
+                    await self._check_slave_active_book_integrity(
+                        db=db,
+                        slave=slave,
+                        slave_trade=slave_trade,
+                        master_open_legs=master_open_legs,
                     )
-                finally:
-                    await client.close()
+
+    async def _check_slave_active_book_integrity(
+        self,
+        *,
+        db: Any,
+        slave: SlaveAccount,
+        slave_trade: SlaveTrade,
+        master_open_legs: int,
+    ) -> None:
+        # Caller MUST hold the per-slave lock.
+        client = self._get_slave_client(slave)
+        try:
+            slave_positions = await client.get_option_positions()
+            if not slave_positions:
+                logger.warning(
+                    "Slave '%s' has NO open positions but "
+                    "SlaveTrade %s is 'active'. Marking as closed.",
+                    slave.name,
+                    slave_trade.id,
+                )
+                if self._close_slave_trade(
+                    slave,
+                    slave_trade,
+                    reason="integrity_empty_book",
+                    allow_virtual=False,
+                ):
+                    slave_trade.last_updated = get_utc_now()
+                    db.commit()
+                return
+
+            # Count distinct short option products (size < 0)
+            short_pids: set[int] = set()
+            for pos in slave_positions:
+                try:
+                    size = float(pos.get("size") or 0)
+                    pid = int(pos.get("product_id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if size < 0 and pid > 0:
+                    short_pids.add(pid)
+
+            if master_open_legs >= 2 and len(short_pids) == 1:
+                msg = (
+                    f"naked_one_leg: slave has {len(short_pids)} "
+                    f"short product(s) {sorted(short_pids)} while "
+                    f"master has {master_open_legs} open legs"
+                )
+                logger.critical(
+                    "[SLAVE_INTEGRITY] slave='%s' slave_trade=%s %s",
+                    slave.name,
+                    slave_trade.id,
+                    msg,
+                )
+                slave_trade.status = "partial_adjustment"
+                slave_trade.last_error = msg[:500]
+                slave_trade.error_count = (
+                    int(slave_trade.error_count or 0) + 1
+                )
+                slave_trade.last_updated = get_utc_now()
+                slave.connection_status = "error"
+                slave.last_error = msg[:500]
+                db.commit()
+            else:
+                logger.debug(
+                    "Slave '%s' integrity OK: %s option positions "
+                    "(%s shorts)",
+                    slave.name,
+                    len(slave_positions),
+                    len(short_pids),
+                )
+        except Exception as exc:
+            logger.warning(
+                "Slave '%s' integrity check failed: %s",
+                slave.name,
+                exc,
+            )
+        finally:
+            await client.close()
 
 
 # Global singleton — set during app lifespan

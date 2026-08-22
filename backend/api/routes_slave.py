@@ -519,31 +519,7 @@ async def copy_master_trade_to_slave(
             "message": "Master trade missing open call/put legs",
         }
 
-    # Hedge invariant — fail fast with clear message before any order
-    master_hedge_id = me._resolve_master_hedge_id_for_trade(
-        db, int(master_trade_id)
-    )
-    ok_hedge, hedge_reason = me._assert_hedge_before_basket(
-        db, int(slave.id), master_hedge_id
-    )
-    if not ok_hedge:
-        me._skip_basket_no_hedge(
-            db,
-            slave=slave,
-            master_trade_id=int(master_trade_id),
-            master_hedge_id=master_hedge_id,
-            reason=hedge_reason,
-        )
-        return {
-            "success": False,
-            "message": (
-                f"Basket entry skipped: {hedge_reason} "
-                "(short basket requires a live hedge)"
-            ),
-            "status": "skipped_no_hedge",
-            "reason": hedge_reason,
-        }
-
+    # Hedge invariant + entry under per-slave lock (same as mirror_trade_entry)
     master_qty = max(1, int(getattr(call_leg, "quantity", 1) or 1))
     uni_sl = float(getattr(state.trade, "universal_sl_pct", None) or 200.0)
     from backend.core.delta_sl import compute_bracket_sl
@@ -575,31 +551,66 @@ async def copy_master_trade_to_slave(
     put_fill = float(getattr(put_leg, "initial_premium", 0) or 0)
 
     try:
-        await me._mirror_entry_to_slave(
-            slave=slave,
-            master_trade_id=int(master_trade_id),
-            call_product_id=int(call_leg.product_id),
-            put_product_id=int(put_leg.product_id),
-            master_call_qty=master_qty,
-            master_put_qty=max(
-                1, int(getattr(put_leg, "quantity", master_qty) or master_qty)
-            ),
-            master_call_strike=float(getattr(call_leg, "strike", 0) or 0),
-            master_put_strike=float(getattr(put_leg, "strike", 0) or 0),
-            master_call_symbol=call_symbol,
-            master_put_symbol=put_symbol,
-            master_call_fill=call_fill,
-            master_put_fill=put_fill,
-            expiry_date=expiry,
-            underlying=underlying,
-            db=db,
-            master_bracket_sl_call=(
-                float(call_sl) if call_sl is not None else None
-            ),
-            master_bracket_sl_put=(
-                float(put_sl) if put_sl is not None else None
-            ),
-        )
+        async with me._slave_op_lock(
+            int(slave.id), "copy_master_trade"
+        ) as acquired:
+            if not acquired:
+                return {
+                    "success": False,
+                    "message": "Slave busy (lock timeout) — retry later",
+                    "status": "lock_timeout",
+                }
+            master_hedge_id = me._resolve_master_hedge_id_for_trade(
+                db, int(master_trade_id)
+            )
+            ok_hedge, hedge_reason = me._assert_hedge_before_basket(
+                db, int(slave.id), master_hedge_id
+            )
+            if not ok_hedge:
+                me._skip_basket_no_hedge(
+                    db,
+                    slave=slave,
+                    master_trade_id=int(master_trade_id),
+                    master_hedge_id=master_hedge_id,
+                    reason=hedge_reason,
+                )
+                return {
+                    "success": False,
+                    "message": (
+                        f"Basket entry skipped: {hedge_reason} "
+                        "(short basket requires a live hedge)"
+                    ),
+                    "status": "skipped_no_hedge",
+                    "reason": hedge_reason,
+                }
+            await me._mirror_entry_to_slave(
+                slave=slave,
+                master_trade_id=int(master_trade_id),
+                call_product_id=int(call_leg.product_id),
+                put_product_id=int(put_leg.product_id),
+                master_call_qty=master_qty,
+                master_put_qty=max(
+                    1,
+                    int(
+                        getattr(put_leg, "quantity", master_qty) or master_qty
+                    ),
+                ),
+                master_call_strike=float(getattr(call_leg, "strike", 0) or 0),
+                master_put_strike=float(getattr(put_leg, "strike", 0) or 0),
+                master_call_symbol=call_symbol,
+                master_put_symbol=put_symbol,
+                master_call_fill=call_fill,
+                master_put_fill=put_fill,
+                expiry_date=expiry,
+                underlying=underlying,
+                db=db,
+                master_bracket_sl_call=(
+                    float(call_sl) if call_sl is not None else None
+                ),
+                master_bracket_sl_put=(
+                    float(put_sl) if put_sl is not None else None
+                ),
+            )
     except Exception as exc:
         logger.error(
             "Copy trade to slave failed slave=%s master=%s: %s",
