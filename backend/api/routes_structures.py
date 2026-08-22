@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
@@ -23,6 +24,13 @@ from backend.models import Structure, StructureLeg
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/structures", tags=["structures"])
+
+
+class LegAttributionFromUpdate(BaseModel):
+    attribution_from: str = Field(
+        ...,
+        description="ISO8601 UTC — earner attribution window start (must be <= opened_at)",
+    )
 
 
 def _parse_utc_iso(value: str, *, param: str = "since") -> datetime:
@@ -71,6 +79,7 @@ def _serialize_leg(leg: StructureLeg) -> dict[str, Any]:
         "quantity": int(leg.quantity or 0),
         "entry_order_id": leg.entry_order_id,
         "opened_at": _utc_iso(leg.opened_at),
+        "attribution_from": _utc_iso(leg.attribution_from),
         "closed_at": _utc_iso(leg.closed_at),
         "close_reason": leg.close_reason,
     }
@@ -224,4 +233,61 @@ async def list_structure_changes(
         "success": True,
         "since": since_dt.astimezone(timezone.utc).isoformat(),
         "structures": [_serialize_structure(r) for r in rows],
+    }
+
+
+@router.patch("/legs/{leg_id}/attribution-from")
+async def patch_leg_attribution_from(
+    leg_id: int,
+    payload: LegAttributionFromUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Admin: set earner attribution window start for a closed leg.
+
+    Does not modify opened_at or closed_at. New value must not be after
+    opened_at (window may only shift backward).
+    """
+    leg = db.query(StructureLeg).filter(StructureLeg.id == int(leg_id)).first()
+    if leg is None:
+        raise HTTPException(status_code=404, detail=f"Structure leg {leg_id} not found")
+
+    if leg.closed_at is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Leg must be closed before setting attribution_from",
+        )
+
+    new_ts = _parse_utc_iso(payload.attribution_from, param="attribution_from")
+    opened = as_utc(leg.opened_at)
+    if opened is None:
+        raise HTTPException(status_code=422, detail="Leg opened_at is invalid")
+
+    if new_ts > opened:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "attribution_from must not be after opened_at "
+                "(window may only shift backward)"
+            ),
+        )
+
+    old_raw = leg.attribution_from
+    old_iso = _utc_iso(old_raw)
+    new_iso = _utc_iso(new_ts)
+
+    leg.attribution_from = new_ts
+    db.commit()
+    db.refresh(leg)
+
+    logger.warning(
+        "structure leg attribution_from updated leg_id=%s old=%s new=%s",
+        int(leg_id),
+        old_iso,
+        new_iso,
+    )
+
+    return {
+        "success": True,
+        "leg": _serialize_leg(leg),
     }

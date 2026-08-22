@@ -857,6 +857,10 @@ class StructureLeg(Base):
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    # Earner attribution window start — NULL means use opened_at (earner-side fallback)
+    attribution_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     closed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

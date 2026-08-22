@@ -995,6 +995,7 @@ def _migrate_schema() -> None:
                         quantity INTEGER NOT NULL,
                         entry_order_id VARCHAR(100),
                         opened_at DATETIME NOT NULL,
+                        attribution_from DATETIME,
                         closed_at DATETIME,
                         close_reason VARCHAR(50)
                     )
@@ -1008,6 +1009,19 @@ def _migrate_schema() -> None:
                     "ON structure_legs (product_id, opened_at)"
                 )
             )
+
+    if "structure_legs" in tables:
+        leg_cols = {
+            col["name"] for col in inspector.get_columns("structure_legs")
+        }
+        if "attribution_from" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE structure_legs "
+                        "ADD COLUMN attribution_from DATETIME"
+                    )
+                )
 
 
 def get_usd_inr_rate(db: Session) -> float:
