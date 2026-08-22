@@ -154,6 +154,65 @@ class MirrorEngine:
                     pids.add(pid)
         return pids
 
+    def _bot_owned_product_ids(self, db: Any, slave_id: int) -> set[int]:
+        """
+        Product ids this bot opened for a slave — single source of truth.
+
+        Includes:
+        - call/put product_id on non-closed SlaveTrade rows
+        - open StructureLeg rows on that slave's active structures
+        """
+        from backend.models import Structure, StructureLeg
+
+        pids: set[int] = set()
+        sid = int(slave_id)
+
+        trades = (
+            db.query(SlaveTrade)
+            .filter(
+                SlaveTrade.slave_account_id == sid,
+                SlaveTrade.status != "closed",
+            )
+            .all()
+        )
+        for st in trades:
+            for attr in ("call_product_id", "put_product_id"):
+                try:
+                    pid = int(getattr(st, attr, 0) or 0)
+                except (TypeError, ValueError):
+                    pid = 0
+                if pid > 0:
+                    pids.add(pid)
+
+        active_structs = (
+            db.query(Structure)
+            .filter(
+                Structure.slave_account_id == sid,
+                Structure.account_kind == "SLAVE",
+                Structure.status == "active",
+            )
+            .all()
+        )
+        struct_ids = [int(s.id) for s in active_structs]
+        if struct_ids:
+            legs = (
+                db.query(StructureLeg)
+                .filter(
+                    StructureLeg.structure_id.in_(struct_ids),
+                    StructureLeg.closed_at.is_(None),
+                )
+                .all()
+            )
+            for lg in legs:
+                try:
+                    pid = int(getattr(lg, "product_id", 0) or 0)
+                except (TypeError, ValueError):
+                    pid = 0
+                if pid > 0:
+                    pids.add(pid)
+
+        return pids
+
     def _assert_slave_hedge_close_allowed(
         self, *, slave_id: int, reason: str
     ) -> bool:
@@ -3359,10 +3418,12 @@ class MirrorEngine:
                 )
                 return False
 
+            bot_owned = self._bot_owned_product_ids(db, int(slave.id))
             live_shorts = [
                 int(p.get("product_id") or 0)
                 for p in positions
                 if float(p.get("size") or 0) < -1e-9
+                and int(p.get("product_id") or 0) in bot_owned
             ]
             if live_shorts:
                 return False
@@ -3468,8 +3529,9 @@ class MirrorEngine:
                 try:
                     if not is_virtual:
                         client = self._get_slave_client(slave)
-                    # Hedge legs are longs — any remaining SHORT means a
-                    # basket is still live (product_ids may differ after adj).
+                    bot_owned = self._bot_owned_product_ids(db, slave_id)
+                    # Hedge legs are longs — remaining *bot-owned* SHORT means
+                    # a basket is still live (product_ids may differ after adj).
                     live_shorts: list[dict[str, Any]] = []
                     if client is not None:
                         try:
@@ -3496,7 +3558,7 @@ class MirrorEngine:
                                     pid = int(pos.get("product_id") or 0)
                                 except (TypeError, ValueError):
                                     continue
-                                if size < -1e-9 and pid > 0:
+                                if size < -1e-9 and pid > 0 and pid in bot_owned:
                                     live_shorts.append(
                                         {
                                             "product_id": pid,
@@ -4534,9 +4596,12 @@ class MirrorEngine:
                 )
                 if pid and int(pid) > 0
             }
+            bot_owned = self._bot_owned_product_ids(db, int(slave.id))
+            # Current exit hints for this basket are always bot-owned for this trade
+            bot_owned |= hint_ids
             logger.info(
                 "[MIRROR_EXIT] Slave '%s' positions_fetch_ok=%s "
-                "live_positions=%s hint_ids=%s stored_qty=%s",
+                "live_positions=%s hint_ids=%s bot_owned=%s stored_qty=%s",
                 slave.name,
                 positions_fetch_ok,
                 [
@@ -4548,54 +4613,48 @@ class MirrorEngine:
                     for p in live_positions
                 ],
                 sorted(hint_ids),
+                sorted(bot_owned),
                 stored_qty,
             )
 
             targets: list[dict[str, Any]] = []
+            foreign_notes: list[str] = []
             if live_positions:
-                # Prefer positions matching master hints when present
-                matched = [
-                    p
-                    for p in live_positions
-                    if int(p.get("product_id") or 0) in hint_ids
-                ]
-                matched_pids = {
-                    int(p.get("product_id") or 0) for p in matched
-                }
-                # Always include unmatched SHORTS — adjusted legs may not be
-                # in hint_ids when master/slave drifted
-                extras = [
-                    p
-                    for p in live_positions
-                    if float(p.get("size") or 0) < 0
-                    and int(p.get("product_id") or 0) not in matched_pids
-                ]
-                # Longs: include if matches hedge hint, or if any hedge was
-                # expected and this long wasn't already matched
-                if hedge_product_id:
-                    for p in live_positions:
+                for p in live_positions:
+                    try:
                         pid = int(p.get("product_id") or 0)
                         size = float(p.get("size") or 0)
-                        if size > 0 and pid not in matched_pids:
-                            extras.append(p)
-
-                if matched or extras:
-                    targets = matched + extras
-                else:
-                    # No hints matched — close SHORTS only; never structure hedge
-                    targets = [
-                        p
-                        for p in live_positions
-                        if float(p.get("size") or 0) < 0
-                    ]
-                    logger.warning(
-                        "[MIRROR_EXIT] Slave '%s' — closing %s short "
-                        "option positions (hints stale; hedge protected)",
-                        slave.name,
-                        len(targets),
+                    except (TypeError, ValueError):
+                        continue
+                    if pid <= 0 or abs(size) <= 0:
+                        continue
+                    if pid in bot_owned:
+                        targets.append(p)
+                        continue
+                    # Customer / non-bot position — never buy back or sell
+                    log_and_buffer(
+                        "SLAVE_FOREIGN",
+                        int(slave_trade.master_trade_id or 0),
+                        {
+                            "slave": int(slave.id),
+                            "product_id": pid,
+                            "size": size,
+                            "symbol": str(p.get("product_symbol") or ""),
+                            "path": "_mirror_exit_to_slave",
+                            "note": "left untouched (not bot-owned)",
+                        },
                     )
+                    foreign_notes.append(f"pid={pid} size={size}")
+                if foreign_notes:
+                    note = (
+                        "foreign_left_untouched: " + "; ".join(foreign_notes)
+                    )[:500]
+                    prior = str(slave_trade.last_error or "")
+                    slave_trade.last_error = (
+                        f"{prior};{note}".strip(";") if prior else note
+                    )[:500]
             else:
-                # Empty book OR fetch failed — last resort: hint product_ids
+                # Empty book OR fetch failed — last resort: bot-owned hint pids only
                 if positions_fetch_ok:
                     logger.info(
                         "[MIRROR_EXIT] Slave '%s' verified empty option book "
@@ -4620,7 +4679,7 @@ class MirrorEngine:
                     (int(call_product_id or 0), "buy"),
                     (int(put_product_id or 0), "buy"),
                 ):
-                    if pid <= 0:
+                    if pid <= 0 or pid not in bot_owned:
                         continue
                     targets.append(
                         {
@@ -4630,7 +4689,7 @@ class MirrorEngine:
                             "_fallback_side": side,
                         }
                     )
-                if hedge_product_id:
+                if hedge_product_id and int(hedge_product_id) in bot_owned:
                     targets.append(
                         {
                             "product_id": int(hedge_product_id),
@@ -4793,10 +4852,11 @@ class MirrorEngine:
                     }
 
             # Products that must be flat: basket hints + closed targets ONLY
-            # (never require structure hedge longs to be flat)
+            # (never require structure hedge longs or foreign positions to be flat)
             check_pids = set(hint_ids) | target_pids
             check_pids.discard(0)
             check_pids -= protected_hedge_pids
+            check_pids &= bot_owned
 
             # VERIFY flat before marking closed — never trust order success alone
             await asyncio.sleep(2)
@@ -4823,9 +4883,13 @@ class MirrorEngine:
                         continue
                     if pid <= 0 or abs(size) <= 0:
                         continue
+                    if pid not in bot_owned:
+                        continue
+                    if pid in protected_hedge_pids and size > 0:
+                        continue
                     # If we have specific pids to check, only those matter;
                     # if none (already-flat path with no hints), any leftover
-                    # option size blocks closed.
+                    # *bot-owned* option size blocks closed.
                     if check_pids and pid not in check_pids:
                         continue
                     remaining.append(
@@ -5803,7 +5867,7 @@ class MirrorEngine:
                 )
                 return "unreachable"
 
-            # Prefer master leg product_ids; else close entire live option book
+            # Prefer master leg product_ids; never close whole book or foreign shorts
             master_pids: set[int] = set()
             for lg in (
                 db.query(Leg)
@@ -5820,6 +5884,39 @@ class MirrorEngine:
                 if pid > 0:
                     master_pids.add(pid)
 
+            bot_owned = self._bot_owned_product_ids(db, int(slave.id))
+            protected_hedge_pids = self._structure_hedge_pids_for_slave(
+                db, int(slave.id)
+            )
+
+            if not master_pids:
+                log_and_buffer(
+                    "SLAVE_SWEEP",
+                    int(master_trade_id),
+                    {
+                        "slave": int(slave.id),
+                        "slave_trade": int(slave_trade.id),
+                        "reason": "empty_master_pids_skip_close",
+                        "note": (
+                            "no bot-managed master legs — refusing to "
+                            "close any live option positions"
+                        ),
+                    },
+                )
+                slave_trade.last_error = (
+                    "sweep_skipped: empty_master_pids — no close attempted"
+                )[:500]
+                slave_trade.last_updated = get_utc_now()
+                db.commit()
+                logger.critical(
+                    "[SLAVE_SWEEP] slave='%s' slave_trade=%s master=#%s "
+                    "empty master_pids — skip close (will not touch book)",
+                    slave.name,
+                    slave_trade.id,
+                    master_trade_id,
+                )
+                return "close_failed"
+
             live_nonzero: list[dict[str, Any]] = []
             for pos in live_positions or []:
                 try:
@@ -5829,13 +5926,34 @@ class MirrorEngine:
                     continue
                 if pid <= 0 or abs(size) <= 0:
                     continue
-                # Close master's products if known; otherwise whole book.
-                # Always include shorts (adjusted legs may drift from master).
-                if master_pids:
-                    if pid in master_pids or size < 0:
-                        live_nonzero.append(pos)
-                else:
-                    live_nonzero.append(pos)
+                if pid not in bot_owned:
+                    log_and_buffer(
+                        "SLAVE_FOREIGN",
+                        int(master_trade_id),
+                        {
+                            "slave": int(slave.id),
+                            "product_id": pid,
+                            "size": size,
+                            "symbol": str(pos.get("product_symbol") or ""),
+                            "path": "_recover_slave_under_closed_master",
+                            "note": "left untouched (not bot-owned)",
+                        },
+                    )
+                    continue
+                # Structure hedge longs must survive basket/sweep closes
+                if pid in protected_hedge_pids and size > 0:
+                    log_and_buffer(
+                        "SLAVE_HEDGE_PROTECTED",
+                        int(master_trade_id),
+                        {
+                            "slave": int(slave.id),
+                            "attempted_by": "SLAVE_SWEEP",
+                            "product_id": pid,
+                            "path": "_recover_slave_under_closed_master",
+                        },
+                    )
+                    continue
+                live_nonzero.append(pos)
 
             if not live_nonzero:
                 if self._close_slave_trade(
@@ -5923,7 +6041,12 @@ class MirrorEngine:
                     continue
                 if pid <= 0 or abs(size) <= 0:
                     continue
-                # Any leftover option size blocks closed for a dedicated slave
+                # Foreign / customer positions do not block sweep success
+                if pid not in bot_owned:
+                    continue
+                # Structure hedge longs are expected to remain
+                if pid in protected_hedge_pids and size > 0:
+                    continue
                 remaining.append({"product_id": pid, "size": size})
 
             if remaining:
