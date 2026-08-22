@@ -39,6 +39,12 @@ from backend.strategies.s001_short_strangle.config import (
 
 logger = logging.getLogger(__name__)
 
+# adjustment_count is PER BASKET (one Trade row), shared across BOTH legs.
+# Each successful adjustment — call or put — increments Trade.adjustment_count
+# by 1. It is NOT a per-leg counter.
+
+_ADJUSTMENT_LIMIT_UNSET_LOGGED: set[int] = set()
+
 _SLAB_KEYS = (
     "slab_24h",
     "slab_12h",
@@ -815,7 +821,7 @@ class ShortStrangleStrategy(BaseStrategy):
                         call_trigger_pct=call_trigger_pct,
                         put_trigger_pct=put_trigger_pct,
                     )
-                # Max-adjustments gate (only when conversion mode is OFF)
+                # Max-adjustments gate — must run before any ADJUST decision
                 max_exit = self._check_max_adjustments_exit(
                     trade, db_session, triggered_leg="call",
                     trigger_pct=call_trigger_pct,
@@ -930,48 +936,70 @@ class ShortStrangleStrategy(BaseStrategy):
         put_trigger_pct: float,
     ) -> TradeAction | None:
         """
-        When conversion_mode_enabled=False and adjustment_count >= max,
-        exit basket instead of adjusting. Returns TradeAction or None.
+        Gate BEFORE choosing ADJUST_*: exit whole basket when the per-basket
+        adjustment limit is reached.
+
+        adjustment_count is read fresh from the DB row — never from cached
+        trade_state / position_tracker copies.
         """
         if db_session is None:
             return None
         try:
-            from backend.database import get_or_create_auto_settings
             from backend.core.bot_logger import log_and_buffer
+            from backend.database import get_or_create_auto_settings
+            from backend.models import Trade as TradeModel
 
+            trade_id = int(getattr(trade, "id", 0) or 0)
             cfg = get_or_create_auto_settings(db_session)
-            conv_on = bool(getattr(cfg, "conversion_mode_enabled", True))
-            if conv_on:
-                return None
             raw_max = getattr(cfg, "max_adjustments_per_basket", None)
-            if raw_max is None:
+            max_allowed: int | None = (
+                int(raw_max) if raw_max is not None else None
+            )
+
+            count = 0
+            if trade_id > 0:
+                scalar = (
+                    db_session.query(TradeModel.adjustment_count)
+                    .filter(TradeModel.id == trade_id)
+                    .scalar()
+                )
+                try:
+                    count = int(scalar or 0)
+                except (TypeError, ValueError):
+                    count = 0
+
+            if max_allowed is None:
+                if trade_id > 0 and trade_id not in _ADJUSTMENT_LIMIT_UNSET_LOGGED:
+                    _ADJUSTMENT_LIMIT_UNSET_LOGGED.add(trade_id)
+                    logger.warning(
+                        "[ADJUSTMENT_LIMIT_UNSET] trade=%s",
+                        trade_id,
+                    )
+                    log_and_buffer("ADJUSTMENT_LIMIT_UNSET", trade_id, {})
                 return None
-            max_allowed = int(raw_max)
-            try:
-                count = int(getattr(trade, "adjustment_count", 0) or 0)
-            except (TypeError, ValueError):
-                count = 0
+
             if count < max_allowed:
                 return None
+
             logger.warning(
-                "MAX_ADJUSTMENTS_REACHED | trade_id=%s | adjustment_count=%s | "
-                "max_allowed=%s — exiting basket instead of adjusting",
-                getattr(trade, "id", "?"),
+                "[MAX_ADJUSTMENTS_REACHED] trade=%s | count=%s | max=%s | "
+                "triggered_leg=%s | net_mtm=%s",
+                trade_id,
                 count,
                 max_allowed,
+                triggered_leg,
+                round(float(net_for_decision), 4),
             )
-            try:
-                log_and_buffer(
-                    "MAX_ADJUSTMENTS_REACHED",
-                    int(getattr(trade, "id", 0) or 0),
-                    {
-                        "adjustment_count": count,
-                        "max_allowed": max_allowed,
-                        "triggered_leg": triggered_leg,
-                    },
-                )
-            except Exception:
-                pass
+            log_and_buffer(
+                "MAX_ADJUSTMENTS_REACHED",
+                trade_id,
+                {
+                    "count": count,
+                    "max": max_allowed,
+                    "triggered_leg": triggered_leg,
+                    "net_mtm": round(float(net_for_decision), 4),
+                },
+            )
             return TradeAction(
                 should_exit=True,
                 exit_reason="MAX_ADJUSTMENTS_REACHED",

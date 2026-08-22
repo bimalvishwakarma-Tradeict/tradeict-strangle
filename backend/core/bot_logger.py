@@ -140,6 +140,7 @@ _IMPORTANT_EVENTS = frozenset(
         "HEDGE_TARGET_HELD",
         "SL_FALSE_TRIGGER_BLOCKED",
         "MAX_ADJUSTMENTS_REACHED",
+        "ADJUSTMENT_LIMIT_UNSET",
         "MIRROR_PARTIAL_ADJ",
         "ADJUSTMENT_TARGET",
         "ADJUSTMENT_TARGET_PREMIUM",
@@ -304,6 +305,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_TARGET_FIRE",
         "SL_FALSE_TRIGGER_BLOCKED",
         "MAX_ADJUSTMENTS_REACHED",
+        "ADJUSTMENT_LIMIT_UNSET",
     ):
         bot_log.warning(msg)
     elif event_type in (

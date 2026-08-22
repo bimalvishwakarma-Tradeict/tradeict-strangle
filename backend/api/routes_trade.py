@@ -1832,11 +1832,7 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "adjustment_count": int(
                 getattr(state.trade, "adjustment_count", None) or adj_count or 0
             ),
-            "max_adjustments_per_basket": (
-                max_adjustments_per_basket
-                if not conversion_mode_enabled
-                else None
-            ),
+            "max_adjustments_per_basket": max_adjustments_per_basket,
             "adjustments_remaining": (
                 max(
                     0,
@@ -1847,10 +1843,7 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                         or 0
                     ),
                 )
-                if (
-                    not conversion_mode_enabled
-                    and max_adjustments_per_basket is not None
-                )
+                if max_adjustments_per_basket is not None
                 else None
             ),
             "conversion_mode_enabled": conversion_mode_enabled,

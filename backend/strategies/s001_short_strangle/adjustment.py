@@ -224,6 +224,41 @@ class AdjustmentExecutor:
                         error_message="Trade not found in DB",
                     )
 
+            # Safety gate before any orders — fresh DB count vs configured max.
+            try:
+                from backend.database import get_or_create_auto_settings
+
+                _adj_cfg = get_or_create_auto_settings(db_session)
+                _raw_max = getattr(_adj_cfg, "max_adjustments_per_basket", None)
+                if _raw_max is not None:
+                    _max_allowed = int(_raw_max)
+                    _fresh_count = (
+                        db_session.query(Trade.adjustment_count)
+                        .filter(Trade.id == trade_id_lookup)
+                        .scalar()
+                    )
+                    _count = int(_fresh_count or 0)
+                    if _count >= _max_allowed:
+                        logger.warning(
+                            "[MAX_ADJUSTMENTS_REACHED] execute blocked "
+                            "trade=%s | count=%s | max=%s",
+                            trade_id_lookup,
+                            _count,
+                            _max_allowed,
+                        )
+                        return AdjustmentResult(
+                            success=False,
+                            error_message=(
+                                f"max adjustments reached "
+                                f"({_count}/{_max_allowed})"
+                            ),
+                        )
+            except Exception as gate_exc:
+                logger.warning(
+                    "adjustment pre-execute limit check failed: %s",
+                    gate_exc,
+                )
+
             call_leg, put_leg = self._get_legs(trade, db_session)
             triggered_leg, other_leg = self._resolve_legs(
                 triggered_leg_type, call_leg, put_leg
@@ -1495,7 +1530,7 @@ class AdjustmentExecutor:
             )
             db_session.add(adjustment)
 
-            # Increment per-trade adjustment counter
+            # Increment per-trade adjustment counter (per basket, both legs).
             try:
                 prior_count = int(getattr(trade, "adjustment_count", 0) or 0)
             except (TypeError, ValueError):
@@ -1512,19 +1547,27 @@ class AdjustmentExecutor:
                     max_allowed = int(raw_max)
             except Exception:
                 max_allowed = None
+            remaining = (
+                max(0, int(max_allowed) - committed_adj_count)
+                if max_allowed is not None
+                else None
+            )
             log_and_buffer(
                 "ADJUSTMENT_COUNT_UPDATED",
                 int(trade.id),
                 {
                     "new_count": committed_adj_count,
                     "max_allowed": max_allowed,
+                    "remaining": remaining,
                 },
             )
             logger.info(
-                "ADJUSTMENT_COUNT_UPDATED | trade_id=%s | new_count=%s | max_allowed=%s",
+                "ADJUSTMENT_COUNT_UPDATED | trade_id=%s | new_count=%s | "
+                "max_allowed=%s | remaining=%s",
                 trade.id,
                 committed_adj_count,
                 max_allowed,
+                remaining,
             )
 
             # Capture scalars BEFORE commit — never rely on ORM attrs after

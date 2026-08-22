@@ -878,6 +878,25 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
     (row) => String(row.status || '').toLowerCase() === 'closed',
   )
 
+  const adjCount = Number(trade.adjustment_count ?? 0)
+  const adjMaxRaw = trade.max_adjustments_per_basket
+  const adjMax =
+    adjMaxRaw != null && adjMaxRaw !== '' && Number.isFinite(Number(adjMaxRaw))
+      ? Number(adjMaxRaw)
+      : null
+  const adjRemaining =
+    trade.adjustments_remaining != null && trade.adjustments_remaining !== ''
+      ? Number(trade.adjustments_remaining)
+      : adjMax != null
+        ? Math.max(0, adjMax - adjCount)
+        : null
+  const adjLimitReached = adjMax != null && adjCount >= adjMax
+  const adjLastSlot =
+    !adjLimitReached &&
+    adjRemaining != null &&
+    Number.isFinite(adjRemaining) &&
+    adjRemaining === 1
+
   return (
     <article className="overflow-hidden rounded-xl border border-gray-700 bg-gray-800 shadow-lg">
       {/* Header */}
@@ -887,6 +906,21 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
           {trade.open_leg_count === 1 && (
             <span className="ml-2 rounded bg-amber-900/60 px-2 py-0.5 text-xs font-normal text-amber-200">
               1 leg open
+            </span>
+          )}
+          {adjMax != null && (
+            <span
+              className={`ml-2 rounded px-2 py-0.5 text-xs font-normal ${
+                adjLimitReached
+                  ? 'bg-red-950/70 text-red-300'
+                  : adjLastSlot
+                    ? 'bg-amber-950/70 text-amber-300'
+                    : 'bg-gray-800 text-gray-400'
+              }`}
+              title="Per-basket adjustment limit (call + put combined)"
+            >
+              Adjustments {adjCount} / {adjMax}
+              {adjLimitReached ? ' · limit reached' : ''}
             </span>
           )}
         </div>

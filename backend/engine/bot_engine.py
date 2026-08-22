@@ -5065,8 +5065,12 @@ class BotEngine:
         max_adjustments_per_basket = None
         conversion_mode_enabled_flag = True
         spread_settings = None
+        fresh_adj_count = int(
+            getattr(trade_state.trade, "adjustment_count", 0) or 0
+        )
         with self.db_factory() as db:
             from backend.database import get_or_create_auto_settings
+            from backend.models import Trade as TradeRow
 
             try:
                 _cfg = get_or_create_auto_settings(db)
@@ -5104,6 +5108,15 @@ class BotEngine:
                 )
                 .all()
             )
+            trade_row = (
+                db.query(TradeRow)
+                .filter(TradeRow.id == int(trade_state.trade_id))
+                .first()
+            )
+            if trade_row is not None:
+                fresh_adj_count = int(
+                    getattr(trade_row, "adjustment_count", 0) or 0
+                )
             fees_paid = basket_fees_paid_from_legs(legs)
             btc = float(self._btc_spot or 0)
             for leg in legs:
@@ -5250,26 +5263,14 @@ class BotEngine:
             ),
             "conversion_equality_pct": conversion_equality_pct,
             "conversion_mode_enabled": conversion_mode_enabled_flag,
-            "adjustment_count": int(
-                getattr(trade_state.trade, "adjustment_count", 0) or 0
-            ),
-            "max_adjustments_per_basket": (
-                max_adjustments_per_basket
-                if not conversion_mode_enabled_flag
-                else None
-            ),
+            "adjustment_count": fresh_adj_count,
+            "max_adjustments_per_basket": max_adjustments_per_basket,
             "adjustments_remaining": (
                 max(
                     0,
-                    int(max_adjustments_per_basket)
-                    - int(
-                        getattr(trade_state.trade, "adjustment_count", 0) or 0
-                    ),
+                    int(max_adjustments_per_basket) - fresh_adj_count,
                 )
-                if (
-                    not conversion_mode_enabled_flag
-                    and max_adjustments_per_basket is not None
-                )
+                if max_adjustments_per_basket is not None
                 else None
             ),
         }
