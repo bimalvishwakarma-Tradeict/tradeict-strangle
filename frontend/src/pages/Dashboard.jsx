@@ -11,6 +11,7 @@ import {
   getHedgeStructures,
   getStructureLedger,
   getSlaveOverview,
+  closeSlaveStructure,
 } from '../services/api'
 import { formatNextEntryWait } from '../utils/nextEntryLabel'
 
@@ -235,6 +236,113 @@ function formatSignedMoney(v) {
   return `${sign}$${fmtMoney(n)}`
 }
 
+function ForceCloseSlaveAction({ slave, onComplete }) {
+  const [step, setStep] = useState(0)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [lastResult, setLastResult] = useState(null)
+
+  const structureClosed = Boolean(slave.structure_closed_at)
+  const canForceClose =
+    !structureClosed &&
+    (slave.active_slave_trade ||
+      slave.is_active ||
+      slave.connection_status === 'error')
+
+  const handleClick = async (e) => {
+    e.stopPropagation()
+    if (busy) return
+    if (step === 0) {
+      setError(null)
+      setStep(1)
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await closeSlaveStructure(slave.id, 'ADMIN_FORCE')
+      setLastResult(result)
+      setStep(0)
+      if (onComplete) await onComplete()
+    } catch (err) {
+      setError(err.message || 'Force close failed')
+      setStep(0)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleCancel = (e) => {
+    e.stopPropagation()
+    setStep(0)
+    setError(null)
+  }
+
+  if (structureClosed) {
+    return (
+      <div className="mt-2 rounded border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-[11px] text-gray-400">
+        Structure closed
+        {slave.structure_close_reason ? (
+          <span className="text-gray-300"> · {slave.structure_close_reason}</span>
+        ) : null}
+        {slave.structure_closed_at ? (
+          <span className="text-gray-500"> · {slave.structure_closed_at}</span>
+        ) : null}
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className="mt-2 space-y-1"
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
+      {step === 0 ? (
+        <button
+          type="button"
+          disabled={!canForceClose || busy}
+          onClick={handleClick}
+          className="rounded border border-red-700/60 bg-red-950/40 px-2 py-1 text-[11px] font-medium text-red-200 hover:bg-red-900/50 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Force close structure
+        </button>
+      ) : (
+        <div className="rounded border border-red-700/50 bg-red-950/30 px-2 py-2 text-[11px] text-red-100">
+          <p className="mb-2">
+            Close all baskets on <strong>{slave.name}</strong>, then the hedge?
+            This cannot be undone.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={handleClick}
+              className="rounded bg-red-700 px-2 py-1 font-medium text-white hover:bg-red-600 disabled:opacity-50"
+            >
+              {busy ? 'Closing…' : 'Yes, force close'}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={handleCancel}
+              className="rounded border border-gray-600 px-2 py-1 text-gray-300 hover:bg-gray-800"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {error ? (
+        <p className="text-[11px] text-red-400">{error}</p>
+      ) : null}
+      {lastResult?.already_closed ? (
+        <p className="text-[11px] text-gray-500">Already flat — no positions to close.</p>
+      ) : null}
+    </div>
+  )
+}
+
 function AccountOverviewRow({
   rowKey,
   role,
@@ -381,7 +489,7 @@ function AccountOverviewRow({
   )
 }
 
-function MultiAccountOverview({ overview }) {
+function MultiAccountOverview({ overview, onRefresh }) {
   const [expanded, setExpanded] = useState({})
 
   if (!overview?.has_slaves) return null
@@ -544,6 +652,16 @@ function MultiAccountOverview({ overview }) {
                 </span>
               )
 
+              const expandWithActions = (
+                <div className="space-y-0">
+                  {expand}
+                  <ForceCloseSlaveAction
+                    slave={slave}
+                    onComplete={onRefresh}
+                  />
+                </div>
+              )
+
               return (
                 <AccountOverviewRow
                   key={key}
@@ -575,7 +693,7 @@ function MultiAccountOverview({ overview }) {
                       : 'border-l-2 border-l-blue-500'
                   }
                   dimmed={!slave.is_active}
-                  expandContent={expand}
+                  expandContent={expandWithActions}
                 />
               )
             })}
@@ -1287,7 +1405,7 @@ export default function Dashboard() {
         onEnterNow={handleEnterNow}
       />
 
-      <MultiAccountOverview overview={slaveOverview} />
+      <MultiAccountOverview overview={slaveOverview} onRefresh={refreshSlaveOverview} />
 
       {!loading && activeHedge && (
         <HedgePanel

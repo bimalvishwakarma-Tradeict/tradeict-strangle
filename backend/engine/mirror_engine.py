@@ -29,6 +29,15 @@ _HEDGE_AFFORD_BUFFER = 1.15
 _CONTRACT_SIZE = float(OPTIONS_CONTRACT_VALUE)
 _HEDGE_VERIFY_PAUSE_SECONDS = 2.0
 
+# Earner/billing force-close — closes one slave structure on cancellation
+FORCE_CLOSE_REASONS = frozenset(
+    {
+        "SUBSCRIPTION_CANCELLED",
+        "API_DISCONNECTED",
+        "ADMIN_FORCE",
+    }
+)
+
 
 def is_virtual_slave_trade(
     slave: SlaveAccount | None,
@@ -156,8 +165,10 @@ class MirrorEngine:
         # Cascade passes HEDGE_STOPLOSS / HEDGE_TARGET / … from close_hedge
         from backend.engine.hedge_lifecycle import VALID_HEDGE_EXIT_REASONS
 
-        allowed = reason_norm in VALID_HEDGE_EXIT_REASONS or reason_norm.startswith(
-            "HEDGE_"
+        allowed = (
+            reason_norm in VALID_HEDGE_EXIT_REASONS
+            or reason_norm.startswith("HEDGE_")
+            or reason_norm in FORCE_CLOSE_REASONS
         )
         if allowed:
             return True
@@ -175,6 +186,13 @@ class MirrorEngine:
             },
         )
         return False
+
+    def _cascade_basket_exit_reason(self, reason: str) -> str:
+        """Basket exit reason: force-close uses plain reason; hedge cascade prefixes."""
+        reason_norm = str(reason or "").upper().strip()
+        if reason_norm in FORCE_CLOSE_REASONS:
+            return reason_norm
+        return f"HEDGE_CASCADE:{reason_norm}"
 
     def _get_slave_client(self, slave: SlaveAccount) -> DeltaClient:
         """Create DeltaClient for a slave account."""
@@ -3063,6 +3081,307 @@ class MirrorEngine:
             "blocked": blocked,
         }
 
+    async def force_close_slave_structure(
+        self,
+        *,
+        slave_id: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        """
+        Force-close ONE slave's structure (baskets → verify → hedge).
+
+        Used on subscription cancellation / API disconnect. Never touches
+        master or other slaves. Idempotent when already flat.
+        """
+        reason_norm = str(reason or "").upper().strip()
+        if reason_norm not in FORCE_CLOSE_REASONS:
+            raise ValueError(
+                f"Invalid force-close reason: {reason_norm or 'empty'}"
+            )
+
+        _ignore_trade_statuses = {
+            "skipped_low_capital",
+            "skipped_no_hedge",
+            "closed",
+        }
+        _alive_hedge_statuses = (
+            "active",
+            "partial",
+            "exit_failed",
+            "error",
+            "pending_close",
+        )
+
+        result: dict[str, Any] = {
+            "slave_id": int(slave_id),
+            "reason": reason_norm,
+            "baskets_found": 0,
+            "baskets_closed": 0,
+            "baskets_failed": 0,
+            "failed_baskets": [],
+            "hedge_closed": False,
+            "structures_closed": 0,
+            "already_closed": False,
+            "success": False,
+        }
+
+        with self.db_factory() as db:
+            slave = (
+                db.query(SlaveAccount)
+                .filter(SlaveAccount.id == int(slave_id))
+                .first()
+            )
+            if slave is None:
+                raise LookupError(f"Slave {slave_id} not found")
+
+            from backend.models import Structure
+
+            alive_hedges = (
+                db.query(SlaveHedgePosition)
+                .filter(
+                    SlaveHedgePosition.slave_account_id == int(slave_id),
+                    SlaveHedgePosition.status.in_(_alive_hedge_statuses),
+                )
+                .order_by(SlaveHedgePosition.id.asc())
+                .all()
+            )
+            open_trades = [
+                st
+                for st in db.query(SlaveTrade)
+                .filter(SlaveTrade.slave_account_id == int(slave_id))
+                .all()
+                if str(st.status or "").lower() not in _ignore_trade_statuses
+            ]
+            active_structures = (
+                db.query(Structure)
+                .filter(
+                    Structure.slave_account_id == int(slave_id),
+                    Structure.account_kind == "SLAVE",
+                    Structure.status == "active",
+                )
+                .all()
+            )
+
+            if not alive_hedges and not open_trades and not active_structures:
+                result["already_closed"] = True
+                result["success"] = True
+                if bool(slave.is_active):
+                    slave.is_active = False
+                    slave.updated_at = get_utc_now()
+                    db.commit()
+                earner_uid = getattr(slave, "earner_user_id", None)
+                logger.info(
+                    "[SLAVE_FORCE_CLOSE] slave=%s earner_user=%s reason=%s | "
+                    "baskets_closed=0 | hedge_closed=False | structures_closed=0 "
+                    "(already flat)",
+                    slave_id,
+                    earner_uid,
+                    reason_norm,
+                )
+                return result
+
+            async with self._get_slave_hedge_lock(int(slave_id)):
+                for sh in alive_hedges:
+                    master_hid = int(sh.master_hedge_id)
+                    master_trade_ids = [
+                        int(t.id)
+                        for t in db.query(Trade)
+                        .filter(Trade.hedge_position_id == master_hid)
+                        .order_by(Trade.id.asc())
+                        .all()
+                    ]
+                    cascade = await self._cascade_close_slave_hedge(
+                        slave=slave,
+                        slave_hedge=sh,
+                        db=db,
+                        master_hedge_id=master_hid,
+                        master_trade_ids=master_trade_ids,
+                        reason=reason_norm,
+                    )
+                    result["baskets_found"] += int(
+                        cascade.get("baskets_found") or 0
+                    )
+                    result["baskets_closed"] += int(
+                        cascade.get("baskets_closed") or 0
+                    )
+                    result["baskets_failed"] += int(
+                        cascade.get("baskets_failed") or 0
+                    )
+                    result["failed_baskets"].extend(
+                        list(cascade.get("failed_baskets") or [])
+                    )
+                    if cascade.get("hedge_closed"):
+                        result["hedge_closed"] = True
+
+                # Orphan baskets (no alive hedge row) — still must flat before done
+                if not alive_hedges and open_trades:
+                    result["baskets_found"] = len(open_trades)
+                    for st in open_trades:
+                        if str(st.status or "").lower() == "closed":
+                            result["baskets_closed"] += 1
+                            continue
+                        mid = int(st.master_trade_id)
+                        call_pid, put_pid = self._master_trade_call_put_pids(
+                            db, mid
+                        )
+                        try:
+                            await self._mirror_exit_to_slave(
+                                slave=slave,
+                                slave_trade=st,
+                                call_product_id=call_pid,
+                                put_product_id=put_pid,
+                                reason=reason_norm,
+                                db=db,
+                                hedge_product_id=None,
+                            )
+                        except Exception as exit_exc:
+                            logger.error(
+                                "[SLAVE_FORCE_CLOSE] slave=%s orphan basket "
+                                "master=%s exit raised: %s",
+                                slave_id,
+                                mid,
+                                exit_exc,
+                            )
+
+                    db.expire_all()
+                    orphan_ok = await self._verify_slave_baskets_flat(
+                        db=db,
+                        slave=slave,
+                        trades=open_trades,
+                    )
+                    if orphan_ok:
+                        result["baskets_closed"] = result["baskets_found"]
+                    else:
+                        result["baskets_failed"] = result["baskets_found"]
+                        result["failed_baskets"] = [
+                            int(st.master_trade_id) for st in open_trades
+                        ]
+
+            if int(result["baskets_failed"] or 0) > 0:
+                failed_ids = sorted(set(int(x) for x in result["failed_baskets"]))
+                result["failed_baskets"] = failed_ids
+                logger.critical(
+                    "[SLAVE_FORCE_CLOSE_BLOCKED] slave=%s failed_baskets=%s",
+                    slave_id,
+                    failed_ids,
+                )
+                log_and_buffer(
+                    "SLAVE_FORCE_CLOSE_BLOCKED",
+                    0,
+                    {
+                        "slave": int(slave_id),
+                        "failed_baskets": failed_ids,
+                        "reason": reason_norm,
+                    },
+                )
+                result["success"] = False
+                return result
+
+            # Close any stale active structure rows once positions are flat
+            db.expire_all()
+            still_active = (
+                db.query(Structure)
+                .filter(
+                    Structure.slave_account_id == int(slave_id),
+                    Structure.account_kind == "SLAVE",
+                    Structure.status == "active",
+                )
+                .all()
+            )
+            if still_active:
+                from backend.engine.structure_ledger import close_structure
+
+                close_ts = get_utc_now()
+                for struct in still_active:
+                    close_structure(
+                        db,
+                        struct,
+                        reason=reason_norm,
+                        closed_at=close_ts,
+                    )
+                    result["structures_closed"] += 1
+                db.flush()
+
+            slave.is_active = False
+            slave.updated_at = get_utc_now()
+            db.commit()
+
+            result["success"] = True
+            earner_uid = getattr(slave, "earner_user_id", None)
+            logger.info(
+                "[SLAVE_FORCE_CLOSE] slave=%s earner_user=%s reason=%s | "
+                "baskets_closed=%s | hedge_closed=%s | structures_closed=%s",
+                slave_id,
+                earner_uid,
+                reason_norm,
+                result["baskets_closed"],
+                result["hedge_closed"],
+                result["structures_closed"],
+            )
+            log_and_buffer(
+                "SLAVE_FORCE_CLOSE",
+                0,
+                {
+                    "slave": int(slave_id),
+                    "earner_user": earner_uid,
+                    "reason": reason_norm,
+                    "baskets_closed": result["baskets_closed"],
+                    "hedge_closed": bool(result["hedge_closed"]),
+                    "structures_closed": result["structures_closed"],
+                },
+            )
+            return result
+
+    async def _verify_slave_baskets_flat(
+        self,
+        *,
+        db: Any,
+        slave: SlaveAccount,
+        trades: list[SlaveTrade],
+    ) -> bool:
+        """Exchange-truth: no live shorts for the given slave basket rows."""
+        if not trades:
+            return True
+        if bool(getattr(slave, "is_virtual", False)):
+            return all(
+                str(st.status or "").lower() == "closed" for st in trades
+            )
+
+        client = self._get_slave_client(slave)
+        try:
+            try:
+                positions = await client.get_option_positions()
+            except Exception as pos_exc:
+                logger.error(
+                    "[SLAVE_FORCE_CLOSE] slave=%s positions fetch failed: %s",
+                    slave.id,
+                    pos_exc,
+                )
+                return False
+
+            live_shorts = [
+                int(p.get("product_id") or 0)
+                for p in positions
+                if float(p.get("size") or 0) < -1e-9
+            ]
+            if live_shorts:
+                return False
+
+            for st in trades:
+                mid = int(st.master_trade_id)
+                call_pid, put_pid = self._master_trade_call_put_pids(db, mid)
+                if call_pid or put_pid:
+                    flat, _rem = await self._verify_slave_products_flat(
+                        client, [call_pid, put_pid]
+                    )
+                    if not flat:
+                        return False
+                if str(st.status or "").lower() != "closed":
+                    return False
+            return True
+        finally:
+            await client.close()
+
     async def _cascade_close_slave_hedge(
         self,
         *,
@@ -3116,7 +3435,7 @@ class MirrorEngine:
                         slave_trade=st,
                         call_product_id=call_pid,
                         put_product_id=put_pid,
-                        reason=f"HEDGE_CASCADE:{reason}",
+                        reason=self._cascade_basket_exit_reason(reason),
                         db=db,
                         hedge_product_id=None,  # never touch structure hedge here
                     )

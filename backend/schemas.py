@@ -225,3 +225,16 @@ class SlaveAccountResponse(BaseModel):
     last_error: str | None = None
     active_trade_count: int = 0
 
+
+class SlaveForceCloseRequest(BaseModel):
+    reason: str = Field(
+        ...,
+        description=(
+            "SUBSCRIPTION_CANCELLED | API_DISCONNECTED | ADMIN_FORCE"
+        ),
+    )
+    earner_user_id: str | None = Field(
+        default=None,
+        description="Alternative lookup when bot slave_id is unknown",
+    )
+

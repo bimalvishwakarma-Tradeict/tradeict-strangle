@@ -444,6 +444,17 @@ export const getSlaveOverview = async () => {
   }
 }
 
+export const closeSlaveStructure = async (slaveId, reason = 'ADMIN_FORCE') => {
+  try {
+    const res = await api.post(`/api/slave/${slaveId}/close-structure`, {
+      reason,
+    })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to force-close slave structure'))
+  }
+}
+
 export const runBacktest = async (payload) => {
   try {
     const res = await api.post('/api/backtest/run', payload, {

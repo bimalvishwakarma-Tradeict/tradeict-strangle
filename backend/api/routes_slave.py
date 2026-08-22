@@ -12,11 +12,12 @@ from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt, encrypt
 from backend.core.time_utils import get_utc_now
 from backend.database import get_db, get_or_create_auto_settings, get_usd_inr_rate
-from backend.models import Account, SlaveAccount, SlaveTrade, Trade
+from backend.models import Account, SlaveAccount, SlaveTrade, Structure, Trade
 from backend.schemas import (
     SlaveAccountCreate,
     SlaveAccountResponse,
     SlaveAccountUpdate,
+    SlaveForceCloseRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,26 @@ def _active_trade_count(db: Session, slave_id: int) -> int:
         )
         .count()
     )
+
+
+def _latest_slave_structure_close(db: Session, slave_id: int) -> dict[str, Any]:
+    """Most recent closed SLAVE structure row for overview display."""
+    row = (
+        db.query(Structure)
+        .filter(
+            Structure.slave_account_id == int(slave_id),
+            Structure.account_kind == "SLAVE",
+            Structure.status == "closed",
+        )
+        .order_by(Structure.closed_at.desc(), Structure.id.desc())
+        .first()
+    )
+    if row is None:
+        return {"structure_close_reason": None, "structure_closed_at": None}
+    return {
+        "structure_close_reason": row.close_reason,
+        "structure_closed_at": _iso(row.closed_at),
+    }
 
 
 def _to_response(slave: SlaveAccount, db: Session, rate: float) -> dict[str, Any]:
@@ -335,6 +356,107 @@ async def toggle_slave_account(
         "id": slave.id,
         "is_active": slave.is_active,
         "message": f"Slave '{slave.name}' {msg}",
+    }
+
+
+@router.post("/{slave_id}/close-structure")
+async def close_slave_structure(
+    slave_id: int,
+    payload: SlaveForceCloseRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Force-close ONE slave's structure: baskets (verified) → hedge → ledger.
+
+    Accepts earner_user_id in the body when the caller does not know slave_id.
+    Idempotent when already flat. Does not touch master or other slaves.
+    """
+    from backend.engine.mirror_engine import FORCE_CLOSE_REASONS, mirror_engine
+
+    reason_norm = str(payload.reason or "").upper().strip()
+    if reason_norm not in FORCE_CLOSE_REASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Invalid reason '{payload.reason}'. "
+                f"Use one of: {', '.join(sorted(FORCE_CLOSE_REASONS))}"
+            ),
+        )
+
+    slave: SlaveAccount | None = None
+    if payload.earner_user_id:
+        slave = (
+            db.query(SlaveAccount)
+            .filter(SlaveAccount.earner_user_id == str(payload.earner_user_id))
+            .first()
+        )
+    elif int(slave_id) > 0:
+        slave = (
+            db.query(SlaveAccount)
+            .filter(SlaveAccount.id == int(slave_id))
+            .first()
+        )
+    if slave is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Slave account not found (check slave_id or earner_user_id)",
+        )
+
+    if mirror_engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Mirror engine not initialized",
+        )
+
+    try:
+        outcome = await mirror_engine.force_close_slave_structure(
+            slave_id=int(slave.id),
+            reason=reason_norm,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.critical(
+            "force_close_slave_structure failed slave=%s: %s",
+            slave.id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Force close failed — see server logs",
+        ) from exc
+
+    db.expire(slave)
+    db.refresh(slave)
+
+    if not outcome.get("success"):
+        failed = outcome.get("failed_baskets") or []
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "Basket close failed — hedge not closed to avoid "
+                    "naked short strangle"
+                ),
+                "slave_id": int(slave.id),
+                "failed_baskets": failed,
+            },
+        )
+
+    return {
+        "success": True,
+        "slave_id": int(slave.id),
+        "earner_user_id": getattr(slave, "earner_user_id", None),
+        "reason": reason_norm,
+        "already_closed": bool(outcome.get("already_closed")),
+        "baskets_found": int(outcome.get("baskets_found") or 0),
+        "baskets_closed": int(outcome.get("baskets_closed") or 0),
+        "hedge_closed": bool(outcome.get("hedge_closed")),
+        "structures_closed": int(outcome.get("structures_closed") or 0),
+        "is_active": bool(slave.is_active),
     }
 
 
@@ -991,6 +1113,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "last_error": slave.last_error,
                 "last_connected_at": _iso(slave.last_connected_at),
                 "active_slave_trade": slave_trade_data,
+                **_latest_slave_structure_close(db, int(slave.id)),
             }
         )
 
