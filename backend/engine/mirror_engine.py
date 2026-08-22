@@ -1076,6 +1076,8 @@ class MirrorEngine:
                 master_put_strike,
                 slave_qty,
             )
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             virt_basket_open_ts = get_utc_now()
             virt_call_fill = float(master_call_fill or 0)
             virt_put_fill = float(master_put_fill or 0)
@@ -1278,6 +1280,8 @@ class MirrorEngine:
                     put_sl_limit = None  # type: ignore[assignment]
 
             # Place call order on slave (bracket SL attached)
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             call_open_ts = get_utc_now()
             call_order = await client.place_order(
                 product_id=int(call_product_id),
@@ -1317,6 +1321,8 @@ class MirrorEngine:
             )
 
             # Place put order on slave (bracket SL attached)
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             put_open_ts = get_utc_now()
             put_order = await client.place_order(
                 product_id=int(put_product_id),
@@ -2193,6 +2199,9 @@ class MirrorEngine:
                 continue
             if abs(signed) <= 1e-9:
                 signed = -abs(float(item.get("quantity") or 1))
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
+            unwind_closed_at = get_utc_now()
             ok, _order, err = await self._close_with_reduce_only(
                 client=client,
                 slave=slave,
@@ -2205,7 +2214,7 @@ class MirrorEngine:
             out["unwound"] = bool(ok)
             out["unwind_error"] = err if not ok else ""
             if ok:
-                out["closed_at"] = get_utc_now()
+                out["closed_at"] = unwind_closed_at
                 out["close_reason"] = "PARTIAL_UNWIND"
             log_and_buffer(
                 "SLAVE_PARTIAL_ENTRY",
@@ -2259,6 +2268,8 @@ class MirrorEngine:
                 )
                 if st:
                     leg = str(triggered_leg_type).lower()
+                    # Captured BEFORE any order — this is an attribution window bound.
+                    # See e3e6b7d: a post-fill timestamp silently drops the fill.
                     virt_adj_close_ts = get_utc_now()
                     try:
                         from backend.engine.structure_ledger import (
@@ -2375,8 +2386,12 @@ class MirrorEngine:
                     slave.name,
                     old_pid,
                 )
+                # Captured BEFORE any order — this is an attribution window bound.
+                # See e3e6b7d: a post-fill timestamp silently drops the fill.
                 old_leg_closed_ts = get_utc_now()
             else:
+                # Captured BEFORE any order — this is an attribution window bound.
+                # See e3e6b7d: a post-fill timestamp silently drops the fill.
                 old_leg_closed_ts = get_utc_now()
                 close_size = max(1, abs(int(live_size)))
                 is_long = float(live_size) > 0
@@ -2498,6 +2513,8 @@ class MirrorEngine:
                     slave.name,
                 )
 
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             new_leg_open_ts = get_utc_now()
             new_order = await client.place_order(
                 product_id=new_pid,
@@ -3015,6 +3032,8 @@ class MirrorEngine:
             hedge_live_before = self._position_size_for_product(
                 live_positions, hedge_pid
             )
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             hedge_open_ts = get_utc_now()
             hedge_order = await client.place_order(
                 product_id=hedge_pid,
@@ -3071,6 +3090,8 @@ class MirrorEngine:
             # --- 2) Close old other short (reduce_only + live size) ---
             old_live_now = self._position_size_for_product(post_hedge, old_pid)
             if old_live_now is None or abs(float(old_live_now)) <= 1e-9:
+                # Captured BEFORE any order — this is an attribution window bound.
+                # See e3e6b7d: a post-fill timestamp silently drops the fill.
                 old_close_ts = get_utc_now()
                 old_close_fill_ts = old_close_ts
                 log_and_buffer(
@@ -3110,6 +3131,8 @@ class MirrorEngine:
                             fill_at=old_close_fill_ts,
                         )
             else:
+                # Captured BEFORE any order — this is an attribution window bound.
+                # See e3e6b7d: a post-fill timestamp silently drops the fill.
                 old_close_ts = get_utc_now()
                 ok_close, _ord, close_err = await self._close_with_reduce_only(
                     client=client,
@@ -3183,6 +3206,8 @@ class MirrorEngine:
                 )
             pre_new = await client.get_option_positions()
             new_live_before = self._position_size_for_product(pre_new, new_pid)
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             new_open_ts = get_utc_now()
             new_order = await client.place_order(
                 product_id=new_pid,
@@ -3679,6 +3704,8 @@ class MirrorEngine:
 
         # Virtual: DB only
         if bool(getattr(slave, "is_virtual", False)):
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             virt_hedge_open_ts = get_utc_now()
             cost_usd = (
                 (master_call_fill + master_put_fill)
@@ -3790,6 +3817,8 @@ class MirrorEngine:
         put_order_id: str | None = None
         try:
             # --- BUY CALL ---
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             call_open_ts = get_utc_now()
             call_result = await executor.buy_option(
                 product_id=int(call_pid),
@@ -3860,6 +3889,8 @@ class MirrorEngine:
             )
 
             # --- BUY PUT ---
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             put_open_ts = get_utc_now()
             put_result = await executor.buy_option(
                 product_id=int(put_pid),
@@ -4349,6 +4380,9 @@ class MirrorEngine:
                 )
                 return result
 
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
+            force_close_batch_ts = get_utc_now()
             async with self._slave_op_lock(
                 int(slave_id), "force_close_slave_structure"
             ) as acquired:
@@ -4466,13 +4500,12 @@ class MirrorEngine:
             if still_active:
                 from backend.engine.structure_ledger import close_structure
 
-                close_ts = get_utc_now()
                 for struct in still_active:
                     close_structure(
                         db,
                         struct,
                         reason=reason_norm,
-                        closed_at=close_ts,
+                        closed_at=force_close_batch_ts,
                     )
                     result["structures_closed"] += 1
                 db.flush()
@@ -4844,6 +4877,8 @@ class MirrorEngine:
             sh.realized_pnl = 0.0
             sh.status = "closed"
             sh.exit_reason = reason
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             virt_hedge_close_ts = get_utc_now()
             sh.exit_time = virt_hedge_close_ts
             sh.last_error = None
@@ -4878,6 +4913,10 @@ class MirrorEngine:
         put_close_ts: Any = None
         call_close_fill_ts: Any = None
         put_close_fill_ts: Any = None
+        # Captured BEFORE any order — this is an attribution window bound.
+        # See e3e6b7d: a post-fill timestamp silently drops the fill.
+        # Used for already-flat legs and structure_closed_at (shared batch).
+        hedge_close_batch_ts = get_utc_now()
         try:
             for leg, pid, sym in (
                 ("call", call_pid, call_symbol),
@@ -4894,7 +4933,14 @@ class MirrorEngine:
                         leg,
                         pid,
                     )
+                    # No fill of ours — shared batch bound ends the window
+                    if leg == "call":
+                        call_close_ts = hedge_close_batch_ts
+                    else:
+                        put_close_ts = hedge_close_batch_ts
                     continue
+                # Captured BEFORE any order — this is an attribution window bound.
+                # See e3e6b7d: a post-fill timestamp silently drops the fill.
                 close_ts = get_utc_now()
                 try:
                     order = await client.close_position(
@@ -5018,12 +5064,17 @@ class MirrorEngine:
                     6,
                 )
 
+            if call_close_ts is None:
+                call_close_ts = hedge_close_batch_ts
+            if put_close_ts is None:
+                put_close_ts = hedge_close_batch_ts
+
             sh.call_exit_price = call_exit if call_exit > 0 else None
             sh.put_exit_price = put_exit if put_exit > 0 else None
             sh.realized_pnl = realized
             sh.status = "closed"
             sh.exit_reason = reason
-            sh.exit_time = get_utc_now()
+            sh.exit_time = hedge_close_batch_ts
             sh.last_error = None
             try:
                 from backend.engine.structure_ledger import record_slave_hedge_close
@@ -5035,7 +5086,7 @@ class MirrorEngine:
                     reason=str(reason or ""),
                     call_closed_at=call_close_ts,
                     put_closed_at=put_close_ts,
-                    structure_closed_at=sh.exit_time,
+                    structure_closed_at=hedge_close_batch_ts,
                     call_fill_at=call_close_fill_ts,
                     put_fill_at=put_close_fill_ts,
                 )
@@ -5154,6 +5205,8 @@ class MirrorEngine:
                 return
 
             # Long hedge → signed size > 0; reduce_only sells live size
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             closed_at = get_utc_now()
             ok, _ord, err = await self._close_with_reduce_only(
                 client=client,
@@ -5606,6 +5659,8 @@ class MirrorEngine:
             db.commit()
 
         if is_virtual_slave_trade(slave, slave_trade):
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             closed_at = get_utc_now()
             ledger = self._write_slave_product_leg_close_ledger(
                 db,
@@ -5690,7 +5745,8 @@ class MirrorEngine:
             live_size = self._position_size_for_product(
                 live_positions, target_pid
             )
-            # Timestamp BEFORE close order (or before treating as already flat)
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             closed_at = get_utc_now()
 
             if live_size is None or abs(float(live_size)) <= 1e-9:
@@ -5986,6 +6042,8 @@ class MirrorEngine:
                     .first()
                 )
                 if st:
+                    # Captured BEFORE any order — this is an attribution window bound.
+                    # See e3e6b7d: a post-fill timestamp silently drops the fill.
                     virt_basket_close_ts = get_utc_now()
                     self._close_slave_trade(
                         slave,
@@ -5999,7 +6057,7 @@ class MirrorEngine:
                     st.put_exit_price = float(st.put_fill_price or 0) or None
                     st.call_exit_fee_usd = 0.0
                     st.put_exit_fee_usd = 0.0
-                    st.exit_time = get_utc_now()
+                    st.exit_time = virt_basket_close_ts
                     st.exit_reason = str(reason or "")[:50]
                     self._apply_slave_realized_pnl(st)
                     st.last_updated = get_utc_now()
@@ -6259,8 +6317,9 @@ class MirrorEngine:
                 or put_product_id
                 or 0
             )
-            # Capture BEFORE any close orders — used for already-flat legs
-            # (bracket SL / prior partial) so ledger windows always end.
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
+            # Used for already-flat legs so ledger windows always end.
             exit_batch_ts = get_utc_now()
             for pos in targets:
                 pid = int(pos.get("product_id") or 0)
@@ -6304,6 +6363,8 @@ class MirrorEngine:
                         if fb == "buy"
                         else abs(float(stored_qty))
                     )
+                # Captured BEFORE any order — this is an attribution window bound.
+                # See e3e6b7d: a post-fill timestamp silently drops the fill.
                 close_ts = get_utc_now()
                 ok, close_order, err = await self._close_with_reduce_only(
                     client=client,
@@ -7495,6 +7556,8 @@ class MirrorEngine:
 
             if not live_nonzero:
                 # Already flat on exchange — still end attribution windows
+                # Captured BEFORE any order — this is an attribution window bound.
+                # See e3e6b7d: a post-fill timestamp silently drops the fill.
                 exit_batch_ts = get_utc_now()
                 call_pid_hint = int(
                     getattr(slave_trade, "call_product_id", 0) or 0
@@ -7559,6 +7622,8 @@ class MirrorEngine:
                 return "close_failed"
 
             # Attempt real closes via shared reduce_only helper
+            # Captured BEFORE any order — this is an attribution window bound.
+            # See e3e6b7d: a post-fill timestamp silently drops the fill.
             exit_batch_ts = get_utc_now()
             closed_pids: dict[int, Any] = {}
             for pos in live_nonzero:
@@ -7566,6 +7631,8 @@ class MirrorEngine:
                 size = float(pos.get("size") or 0)
                 if pid <= 0 or abs(size) <= 1e-9:
                     continue
+                # Captured BEFORE any order — this is an attribution window bound.
+                # See e3e6b7d: a post-fill timestamp silently drops the fill.
                 closed_at = get_utc_now()
                 ok, _order, err = await self._close_with_reduce_only(
                     client=client,
