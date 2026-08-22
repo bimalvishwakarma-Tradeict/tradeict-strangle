@@ -129,6 +129,69 @@ class MirrorEngine:
             .first()
         )
 
+    def _assert_hedge_before_basket(
+        self,
+        db: Any,
+        slave_id: int,
+        master_hedge_id: int | None,
+    ) -> tuple[bool, str]:
+        """
+        Hard invariant: never open a short basket without a live slave hedge.
+
+        Returns (ok, reason) where reason is no_master_hedge | no_slave_hedge | ok.
+        """
+        if master_hedge_id is None:
+            return False, "no_master_hedge"
+        alive = self._get_alive_slave_hedge(
+            db,
+            slave_id=int(slave_id),
+            master_hedge_id=int(master_hedge_id),
+        )
+        if alive is None:
+            return False, "no_slave_hedge"
+        return True, "ok"
+
+    def _skip_basket_no_hedge(
+        self,
+        db: Any,
+        *,
+        slave: SlaveAccount,
+        master_trade_id: int,
+        master_hedge_id: int | None,
+        reason: str,
+    ) -> None:
+        """Persist skipped_no_hedge row + SLAVE_NO_HEDGE audit log."""
+        log_and_buffer(
+            "SLAVE_NO_HEDGE",
+            int(master_trade_id),
+            {
+                "slave": int(slave.id),
+                "master_trade": int(master_trade_id),
+                "master_hedge": master_hedge_id,
+                "reason": str(reason),
+                "note": "basket_entry_skipped",
+            },
+        )
+        logger.warning(
+            "[SLAVE_NO_HEDGE] slave=%s master_trade=%s reason=%s "
+            "basket_entry_skipped",
+            slave.id,
+            master_trade_id,
+            reason,
+        )
+        skip_trade = SlaveTrade(
+            slave_account_id=int(slave.id),
+            master_trade_id=int(master_trade_id),
+            actual_quantity=0,
+            status="skipped_no_hedge",
+            last_error=(
+                f"{reason} master_hedge={master_hedge_id}"
+            )[:500],
+            error_count=0,
+        )
+        db.add(skip_trade)
+        db.commit()
+
     def _structure_hedge_pids_for_slave(
         self, db: Any, slave_id: int
     ) -> set[int]:
@@ -773,47 +836,22 @@ class MirrorEngine:
         master_bracket_sl_call: float | None = None,
         master_bracket_sl_put: float | None = None,
     ) -> None:
-        # --- No naked baskets: require alive slave hedge under master hedge ---
+        # --- No naked baskets: require live slave hedge under master hedge ---
         master_hedge_id = self._resolve_master_hedge_id_for_trade(
             db, int(master_trade_id)
         )
-        if master_hedge_id is not None:
-            alive_hedge = self._get_alive_slave_hedge(
+        ok_hedge, hedge_reason = self._assert_hedge_before_basket(
+            db, int(slave.id), master_hedge_id
+        )
+        if not ok_hedge:
+            self._skip_basket_no_hedge(
                 db,
-                slave_id=int(slave.id),
-                master_hedge_id=int(master_hedge_id),
+                slave=slave,
+                master_trade_id=int(master_trade_id),
+                master_hedge_id=master_hedge_id,
+                reason=hedge_reason,
             )
-            if alive_hedge is None:
-                logger.info(
-                    "[SLAVE_ENTRY_BLOCK] slave=%s | guard=no_slave_hedge | "
-                    "master_hedge=%s | master_trade=%s",
-                    slave.id,
-                    master_hedge_id,
-                    master_trade_id,
-                )
-                log_and_buffer(
-                    "SLAVE_ENTRY_BLOCK",
-                    int(master_trade_id),
-                    {
-                        "slave": int(slave.id),
-                        "guard": "no_slave_hedge",
-                        "master_hedge": int(master_hedge_id),
-                        "master_trade": int(master_trade_id),
-                    },
-                )
-                skip_trade = SlaveTrade(
-                    slave_account_id=int(slave.id),
-                    master_trade_id=int(master_trade_id),
-                    actual_quantity=0,
-                    status="skipped_no_hedge",
-                    last_error=(
-                        f"no_slave_hedge master_hedge={master_hedge_id}"
-                    )[:500],
-                    error_count=0,
-                )
-                db.add(skip_trade)
-                db.commit()
-                return
+            return
 
         # Fetch master + fresh slave capital for capital-based qty calculation
         master_margin_used: float | None = None
@@ -1961,6 +1999,11 @@ class MirrorEngine:
                 return
             hid = getattr(master_row, "hedge_position_id", None)
             if hid is None:
+                logger.error(
+                    "[LEDGER_MISS] slave=%s reason=no_hedge_position_id -- "
+                    "basket entry NOT recorded",
+                    slave_account_id,
+                )
                 return
             struct = get_active_structure(
                 db,
@@ -1969,6 +2012,11 @@ class MirrorEngine:
                 slave_account_id=int(slave_account_id),
             )
             if struct is None:
+                logger.error(
+                    "[LEDGER_MISS] slave=%s reason=no_active_structure -- "
+                    "basket entry NOT recorded",
+                    slave_account_id,
+                )
                 return
             basket_seq = getattr(master_row, "basket_seq_in_structure", None)
             bs = int(basket_seq) if basket_seq is not None else None

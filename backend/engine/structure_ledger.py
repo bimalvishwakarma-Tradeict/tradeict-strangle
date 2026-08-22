@@ -688,6 +688,11 @@ def record_slave_basket_entry(
     try:
         hid = getattr(master_trade, "hedge_position_id", None)
         if hid is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s reason=no_hedge_position_id -- "
+                "basket entry NOT recorded",
+                slave_account_id,
+            )
             return
         struct = get_active_structure(
             db,
@@ -696,6 +701,11 @@ def record_slave_basket_entry(
             slave_account_id=int(slave_account_id),
         )
         if struct is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s reason=no_active_structure -- "
+                "basket entry NOT recorded",
+                slave_account_id,
+            )
             return
         basket_seq = getattr(master_trade, "basket_seq_in_structure", None)
         call_pid = int(getattr(slave_trade, "call_product_id", 0) or 0)

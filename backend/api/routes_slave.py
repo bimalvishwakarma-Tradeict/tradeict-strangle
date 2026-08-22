@@ -468,9 +468,12 @@ async def copy_master_trade_to_slave(
     """
     One-click: place the master's current open strangle on this slave.
 
-    Uses bracket SL attached to entry orders (auto-cancels on close).
+    Delegates to MirrorEngine._mirror_entry_to_slave so the same hedge
+    guard, unwind, product_id fill, and structure-ledger recording apply
+    as automatic mirror entry (Accounts UI still calls this endpoint).
     """
     from backend.engine.bot_engine import bot_engine
+    from backend.engine import mirror_engine as mirror_module
 
     slave = db.query(SlaveAccount).filter(SlaveAccount.id == slave_id).first()
     if slave is None:
@@ -478,6 +481,13 @@ async def copy_master_trade_to_slave(
 
     if not slave.is_active:
         raise HTTPException(status_code=400, detail="Slave account is paused")
+
+    me = mirror_module.mirror_engine
+    if me is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Mirror engine not initialized",
+        )
 
     active_states = bot_engine.position_tracker.get_all_active()
     if not active_states:
@@ -504,128 +514,54 @@ async def copy_master_trade_to_slave(
     call_leg = state.call_leg
     put_leg = state.put_leg
     if call_leg is None or put_leg is None:
-        return {"success": False, "message": "Master trade missing open call/put legs"}
+        return {
+            "success": False,
+            "message": "Master trade missing open call/put legs",
+        }
+
+    # Hedge invariant — fail fast with clear message before any order
+    master_hedge_id = me._resolve_master_hedge_id_for_trade(
+        db, int(master_trade_id)
+    )
+    ok_hedge, hedge_reason = me._assert_hedge_before_basket(
+        db, int(slave.id), master_hedge_id
+    )
+    if not ok_hedge:
+        me._skip_basket_no_hedge(
+            db,
+            slave=slave,
+            master_trade_id=int(master_trade_id),
+            master_hedge_id=master_hedge_id,
+            reason=hedge_reason,
+        )
+        return {
+            "success": False,
+            "message": (
+                f"Basket entry skipped: {hedge_reason} "
+                "(short basket requires a live hedge)"
+            ),
+            "status": "skipped_no_hedge",
+            "reason": hedge_reason,
+        }
 
     master_qty = max(1, int(getattr(call_leg, "quantity", 1) or 1))
-    mult = float(slave.qty_multiplier or 1.0)
-
-    # Live-balance-aware sizing (same rules as mirror_engine)
-    from backend.config import MAX_SLAVE_QTY
-    from backend.engine.mirror_engine import MirrorEngine
-
-    me = MirrorEngine()
-    live_available = 0.0
-    master_margin_used = None
-    master_total_capital = None
-    if not bool(getattr(slave, "is_virtual", False)):
-        try:
-            bal_client = DeltaClient(
-                decrypt(slave.api_key_encrypted),
-                decrypt(slave.api_secret_encrypted),
-            )
-            try:
-                wallet = await bal_client.get_wallet_balance()
-                live_available = float(
-                    wallet.get("available_balance", 0) or 0
-                )
-                slave.balance_usd = float(
-                    wallet.get("balance_usdt", 0) or 0
-                )
-            finally:
-                await bal_client.close()
-        except Exception as bal_exc:
-            logger.warning(
-                "Copy-trade balance fetch failed slave=%s: %s",
-                slave.name,
-                bal_exc,
-            )
-            live_available = float(getattr(slave, "balance_usd", 0) or 0)
-
-    if bool(getattr(slave, "capital_based_qty", False)):
-        try:
-            from backend.models import Account
-
-            master_acc = (
-                db.query(Account)
-                .filter(Account.is_active.is_(True))
-                .order_by(Account.id.asc())
-                .first()
-            )
-            if master_acc:
-                mclient = DeltaClient(
-                    decrypt(master_acc.api_key_encrypted),
-                    decrypt(master_acc.api_secret_encrypted),
-                )
-                try:
-                    mw = await mclient.get_wallet_balance()
-                    master_total_capital = float(
-                        mw.get("balance_usdt", 0) or 0
-                    )
-                    master_available = float(
-                        mw.get("available_balance", 0) or 0
-                    )
-                    master_margin_used = max(
-                        0.0, master_total_capital - master_available
-                    )
-                finally:
-                    await mclient.close()
-        except Exception as m_exc:
-            logger.warning("Copy-trade master capital fetch failed: %s", m_exc)
-
-    slave_qty = me._calc_qty(
-        master_qty,
-        mult,
-        slave=slave,
-        master_margin_used_usd=master_margin_used,
-        master_total_capital_usd=master_total_capital,
-        slave_available_usd=live_available,
-    )
-    if not bool(getattr(slave, "is_virtual", False)) and slave_qty > 0:
-        slave_qty = me._fit_qty_to_margin(
-            slave_qty,
-            live_balance=live_available,
-            master_margin_used_usd=master_margin_used,
-            master_qty=master_qty,
-            call_fill=float(getattr(call_leg, "initial_premium", 0) or 0),
-            put_fill=float(getattr(put_leg, "initial_premium", 0) or 0),
-        )
-    if slave_qty < 1:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"skipped_low_capital: live=${live_available:.2f} "
-                f"(MAX_SLAVE_QTY={MAX_SLAVE_QTY})"
-            ),
-        )
-
     uni_sl = float(getattr(state.trade, "universal_sl_pct", None) or 200.0)
-    # Prefer master's stored absolute stop; else compute from master fill.
     from backend.core.delta_sl import compute_bracket_sl
 
     call_sl = getattr(call_leg, "sl_trigger_price", None)
     put_sl = getattr(put_leg, "sl_trigger_price", None)
     if call_sl is None or float(call_sl) <= 0:
-        call_base = float(
-            getattr(call_leg, "initial_premium", 0) or 0
-        )
+        call_base = float(getattr(call_leg, "initial_premium", 0) or 0)
         call_sl, _ = compute_bracket_sl(
-            call_base,
-            uni_sl,
-            leg="call",
-            trade_id=int(master_trade_id),
+            call_base, uni_sl, leg="call", trade_id=int(master_trade_id)
         )
         call_sl = call_sl if call_sl > 0 else None
     else:
         call_sl = round(float(call_sl), 2)
     if put_sl is None or float(put_sl) <= 0:
-        put_base = float(
-            getattr(put_leg, "initial_premium", 0) or 0
-        )
+        put_base = float(getattr(put_leg, "initial_premium", 0) or 0)
         put_sl, _ = compute_bracket_sl(
-            put_base,
-            uni_sl,
-            leg="put",
-            trade_id=int(master_trade_id),
+            put_base, uni_sl, leg="put", trade_id=int(master_trade_id)
         )
         put_sl = put_sl if put_sl > 0 else None
     else:
@@ -634,123 +570,98 @@ async def copy_master_trade_to_slave(
     underlying = str(getattr(state.trade, "underlying", "") or "")
     call_symbol = str(getattr(call_leg, "symbol", "") or "")
     put_symbol = str(getattr(put_leg, "symbol", "") or "")
+    expiry = getattr(state.trade, "expiry_date", None)
+    call_fill = float(getattr(call_leg, "initial_premium", 0) or 0)
+    put_fill = float(getattr(put_leg, "initial_premium", 0) or 0)
 
-    client = DeltaClient(
-        decrypt(slave.api_key_encrypted),
-        decrypt(slave.api_secret_encrypted),
-    )
-    call_order_id: str | None = None
     try:
-        # Bracket SL confirmed working on Delta Exchange India
-        # Format: bracket_stop_loss_price + bracket_stop_loss_limit_price
-        call_order = await client.place_order(
-            product_id=int(call_leg.product_id),
-            size=slave_qty,
-            side="sell",
-            bracket_stop_loss_price=call_sl,
-            bracket_stop_loss_limit_price=(
-                round(call_sl * 1.05, 2) if call_sl else None
+        await me._mirror_entry_to_slave(
+            slave=slave,
+            master_trade_id=int(master_trade_id),
+            call_product_id=int(call_leg.product_id),
+            put_product_id=int(put_leg.product_id),
+            master_call_qty=master_qty,
+            master_put_qty=max(
+                1, int(getattr(put_leg, "quantity", master_qty) or master_qty)
+            ),
+            master_call_strike=float(getattr(call_leg, "strike", 0) or 0),
+            master_put_strike=float(getattr(put_leg, "strike", 0) or 0),
+            master_call_symbol=call_symbol,
+            master_put_symbol=put_symbol,
+            master_call_fill=call_fill,
+            master_put_fill=put_fill,
+            expiry_date=expiry,
+            underlying=underlying,
+            db=db,
+            master_bracket_sl_call=(
+                float(call_sl) if call_sl is not None else None
+            ),
+            master_bracket_sl_put=(
+                float(put_sl) if put_sl is not None else None
             ),
         )
-        call_fill = float(
-            await client.resolve_fill_price(
-                call_order, symbol_for_fallback=call_symbol or None
-            )
-            or 0.0
-        )
-        if call_fill <= 0:
-            call_fill = float(getattr(call_leg, "initial_premium", 0) or 0)
-        call_order_id = str(
-            call_order.get("order_id") or call_order.get("id") or ""
-        ) or None
-
-        put_order = await client.place_order(
-            product_id=int(put_leg.product_id),
-            size=slave_qty,
-            side="sell",
-            bracket_stop_loss_price=put_sl,
-            bracket_stop_loss_limit_price=(
-                round(put_sl * 1.05, 2) if put_sl else None
-            ),
-        )
-        put_fill = float(
-            await client.resolve_fill_price(
-                put_order, symbol_for_fallback=put_symbol or None
-            )
-            or 0.0
-        )
-        if put_fill <= 0:
-            put_fill = float(getattr(put_leg, "initial_premium", 0) or 0)
-        put_order_id = str(
-            put_order.get("order_id") or put_order.get("id") or ""
-        ) or None
-
-        slave_trade = SlaveTrade(
-            slave_account_id=int(slave.id),
-            master_trade_id=master_trade_id,
-            call_order_id=call_order_id,
-            put_order_id=put_order_id,
-            call_sl_order_id=None,
-            put_sl_order_id=None,
-            actual_quantity=slave_qty,
-            call_fill_price=call_fill,
-            put_fill_price=put_fill,
-            status="active",
-        )
-        db.add(slave_trade)
-
-        slave.connection_status = "connected"
-        slave.last_connected_at = get_utc_now()
-        slave.last_error = None
-        slave.updated_at = get_utc_now()
-        db.commit()
-
-        logger.info(
-            "✅ Master trade #%s copied to slave '%s': qty=%s "
-            "call_fill=%s put_fill=%s",
-            master_trade_id,
-            slave.name,
-            slave_qty,
-            call_fill,
-            put_fill,
-        )
-
-        return {
-            "success": True,
-            "message": f"Trade #{master_trade_id} copied to {slave.name}",
-            "slave_qty": slave_qty,
-            "call_fill": call_fill,
-            "put_fill": put_fill,
-            "call_order_id": call_order_id,
-            "put_order_id": put_order_id,
-            "master_trade_id": master_trade_id,
-            "underlying": underlying,
-        }
-
-    except HTTPException:
-        raise
     except Exception as exc:
         logger.error(
-            "Copy trade to slave failed slave=%s master=%s call_order=%s: %s",
+            "Copy trade to slave failed slave=%s master=%s: %s",
             slave.name,
             master_trade_id,
-            call_order_id,
             exc,
             exc_info=True,
         )
-        slave.last_error = str(exc)[:500]
-        slave.connection_status = "error"
-        slave.updated_at = get_utc_now()
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
         raise HTTPException(
             status_code=502,
             detail=f"Failed to copy trade: {exc}",
         ) from exc
-    finally:
-        await client.close()
+
+    db.expire_all()
+    st = (
+        db.query(SlaveTrade)
+        .filter(
+            SlaveTrade.slave_account_id == int(slave.id),
+            SlaveTrade.master_trade_id == int(master_trade_id),
+        )
+        .order_by(SlaveTrade.id.desc())
+        .first()
+    )
+    if st is None:
+        return {
+            "success": False,
+            "message": "Copy finished but no SlaveTrade row was created",
+        }
+    st_status = str(st.status or "")
+    if st_status == "active":
+        logger.info(
+            "Master trade #%s copied to slave '%s' via mirror_entry "
+            "qty=%s call=%s put=%s",
+            master_trade_id,
+            slave.name,
+            st.actual_quantity,
+            st.call_product_id,
+            st.put_product_id,
+        )
+        return {
+            "success": True,
+            "message": f"Trade #{master_trade_id} copied to {slave.name}",
+            "slave_qty": int(st.actual_quantity or 0),
+            "call_fill": float(st.call_fill_price or 0),
+            "put_fill": float(st.put_fill_price or 0),
+            "call_order_id": st.call_order_id,
+            "put_order_id": st.put_order_id,
+            "call_product_id": st.call_product_id,
+            "put_product_id": st.put_product_id,
+            "master_trade_id": master_trade_id,
+            "underlying": underlying,
+            "status": st_status,
+        }
+    return {
+        "success": False,
+        "message": (
+            st.last_error
+            or f"Copy finished with status={st_status}"
+        ),
+        "status": st_status,
+        "master_trade_id": master_trade_id,
+    }
 
 
 @router.get("/accounts/{slave_id}/trades")
