@@ -2365,6 +2365,9 @@ class MirrorEngine:
             # --- b/c. Close old leg with reduce_only using LIVE size ---
             old_leg_closed_ts = None
             old_leg_close_fill_ts = None
+            new_leg_open_ts = None
+            new_leg_fill_ts = None
+            new_order_id: str | None = None
             if live_size is None or live_size == 0:
                 logger.info(
                     "[MIRROR_ADJ_SKIP] slave='%s' already_flat "
@@ -2431,8 +2434,47 @@ class MirrorEngine:
                     slave_trade.last_updated = get_utc_now()
                     slave.connection_status = "error"
                     slave.last_error = msg[:500]
+                    log_and_buffer(
+                        "SLAVE_ADJ_LEDGER",
+                        int(slave_trade.master_trade_id or 0),
+                        {
+                            "slave": int(slave.id),
+                            "old_pid": old_pid,
+                            "old_closed": "no",
+                            "new_pid": new_pid,
+                            "new_opened": "no",
+                            "outcome": "error",
+                        },
+                    )
                     db.commit()
                     return
+
+            # Old leg flat on exchange — close ledger window NOW (before new open)
+            from backend.engine.structure_ledger import (
+                record_slave_adjustment_close,
+                record_slave_adjustment_open,
+                set_structure_attribution_warning,
+            )
+            from backend.models import Trade as MasterTrade
+
+            master_row = (
+                db.query(MasterTrade)
+                .filter(
+                    MasterTrade.id == int(slave_trade.master_trade_id or 0)
+                )
+                .first()
+            )
+            old_closed_ok = record_slave_adjustment_close(
+                db,
+                slave_account_id=int(slave.id),
+                master_trade=master_row,
+                triggered_leg=leg,
+                reason="ADJUSTMENT",
+                old_leg_closed_at=old_leg_closed_ts,
+                old_leg_fill_at=old_leg_close_fill_ts,
+                old_product_id=old_pid,
+            )
+            db.commit()
 
             # Close size for new entry: prefer live abs size, else stored
             entry_qty = (
@@ -2529,6 +2571,22 @@ class MirrorEngine:
                     slave.name,
                     msg,
                 )
+                logger.error(
+                    "[LEDGER_MISS] slave=%s structure=active "
+                    "old_pid=%s new_pid=%s reason=partial_adjustment -- "
+                    "old closed, new missing",
+                    slave.id,
+                    old_pid,
+                    new_pid,
+                )
+                set_structure_attribution_warning(
+                    db,
+                    slave_account_id=int(slave.id),
+                    master_trade=master_row,
+                    warning=(
+                        "partial_adjustment: old leg closed, new leg missing"
+                    ),
+                )
                 slave_trade.status = "partial_adjustment"
                 slave_trade.last_error = msg[:500]
                 slave_trade.error_count = (
@@ -2551,49 +2609,41 @@ class MirrorEngine:
                         slave_trade.put_fill_price = new_fill
                 slave.connection_status = "error"
                 slave.last_error = msg[:500]
+                log_and_buffer(
+                    "SLAVE_ADJ_LEDGER",
+                    int(slave_trade.master_trade_id or 0),
+                    {
+                        "slave": int(slave.id),
+                        "old_pid": old_pid,
+                        "old_closed": "yes" if old_closed_ok else "no",
+                        "new_pid": new_pid,
+                        "new_opened": "no",
+                        "outcome": "partial",
+                    },
+                )
                 db.commit()
                 return
+
+            # New leg confirmed live — open ledger window
+            new_opened_ok = record_slave_adjustment_open(
+                db,
+                slave_trade=slave_trade,
+                slave_account_id=int(slave.id),
+                master_trade=master_row,
+                triggered_leg=leg,
+                new_product_id=new_pid,
+                new_symbol=str(new_symbol or ""),
+                new_strike=float(new_strike or 0),
+                new_order_id=new_order_id or None,
+                reason="ADJUSTMENT",
+                new_leg_opened_at=new_leg_open_ts,
+                new_leg_fill_at=new_leg_fill_ts,
+                quantity=entry_qty,
+            )
 
             if leg == "call":
                 slave_trade.call_order_id = new_order_id or None
                 slave_trade.call_sl_order_id = None
-                # Ledger BEFORE product_id update so open window uses prior role row
-                try:
-                    from backend.engine.structure_ledger import (
-                        record_slave_adjustment,
-                    )
-                    from backend.models import Trade as MasterTrade
-
-                    master_row = (
-                        db.query(MasterTrade)
-                        .filter(
-                            MasterTrade.id
-                            == int(slave_trade.master_trade_id or 0)
-                        )
-                        .first()
-                    )
-                    record_slave_adjustment(
-                        db,
-                        slave_trade=slave_trade,
-                        slave_account_id=int(slave.id),
-                        master_trade=master_row,
-                        triggered_leg=leg,
-                        new_product_id=new_pid,
-                        new_symbol=str(new_symbol or ""),
-                        new_strike=float(new_strike or 0),
-                        new_order_id=new_order_id or None,
-                        reason="ADJUSTMENT",
-                        old_leg_closed_at=old_leg_closed_ts,
-                        new_leg_opened_at=new_leg_open_ts,
-                        old_leg_fill_at=old_leg_close_fill_ts,
-                        new_leg_fill_at=new_leg_fill_ts,
-                    )
-                except Exception as ledger_exc:
-                    logger.error(
-                        "structure ledger slave adjustment failed: %s",
-                        ledger_exc,
-                        exc_info=True,
-                    )
                 slave_trade.call_product_id = new_pid
                 slave_trade.call_symbol = str(new_symbol or "")
                 slave_trade.call_strike = float(new_strike or 0)
@@ -2602,42 +2652,6 @@ class MirrorEngine:
             else:
                 slave_trade.put_order_id = new_order_id or None
                 slave_trade.put_sl_order_id = None
-                try:
-                    from backend.engine.structure_ledger import (
-                        record_slave_adjustment,
-                    )
-                    from backend.models import Trade as MasterTrade
-
-                    master_row = (
-                        db.query(MasterTrade)
-                        .filter(
-                            MasterTrade.id
-                            == int(slave_trade.master_trade_id or 0)
-                        )
-                        .first()
-                    )
-                    record_slave_adjustment(
-                        db,
-                        slave_trade=slave_trade,
-                        slave_account_id=int(slave.id),
-                        master_trade=master_row,
-                        triggered_leg=leg,
-                        new_product_id=new_pid,
-                        new_symbol=str(new_symbol or ""),
-                        new_strike=float(new_strike or 0),
-                        new_order_id=new_order_id or None,
-                        reason="ADJUSTMENT",
-                        old_leg_closed_at=old_leg_closed_ts,
-                        new_leg_opened_at=new_leg_open_ts,
-                        old_leg_fill_at=old_leg_close_fill_ts,
-                        new_leg_fill_at=new_leg_fill_ts,
-                    )
-                except Exception as ledger_exc:
-                    logger.error(
-                        "structure ledger slave adjustment failed: %s",
-                        ledger_exc,
-                        exc_info=True,
-                    )
                 slave_trade.put_product_id = new_pid
                 slave_trade.put_symbol = str(new_symbol or "")
                 slave_trade.put_strike = float(new_strike or 0)
@@ -2652,6 +2666,18 @@ class MirrorEngine:
             slave.last_error = None
             slave.connection_status = "connected"
             slave.last_connected_at = get_utc_now()
+            log_and_buffer(
+                "SLAVE_ADJ_LEDGER",
+                int(slave_trade.master_trade_id or 0),
+                {
+                    "slave": int(slave.id),
+                    "old_pid": old_pid,
+                    "old_closed": "yes" if old_closed_ok else "no",
+                    "new_pid": new_pid,
+                    "new_opened": "yes" if new_opened_ok else "no",
+                    "outcome": "ok",
+                },
+            )
             db.commit()
             logger.info(
                 "✅ Slave '%s' adjustment mirrored (atomic verify OK)",
@@ -2669,8 +2695,90 @@ class MirrorEngine:
                 db.rollback()
             except Exception:
                 pass
-            # Prefer partial if we likely closed old but failed before verify
+            # Record what actually happened on the exchange (RULE 9)
             try:
+                from backend.engine.structure_ledger import (
+                    record_slave_adjustment_close,
+                    record_slave_adjustment_open,
+                    set_structure_attribution_warning,
+                )
+                from backend.models import Trade as MasterTrade
+
+                master_row = (
+                    db.query(MasterTrade)
+                    .filter(
+                        MasterTrade.id
+                        == int(slave_trade.master_trade_id or 0)
+                    )
+                    .first()
+                )
+                try:
+                    exc_positions = await client.get_option_positions()
+                except Exception:
+                    exc_positions = []
+                old_live_exc = self._position_size_for_product(
+                    exc_positions, old_pid
+                )
+                new_live_exc = self._position_size_for_product(
+                    exc_positions, new_pid
+                )
+                old_flat = (
+                    old_live_exc is None
+                    or abs(float(old_live_exc)) <= 1e-9
+                )
+                new_live_short = (
+                    new_live_exc is not None
+                    and float(new_live_exc) < -1e-9
+                )
+                # Old flat → close window (idempotent if already closed)
+                if old_flat:
+                    close_ts = (
+                        old_leg_closed_ts
+                        if old_leg_closed_ts is not None
+                        else get_utc_now()
+                    )
+                    old_closed_exc = record_slave_adjustment_close(
+                        db,
+                        slave_account_id=int(slave.id),
+                        master_trade=master_row,
+                        triggered_leg=leg,
+                        reason="ADJUSTMENT",
+                        old_leg_closed_at=close_ts,
+                        old_leg_fill_at=old_leg_close_fill_ts,
+                        old_product_id=old_pid,
+                    )
+                # New short live → open window
+                if new_live_short:
+                    open_ts = (
+                        new_leg_open_ts
+                        if new_leg_open_ts is not None
+                        else get_utc_now()
+                    )
+                    new_opened_exc = record_slave_adjustment_open(
+                        db,
+                        slave_trade=slave_trade,
+                        slave_account_id=int(slave.id),
+                        master_trade=master_row,
+                        triggered_leg=leg,
+                        new_product_id=new_pid,
+                        new_symbol=str(new_symbol or ""),
+                        new_strike=float(new_strike or 0),
+                        new_order_id=new_order_id,
+                        reason="ADJUSTMENT",
+                        new_leg_opened_at=open_ts,
+                        new_leg_fill_at=new_leg_fill_ts,
+                        quantity=stored_qty,
+                    )
+                if old_flat and not new_live_short:
+                    set_structure_attribution_warning(
+                        db,
+                        slave_account_id=int(slave.id),
+                        master_trade=master_row,
+                        warning=(
+                            "partial_adjustment: old leg closed, "
+                            "new leg missing"
+                        ),
+                    )
                 slave_trade.status = "partial_adjustment"
                 slave_trade.last_error = (
                     f"partial_adjustment: exception during adjust: {exc}"
@@ -2681,6 +2789,18 @@ class MirrorEngine:
                 slave_trade.last_updated = get_utc_now()
                 slave.connection_status = "error"
                 slave.last_error = str(exc)[:500]
+                log_and_buffer(
+                    "SLAVE_ADJ_LEDGER",
+                    int(slave_trade.master_trade_id or 0),
+                    {
+                        "slave": int(slave.id),
+                        "old_pid": old_pid,
+                        "old_closed": "yes" if old_flat else "no",
+                        "new_pid": new_pid,
+                        "new_opened": "yes" if new_live_short else "no",
+                        "outcome": "error",
+                    },
+                )
                 db.commit()
             except Exception:
                 try:

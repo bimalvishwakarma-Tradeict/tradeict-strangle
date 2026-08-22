@@ -1019,6 +1019,220 @@ def record_master_adjustment(
         )
 
 
+def record_slave_adjustment_close(
+    db: Session,
+    *,
+    slave_account_id: int,
+    master_trade: Any | None,
+    triggered_leg: str,
+    reason: str = "ADJUSTMENT",
+    old_leg_closed_at: Any,
+    old_leg_fill_at: Any = None,
+    old_product_id: int | None = None,
+) -> bool:
+    """
+    Close the open basket leg window for the triggered side.
+
+    Call as soon as the old product is confirmed flat on the exchange —
+    do not wait for the replacement leg. Returns True if a row was closed.
+    """
+    try:
+        if master_trade is None:
+            return False
+        if old_leg_closed_at is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s reason=no_closed_at -- "
+                "adjustment old leg window NOT closed",
+                slave_account_id,
+            )
+            return False
+        hid = getattr(master_trade, "hedge_position_id", None)
+        if hid is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s reason=no_hedge_position_id -- "
+                "adjustment old close NOT recorded",
+                slave_account_id,
+            )
+            return False
+        struct = get_active_structure(
+            db,
+            hedge_position_id=int(hid),
+            account_kind=KIND_SLAVE,
+            slave_account_id=int(slave_account_id),
+        )
+        if struct is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s reason=no_active_structure -- "
+                "adjustment old close NOT recorded",
+                slave_account_id,
+            )
+            return False
+        basket_seq = getattr(master_trade, "basket_seq_in_structure", None)
+        bs = int(basket_seq) if basket_seq is not None else None
+        leg = str(triggered_leg or "").lower()
+        role = ROLE_BASKET_CALL if leg == "call" else ROLE_BASKET_PUT
+        old_pid = int(old_product_id or 0)
+        open_row = None
+        if old_pid > 0:
+            open_row = find_open_leg(
+                db,
+                structure_id=int(struct.id),
+                leg_role=role,
+                basket_seq=bs,
+                product_id=old_pid,
+            )
+        if open_row is None:
+            open_row = find_open_leg(
+                db,
+                structure_id=int(struct.id),
+                leg_role=role,
+                basket_seq=bs,
+            )
+        if open_row is None:
+            return False
+        close_leg(
+            db,
+            open_row,
+            reason=reason,
+            closed_at=old_leg_closed_at,
+            structure=struct,
+            fill_at=old_leg_fill_at,
+        )
+        db.flush()
+        return True
+    except Exception as exc:
+        logger.error(
+            "structure ledger slave adjustment close failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return False
+
+
+def record_slave_adjustment_open(
+    db: Session,
+    *,
+    slave_trade: Any,
+    slave_account_id: int,
+    master_trade: Any | None,
+    triggered_leg: str,
+    new_product_id: int,
+    new_symbol: str,
+    new_strike: float,
+    new_order_id: str | None,
+    reason: str = "ADJUSTMENT",
+    new_leg_opened_at: Any,
+    new_leg_fill_at: Any = None,
+    quantity: int | None = None,
+) -> bool:
+    """
+    Open a new basket leg window after the replacement short is confirmed
+    live on the exchange. Returns True if a row was opened.
+    """
+    try:
+        if master_trade is None:
+            return False
+        if new_leg_opened_at is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s reason=no_opened_at -- "
+                "adjustment new leg NOT recorded",
+                slave_account_id,
+            )
+            return False
+        hid = getattr(master_trade, "hedge_position_id", None)
+        if hid is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s reason=no_hedge_position_id -- "
+                "adjustment new open NOT recorded",
+                slave_account_id,
+            )
+            return False
+        struct = get_active_structure(
+            db,
+            hedge_position_id=int(hid),
+            account_kind=KIND_SLAVE,
+            slave_account_id=int(slave_account_id),
+        )
+        if struct is None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s reason=no_active_structure -- "
+                "adjustment new open NOT recorded",
+                slave_account_id,
+            )
+            return False
+        basket_seq = getattr(master_trade, "basket_seq_in_structure", None)
+        bs = int(basket_seq) if basket_seq is not None else None
+        leg = str(triggered_leg or "").lower()
+        role = ROLE_BASKET_CALL if leg == "call" else ROLE_BASKET_PUT
+        adj = _next_adj_seq(
+            db,
+            structure_id=int(struct.id),
+            leg_role=role,
+            basket_seq=bs,
+        )
+        qty = (
+            abs(int(quantity))
+            if quantity is not None
+            else abs(int(getattr(slave_trade, "actual_quantity", 1) or 1))
+        )
+        open_leg(
+            db,
+            structure=struct,
+            leg_role=role,
+            product_id=int(new_product_id),
+            side="SELL",
+            quantity=qty,
+            symbol=new_symbol,
+            strike=float(new_strike) if new_strike is not None else None,
+            basket_seq=bs,
+            adj_seq=adj,
+            entry_order_id=new_order_id,
+            opened_at=new_leg_opened_at,
+            fill_at=new_leg_fill_at,
+        )
+        db.flush()
+        return True
+    except Exception as exc:
+        logger.error(
+            "structure ledger slave adjustment open failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return False
+
+
+def set_structure_attribution_warning(
+    db: Session,
+    *,
+    slave_account_id: int,
+    master_trade: Any | None,
+    warning: str,
+) -> None:
+    """Set structures.attribution_warning when adjustment is only half-done."""
+    try:
+        if master_trade is None:
+            return
+        hid = getattr(master_trade, "hedge_position_id", None)
+        if hid is None:
+            return
+        struct = get_active_structure(
+            db,
+            hedge_position_id=int(hid),
+            account_kind=KIND_SLAVE,
+            slave_account_id=int(slave_account_id),
+        )
+        if struct is None:
+            return
+        struct.attribution_warning = str(warning or "")[:2000]
+        db.flush()
+    except Exception as exc:
+        logger.error(
+            "structure attribution_warning update failed: %s",
+            exc,
+            exc_info=True,
+        )
+
+
 def record_slave_adjustment(
     db: Session,
     *,
@@ -1035,65 +1249,30 @@ def record_slave_adjustment(
     new_leg_opened_at: Any,
     old_leg_fill_at: Any = None,
     new_leg_fill_at: Any = None,
+    old_product_id: int | None = None,
 ) -> None:
-    try:
-        if master_trade is None:
-            return
-        hid = getattr(master_trade, "hedge_position_id", None)
-        if hid is None:
-            return
-        struct = get_active_structure(
-            db,
-            hedge_position_id=int(hid),
-            account_kind=KIND_SLAVE,
-            slave_account_id=int(slave_account_id),
-        )
-        if struct is None:
-            return
-        basket_seq = getattr(master_trade, "basket_seq_in_structure", None)
-        leg = str(triggered_leg or "").lower()
-        role = ROLE_BASKET_CALL if leg == "call" else ROLE_BASKET_PUT
-        open_row = find_open_leg(
-            db,
-            structure_id=int(struct.id),
-            leg_role=role,
-            basket_seq=int(basket_seq) if basket_seq is not None else None,
-        )
-        if open_row is not None:
-            close_leg(
-                db,
-                open_row,
-                reason=reason,
-                closed_at=old_leg_closed_at,
-                structure=struct,
-                fill_at=old_leg_fill_at,
-            )
-        adj = _next_adj_seq(
-            db,
-            structure_id=int(struct.id),
-            leg_role=role,
-            basket_seq=int(basket_seq) if basket_seq is not None else None,
-        )
-        qty = abs(int(getattr(slave_trade, "actual_quantity", 1) or 1))
-        open_leg(
-            db,
-            structure=struct,
-            leg_role=role,
-            product_id=int(new_product_id),
-            side="SELL",
-            quantity=qty,
-            symbol=new_symbol,
-            strike=float(new_strike) if new_strike is not None else None,
-            basket_seq=int(basket_seq) if basket_seq is not None else None,
-            adj_seq=adj,
-            entry_order_id=new_order_id,
-            opened_at=new_leg_opened_at,
-            fill_at=new_leg_fill_at,
-        )
-        db.flush()
-    except Exception as exc:
-        logger.error(
-            "structure ledger slave adjustment failed: %s",
-            exc,
-            exc_info=True,
-        )
+    """Close old + open new (convenience for virtual / full-success paths)."""
+    record_slave_adjustment_close(
+        db,
+        slave_account_id=slave_account_id,
+        master_trade=master_trade,
+        triggered_leg=triggered_leg,
+        reason=reason,
+        old_leg_closed_at=old_leg_closed_at,
+        old_leg_fill_at=old_leg_fill_at,
+        old_product_id=old_product_id,
+    )
+    record_slave_adjustment_open(
+        db,
+        slave_trade=slave_trade,
+        slave_account_id=slave_account_id,
+        master_trade=master_trade,
+        triggered_leg=triggered_leg,
+        new_product_id=new_product_id,
+        new_symbol=new_symbol,
+        new_strike=new_strike,
+        new_order_id=new_order_id,
+        reason=reason,
+        new_leg_opened_at=new_leg_opened_at,
+        new_leg_fill_at=new_leg_fill_at,
+    )
