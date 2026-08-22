@@ -1282,24 +1282,129 @@ class MirrorEngine:
                     exc,
                 )
 
-            if call_verified and put_verified:
+            # Live sizes — verify can miss; also drives partial unwind size
+            call_live_size: float | None = None
+            put_live_size: float | None = None
+            try:
+                live_positions = await client.get_option_positions()
+                call_live_size = self._position_size_for_product(
+                    live_positions, int(call_product_id)
+                )
+                put_live_size = self._position_size_for_product(
+                    live_positions, int(put_product_id)
+                )
+            except Exception as pos_exc:
+                logger.warning(
+                    "Slave '%s' post-entry positions fetch failed: %s",
+                    slave.name,
+                    pos_exc,
+                )
+
+            call_on_exchange = call_verified or (
+                call_live_size is not None and abs(float(call_live_size)) > 1e-9
+            )
+            put_on_exchange = put_verified or (
+                put_live_size is not None and abs(float(put_live_size)) > 1e-9
+            )
+
+            ledger_legs: list[dict[str, Any]] = []
+            status = "error"
+            last_error: str | None = None
+            err_count = 1
+
+            if call_on_exchange and put_on_exchange:
                 status = "active"
                 last_error = None
                 err_count = 0
                 logger.info(
                     "Slave '%s' both positions verified", slave.name
                 )
-            elif call_verified or put_verified:
-                status = "error"
-                last_error = (
-                    f"Partial fill: call={call_verified} put={put_verified}"
-                )[:500]
-                err_count = 1
+            elif call_on_exchange or put_on_exchange:
+                # Partial — unwind whatever landed (never leave naked short)
+                to_unwind: list[dict[str, Any]] = []
+                if call_on_exchange:
+                    signed = (
+                        float(call_live_size)
+                        if call_live_size is not None
+                        and abs(float(call_live_size)) > 1e-9
+                        else -float(slave_qty)
+                    )
+                    to_unwind.append(
+                        {
+                            "leg": "call",
+                            "product_id": int(call_product_id),
+                            "signed_size": signed,
+                            "opened_at": call_open_ts,
+                            "fill_at": call_fill_ts,
+                            "order_id": call_order_id,
+                            "symbol": str(master_call_symbol or ""),
+                            "strike": float(master_call_strike or 0),
+                            "quantity": int(slave_qty),
+                        }
+                    )
+                if put_on_exchange:
+                    signed = (
+                        float(put_live_size)
+                        if put_live_size is not None
+                        and abs(float(put_live_size)) > 1e-9
+                        else -float(slave_qty)
+                    )
+                    to_unwind.append(
+                        {
+                            "leg": "put",
+                            "product_id": int(put_product_id),
+                            "signed_size": signed,
+                            "opened_at": put_open_ts,
+                            "fill_at": put_fill_ts,
+                            "order_id": put_order_id,
+                            "symbol": str(master_put_symbol or ""),
+                            "strike": float(master_put_strike or 0),
+                            "quantity": int(slave_qty),
+                        }
+                    )
+                unwound_legs = await self._unwind_slave_entry_legs(
+                    client=client,
+                    slave=slave,
+                    master_trade_id=int(master_trade_id),
+                    legs_to_unwind=to_unwind,
+                )
+                ledger_legs = unwound_legs
+                all_unwound = all(bool(x.get("unwound")) for x in unwound_legs)
+                if all_unwound:
+                    status = "error"
+                    parts = [
+                        (
+                            f"{x['leg']} product={x['product_id']} "
+                            f"unwound"
+                        )
+                        for x in unwound_legs
+                    ]
+                    last_error = (
+                        "Partial fill closed: " + "; ".join(parts)
+                    )[:500]
+                else:
+                    status = "partial_entry_open"
+                    naked = [
+                        x for x in unwound_legs if not x.get("unwound")
+                    ]
+                    parts = [
+                        (
+                            f"NAKED {x['leg']} product_id={x['product_id']} "
+                            f"size={x.get('signed_size')} still OPEN"
+                        )
+                        for x in naked
+                    ]
+                    last_error = (
+                        "Partial entry — customer has naked leg(s): "
+                        + "; ".join(parts)
+                    )[:500]
                 logger.error(
-                    "Slave '%s' PARTIAL position: call=%s put=%s",
+                    "Slave '%s' PARTIAL position: call=%s put=%s "
+                    "status=%s",
                     slave.name,
-                    call_verified,
-                    put_verified,
+                    call_on_exchange,
+                    put_on_exchange,
+                    status,
                 )
             else:
                 status = "error"
@@ -1363,8 +1468,9 @@ class MirrorEngine:
             slave.updated_at = get_utc_now()
             db.commit()
 
-            if status == "active":
-                try:
+            # Ledger: always record legs that actually filled (not gated on active)
+            try:
+                if status == "active":
                     from backend.engine.structure_ledger import (
                         record_slave_basket_entry,
                     )
@@ -1387,12 +1493,21 @@ class MirrorEngine:
                             put_fill_at=put_fill_ts,
                         )
                         db.commit()
-                except Exception as ledger_exc:
-                    logger.error(
-                        "structure ledger slave basket entry failed: %s",
-                        ledger_exc,
-                        exc_info=True,
+                elif ledger_legs:
+                    await self._ledger_slave_basket_legs(
+                        db,
+                        slave_account_id=int(slave.id),
+                        master_trade_id=int(master_trade_id),
+                        slave_trade=slave_trade,
+                        legs=ledger_legs,
                     )
+                    db.commit()
+            except Exception as ledger_exc:
+                logger.error(
+                    "structure ledger slave basket entry failed: %s",
+                    ledger_exc,
+                    exc_info=True,
+                )
 
             self._log_slave_trade_detail(
                 slave_id=int(slave.id),
@@ -1420,22 +1535,125 @@ class MirrorEngine:
                 exc,
                 exc_info=True,
             )
+            # Call may already be filled when put place_order raises — unwind live
+            exception_ledger_legs: list[dict[str, Any]] = []
+            unwind_status = "error"
+            unwind_error = str(exc)[:500]
+            try:
+                positions = await client.get_option_positions()
+            except Exception:
+                positions = []
+            to_unwind_exc: list[dict[str, Any]] = []
+            call_pid_i = int(call_product_id)
+            put_pid_i = int(put_product_id)
+            if "call_open_ts" in locals() or "call_order" in locals():
+                clive = self._position_size_for_product(positions, call_pid_i)
+                if clive is not None and abs(float(clive)) > 1e-9:
+                    to_unwind_exc.append(
+                        {
+                            "leg": "call",
+                            "product_id": call_pid_i,
+                            "signed_size": float(clive),
+                            "opened_at": locals().get("call_open_ts")
+                            or get_utc_now(),
+                            "fill_at": locals().get("call_fill_ts"),
+                            "order_id": locals().get("call_order_id"),
+                            "symbol": str(master_call_symbol or ""),
+                            "strike": float(master_call_strike or 0),
+                            "quantity": int(slave_qty),
+                        }
+                    )
+            if "put_open_ts" in locals() or "put_order" in locals():
+                plive = self._position_size_for_product(positions, put_pid_i)
+                if plive is not None and abs(float(plive)) > 1e-9:
+                    to_unwind_exc.append(
+                        {
+                            "leg": "put",
+                            "product_id": put_pid_i,
+                            "signed_size": float(plive),
+                            "opened_at": locals().get("put_open_ts")
+                            or get_utc_now(),
+                            "fill_at": locals().get("put_fill_ts"),
+                            "order_id": locals().get("put_order_id"),
+                            "symbol": str(master_put_symbol or ""),
+                            "strike": float(master_put_strike or 0),
+                            "quantity": int(slave_qty),
+                        }
+                    )
+            if to_unwind_exc:
+                try:
+                    exception_ledger_legs = await self._unwind_slave_entry_legs(
+                        client=client,
+                        slave=slave,
+                        master_trade_id=int(master_trade_id),
+                        legs_to_unwind=to_unwind_exc,
+                    )
+                    if all(
+                        bool(x.get("unwound")) for x in exception_ledger_legs
+                    ):
+                        unwind_status = "error"
+                        unwind_error = (
+                            f"Entry exception after fill — unwound: {exc}"
+                        )[:500]
+                    else:
+                        unwind_status = "partial_entry_open"
+                        naked = [
+                            x
+                            for x in exception_ledger_legs
+                            if not x.get("unwound")
+                        ]
+                        parts = [
+                            (
+                                f"NAKED {x['leg']} product_id={x['product_id']} "
+                                f"size={x.get('signed_size')} still OPEN"
+                            )
+                            for x in naked
+                        ]
+                        unwind_error = (
+                            f"Entry exception — naked leg(s) remain: "
+                            f"{'; '.join(parts)} | {exc}"
+                        )[:500]
+                except Exception as uw_exc:
+                    unwind_status = "partial_entry_open"
+                    unwind_error = (
+                        f"Entry exception + unwind failed: {exc} / {uw_exc}"
+                    )[:500]
+
             try:
                 db.rollback()
             except Exception:
                 pass
             slave.connection_status = "error"
-            slave.last_error = str(exc)[:500]
+            slave.last_error = unwind_error
             slave.updated_at = get_utc_now()
             failed_trade = SlaveTrade(
                 slave_account_id=int(slave.id),
                 master_trade_id=int(master_trade_id),
                 actual_quantity=slave_qty,
-                status="error",
-                last_error=str(exc)[:500],
+                call_product_id=int(call_product_id),
+                put_product_id=int(put_product_id),
+                call_symbol=str(master_call_symbol or ""),
+                put_symbol=str(master_put_symbol or ""),
+                call_strike=float(master_call_strike or 0),
+                put_strike=float(master_put_strike or 0),
+                call_order_id=locals().get("call_order_id") or None,
+                put_order_id=locals().get("put_order_id") or None,
+                call_fill_price=locals().get("call_fill"),
+                put_fill_price=locals().get("put_fill"),
+                status=unwind_status,
+                last_error=unwind_error,
                 error_count=1,
             )
             db.add(failed_trade)
+            db.flush()
+            if exception_ledger_legs:
+                await self._ledger_slave_basket_legs(
+                    db,
+                    slave_account_id=int(slave.id),
+                    master_trade_id=int(master_trade_id),
+                    slave_trade=failed_trade,
+                    legs=exception_ledger_legs,
+                )
             db.commit()
 
         finally:
@@ -1702,6 +1920,179 @@ class MirrorEngine:
                 await asyncio.sleep(float(backoff_seconds))
 
         return False, None, last_err or "close_failed"
+
+    async def _ledger_slave_basket_legs(
+        self,
+        db: Any,
+        *,
+        slave_account_id: int,
+        master_trade_id: int,
+        slave_trade: SlaveTrade,
+        legs: list[dict[str, Any]],
+    ) -> None:
+        """
+        Record StructureLeg rows for legs that actually filled.
+
+        Each item in ``legs``:
+          leg: "call"|"put"
+          opened_at, fill_at, product_id, order_id, symbol, strike, quantity
+          closed_at: optional — set when unwound
+          close_reason: optional
+        """
+        if not legs:
+            return
+        try:
+            from backend.engine.structure_ledger import (
+                KIND_SLAVE,
+                ROLE_BASKET_CALL,
+                ROLE_BASKET_PUT,
+                close_leg,
+                get_active_structure,
+                open_leg,
+            )
+            from backend.models import Trade as MasterTrade
+
+            master_row = (
+                db.query(MasterTrade)
+                .filter(MasterTrade.id == int(master_trade_id))
+                .first()
+            )
+            if master_row is None:
+                return
+            hid = getattr(master_row, "hedge_position_id", None)
+            if hid is None:
+                return
+            struct = get_active_structure(
+                db,
+                hedge_position_id=int(hid),
+                account_kind=KIND_SLAVE,
+                slave_account_id=int(slave_account_id),
+            )
+            if struct is None:
+                return
+            basket_seq = getattr(master_row, "basket_seq_in_structure", None)
+            bs = int(basket_seq) if basket_seq is not None else None
+            for item in legs:
+                role = (
+                    ROLE_BASKET_CALL
+                    if str(item.get("leg") or "").lower() == "call"
+                    else ROLE_BASKET_PUT
+                )
+                pid = int(item.get("product_id") or 0)
+                opened_at = item.get("opened_at")
+                if pid <= 0 or opened_at is None:
+                    continue
+                row = open_leg(
+                    db,
+                    structure=struct,
+                    leg_role=role,
+                    product_id=pid,
+                    side="SELL",
+                    quantity=abs(int(item.get("quantity") or 1)),
+                    symbol=item.get("symbol"),
+                    strike=item.get("strike"),
+                    basket_seq=bs,
+                    adj_seq=0,
+                    entry_order_id=item.get("order_id"),
+                    opened_at=opened_at,
+                    fill_at=item.get("fill_at"),
+                )
+                closed_at = item.get("closed_at")
+                if closed_at is not None:
+                    close_leg(
+                        db,
+                        row,
+                        reason=str(item.get("close_reason") or "PARTIAL_UNWIND"),
+                        closed_at=closed_at,
+                        structure=struct,
+                        fill_at=item.get("unwind_fill_at"),
+                    )
+            # Keep slave_trade product ids in sync for ownership helper
+            for item in legs:
+                lt = str(item.get("leg") or "").lower()
+                pid = int(item.get("product_id") or 0)
+                if lt == "call" and pid > 0:
+                    slave_trade.call_product_id = pid
+                    if item.get("order_id"):
+                        slave_trade.call_order_id = str(item["order_id"])
+                    if item.get("symbol"):
+                        slave_trade.call_symbol = str(item["symbol"])
+                    if item.get("strike") is not None:
+                        slave_trade.call_strike = float(item["strike"])
+                elif lt == "put" and pid > 0:
+                    slave_trade.put_product_id = pid
+                    if item.get("order_id"):
+                        slave_trade.put_order_id = str(item["order_id"])
+                    if item.get("symbol"):
+                        slave_trade.put_symbol = str(item["symbol"])
+                    if item.get("strike") is not None:
+                        slave_trade.put_strike = float(item["strike"])
+            db.flush()
+        except Exception as ledger_exc:
+            logger.error(
+                "structure ledger partial/full slave basket legs failed: %s",
+                ledger_exc,
+                exc_info=True,
+            )
+
+    async def _unwind_slave_entry_legs(
+        self,
+        *,
+        client: DeltaClient,
+        slave: SlaveAccount,
+        master_trade_id: int,
+        legs_to_unwind: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        Unwind filled short entry legs with _close_with_reduce_only.
+
+        ``legs_to_unwind`` items need: leg, product_id, signed_size,
+        opened_at, fill_at, order_id, symbol, strike, quantity.
+
+        Returns updated leg dicts with unwound=True/False and closed_at set
+        when unwind succeeded.
+        """
+        results: list[dict[str, Any]] = []
+        for item in legs_to_unwind:
+            pid = int(item.get("product_id") or 0)
+            signed = float(item.get("signed_size") or 0)
+            leg_name = str(item.get("leg") or "")
+            if pid <= 0:
+                continue
+            if abs(signed) <= 1e-9:
+                signed = -abs(float(item.get("quantity") or 1))
+            ok, _order, err = await self._close_with_reduce_only(
+                client=client,
+                slave=slave,
+                product_id=pid,
+                signed_size=signed,
+                master_trade_id=int(master_trade_id),
+                path="partial_basket_entry_unwind",
+            )
+            out = dict(item)
+            out["unwound"] = bool(ok)
+            out["unwind_error"] = err if not ok else ""
+            if ok:
+                out["closed_at"] = get_utc_now()
+                out["close_reason"] = "PARTIAL_UNWIND"
+            log_and_buffer(
+                "SLAVE_PARTIAL_ENTRY",
+                int(master_trade_id),
+                {
+                    "slave": int(slave.id),
+                    "filled_leg": leg_name,
+                    "product_id": pid,
+                    "size": signed,
+                    "unwound": "yes" if ok else "no",
+                    "reason": (
+                        "unwind_ok"
+                        if ok
+                        else f"unwind_failed:{err[:120]}"
+                    ),
+                },
+            )
+            results.append(out)
+        return results
 
     async def _mirror_adjustment_to_slave(
         self,
