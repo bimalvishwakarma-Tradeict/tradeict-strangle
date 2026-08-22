@@ -340,10 +340,62 @@ def close_structure(
     reason: str,
     closed_at: Any,
 ) -> None:
-    """Mark structure closed (caller should close legs first)."""
+    """
+    Mark structure closed (caller should close legs first).
+
+    Hard check: any leg still missing closed_at is force-closed with this
+    batch timestamp and attribution_warning is set so earner can mark
+    the structure SUSPECT.
+    """
     if str(structure.status or "").lower() == "closed":
         return
     at = _require_ts(closed_at, field="structure.closed_at")
+    open_legs = (
+        db.query(StructureLeg)
+        .filter(
+            StructureLeg.structure_id == int(structure.id),
+            StructureLeg.closed_at.is_(None),
+        )
+        .order_by(StructureLeg.id.asc())
+        .all()
+    )
+    if open_legs:
+        leg_bits = [
+            (
+                f"id={int(lg.id)} role={lg.leg_role} "
+                f"product_id={int(lg.product_id)}"
+            )
+            for lg in open_legs
+        ]
+        warning = (
+            "open_legs_at_structure_close: " + "; ".join(leg_bits)
+        )[:2000]
+        structure.attribution_warning = warning
+        logger.error(
+            "[LEDGER_MISS] slave=%s structure=%s reason=open_legs_at_close "
+            "legs=%s -- force-closing windows; attribution_warning set",
+            getattr(structure, "slave_account_id", None) or 0,
+            int(structure.id),
+            leg_bits,
+        )
+        log_and_buffer(
+            "LEDGER_MISS",
+            0,
+            {
+                "slave": getattr(structure, "slave_account_id", None) or 0,
+                "structure": int(structure.id),
+                "reason": "open_legs_at_close",
+                "legs": leg_bits,
+            },
+        )
+        for lg in open_legs:
+            close_leg(
+                db,
+                lg,
+                reason="STRUCTURE_CLOSE_OPEN_LEG",
+                closed_at=at,
+                structure=structure,
+            )
     structure.status = "closed"
     structure.closed_at = at
     structure.close_reason = str(reason or "")[:50]
@@ -361,8 +413,6 @@ def _close_role_leg(
     fill_at: Any = None,
     product_id: int | None = None,
 ) -> None:
-    if closed_at is None:
-        return
     row = find_open_leg(
         db,
         structure_id=int(structure.id),
@@ -370,6 +420,29 @@ def _close_role_leg(
         basket_seq=basket_seq,
         product_id=product_id,
     )
+    if closed_at is None:
+        if row is not None:
+            logger.error(
+                "[LEDGER_MISS] slave=%s structure=%s leg=%s product_id=%s "
+                "reason=no_closed_at -- leg window left OPEN",
+                getattr(structure, "slave_account_id", None) or 0,
+                int(structure.id),
+                str(leg_role),
+                int(row.product_id),
+            )
+            log_and_buffer(
+                "LEDGER_MISS",
+                0,
+                {
+                    "slave": getattr(structure, "slave_account_id", None) or 0,
+                    "structure": int(structure.id),
+                    "leg": str(leg_role),
+                    "product_id": int(row.product_id),
+                    "reason": "no_closed_at",
+                    "note": "leg_window_left_OPEN",
+                },
+            )
+        return
     if row is not None:
         close_leg(
             db,

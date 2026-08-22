@@ -971,11 +971,24 @@ def _migrate_schema() -> None:
                         status VARCHAR(20) NOT NULL DEFAULT 'active',
                         opened_at DATETIME NOT NULL,
                         closed_at DATETIME,
-                        close_reason VARCHAR(50)
+                        close_reason VARCHAR(50),
+                        attribution_warning TEXT
                     )
                     """
                 )
             )
+    if "structures" in tables:
+        struct_cols = {
+            col["name"] for col in inspector.get_columns("structures")
+        }
+        if "attribution_warning" not in struct_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE structures "
+                        "ADD COLUMN attribution_warning TEXT"
+                    )
+                )
     if "structure_legs" not in tables:
         with engine.begin() as conn:
             conn.execute(

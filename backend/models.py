@@ -822,6 +822,9 @@ class Structure(Base):
         DateTime(timezone=True), nullable=True
     )
     close_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Set when structure is closed while one or more legs lacked a proper closed_at
+    # (earner treats as SUSPECT attribution). NULL = clean close.
+    attribution_warning: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     legs: Mapped[list["StructureLeg"]] = relationship(
         "StructureLeg", back_populates="structure"

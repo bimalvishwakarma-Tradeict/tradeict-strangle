@@ -106,6 +106,7 @@ def _serialize_structure(row: Structure) -> dict[str, Any]:
         "opened_at": _utc_iso(row.opened_at),
         "closed_at": _utc_iso(row.closed_at),
         "close_reason": row.close_reason,
+        "attribution_warning": getattr(row, "attribution_warning", None),
         "legs": [_serialize_leg(lg) for lg in legs],
     }
 

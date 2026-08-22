@@ -1874,6 +1874,32 @@ class MirrorEngine:
         return None
 
     @staticmethod
+    def _resolve_basket_exit_closed_at(
+        exit_by_pid: dict[int, dict[str, Any]],
+        product_id: int,
+        *,
+        exit_batch_ts: Any,
+    ) -> Any:
+        """
+        closed_at for a basket leg on exit.
+
+        Prefer this-pass close timestamp; else last known fill_at from the
+        same exit map; else the exit-batch timestamp captured BEFORE any
+        close orders (already-flat / bracket-SL legs).
+        """
+        pid = int(product_id or 0)
+        if pid <= 0:
+            return exit_batch_ts
+        meta = exit_by_pid.get(pid) or {}
+        closed = meta.get("closed_at")
+        if closed is not None:
+            return closed
+        fill_at = meta.get("fill_at")
+        if fill_at is not None:
+            return fill_at
+        return exit_batch_ts
+
+    @staticmethod
     def _is_reduce_only_unsupported(exc: BaseException) -> bool:
         """True when Delta rejects reduce_only as unsupported for the account."""
         msg = str(exc).lower()
@@ -5886,7 +5912,7 @@ class MirrorEngine:
 
             closed_count = 0
             target_pids: set[int] = set()
-            exit_by_pid: dict[int, dict[str, float]] = {}
+            exit_by_pid: dict[int, dict[str, Any]] = {}
             call_pid_hint = int(
                 getattr(slave_trade, "call_product_id", None)
                 or call_product_id
@@ -5897,6 +5923,9 @@ class MirrorEngine:
                 or put_product_id
                 or 0
             )
+            # Capture BEFORE any close orders — used for already-flat legs
+            # (bracket SL / prior partial) so ledger windows always end.
+            exit_batch_ts = get_utc_now()
             for pos in targets:
                 pid = int(pos.get("product_id") or 0)
                 size = float(pos.get("size") or 0)
@@ -6120,20 +6149,34 @@ class MirrorEngine:
                     )
                     .first()
                 )
+                call_closed_at = self._resolve_basket_exit_closed_at(
+                    exit_by_pid,
+                    call_pid_hint,
+                    exit_batch_ts=exit_batch_ts,
+                )
+                put_closed_at = self._resolve_basket_exit_closed_at(
+                    exit_by_pid,
+                    put_pid_hint,
+                    exit_batch_ts=exit_batch_ts,
+                )
+                call_fill_at = (
+                    exit_by_pid.get(call_pid_hint, {}).get("fill_at")
+                    or call_closed_at
+                )
+                put_fill_at = (
+                    exit_by_pid.get(put_pid_hint, {}).get("fill_at")
+                    or put_closed_at
+                )
                 record_slave_basket_exit(
                     db,
                     slave_trade=slave_trade,
                     slave_account_id=int(slave.id),
                     master_trade=master_row,
                     reason=str(reason or ""),
-                    call_closed_at=(
-                        exit_by_pid.get(call_pid_hint, {}).get("closed_at")
-                    ),
-                    put_closed_at=(
-                        exit_by_pid.get(put_pid_hint, {}).get("closed_at")
-                    ),
-                    call_fill_at=exit_by_pid.get(call_pid_hint, {}).get("fill_at"),
-                    put_fill_at=exit_by_pid.get(put_pid_hint, {}).get("fill_at"),
+                    call_closed_at=call_closed_at,
+                    put_closed_at=put_closed_at,
+                    call_fill_at=call_fill_at,
+                    put_fill_at=put_fill_at,
                 )
             except Exception as ledger_exc:
                 logger.error(
