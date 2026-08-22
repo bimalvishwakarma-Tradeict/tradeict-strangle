@@ -3347,8 +3347,6 @@ class BotEngine:
                                 slave_acc.earner_subscription_id
                             ),
                             "actual_quantity": int(st.actual_quantity or 1),
-                            "call_fill_price": float(st.call_fill_price or 0),
-                            "put_fill_price": float(st.put_fill_price or 0),
                             "slave_account_id": int(slave_acc.id),
                             "slave_name": slave_acc.name,
                         })
@@ -3358,7 +3356,6 @@ class BotEngine:
                         notify_earner_trade_closed(
                             master_trade_id=trade_id,
                             exit_reason=str(reason),
-                            final_pnl=float(final_pnl),
                             slave_accounts=slave_payloads,
                         )
                     )

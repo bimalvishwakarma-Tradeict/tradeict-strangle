@@ -19,29 +19,47 @@ logger = logging.getLogger(__name__)
 EARNER_WEBHOOK_URL = "http://127.0.0.1:5000/api/internal/bot-trade-closed"
 EARNER_WEBHOOK_TIMEOUT = 5  # seconds — short, fire-and-forget
 
+# Allowed slave keys — ids / qty / names only (never money or prices).
+_SLAVE_PAYLOAD_KEYS = (
+    "earner_user_id",
+    "earner_subscription_id",
+    "actual_quantity",
+    "slave_account_id",
+    "slave_name",
+)
+
+
+def _slave_id_payload(slave: dict[str, Any]) -> dict[str, Any]:
+    """Copy identity fields only; drop any price/P&L keys."""
+    out: dict[str, Any] = {}
+    for key in _SLAVE_PAYLOAD_KEYS:
+        if key in slave and slave[key] is not None:
+            out[key] = slave[key]
+    return out
+
 
 async def notify_earner_trade_closed(
     *,
     master_trade_id: int,
     exit_reason: str,
-    final_pnl: float,
     slave_accounts: list[dict[str, Any]],
 ) -> None:
     """
     POST to Earner backend after a master trade closes.
 
-    slave_accounts: list of dicts with keys:
-        earner_user_id: str | None
-        earner_subscription_id: str | None
-        actual_quantity: int
-        call_fill_price: float | None
-        put_fill_price: float | None
+    slave_accounts: list of dicts with identity keys only:
+        earner_user_id, earner_subscription_id, actual_quantity,
+        slave_account_id, slave_name
+
+    Money fields (final_pnl, fill prices, etc.) are never sent — the earner
+    computes P&L from the customer's Delta wallet ledger.
 
     Only fires for slaves that have earner_user_id set.
     Non-fatal: logs warning on any error.
     """
     earner_slaves = [
-        s for s in slave_accounts
+        _slave_id_payload(s)
+        for s in slave_accounts
         if s.get("earner_user_id")
     ]
     if not earner_slaves:
@@ -59,10 +77,12 @@ async def notify_earner_trade_closed(
     try:
         import httpx
 
+        # IDs and timestamps only. P&L is NEVER sent from here -- the earner
+        # computes it from the customer's own Delta wallet ledger.
+        # See routes_structures.py for the same rule.
         payload = {
             "master_trade_id": master_trade_id,
             "exit_reason": exit_reason,
-            "final_pnl": round(float(final_pnl), 4),
             "slaves": earner_slaves,
         }
         # Serialize EXACTLY once — same bytes for HMAC and POST body.
@@ -86,10 +106,9 @@ async def notify_earner_trade_closed(
             if resp.status_code == 200:
                 logger.info(
                     "[EARNER_WEBHOOK] Notified Earner: trade=%s reason=%s "
-                    "pnl=%.4f slaves=%s",
+                    "slaves=%s",
                     master_trade_id,
                     exit_reason,
-                    final_pnl,
                     len(earner_slaves),
                 )
             elif resp.status_code == 401:
