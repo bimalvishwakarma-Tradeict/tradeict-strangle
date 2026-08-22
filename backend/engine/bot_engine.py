@@ -703,8 +703,8 @@ class BotEngine:
                 )
 
                 with SessionLocal() as lr_db:
-                    findings = reconcile_ledger(lr_db)
-                    log_reconcile_findings(findings)
+                    result = reconcile_ledger(lr_db)
+                    log_reconcile_findings(result)
         except Exception as ledger_recon_exc:
             logger.error(
                 "[LEDGER_RECONCILE] job failed: %s",

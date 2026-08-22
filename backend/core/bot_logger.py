@@ -278,6 +278,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_ROLL_FORCED",
         "HEDGE_AUTO_REOPEN_FAILED",
         "MIRROR_PARTIAL_ADJ",
+        "LEDGER_RECONCILE",
     ):
         bot_log.error(msg)
     elif event_type in (

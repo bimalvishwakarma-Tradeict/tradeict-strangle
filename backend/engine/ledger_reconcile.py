@@ -6,15 +6,16 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from backend.core.bot_logger import log_and_buffer
-from backend.core.time_utils import get_utc_now
+from backend.core.time_utils import as_utc, get_utc_now
 from backend.models import (
     SlaveHedgePosition,
     SlaveTrade,
@@ -25,6 +26,10 @@ from backend.models import (
 
 logger = logging.getLogger(__name__)
 
+# Structure ledger went live at first structure 2026-08-22 10:11:09.
+# Override via env LEDGER_RECONCILE_SINCE (ISO8601 UTC) if the cutoff moves.
+LEDGER_LIVE_FROM = "2026-08-22T10:11:00Z"
+
 KIND_ORPHAN_TRADE = "ORPHAN_TRADE"
 KIND_OPEN_LEG_CLOSED_STRUCTURE = "OPEN_LEG_CLOSED_STRUCTURE"
 KIND_OPEN_LEG_CLOSED_TRADE = "OPEN_LEG_CLOSED_TRADE"
@@ -32,6 +37,53 @@ KIND_ATTRIBUTION_WARNING = "ATTRIBUTION_WARNING"
 KIND_NO_STRUCTURE_FOR_HEDGE = "NO_STRUCTURE_FOR_HEDGE"
 
 _BASKET_ROLES = ("BASKET_CALL", "BASKET_PUT")
+
+# Statuses that never produced a billable mirror position
+_ORPHAN_SKIP_STATUSES = frozenset(
+    {
+        "skipped_no_hedge",
+        "skipped_low_capital",
+        "error",
+        "partial_entry_open",
+    }
+)
+
+
+def ledger_reconcile_since() -> datetime:
+    """Cutoff: ignore rows created/opened before structure ledger went live."""
+    raw = str(os.getenv("LEDGER_RECONCILE_SINCE") or LEDGER_LIVE_FROM).strip()
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        logger.error(
+            "[LEDGER_RECONCILE] invalid LEDGER_RECONCILE_SINCE=%r — "
+            "falling back to %s",
+            raw,
+            LEDGER_LIVE_FROM,
+        )
+        dt = datetime.fromisoformat(LEDGER_LIVE_FROM.replace("Z", "+00:00"))
+    aware = as_utc(dt)
+    if aware is None:
+        return datetime(2026, 8, 22, 10, 11, 0, tzinfo=timezone.utc)
+    return aware
+
+
+def _is_before_cutoff(ts: Any, cutoff: datetime) -> bool:
+    aware = as_utc(ts) if ts is not None else None
+    if aware is None:
+        # Unknown time — do not silence; treat as post-cutoff
+        return False
+    return aware < cutoff
+
+
+def _has_real_position(st: SlaveTrade) -> bool:
+    """True only when the slave actually opened a mirror position."""
+    qty = int(getattr(st, "actual_quantity", 0) or 0)
+    if qty <= 0:
+        return False
+    call_pid = getattr(st, "call_product_id", None)
+    put_pid = getattr(st, "put_product_id", None)
+    return call_pid is not None or put_pid is not None
 
 
 def _finding(
@@ -102,14 +154,25 @@ def _basket_legs_for_slave_trade(
     return list(q.all())
 
 
-def reconcile_ledger(db: Session) -> list[dict[str, Any]]:
+def reconcile_ledger(db: Session) -> dict[str, Any]:
     """
     Scan DB for ledger gaps billing cannot see.
 
     Read-only — does not flush, commit, or mutate any row.
+
+    Returns:
+        {
+          "findings": [...],
+          "skipped_pre_ledger": int,
+          "skipped_no_position": int,
+          "since": ISO8601 cutoff used,
+        }
     """
     detected_at = get_utc_now()
+    cutoff = ledger_reconcile_since()
     findings: list[dict[str, Any]] = []
+    skipped_pre_ledger = 0
+    skipped_no_position = 0
 
     # --- a) ORPHAN_TRADE + c) OPEN_LEG_CLOSED_TRADE ---
     slave_trades = db.query(SlaveTrade).all()
@@ -126,6 +189,16 @@ def reconcile_ledger(db: Session) -> list[dict[str, Any]]:
     for st in slave_trades:
         sid = int(st.slave_account_id)
         mid = int(st.master_trade_id)
+        status = str(st.status or "").lower().strip()
+
+        if _is_before_cutoff(getattr(st, "created_at", None), cutoff):
+            skipped_pre_ledger += 1
+            continue
+
+        if status in _ORPHAN_SKIP_STATUSES or not _has_real_position(st):
+            skipped_no_position += 1
+            continue
+
         master = masters_by_id.get(mid)
         legs = _basket_legs_for_slave_trade(
             db,
@@ -152,7 +225,7 @@ def reconcile_ledger(db: Session) -> list[dict[str, Any]]:
             )
             continue
 
-        if str(st.status or "").lower() == "closed":
+        if status == "closed":
             for leg in legs:
                 if leg.closed_at is None:
                     findings.append(
@@ -182,6 +255,9 @@ def reconcile_ledger(db: Session) -> list[dict[str, Any]]:
     )
     seen_open_leg_closed_struct: set[int] = set()
     for struct in closed_or_warned:
+        if _is_before_cutoff(getattr(struct, "opened_at", None), cutoff):
+            skipped_pre_ledger += 1
+            continue
         sid = (
             int(struct.slave_account_id)
             if struct.slave_account_id is not None
@@ -220,6 +296,9 @@ def reconcile_ledger(db: Session) -> list[dict[str, Any]]:
     # --- e) NO_STRUCTURE_FOR_HEDGE ---
     hedges = db.query(SlaveHedgePosition).all()
     for sh in hedges:
+        if _is_before_cutoff(getattr(sh, "entry_time", None), cutoff):
+            skipped_pre_ledger += 1
+            continue
         sid = int(sh.slave_account_id)
         mid_h = int(sh.master_hedge_id)
         exists = (
@@ -248,7 +327,12 @@ def reconcile_ledger(db: Session) -> list[dict[str, Any]]:
                 )
             )
 
-    return findings
+    return {
+        "findings": findings,
+        "skipped_pre_ledger": int(skipped_pre_ledger),
+        "skipped_no_position": int(skipped_no_position),
+        "since": cutoff.isoformat(),
+    }
 
 
 def counts_by_kind(findings: list[dict[str, Any]]) -> dict[str, int]:
@@ -256,15 +340,31 @@ def counts_by_kind(findings: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counter.items()))
 
 
-def log_reconcile_findings(findings: list[dict[str, Any]]) -> None:
+def log_reconcile_findings(result: dict[str, Any]) -> None:
     """Emit ERROR per finding (or INFO clean) — money-critical observability."""
+    findings = list(result.get("findings") or [])
+    skipped_pre = int(result.get("skipped_pre_ledger") or 0)
+    skipped_pos = int(result.get("skipped_no_position") or 0)
+
+    summary = (
+        f"[LEDGER_RECONCILE] findings={len(findings)} "
+        f"skipped_pre_ledger={skipped_pre} skipped_no_position={skipped_pos}"
+    )
+    # Always on the module logger at INFO so the job is visibly alive
+    logger.info(summary)
+
     if not findings:
         logger.info("[LEDGER_RECONCILE] clean findings=0")
         try:
             log_and_buffer(
                 "LEDGER_RECONCILE",
                 0,
-                {"note": "clean", "findings": 0},
+                {
+                    "note": "clean",
+                    "findings": 0,
+                    "skipped_pre_ledger": skipped_pre,
+                    "skipped_no_position": skipped_pos,
+                },
             )
         except Exception as exc:
             logger.warning("LEDGER_RECONCILE buffer failed: %s", exc)
@@ -277,6 +377,8 @@ def log_reconcile_findings(findings: list[dict[str, Any]]) -> None:
         structure = f.get("structure_id")
         leg = f.get("leg_id")
         pid = f.get("product_id")
+        # Direct ERROR on this logger — must reach error.log regardless of
+        # bot_activity classification (RULE 5).
         logger.error(
             "[LEDGER_RECONCILE] kind=%s slave=%s master_trade=%s "
             "structure=%s leg=%s product_id=%s",

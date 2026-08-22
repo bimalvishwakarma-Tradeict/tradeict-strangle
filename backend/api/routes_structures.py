@@ -246,7 +246,7 @@ async def reconcile_structures(db: Session = Depends(get_db)) -> dict[str, Any]:
     Identifiers only — no P&L. Read-only; nothing is persisted.
     """
     try:
-        findings = reconcile_ledger(db)
+        result = reconcile_ledger(db)
     except Exception as exc:
         logger.critical(
             "structure reconcile endpoint failed: %s", exc, exc_info=True
@@ -254,11 +254,15 @@ async def reconcile_structures(db: Session = Depends(get_db)) -> dict[str, Any]:
         raise HTTPException(
             status_code=500, detail="Internal server error"
         ) from exc
+    findings = list(result.get("findings") or [])
     return {
         "success": True,
         "findings": findings,
         "counts": counts_by_kind(findings),
         "total": len(findings),
+        "skipped_pre_ledger": int(result.get("skipped_pre_ledger") or 0),
+        "skipped_no_position": int(result.get("skipped_no_position") or 0),
+        "since": result.get("since"),
     }
 
 
