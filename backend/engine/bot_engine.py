@@ -93,6 +93,9 @@ class BotEngine:
         self._leg_recovery_last_checked: dict[int, float] = {}
         # Per-master-trade exit locks — prevent dual funnel / overwrite races
         self._exit_locks: dict[int, asyncio.Lock] = {}
+        # Periodic structure-ledger reconcile (billing blind spots)
+        self._last_ledger_reconcile_at: float | None = None
+        self._ledger_reconcile_interval_seconds: float = 15 * 60
 
     def _get_exit_lock(self, trade_id: int) -> asyncio.Lock:
         tid = int(trade_id)
@@ -682,6 +685,30 @@ class BotEngine:
             logger.critical(
                 "[SLAVE_ORPHAN_BASKET] sweep failed: %s",
                 slave_orphan_exc,
+                exc_info=True,
+            )
+
+        # Structure ledger reconcile — detect trades billing cannot see (read-only)
+        try:
+            now_mono = time.monotonic()
+            last_lr = getattr(self, "_last_ledger_reconcile_at", None)
+            interval = float(
+                getattr(self, "_ledger_reconcile_interval_seconds", 15 * 60)
+            )
+            if last_lr is None or (now_mono - float(last_lr)) >= interval:
+                self._last_ledger_reconcile_at = now_mono
+                from backend.engine.ledger_reconcile import (
+                    log_reconcile_findings,
+                    reconcile_ledger,
+                )
+
+                with SessionLocal() as lr_db:
+                    findings = reconcile_ledger(lr_db)
+                    log_reconcile_findings(findings)
+        except Exception as ledger_recon_exc:
+            logger.error(
+                "[LEDGER_RECONCILE] job failed: %s",
+                ledger_recon_exc,
                 exc_info=True,
             )
 

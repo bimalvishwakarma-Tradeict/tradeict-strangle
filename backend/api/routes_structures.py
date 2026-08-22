@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from backend.core.time_utils import as_utc
 from backend.database import get_db
+from backend.engine.ledger_reconcile import counts_by_kind, reconcile_ledger
 from backend.models import Structure, StructureLeg
 
 logger = logging.getLogger(__name__)
@@ -234,6 +235,30 @@ async def list_structure_changes(
         "success": True,
         "since": since_dt.astimezone(timezone.utc).isoformat(),
         "structures": [_serialize_structure(r) for r in rows],
+    }
+
+
+@router.get("/reconcile")
+async def reconcile_structures(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """
+    Admin: fresh scan for ledger gaps billing cannot see.
+
+    Identifiers only — no P&L. Read-only; nothing is persisted.
+    """
+    try:
+        findings = reconcile_ledger(db)
+    except Exception as exc:
+        logger.critical(
+            "structure reconcile endpoint failed: %s", exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=500, detail="Internal server error"
+        ) from exc
+    return {
+        "success": True,
+        "findings": findings,
+        "counts": counts_by_kind(findings),
+        "total": len(findings),
     }
 
 
