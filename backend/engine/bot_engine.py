@@ -2840,6 +2840,7 @@ class BotEngine:
 
         # Step 4: Close ALL open legs on Delta (short=BUY, long hedge=SELL)
         close_results: dict[int, Any] = {}
+        basket_close_times: dict[str, tuple[Any, Any]] = {}
         hard_fail = False
         trade_is_demo = bool(getattr(trade, "is_demo", False))
 
@@ -2877,12 +2878,17 @@ class BotEngine:
                     )
                 except Exception:
                     px = float(getattr(leg, "initial_premium", 0) or 0)
+                leg_close_ts = get_utc_now()
                 close_results[leg_id] = OrderResult(
                     success=True,
                     order_id=None,
                     filled_price=px,
                     commission=0.0,
                 )
+                leg_close_fill_ts = get_utc_now()
+                lt = str(getattr(leg, "leg_type", "") or "").lower()
+                if lt in ("call", "put") and not is_long:
+                    basket_close_times[lt] = (leg_close_ts, leg_close_fill_ts)
                 log_and_buffer(
                     "EXIT_CLOSE",
                     trade_id,
@@ -2919,6 +2925,7 @@ class BotEngine:
                     )
                     continue
 
+                leg_close_ts = get_utc_now()
                 if is_long:
                     close_result = await self.order_executor.close_long_position(
                         product_id=int(leg.product_id),
@@ -2930,7 +2937,11 @@ class BotEngine:
                     close_result = await self.order_executor.close_leg(
                         leg, self.delta_client
                     )
+                leg_close_fill_ts = get_utc_now()
                 close_results[leg_id] = close_result
+                lt = str(getattr(leg, "leg_type", "") or "").lower()
+                if lt in ("call", "put") and not is_long:
+                    basket_close_times[lt] = (leg_close_ts, leg_close_fill_ts)
 
                 if close_result.success:
                     logger.info(
@@ -3188,8 +3199,16 @@ class BotEngine:
                     record_master_basket_exit,
                 )
 
+                call_close = basket_close_times.get("call", (None, None))
+                put_close = basket_close_times.get("put", (None, None))
                 record_master_basket_exit(
-                    exit_db, trade_row, reason=str(reason or "")
+                    exit_db,
+                    trade_row,
+                    reason=str(reason or ""),
+                    call_closed_at=call_close[0],
+                    put_closed_at=put_close[0],
+                    call_fill_at=call_close[1],
+                    put_fill_at=put_close[1],
                 )
             except Exception as ledger_exc:
                 logger.error(

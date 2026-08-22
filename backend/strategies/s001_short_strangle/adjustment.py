@@ -1205,6 +1205,7 @@ class AdjustmentExecutor:
                 logger.info(
                     "[DEMO] Virtual adjustment exit+entry — no real orders"
                 )
+                old_leg_closed_ts = get_utc_now()
                 exit_result = await _demo_mark_order_result(
                     delta_client,
                     str(triggered_leg.symbol),
@@ -1215,9 +1216,11 @@ class AdjustmentExecutor:
                     ),
                 )
             else:
+                old_leg_closed_ts = get_utc_now()
                 exit_result = await order_executor.close_leg(
                     triggered_leg, delta_client
                 )
+            old_leg_close_fill_ts = get_utc_now()
             if not exit_result.success:
                 msg = (
                     f"Failed to exit {triggered_leg_type} leg: "
@@ -1282,12 +1285,14 @@ class AdjustmentExecutor:
                 trade_id=int(trade.id),
             )
             if trade_is_demo:
+                new_leg_open_ts = get_utc_now()
                 entry_result = await _demo_mark_order_result(
                     delta_client,
                     str(plan.new_symbol),
                     float(expected_new_entry or other_premium or 0),
                 )
             else:
+                new_leg_open_ts = get_utc_now()
                 entry_result = await order_executor.sell_option(
                     product_id=int(plan.new_product_id),
                     quantity=int(triggered_leg.quantity),
@@ -1296,6 +1301,7 @@ class AdjustmentExecutor:
                     bracket_sl_price=adj_prov_sl if adj_prov_sl > 0 else None,
                     bracket_sl_limit=adj_prov_limit if adj_prov_sl > 0 else None,
                 )
+            new_leg_fill_ts = get_utc_now()
             if not entry_result.success:
                 other_leg_type = (
                     "put" if triggered_leg_type.lower() == "call" else "call"
@@ -1800,6 +1806,10 @@ class AdjustmentExecutor:
                     old_leg=triggered_leg,
                     new_leg=new_leg,
                     reason="ADJUSTMENT",
+                    old_leg_closed_at=old_leg_closed_ts,
+                    new_leg_opened_at=new_leg_open_ts,
+                    old_leg_fill_at=old_leg_close_fill_ts,
+                    new_leg_fill_at=new_leg_fill_ts,
                 )
                 db_session.commit()
             except Exception as ledger_exc:

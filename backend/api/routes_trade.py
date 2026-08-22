@@ -540,6 +540,10 @@ async def _persist_strangle_trade(
     put_entry_fee: float | None = None,
     call_sent_price: float | None = None,
     put_sent_price: float | None = None,
+    call_opened_at: Any = None,
+    put_opened_at: Any = None,
+    call_fill_at: Any = None,
+    put_fill_at: Any = None,
 ) -> tuple[Trade, Leg, Leg]:
     now_utc = get_utc_now()
     qty = int(payload.quantity)
@@ -728,7 +732,16 @@ async def _persist_strangle_trade(
     try:
         from backend.engine.structure_ledger import record_master_basket_entry
 
-        record_master_basket_entry(db, trade, call_leg, put_leg)
+        record_master_basket_entry(
+            db,
+            trade,
+            call_leg,
+            put_leg,
+            call_opened_at=call_opened_at,
+            put_opened_at=put_opened_at,
+            call_fill_at=call_fill_at,
+            put_fill_at=put_fill_at,
+        )
         db.commit()
     except Exception as ledger_exc:
         logger.error(
@@ -805,9 +818,14 @@ async def initiate_trade(
 
         call_result = None
         put_result = None
+        call_open_ts = None
+        call_fill_ts = None
+        put_open_ts = None
+        put_fill_ts = None
 
         if is_demo:
             # Virtual trade: live mark prices instead of placing real orders
+            call_open_ts = get_utc_now()
             logger.info(
                 "[DEMO] Virtual master trade — fetching live prices "
                 "instead of placing orders"
@@ -848,6 +866,9 @@ async def initiate_trade(
                         "trade fills"
                     ),
                 )
+            call_fill_ts = get_utc_now()
+            put_open_ts = call_open_ts
+            put_fill_ts = call_fill_ts
             ts = int(_time.time())
             call_order_id = f"DEMO-CALL-{ts}"
             put_order_id = f"DEMO-PUT-{ts}"
@@ -889,6 +910,7 @@ async def initiate_trade(
         else:
             # --- Step 1: Place CALL with inline bracket (mark-derived) ---
             logger.info("Step 1: Placing call order %s", payload.call_symbol)
+            call_open_ts = get_utc_now()
             call_result = await bot_engine.order_executor.sell_option(
                 product_id=int(payload.call_product_id),
                 quantity=int(payload.quantity),
@@ -902,6 +924,7 @@ async def initiate_trade(
                     status_code=502,
                     detail=f"Call order failed: {call_result.error or 'unknown error'}",
                 )
+            call_fill_ts = get_utc_now()
             call_order_id = (
                 str(call_result.order_id) if call_result.order_id is not None else None
             )
@@ -951,6 +974,7 @@ async def initiate_trade(
 
             # --- Step 4: Place PUT with inline bracket (mark-derived) ---
             logger.info("Step 4: Placing put order %s", payload.put_symbol)
+            put_open_ts = get_utc_now()
             put_result = await bot_engine.order_executor.sell_option(
                 product_id=int(payload.put_product_id),
                 quantity=int(payload.quantity),
@@ -974,6 +998,7 @@ async def initiate_trade(
                         f"Check Delta Exchange manually. Call order ID: {call_order_id}"
                     ),
                 )
+            put_fill_ts = get_utc_now()
 
             put_order_id = (
                 str(put_result.order_id) if put_result.order_id is not None else None
@@ -1063,6 +1088,10 @@ async def initiate_trade(
                 ),
                 call_sent_price=call_mark_for_sl,
                 put_sent_price=put_mark_for_sl,
+                call_opened_at=call_open_ts,
+                put_opened_at=put_open_ts,
+                call_fill_at=call_fill_ts,
+                put_fill_at=put_fill_ts,
             )
             logger.info(
                 "Step 8: Trade saved, id=%s is_demo=%s",

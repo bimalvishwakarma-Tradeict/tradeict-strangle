@@ -834,6 +834,7 @@ class AutoTradeEngine:
                 qty,
                 call_prov_sl,
             )
+            call_open_ts = get_utc_now()
             call_result = await self.order_executor.sell_option(
                 product_id=int(straddle["call_product_id"]),
                 quantity=qty,
@@ -846,6 +847,7 @@ class AutoTradeEngine:
                 raise RuntimeError(
                     f"Call order failed: {call_result.error or 'unknown'}"
                 )
+            call_fill_ts = get_utc_now()
             call_fill = float(call_result.filled_price or 0.0)
             if call_fill <= 0:
                 call_fill = call_mark
@@ -887,6 +889,7 @@ class AutoTradeEngine:
                 qty,
                 put_prov_sl,
             )
+            put_open_ts = get_utc_now()
             put_result = await self.order_executor.sell_option(
                 product_id=int(straddle["put_product_id"]),
                 quantity=qty,
@@ -901,6 +904,7 @@ class AutoTradeEngine:
                     f"(order {call_order_id}) but Put failed: "
                     f"{put_result.error or 'unknown'}"
                 )
+            put_fill_ts = get_utc_now()
             put_fill = float(put_result.filled_price or 0.0)
             if put_fill <= 0:
                 put_fill = put_mark
@@ -1268,7 +1272,16 @@ class AutoTradeEngine:
                     record_master_basket_entry,
                 )
 
-                record_master_basket_entry(db, trade, call_leg, put_leg)
+                record_master_basket_entry(
+                    db,
+                    trade,
+                    call_leg,
+                    put_leg,
+                    call_opened_at=call_open_ts,
+                    put_opened_at=put_open_ts,
+                    call_fill_at=call_fill_ts,
+                    put_fill_at=put_fill_ts,
+                )
                 db.commit()
             except Exception as ledger_exc:
                 logger.error(

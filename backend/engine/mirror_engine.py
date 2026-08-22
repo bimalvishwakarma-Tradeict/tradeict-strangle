@@ -918,6 +918,7 @@ class MirrorEngine:
                 master_put_strike,
                 slave_qty,
             )
+            virt_basket_open_ts = get_utc_now()
             virt_call_fill = float(master_call_fill or 0)
             virt_put_fill = float(master_put_fill or 0)
             virt_entry_spread = (
@@ -972,6 +973,10 @@ class MirrorEngine:
                         slave_trade=virt_trade,
                         slave_account_id=int(slave.id),
                         master_trade=master_row,
+                        call_opened_at=virt_basket_open_ts,
+                        put_opened_at=virt_basket_open_ts,
+                        call_fill_at=virt_basket_open_ts,
+                        put_fill_at=virt_basket_open_ts,
                     )
                     db.commit()
             except Exception as ledger_exc:
@@ -1115,6 +1120,7 @@ class MirrorEngine:
                     put_sl_limit = None  # type: ignore[assignment]
 
             # Place call order on slave (bracket SL attached)
+            call_open_ts = get_utc_now()
             call_order = await client.place_order(
                 product_id=int(call_product_id),
                 size=slave_qty,
@@ -1130,6 +1136,7 @@ class MirrorEngine:
             )
             if call_fill <= 0:
                 call_fill = float(master_call_fill or 0.0)
+            call_fill_ts = get_utc_now()
             call_order_id = self._order_id(call_order)
 
             logger.info(
@@ -1152,6 +1159,7 @@ class MirrorEngine:
             )
 
             # Place put order on slave (bracket SL attached)
+            put_open_ts = get_utc_now()
             put_order = await client.place_order(
                 product_id=int(put_product_id),
                 size=slave_qty,
@@ -1167,6 +1175,7 @@ class MirrorEngine:
             )
             if put_fill <= 0:
                 put_fill = float(master_put_fill or 0.0)
+            put_fill_ts = get_utc_now()
             put_order_id = self._order_id(put_order)
 
             logger.info(
@@ -1305,6 +1314,10 @@ class MirrorEngine:
                             slave_trade=slave_trade,
                             slave_account_id=int(slave.id),
                             master_trade=master_row,
+                            call_opened_at=call_open_ts,
+                            put_opened_at=put_open_ts,
+                            call_fill_at=call_fill_ts,
+                            put_fill_at=put_fill_ts,
                         )
                         db.commit()
                 except Exception as ledger_exc:
@@ -1511,6 +1524,7 @@ class MirrorEngine:
                 )
                 if st:
                     leg = str(triggered_leg_type).lower()
+                    virt_adj_close_ts = get_utc_now()
                     try:
                         from backend.engine.structure_ledger import (
                             record_slave_adjustment,
@@ -1536,6 +1550,10 @@ class MirrorEngine:
                             new_strike=float(new_strike or 0),
                             new_order_id="VIRTUAL",
                             reason="ADJUSTMENT",
+                            old_leg_closed_at=virt_adj_close_ts,
+                            new_leg_opened_at=virt_adj_close_ts,
+                            old_leg_fill_at=virt_adj_close_ts,
+                            new_leg_fill_at=virt_adj_close_ts,
                         )
                     except Exception as ledger_exc:
                         logger.error(
@@ -1610,6 +1628,8 @@ class MirrorEngine:
             )
 
             # --- b/c. Close old leg with reduce_only using LIVE size ---
+            old_leg_closed_ts = None
+            old_leg_close_fill_ts = None
             if live_size is None or live_size == 0:
                 logger.info(
                     "[MIRROR_ADJ_SKIP] slave='%s' already_flat "
@@ -1617,7 +1637,9 @@ class MirrorEngine:
                     slave.name,
                     old_pid,
                 )
+                old_leg_closed_ts = get_utc_now()
             else:
+                old_leg_closed_ts = get_utc_now()
                 close_size = max(1, abs(int(live_size)))
                 is_long = float(live_size) > 0
                 close_order = await client.close_position(
@@ -1625,6 +1647,7 @@ class MirrorEngine:
                     size=close_size,
                     is_long=is_long,
                 )
+                old_leg_close_fill_ts = get_utc_now()
                 logger.info(
                     "[MIRROR_ADJ_VERIFY] slave='%s' stage=close_sent "
                     "product_id=%s size=%s is_long=%s order_id=%s",
@@ -1698,6 +1721,7 @@ class MirrorEngine:
                     slave.name,
                 )
 
+            new_leg_open_ts = get_utc_now()
             new_order = await client.place_order(
                 product_id=new_pid,
                 size=entry_qty,
@@ -1705,6 +1729,7 @@ class MirrorEngine:
                 bracket_stop_loss_price=new_sl,
                 bracket_stop_loss_limit_price=new_sl_limit,
             )
+            new_leg_fill_ts = get_utc_now()
             new_fill = float(
                 await client.resolve_fill_price(
                     new_order, symbol_for_fallback=new_symbol
@@ -1823,6 +1848,10 @@ class MirrorEngine:
                         new_strike=float(new_strike or 0),
                         new_order_id=new_order_id or None,
                         reason="ADJUSTMENT",
+                        old_leg_closed_at=old_leg_closed_ts,
+                        new_leg_opened_at=new_leg_open_ts,
+                        old_leg_fill_at=old_leg_close_fill_ts,
+                        new_leg_fill_at=new_leg_fill_ts,
                     )
                 except Exception as ledger_exc:
                     logger.error(
@@ -1863,6 +1892,10 @@ class MirrorEngine:
                         new_strike=float(new_strike or 0),
                         new_order_id=new_order_id or None,
                         reason="ADJUSTMENT",
+                        old_leg_closed_at=old_leg_closed_ts,
+                        new_leg_opened_at=new_leg_open_ts,
+                        old_leg_fill_at=old_leg_close_fill_ts,
+                        new_leg_fill_at=new_leg_fill_ts,
                     )
                 except Exception as ledger_exc:
                     logger.error(
@@ -2464,6 +2497,7 @@ class MirrorEngine:
 
         # Virtual: DB only
         if bool(getattr(slave, "is_virtual", False)):
+            virt_hedge_open_ts = get_utc_now()
             cost_usd = (
                 (master_call_fill + master_put_fill)
                 * slave_qty
@@ -2517,7 +2551,14 @@ class MirrorEngine:
                 from backend.engine.structure_ledger import record_slave_hedge_open
 
                 record_slave_hedge_open(
-                    db, slave_hedge=row, slave_account=slave
+                    db,
+                    slave_hedge=row,
+                    slave_account=slave,
+                    structure_opened_at=virt_hedge_open_ts,
+                    call_opened_at=virt_hedge_open_ts,
+                    put_opened_at=virt_hedge_open_ts,
+                    call_fill_at=virt_hedge_open_ts,
+                    put_fill_at=virt_hedge_open_ts,
                 )
                 db.commit()
             except Exception as ledger_exc:
@@ -2567,6 +2608,7 @@ class MirrorEngine:
         put_order_id: str | None = None
         try:
             # --- BUY CALL ---
+            call_open_ts = get_utc_now()
             call_result = await executor.buy_option(
                 product_id=int(call_pid),
                 quantity=int(slave_qty),
@@ -2581,6 +2623,7 @@ class MirrorEngine:
                 )
                 return "failed"
 
+            call_fill_ts = get_utc_now()
             await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
             call_ok = await client.verify_position_exists(int(call_pid))
             if not call_ok:
@@ -2635,12 +2678,14 @@ class MirrorEngine:
             )
 
             # --- BUY PUT ---
+            put_open_ts = get_utc_now()
             put_result = await executor.buy_option(
                 product_id=int(put_pid),
                 quantity=int(slave_qty),
                 delta_client=client,
                 symbol_for_fallback=put_symbol or None,
             )
+            put_fill_ts = get_utc_now()
             put_ok = False
             put_fail_reason = ""
             if not put_result.success:
@@ -2781,7 +2826,14 @@ class MirrorEngine:
                 from backend.engine.structure_ledger import record_slave_hedge_open
 
                 record_slave_hedge_open(
-                    db, slave_hedge=row, slave_account=slave
+                    db,
+                    slave_hedge=row,
+                    slave_account=slave,
+                    structure_opened_at=call_open_ts,
+                    call_opened_at=call_open_ts,
+                    put_opened_at=put_open_ts,
+                    call_fill_at=call_fill_ts,
+                    put_fill_at=put_fill_ts,
                 )
                 db.commit()
             except Exception as ledger_exc:
@@ -3291,7 +3343,8 @@ class MirrorEngine:
             sh.realized_pnl = 0.0
             sh.status = "closed"
             sh.exit_reason = reason
-            sh.exit_time = get_utc_now()
+            virt_hedge_close_ts = get_utc_now()
+            sh.exit_time = virt_hedge_close_ts
             sh.last_error = None
             try:
                 from backend.engine.structure_ledger import record_slave_hedge_close
@@ -3301,6 +3354,9 @@ class MirrorEngine:
                     slave_hedge=sh,
                     slave_account_id=slave_id,
                     reason=str(reason or ""),
+                    call_closed_at=virt_hedge_close_ts,
+                    put_closed_at=virt_hedge_close_ts,
+                    structure_closed_at=virt_hedge_close_ts,
                 )
             except Exception as ledger_exc:
                 logger.error(
@@ -3317,6 +3373,10 @@ class MirrorEngine:
         executor = OrderExecutor()
         call_order: dict[str, Any] | None = None
         put_order: dict[str, Any] | None = None
+        call_close_ts: Any = None
+        put_close_ts: Any = None
+        call_close_fill_ts: Any = None
+        put_close_fill_ts: Any = None
         try:
             for leg, pid, sym in (
                 ("call", call_pid, call_symbol),
@@ -3334,6 +3394,7 @@ class MirrorEngine:
                         pid,
                     )
                     continue
+                close_ts = get_utc_now()
                 try:
                     order = await client.close_position(
                         product_id=int(pid),
@@ -3342,8 +3403,12 @@ class MirrorEngine:
                     )
                     if leg == "call":
                         call_order = order if isinstance(order, dict) else None
+                        call_close_ts = close_ts
+                        call_close_fill_ts = get_utc_now()
                     else:
                         put_order = order if isinstance(order, dict) else None
+                        put_close_ts = close_ts
+                        put_close_fill_ts = get_utc_now()
                 except Exception as close_exc:
                     logger.warning(
                         "[SLAVE_HEDGE_CASCADE] slave=%s close_position %s "
@@ -3363,10 +3428,17 @@ class MirrorEngine:
                             "order_id": res.order_id,
                             "avg_fill_price": res.filled_price,
                         }
+                        fill_ts = get_utc_now()
                         if leg == "call":
                             call_order = payload
+                            if call_close_ts is None:
+                                call_close_ts = close_ts
+                            call_close_fill_ts = fill_ts
                         else:
                             put_order = payload
+                            if put_close_ts is None:
+                                put_close_ts = close_ts
+                            put_close_fill_ts = fill_ts
                     else:
                         logger.error(
                             "[SLAVE_HEDGE_CASCADE] slave=%s %s close failed: %s",
@@ -3460,6 +3532,11 @@ class MirrorEngine:
                     slave_hedge=sh,
                     slave_account_id=slave_id,
                     reason=str(reason or ""),
+                    call_closed_at=call_close_ts,
+                    put_closed_at=put_close_ts,
+                    structure_closed_at=sh.exit_time,
+                    call_fill_at=call_close_fill_ts,
+                    put_fill_at=put_close_fill_ts,
                 )
             except Exception as ledger_exc:
                 logger.error(
@@ -4018,6 +4095,7 @@ class MirrorEngine:
                     .first()
                 )
                 if st:
+                    virt_basket_close_ts = get_utc_now()
                     self._close_slave_trade(
                         slave,
                         st,
@@ -4054,6 +4132,10 @@ class MirrorEngine:
                             slave_account_id=int(slave.id),
                             master_trade=master_row,
                             reason=str(reason or ""),
+                            call_closed_at=virt_basket_close_ts,
+                            put_closed_at=virt_basket_close_ts,
+                            call_fill_at=virt_basket_close_ts,
+                            put_fill_at=virt_basket_close_ts,
                         )
                     except Exception as ledger_exc:
                         logger.error(
@@ -4323,6 +4405,7 @@ class MirrorEngine:
                     )
                     continue
                 close_order: dict[str, Any] | None = None
+                close_ts = get_utc_now()
                 try:
                     close_order = await client.place_order(
                         product_id=pid,
@@ -4386,6 +4469,8 @@ class MirrorEngine:
                     exit_by_pid[pid] = {
                         "fill": exit_fill,
                         "fee": float(exit_fee or 0.0),
+                        "closed_at": close_ts,
+                        "fill_at": get_utc_now(),
                     }
 
             # Products that must be flat: basket hints + closed targets ONLY
@@ -4512,6 +4597,14 @@ class MirrorEngine:
                     slave_account_id=int(slave.id),
                     master_trade=master_row,
                     reason=str(reason or ""),
+                    call_closed_at=(
+                        exit_by_pid.get(call_pid_hint, {}).get("closed_at")
+                    ),
+                    put_closed_at=(
+                        exit_by_pid.get(put_pid_hint, {}).get("closed_at")
+                    ),
+                    call_fill_at=exit_by_pid.get(call_pid_hint, {}).get("fill_at"),
+                    put_fill_at=exit_by_pid.get(put_pid_hint, {}).get("fill_at"),
                 )
             except Exception as ledger_exc:
                 logger.error(

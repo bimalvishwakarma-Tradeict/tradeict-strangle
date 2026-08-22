@@ -698,12 +698,14 @@ async def open_hedge(
         )
 
         # --- BUY CALL ---
+        call_open_ts = _utc_now()
         call_result = await executor.buy_option(
             product_id=call_pid,
             quantity=qty,
             delta_client=client,
             symbol_for_fallback=call_symbol,
         )
+        call_fill_ts = _utc_now()
         if not call_result.success:
             _hedge_log(
                 "HEDGE_OPEN_FAIL",
@@ -743,12 +745,14 @@ async def open_hedge(
         )
 
         # --- BUY PUT ---
+        put_open_ts = _utc_now()
         put_result = await executor.buy_option(
             product_id=put_pid,
             quantity=qty,
             delta_client=client,
             symbol_for_fallback=put_symbol,
         )
+        put_fill_ts = _utc_now()
         put_ok = False
         put_fill = 0.0
         put_fee = 0.0
@@ -921,7 +925,15 @@ async def open_hedge(
         try:
             from backend.engine.structure_ledger import record_master_hedge_open
 
-            record_master_hedge_open(db, hedge_row)
+            record_master_hedge_open(
+                db,
+                hedge_row,
+                structure_opened_at=call_open_ts,
+                call_opened_at=call_open_ts,
+                put_opened_at=put_open_ts,
+                call_fill_at=call_fill_ts,
+                put_fill_at=put_fill_ts if put_ok else None,
+            )
             db.commit()
         except Exception as ledger_exc:
             logger.error(
@@ -1218,8 +1230,14 @@ async def close_hedge(
         call_exit_fee: float | None = None
         put_exit_fee: float | None = None
 
+        call_close_ts: Any = None
+        put_close_ts: Any = None
+        call_close_fill_ts: Any = None
+        put_close_fill_ts: Any = None
+
         if call_exists and abs(call_size) >= 1e-9:
             close_size = max(1, int(round(abs(call_size)))) or qty
+            call_close_ts = _utc_now()
             try:
                 call_order = await client.close_position(
                     product_id=call_pid,
@@ -1252,9 +1270,11 @@ async def close_hedge(
                         {"stage": "close_call", "reason": res.error or str(exc)},
                         critical=True,
                     )
+            call_close_fill_ts = _utc_now()
 
         if put_exists and abs(put_size) >= 1e-9:
             close_size = max(1, int(round(abs(put_size)))) or qty
+            put_close_ts = _utc_now()
             try:
                 put_order = await client.close_position(
                     product_id=put_pid,
@@ -1287,6 +1307,7 @@ async def close_hedge(
                         {"stage": "close_put", "reason": res.error or str(exc)},
                         critical=True,
                     )
+            put_close_fill_ts = _utc_now()
 
         await asyncio.sleep(VERIFY_PAUSE_SECONDS)
 
@@ -1435,7 +1456,16 @@ async def close_hedge(
         try:
             from backend.engine.structure_ledger import record_master_hedge_close
 
-            record_master_hedge_close(db, hedge, reason=reason_norm)
+            record_master_hedge_close(
+                db,
+                hedge,
+                reason=reason_norm,
+                call_closed_at=call_close_ts,
+                put_closed_at=put_close_ts,
+                structure_closed_at=now,
+                call_fill_at=call_close_fill_ts,
+                put_fill_at=put_close_fill_ts,
+            )
         except Exception as ledger_exc:
             logger.error(
                 "structure ledger master hedge close failed: %s",
