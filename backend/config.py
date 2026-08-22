@@ -20,6 +20,9 @@ DELTA_EXCHANGE_BASE_URL: str = os.getenv(
     "DELTA_EXCHANGE_BASE_URL",
     "https://api.india.delta.exchange",
 )
+# Shared secret for HMAC-signing Earner webhooks (x-internal-signature).
+# Empty = webhook disabled (warn + skip); never crash.
+BOT_WEBHOOK_SECRET: str = os.getenv("BOT_WEBHOOK_SECRET", "")
 
 IST = pytz.timezone("Asia/Kolkata")
 EXPIRY_HOUR = 17
