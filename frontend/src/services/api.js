@@ -258,6 +258,27 @@ export const getHedgeStructures = async (limit = 40) => {
   }
 }
 
+/** Structure ledger — identifiers + leg windows only (no P&L). */
+export const getStructureLedger = async (params = {}) => {
+  try {
+    const res = await api.get('/api/structures', { params })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch structure ledger'))
+  }
+}
+
+export const getStructureLedgerChanges = async (since, params = {}) => {
+  try {
+    const res = await api.get('/api/structures/changes', {
+      params: { since, ...params },
+    })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch structure ledger changes'))
+  }
+}
+
 export const getBotLogs = async ({ trade_id, limit = 100, level = 'all' } = {}) => {
   try {
     const params = { limit, level }

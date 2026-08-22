@@ -16,6 +16,7 @@ from backend.api.routes_hedge import router as hedge_router
 from backend.api.routes_logs import router as logs_router
 from backend.api.routes_slave import router as slave_router
 from backend.api.routes_strategy import router as strategy_router
+from backend.api.routes_structures import router as structures_router
 from backend.api.routes_trade import router as trade_router
 from backend.api.routes_ws import router as ws_router
 from backend.core.bot_logger import setup_bot_logger
@@ -186,6 +187,7 @@ app.include_router(strategy_router)
 app.include_router(trade_router)
 app.include_router(auto_trade_router)
 app.include_router(hedge_router)
+app.include_router(structures_router)
 app.include_router(slave_router)
 app.include_router(logs_router)
 try:

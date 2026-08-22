@@ -9,6 +9,7 @@ import {
   getAccountStatus,
   getAutoTradeStatus,
   getHedgeStructures,
+  getStructureLedger,
   getSlaveOverview,
 } from '../services/api'
 import { formatNextEntryWait } from '../utils/nextEntryLabel'
@@ -42,6 +43,115 @@ function formatAdjTime(iso) {
   } catch {
     return iso
   }
+}
+
+function fmtLegRole(role) {
+  return String(role || '')
+    .replace(/_/g, ' ')
+    .trim()
+}
+
+function fmtAllotmentOpen(iso) {
+  if (!iso) return '—'
+  try {
+    return new Date(iso).toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'Asia/Kolkata',
+    })
+  } catch {
+    return iso
+  }
+}
+
+function fmtAllotmentWindow(openedAt, closedAt) {
+  if (!openedAt) return '—'
+  const open = fmtAllotmentOpen(openedAt)
+  if (!closedAt) return `${open} → open IST`
+  try {
+    const close = new Date(closedAt).toLocaleString('en-IN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'Asia/Kolkata',
+    })
+    return `${open} → ${close} IST`
+  } catch {
+    return `${open} → — IST`
+  }
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(String(text))
+  } catch {
+    // fallback for older browsers
+    const ta = document.createElement('textarea')
+    ta.value = String(text)
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+  }
+}
+
+function AllotmentLine({ leg }) {
+  const adj =
+    Number(leg?.adj_seq) > 0 ? (
+      <span className="text-gray-600"> · adj {leg.adj_seq}</span>
+    ) : null
+  return (
+    <div className="font-mono text-[11px] leading-relaxed text-gray-500">
+      {fmtLegRole(leg.leg_role)}
+      {adj}
+      <span className="text-gray-600"> · </span>
+      <span className="text-gray-400">{leg.symbol || '—'}</span>
+      <span className="text-gray-600"> · </span>
+      <button
+        type="button"
+        title="Click to copy product_id"
+        onClick={(e) => {
+          e.stopPropagation()
+          copyText(leg.product_id)
+        }}
+        className="cursor-copy text-gray-400 underline decoration-dotted underline-offset-2 hover:text-gray-200"
+      >
+        id {leg.product_id}
+      </button>
+      <span className="text-gray-600"> · </span>
+      {fmtAllotmentWindow(leg.opened_at, leg.closed_at)}
+    </div>
+  )
+}
+
+function AllotmentBlock({ legs, defaultOpen = false }) {
+  const [show, setShow] = useState(defaultOpen)
+  if (!legs?.length) return null
+  return (
+    <div className="mt-2 border-t border-gray-800/80 pt-2">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          setShow((v) => !v)
+        }}
+        className="text-[10px] font-medium uppercase tracking-wide text-gray-500 hover:text-gray-300"
+      >
+        {show ? 'Hide allotment IDs' : 'Show allotment IDs'}
+        <span className="ml-1 normal-case text-gray-600">({legs.length})</span>
+      </button>
+      {show ? (
+        <div className="mt-1.5 space-y-0.5">
+          {legs.map((leg) => (
+            <AllotmentLine key={leg.id} leg={leg} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function syncAgeSeconds(iso) {
@@ -684,9 +794,14 @@ function StructurePnlPanel({ structure }) {
   )
 }
 
-function StructureBasketRow({ basket }) {
+function StructureBasketRow({ basket, ledgerLegs = [] }) {
   const [open, setOpen] = useState(false)
   const seq = basket.basket_seq_in_structure ?? '—'
+  const basketLegs = ledgerLegs.filter(
+    (leg) =>
+      Number(leg.basket_seq) === Number(basket.basket_seq_in_structure) &&
+      String(leg.leg_role || '').startsWith('BASKET_'),
+  )
   const pnl =
     basket.net_mtm != null
       ? Number(basket.net_mtm)
@@ -784,19 +899,25 @@ function StructureBasketRow({ basket }) {
               </ul>
             </div>
           )}
+          <AllotmentBlock legs={basketLegs} />
         </div>
       )}
     </div>
   )
 }
 
-function StructureHistoryCard({ structure }) {
+function StructureHistoryCard({ structure, ledger }) {
   const [open, setOpen] = useState(false)
   const hedge = structure.hedge || {}
   const structurePnl = Number(structure.structure_pnl || 0)
   const status = String(hedge.status || '').toLowerCase()
   const isActive = status === 'active'
   const basketCount = Number(structure.basket_count ?? (structure.baskets || []).length)
+  const ledgerLegs = Array.isArray(ledger?.legs) ? ledger.legs : []
+  const ledgerLegCount = ledgerLegs.length
+  const hedgeLegs = ledgerLegs.filter((leg) =>
+    String(leg.leg_role || '').startsWith('HEDGE_'),
+  )
 
   return (
     <div className="rounded-xl border border-gray-700 bg-gray-800/80">
@@ -819,6 +940,16 @@ function StructureHistoryCard({ structure }) {
           <span className="ml-2 text-xs font-normal text-gray-400">
             {fmtStrike(hedge.strike)} · {hedge.expiry || '—'} · {basketCount}{' '}
             basket{basketCount === 1 ? '' : 's'}
+          </span>
+          <span
+            className={`ml-2 rounded px-1.5 py-0.5 text-[10px] font-normal ${
+              ledgerLegCount > 0
+                ? 'bg-gray-700/80 text-gray-300'
+                : 'bg-amber-950/60 text-amber-400'
+            }`}
+            title="Bot-recorded structure ledger legs"
+          >
+            Ledger: {ledgerLegCount} leg{ledgerLegCount === 1 ? '' : 's'}
           </span>
         </div>
         <div className="text-right">
@@ -885,13 +1016,18 @@ function StructureHistoryCard({ structure }) {
                 {fmtMoney(hedge.put_fill_price)}
               </div>
             )}
+            <AllotmentBlock legs={hedgeLegs} />
           </div>
           {(structure.baskets || []).length === 0 ? (
             <p className="text-xs text-gray-500">No baskets under this structure</p>
           ) : (
             <div className="space-y-2">
               {(structure.baskets || []).map((b) => (
-                <StructureBasketRow key={b.trade_id} basket={b} />
+                <StructureBasketRow
+                  key={b.trade_id}
+                  basket={b}
+                  ledgerLegs={ledgerLegs}
+                />
               ))}
             </div>
           )}
@@ -910,6 +1046,7 @@ export default function Dashboard() {
   const [balance, setBalance] = useState(0)
   const [accountConnected, setAccountConnected] = useState(false)
   const [structures, setStructures] = useState([])
+  const [ledgerByHedgeId, setLedgerByHedgeId] = useState({})
   const [autoStatus, setAutoStatus] = useState(null)
   const [slaveOverview, setSlaveOverview] = useState(null)
 
@@ -1037,16 +1174,31 @@ export default function Dashboard() {
     }
   }, [])
 
-  // Structure history (hedge + linked baskets)
+  // Structure history (hedge + linked baskets) + ledger allotments
   useEffect(() => {
     let cancelled = false
     async function loadStructures() {
       try {
-        const data = await getHedgeStructures(40)
+        const [histData, ledgerData] = await Promise.all([
+          getHedgeStructures(40),
+          getStructureLedger({ account_kind: 'MASTER', limit: 200 }),
+        ])
         if (cancelled) return
-        setStructures(Array.isArray(data?.structures) ? data.structures : [])
+        setStructures(Array.isArray(histData?.structures) ? histData.structures : [])
+        const map = {}
+        for (const row of ledgerData?.structures || []) {
+          const hid = Number(row.hedge_position_id)
+          if (!Number.isFinite(hid)) continue
+          if (!map[hid] || Number(row.id) > Number(map[hid].id)) {
+            map[hid] = row
+          }
+        }
+        setLedgerByHedgeId(map)
       } catch {
-        if (!cancelled) setStructures([])
+        if (!cancelled) {
+          setStructures([])
+          setLedgerByHedgeId({})
+        }
       }
     }
     loadStructures()
@@ -1209,7 +1361,11 @@ export default function Dashboard() {
         ) : (
           <div className="space-y-3">
             {structures.map((s) => (
-              <StructureHistoryCard key={s.hedge?.id} structure={s} />
+              <StructureHistoryCard
+                key={s.hedge?.id}
+                structure={s}
+                ledger={ledgerByHedgeId[Number(s.hedge?.id)]}
+              />
             ))}
           </div>
         )}
