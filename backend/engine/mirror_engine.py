@@ -406,6 +406,7 @@ class MirrorEngine:
         master_margin_used_usd: float | None = None,
         master_total_capital_usd: float | None = None,
         slave_available_usd: float | None = None,
+        master_capital_fetch_failed: bool = False,
     ) -> int:
         """
         Calculate slave qty.
@@ -419,21 +420,44 @@ class MirrorEngine:
            effective_capital = min(user_allocated_capital, live_balance)
            Never size from declared capital alone.
            Returns 0 when capital is insufficient (caller must skip, not place).
+           NEVER falls through to the multiplier branch — if master capital
+           is unreadable, return 0 (skip), never master×1.0 full size.
 
         Hard ceiling: MAX_SLAVE_QTY (config) on every path.
         """
         max_qty = max(1, int(MAX_SLAVE_QTY))
         mq = max(0, int(master_qty or 0))
+        capital_based = slave is not None and bool(
+            getattr(slave, "capital_based_qty", False)
+        )
 
-        if (
-            slave is not None
-            and bool(getattr(slave, "capital_based_qty", False))
-            and master_margin_used_usd is not None
-            and master_margin_used_usd > 0
-            and master_total_capital_usd is not None
-            and master_total_capital_usd > 0
-            and mq > 0
-        ):
+        if capital_based:
+            capital_readable = (
+                not master_capital_fetch_failed
+                and master_margin_used_usd is not None
+                and master_margin_used_usd > 0
+                and master_total_capital_usd is not None
+                and master_total_capital_usd > 0
+                and mq > 0
+            )
+            if not capital_readable:
+                reason = (
+                    "master_capital_fetch_failed"
+                    if master_capital_fetch_failed
+                    else (
+                        "master_capital_unreadable "
+                        f"(used={master_margin_used_usd!r} "
+                        f"total={master_total_capital_usd!r} mq={mq})"
+                    )
+                )
+                logger.warning(
+                    "[SLAVE_SIZING] account_id=%s capital_based=True — "
+                    "skip (qty=0); never fall through to multiplier. reason=%s",
+                    getattr(slave, "id", None),
+                    reason,
+                )
+                return 0
+
             user_allocated = float(
                 getattr(slave, "user_allocated_capital", None) or 0
             )
@@ -482,9 +506,8 @@ class MirrorEngine:
             if per_lot_cost_usd <= 0:
                 calculated_qty = 0
             else:
-                calculated_qty = int(
-                    round(slave_margin_to_use / per_lot_cost_usd)
-                )
+                # Floor — never round UP into the customer's capital
+                calculated_qty = int(slave_margin_to_use / per_lot_cost_usd)
 
             # Do NOT force max(1, ...) — insufficient capital must skip
             final_qty = max(0, min(calculated_qty, max_qty))
@@ -505,7 +528,7 @@ class MirrorEngine:
             )
             return int(final_qty)
 
-        # Fallback: fixed multiplier (unchanged semantics), plus hard ceiling
+        # Fixed multiplier only — capital-based never reaches here
         if mq <= 0:
             return 0
         calculated_qty = max(1, int(round(float(mq) * float(multiplier or 1.0))))
@@ -910,6 +933,7 @@ class MirrorEngine:
         master_margin_used: float | None = None
         master_total_capital: float | None = None
         slave_fresh_available: float | None = None
+        master_capital_fetch_failed = False
 
         if bool(getattr(slave, "capital_based_qty", False)):
             try:
@@ -940,16 +964,35 @@ class MirrorEngine:
                                 0.0,
                                 master_total_capital - master_available,
                             )
-                            logger.info(
-                                "Master capital: total=$%.2f available=$%.2f "
-                                "used=$%.2f",
-                                master_total_capital,
-                                master_available,
-                                master_margin_used,
-                            )
+                            if (
+                                master_total_capital <= 0
+                                or master_margin_used <= 0
+                            ):
+                                master_capital_fetch_failed = True
+                                logger.warning(
+                                    "Master capital fetch returned unusable "
+                                    "values for capital-based sizing "
+                                    "(total=$%.2f used=$%.2f)",
+                                    master_total_capital,
+                                    master_margin_used,
+                                )
+                            else:
+                                logger.info(
+                                    "Master capital: total=$%.2f available=$%.2f "
+                                    "used=$%.2f",
+                                    master_total_capital,
+                                    master_available,
+                                    master_margin_used,
+                                )
                         finally:
                             await master_client.close()
+                    else:
+                        master_capital_fetch_failed = True
+                        logger.warning(
+                            "Master capital fetch failed: no active master account"
+                        )
             except Exception as cap_err:
+                master_capital_fetch_failed = True
                 logger.warning("Master capital fetch failed: %s", cap_err)
 
         # Always fetch live slave balance for sizing / margin headroom
@@ -1012,6 +1055,7 @@ class MirrorEngine:
             master_margin_used_usd=master_margin_used,
             master_total_capital_usd=master_total_capital,
             slave_available_usd=slave_fresh_available,
+            master_capital_fetch_failed=master_capital_fetch_failed,
         )
 
         # Margin headroom: never let Delta be the first insufficient_margin gate
@@ -3430,6 +3474,7 @@ class MirrorEngine:
             master_margin_used: float | None = (
                 master_hedge_cost if master_hedge_cost > 0 else None
             )
+            master_capital_fetch_failed = False
             try:
                 from backend.models import Account
 
@@ -3459,9 +3504,23 @@ class MirrorEngine:
                             master_total_capital = float(
                                 wallet.get("available_balance", 0) or 0
                             )
+                        if master_total_capital <= 0:
+                            master_capital_fetch_failed = True
+                            logger.warning(
+                                "[SLAVE_HEDGE_OPEN] master capital fetch "
+                                "returned unusable total=$%.2f",
+                                master_total_capital,
+                            )
                     finally:
                         await m_client.close()
+                else:
+                    master_capital_fetch_failed = True
+                    logger.warning(
+                        "[SLAVE_HEDGE_OPEN] master capital fetch failed: "
+                        "no master account"
+                    )
             except Exception as cap_err:
+                master_capital_fetch_failed = True
                 logger.warning(
                     "[SLAVE_HEDGE_OPEN] master capital fetch failed: %s",
                     cap_err,
@@ -3483,6 +3542,7 @@ class MirrorEngine:
                         master_hedge_cost=master_hedge_cost,
                         master_margin_used=master_margin_used,
                         master_total_capital=master_total_capital,
+                        master_capital_fetch_failed=master_capital_fetch_failed,
                         call_pid=call_pid,
                         put_pid=put_pid,
                         call_symbol=call_symbol,
@@ -3545,6 +3605,7 @@ class MirrorEngine:
         master_hedge_cost: float,
         master_margin_used: float | None,
         master_total_capital: float | None,
+        master_capital_fetch_failed: bool = False,
         call_pid: int,
         put_pid: int,
         call_symbol: str,
@@ -3647,6 +3708,7 @@ class MirrorEngine:
             master_margin_used_usd=master_margin_used,
             master_total_capital_usd=master_total_capital,
             slave_available_usd=available_before,
+            master_capital_fetch_failed=master_capital_fetch_failed,
         )
 
         # Same margin headroom path as baskets (ratio consistency)
