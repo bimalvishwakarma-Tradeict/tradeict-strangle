@@ -1977,8 +1977,10 @@ class MirrorEngine:
         """
         Close a position with reduce_only=True only. Never drops the flag.
 
-        On exception: re-read live size. Flat → treat first order as success.
-        Still open → retry with live size + reduce_only (max ``max_retries``).
+        After every accepted order, re-read live size. Success only when the
+        product is flat (IOC accept ≠ fill on a thin book). Still open →
+        retry with live size + reduce_only (max ``max_retries``).
+        On exception: same re-read — flat → treat as success; open → retry.
         If Delta rejects reduce_only specifically: leave position, do not open
         an opposite naked order.
 
@@ -1996,6 +1998,7 @@ class MirrorEngine:
         for attempt in range(0, int(max_retries) + 1):
             close_size = max(1, abs(int(round(live_size))))
             side = "buy" if live_size < 0 else "sell"
+            order_accepted = False
             try:
                 last_order = await client.place_order(
                     product_id=pid,
@@ -2003,7 +2006,7 @@ class MirrorEngine:
                     side=side,
                     reduce_only=True,
                 )
-                return True, last_order, ""
+                order_accepted = True
             except Exception as close_exc:
                 last_err = str(close_exc)
                 if self._is_reduce_only_unsupported(close_exc):
@@ -2029,50 +2032,20 @@ class MirrorEngine:
                     )
                     return False, None, "reduce_only_unsupported"
 
-                # Exception ≠ proof the order never filled — re-read live size
-                await asyncio.sleep(float(backoff_seconds))
-                live_before = live_size
-                try:
-                    positions = await client.get_option_positions()
-                except Exception as pos_exc:
-                    last_err = (
+            # Always re-read: accepted IOC can cancel unfilled
+            await asyncio.sleep(float(backoff_seconds))
+            live_before = live_size
+            try:
+                positions = await client.get_option_positions()
+            except Exception as pos_exc:
+                last_err = (
+                    f"close_ok_but_positions_fetch_failed: {pos_exc}"
+                    if order_accepted
+                    else (
                         f"close_failed then positions fetch failed: "
-                        f"{close_exc} / {pos_exc}"
+                        f"{last_err} / {pos_exc}"
                     )
-                    log_and_buffer(
-                        "SLAVE_CLOSE_RETRY",
-                        int(master_trade_id or 0),
-                        {
-                            "slave": slave_id,
-                            "product_id": pid,
-                            "attempt": attempt + 1,
-                            "live_size_before": live_before,
-                            "reason": "positions_fetch_failed",
-                            "path": path,
-                        },
-                    )
-                    if attempt >= int(max_retries):
-                        return False, None, last_err
-                    continue
-
-                rechecked = self._position_size_for_product(positions, pid)
-                if rechecked is None or abs(float(rechecked)) <= 1e-9:
-                    log_and_buffer(
-                        "SLAVE_CLOSE_RETRY",
-                        int(master_trade_id or 0),
-                        {
-                            "slave": slave_id,
-                            "product_id": pid,
-                            "attempt": attempt + 1,
-                            "live_size_before": live_before,
-                            "reason": "flat_after_exception_treat_success",
-                            "path": path,
-                        },
-                    )
-                    return True, last_order, ""
-
-                live_size = float(rechecked)
-                reason = f"still_open:{last_err[:120]}"
+                )
                 log_and_buffer(
                     "SLAVE_CLOSE_RETRY",
                     int(master_trade_id or 0),
@@ -2080,18 +2053,59 @@ class MirrorEngine:
                         "slave": slave_id,
                         "product_id": pid,
                         "attempt": attempt + 1,
-                        "live_size_before": live_size,
-                        "reason": reason,
+                        "live_size_before": live_before,
+                        "reason": "positions_fetch_failed",
                         "path": path,
                     },
                 )
                 if attempt >= int(max_retries):
-                    return False, None, (
-                        f"close_failed after {max_retries} retries: {last_err}"
-                    )
-                await asyncio.sleep(float(backoff_seconds))
+                    return False, last_order, last_err
+                continue
 
-        return False, None, last_err or "close_failed"
+            rechecked = self._position_size_for_product(positions, pid)
+            if rechecked is None or abs(float(rechecked)) <= 1e-9:
+                log_and_buffer(
+                    "SLAVE_CLOSE_RETRY",
+                    int(master_trade_id or 0),
+                    {
+                        "slave": slave_id,
+                        "product_id": pid,
+                        "attempt": attempt + 1,
+                        "live_size_before": live_before,
+                        "reason": (
+                            "flat_verified"
+                            if order_accepted
+                            else "flat_after_exception_treat_success"
+                        ),
+                        "path": path,
+                    },
+                )
+                return True, last_order, ""
+
+            live_size = float(rechecked)
+            if order_accepted:
+                last_err = (
+                    f"order_accepted_but_not_flat live_size={live_size}"
+                )
+            reason = f"still_open:{last_err[:120]}"
+            log_and_buffer(
+                "SLAVE_CLOSE_RETRY",
+                int(master_trade_id or 0),
+                {
+                    "slave": slave_id,
+                    "product_id": pid,
+                    "attempt": attempt + 1,
+                    "live_size_before": live_size,
+                    "reason": reason,
+                    "path": path,
+                },
+            )
+            if attempt >= int(max_retries):
+                return False, last_order, (
+                    f"close_not_flat after {max_retries} retries: {last_err}"
+                )
+
+        return False, last_order, last_err or "close_failed"
 
     async def _ledger_slave_basket_legs(
         self,
@@ -7102,6 +7116,201 @@ class MirrorEngine:
     # After this many consecutive close failures, only retry every Nth sweep
     _SWEEP_BACKOFF_AFTER = 3
     _SWEEP_BACKOFF_EVERY = 6  # generations between retries once backed off
+    # Bounded unwind retries for partial_entry_open / naked repair before escalate
+    _PARTIAL_ENTRY_UNWIND_MAX_ATTEMPTS = 5
+
+    # Orphan-basket sweep — rows that may still hold exchange risk
+    _ORPHAN_BASKET_OPEN_STATUSES = (
+        "active",
+        "partial",
+        "partial_entry_open",
+        "partial_adjustment",
+        "adjust_close_failed",
+        "exit_failed",
+        "error",
+    )
+    # Active-master integrity problem set (entry/adjust leftovers)
+    _INTEGRITY_PROBLEM_STATUSES = (
+        "error",
+        "partial",
+        "partial_entry_open",
+        "partial_adjustment",
+        "adjust_close_failed",
+        "exit_failed",
+        "blocked_foreign_position",
+        "skipped_low_capital",
+    )
+
+    async def _close_bot_owned_shorts(
+        self,
+        *,
+        client: DeltaClient,
+        slave: SlaveAccount,
+        slave_trade: SlaveTrade,
+        db: Any,
+        live_positions: list[dict[str, Any]] | None = None,
+        path: str = "",
+    ) -> tuple[bool, str]:
+        """
+        Close bot-owned short option products only (never foreign manuals).
+
+        Returns (all_flat, error_or_empty). Caller must hold per-slave lock.
+        """
+        bot_owned = self._bot_owned_product_ids(db, int(slave.id))
+        if live_positions is None:
+            try:
+                live_positions = await client.get_option_positions()
+            except Exception as pos_exc:
+                return False, f"get_option_positions: {pos_exc}"
+
+        shorts: list[tuple[int, float]] = []
+        for pos in live_positions or []:
+            try:
+                pid = int(pos.get("product_id") or 0)
+                size = float(pos.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid > 0 and size < -1e-9 and pid in bot_owned:
+                shorts.append((pid, size))
+
+        if not shorts:
+            return True, ""
+
+        errors: list[str] = []
+        for pid, size in shorts:
+            ok, _ord, err = await self._close_with_reduce_only(
+                client=client,
+                slave=slave,
+                product_id=pid,
+                signed_size=float(size),
+                master_trade_id=int(slave_trade.master_trade_id or 0),
+                path=path or "close_bot_owned_shorts",
+            )
+            if not ok:
+                errors.append(f"product={pid}:{err}")
+
+        if errors:
+            return False, "; ".join(errors)[:500]
+
+        # Final verify
+        try:
+            post = await client.get_option_positions()
+        except Exception as pos_exc:
+            return False, f"post_close_positions: {pos_exc}"
+        for pos in post or []:
+            try:
+                pid = int(pos.get("product_id") or 0)
+                size = float(pos.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid in bot_owned and size < -1e-9:
+                return False, f"still_short product={pid} size={size}"
+        return True, ""
+
+    async def _repair_partial_or_naked_slave(
+        self,
+        *,
+        db: Any,
+        slave: SlaveAccount,
+        slave_trade: SlaveTrade,
+        path: str,
+    ) -> str:
+        """
+        Re-attempt unwind of remaining bot-owned shorts for
+        partial_entry_open / partial_adjustment. Escalates after
+        ``_PARTIAL_ENTRY_UNWIND_MAX_ATTEMPTS`` failures.
+
+        Returns outcome: repaired | retry_pending | escalated | unreachable
+        Caller MUST hold the per-slave lock.
+        """
+        client = self._get_slave_client(slave)
+        try:
+            try:
+                live = await client.get_option_positions()
+            except Exception as pos_exc:
+                slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+                slave_trade.last_error = (
+                    f"repair_unreachable: {pos_exc}"
+                )[:500]
+                slave_trade.last_updated = get_utc_now()
+                slave.connection_status = "error"
+                slave.last_error = str(pos_exc)[:500]
+                db.commit()
+                logger.critical(
+                    "[SLAVE_REPAIR] slave_trade=%s unreachable: %s",
+                    slave_trade.id,
+                    pos_exc,
+                )
+                return "unreachable"
+
+            ok, err = await self._close_bot_owned_shorts(
+                client=client,
+                slave=slave,
+                slave_trade=slave_trade,
+                db=db,
+                live_positions=live,
+                path=path,
+            )
+            if ok:
+                if self._close_slave_trade(
+                    slave,
+                    slave_trade,
+                    reason=f"repaired:{path}",
+                    allow_virtual=False,
+                ):
+                    slave_trade.last_error = (
+                        f"Repaired via {path}: bot-owned shorts closed"
+                    )[:500]
+                    slave_trade.last_updated = get_utc_now()
+                    db.commit()
+                logger.critical(
+                    "[SLAVE_REPAIR] slave_trade=%s slave='%s' REPAIRED "
+                    "path=%s — naked/partial shorts closed",
+                    slave_trade.id,
+                    slave.name,
+                    path,
+                )
+                return "repaired"
+
+            slave_trade.error_count = int(slave_trade.error_count or 0) + 1
+            attempts = int(slave_trade.error_count or 0)
+            slave_trade.last_error = (
+                f"repair_failed ({attempts}): {err}"
+            )[:500]
+            slave_trade.last_updated = get_utc_now()
+            slave.connection_status = "error"
+            slave.last_error = (err or "")[:500]
+
+            if attempts >= self._PARTIAL_ENTRY_UNWIND_MAX_ATTEMPTS:
+                slave_trade.status = "exit_failed"
+                db.commit()
+                logger.critical(
+                    "[SLAVE_REPAIR] slave_trade=%s slave='%s' ESCALATED "
+                    "status=exit_failed after %s unwind attempts path=%s "
+                    "err=%s — needs human review",
+                    slave_trade.id,
+                    slave.name,
+                    attempts,
+                    path,
+                    (err or "")[:200],
+                )
+                return "escalated"
+
+            # Keep status so sweep retries (partial_entry_open / partial_adjustment)
+            db.commit()
+            logger.critical(
+                "[SLAVE_REPAIR] slave_trade=%s slave='%s' retry_pending "
+                "attempt=%s/%s path=%s err=%s",
+                slave_trade.id,
+                slave.name,
+                attempts,
+                self._PARTIAL_ENTRY_UNWIND_MAX_ATTEMPTS,
+                path,
+                (err or "")[:200],
+            )
+            return "retry_pending"
+        finally:
+            await client.close()
 
     async def sweep_orphan_slave_baskets(self) -> dict[str, int]:
         """
@@ -7139,14 +7348,7 @@ class MirrorEngine:
                 else:
                     without_hedge += 1
 
-            open_statuses = (
-                "active",
-                "partial",
-                "partial_adjustment",
-                "adjust_close_failed",
-                "exit_failed",
-                "error",
-            )
+            open_statuses = self._ORPHAN_BASKET_OPEN_STATUSES
             open_baskets = (
                 db.query(SlaveTrade)
                 .filter(SlaveTrade.status.in_(open_statuses))
@@ -7942,15 +8144,7 @@ class MirrorEngine:
                 .filter(
                     SlaveTrade.master_trade_id == int(master_trade_id),
                     SlaveTrade.status.in_(
-                        (
-                            "error",
-                            "partial",
-                            "partial_adjustment",
-                            "adjust_close_failed",
-                            "exit_failed",
-                            "blocked_foreign_position",
-                            "skipped_low_capital",
-                        )
+                        self._INTEGRITY_PROBLEM_STATUSES
                     ),
                 )
                 .all()
@@ -7962,9 +8156,31 @@ class MirrorEngine:
                     .first()
                 )
 
+                # Re-attempt unwind for naked / partial-entry leftovers
+                if st.status in ("partial_entry_open", "partial_adjustment"):
+                    if slave is None or not slave.is_active:
+                        continue
+                    if is_virtual_slave_trade(slave, st):
+                        continue
+                    async with self._slave_op_lock(
+                        int(slave.id), "check_slave_integrity"
+                    ) as acquired:
+                        if not acquired:
+                            continue
+                        await self._repair_partial_or_naked_slave(
+                            db=db,
+                            slave=slave,
+                            slave_trade=st,
+                            path=(
+                                "integrity_partial_entry_open"
+                                if st.status == "partial_entry_open"
+                                else "integrity_partial_adjustment"
+                            ),
+                        )
+                    continue
+
                 # Master still active — surface adjust/exit failures every cycle
                 if st.status in (
-                    "partial_adjustment",
                     "adjust_close_failed",
                     "exit_failed",
                 ):
@@ -8145,6 +8361,7 @@ class MirrorEngine:
 
             # Count distinct short option products (size < 0)
             short_pids: set[int] = set()
+            short_sizes: dict[int, float] = {}
             for pos in slave_positions:
                 try:
                     size = float(pos.get("size") or 0)
@@ -8153,8 +8370,11 @@ class MirrorEngine:
                     continue
                 if size < 0 and pid > 0:
                     short_pids.add(pid)
+                    short_sizes[pid] = size
 
             if master_open_legs >= 2 and len(short_pids) == 1:
+                naked_pid = next(iter(short_pids))
+                bot_owned = self._bot_owned_product_ids(db, int(slave.id))
                 msg = (
                     f"naked_one_leg: slave has {len(short_pids)} "
                     f"short product(s) {sorted(short_pids)} while "
@@ -8166,15 +8386,71 @@ class MirrorEngine:
                     slave_trade.id,
                     msg,
                 )
-                slave_trade.status = "partial_adjustment"
-                slave_trade.last_error = msg[:500]
-                slave_trade.error_count = (
-                    int(slave_trade.error_count or 0) + 1
+
+                if naked_pid not in bot_owned:
+                    # Foreign short — never touch; leave for human
+                    slave_trade.status = "partial_adjustment"
+                    slave_trade.last_error = (
+                        f"{msg} | FOREIGN product={naked_pid} not bot-owned"
+                    )[:500]
+                    slave_trade.error_count = (
+                        int(slave_trade.error_count or 0) + 1
+                    )
+                    slave_trade.last_updated = get_utc_now()
+                    slave.connection_status = "error"
+                    slave.last_error = slave_trade.last_error
+                    db.commit()
+                    return
+
+                # Close bot-owned naked short immediately (verified fill)
+                ok, _ord, err = await self._close_with_reduce_only(
+                    client=client,
+                    slave=slave,
+                    product_id=int(naked_pid),
+                    signed_size=float(short_sizes.get(naked_pid) or -1),
+                    master_trade_id=int(slave_trade.master_trade_id or 0),
+                    path="naked_one_leg",
                 )
-                slave_trade.last_updated = get_utc_now()
-                slave.connection_status = "error"
-                slave.last_error = msg[:500]
-                db.commit()
+                if ok:
+                    if self._close_slave_trade(
+                        slave,
+                        slave_trade,
+                        reason="naked_one_leg_closed",
+                        allow_virtual=False,
+                    ):
+                        slave_trade.last_error = (
+                            f"{msg} | closed product={naked_pid}"
+                        )[:500]
+                        slave_trade.last_updated = get_utc_now()
+                        db.commit()
+                    logger.critical(
+                        "[SLAVE_INTEGRITY] slave='%s' slave_trade=%s "
+                        "naked short product=%s CLOSED",
+                        slave.name,
+                        slave_trade.id,
+                        naked_pid,
+                    )
+                else:
+                    slave_trade.status = "partial_adjustment"
+                    slave_trade.last_error = (
+                        f"{msg} | close_failed: {err}"
+                    )[:500]
+                    slave_trade.error_count = (
+                        int(slave_trade.error_count or 0) + 1
+                    )
+                    slave_trade.last_updated = get_utc_now()
+                    slave.connection_status = "error"
+                    slave.last_error = slave_trade.last_error
+                    db.commit()
+                    logger.critical(
+                        "[SLAVE_INTEGRITY] slave='%s' slave_trade=%s "
+                        "naked close FAILED product=%s err=%s — "
+                        "status=partial_adjustment for sweep retry",
+                        slave.name,
+                        slave_trade.id,
+                        naked_pid,
+                        (err or "")[:200],
+                    )
             else:
                 logger.debug(
                     "Slave '%s' integrity OK: %s option positions "
