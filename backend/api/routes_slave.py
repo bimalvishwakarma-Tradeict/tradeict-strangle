@@ -24,6 +24,125 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/slave", tags=["slave-accounts"])
 
+# Unfillable by construction: product 0 does not exist, size 0 cannot fill,
+# IOC market cannot rest. Used only as a trading-permission probe.
+TRADING_PROBE_PRODUCT_ID = 0
+TRADING_PROBE_SIZE = 0
+
+_READ_ONLY_ERROR = (
+    "Delta API key is read-only — enable Trading permission. (read_only)"
+)
+
+
+def _is_read_only_permission_error(exc: DeltaAPIError) -> bool:
+    """True when Delta rejected the order because the key cannot trade."""
+    msg = str(getattr(exc, "message", "") or exc).lower()
+    if (
+        "ip_not_whitelisted" in msg
+        or "ip whitelist" in msg
+        or "not whitelisted" in msg
+    ):
+        return False
+    if (
+        "invalid_api_key" in msg
+        or "invalid api key" in msg
+        or "signature" in msg
+    ):
+        return False
+    permission_needles = (
+        "permission",
+        "unauthorized",
+        "unauthorised",
+        "forbidden",
+        "read only",
+        "read-only",
+        "readonly",
+        "not authorized",
+        "not authorised",
+        "not allowed to trade",
+        "trading is disabled",
+        "insufficient permission",
+    )
+    if any(n in msg for n in permission_needles):
+        return True
+    code = int(getattr(exc, "status_code", 0) or 0)
+    return code in (401, 403)
+
+
+def _is_order_validation_error(exc: DeltaAPIError) -> bool:
+    """True when the probe reached POST /v2/orders and Delta rejected the bad fields."""
+    code = int(getattr(exc, "status_code", 0) or 0)
+    if code in (400, 404, 422):
+        return True
+    msg = str(getattr(exc, "message", "") or exc).lower()
+    return any(
+        n in msg
+        for n in (
+            "invalid product",
+            "invalid_product",
+            "product_id",
+            "unknown product",
+            "does not exist",
+            "invalid size",
+            "size must",
+            "must be greater",
+            "out of range",
+        )
+    )
+
+
+async def assert_trading_permission(client: DeltaClient) -> None:
+    """
+    Prove the key can hit POST /v2/orders without placing a fillable order.
+
+    Delta does not expose key scopes on GET /v2/profile. A wallet read succeeds
+    for read-only keys, so we probe with product_id=0 and size=0 (IOC market).
+    Permission/authorisation errors refuse registration; validation errors
+    mean trading permission is present.
+    """
+    try:
+        result = await client.place_order(
+            product_id=TRADING_PROBE_PRODUCT_ID,
+            size=TRADING_PROBE_SIZE,
+            side="buy",
+            order_type="market_order",
+            time_in_force="ioc",
+        )
+    except DeltaAPIError as exc:
+        if _is_read_only_permission_error(exc):
+            logger.error("Slave key trading probe: read_only — %s", exc)
+            raise HTTPException(status_code=403, detail=_READ_ONLY_ERROR) from exc
+        if _is_order_validation_error(exc):
+            logger.info(
+                "Slave key trading probe: validation reject (permission ok) %s",
+                exc,
+            )
+            return
+        logger.error("Slave key trading probe inconclusive: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # Must never happen for product_id=0 / size=0 — cancel if Delta accepted.
+    order_id = None
+    if isinstance(result, dict):
+        order_id = result.get("order_id") or (result.get("raw") or {}).get("id")
+    logger.critical(
+        "trading probe unexpectedly accepted order_id=%s — cancelling",
+        order_id,
+    )
+    if order_id is not None:
+        try:
+            await client.cancel_order(int(order_id))
+        except Exception as cancel_exc:
+            logger.critical(
+                "trading probe cancel failed order_id=%s: %s",
+                order_id,
+                cancel_exc,
+            )
+    raise HTTPException(
+        status_code=502,
+        detail="Trading probe returned an order — registration refused",
+    )
+
 
 def _iso(dt: Any) -> str | None:
     if dt is None:
@@ -126,6 +245,10 @@ async def create_slave_account(
         try:
             profile = await client.test_connection()
             wallet = await client.get_wallet_balance()
+            if not bool(payload.is_virtual):
+                await assert_trading_permission(client)
+        except HTTPException:
+            raise
         except DeltaAPIError as exc:
             logger.error("Slave connect failed: %s", exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -184,6 +307,14 @@ async def test_slave_account(
         try:
             profile = await client.test_connection()
             wallet = await client.get_wallet_balance()
+            if not bool(getattr(slave, "is_virtual", False)):
+                await assert_trading_permission(client)
+        except HTTPException as exc:
+            slave.connection_status = "error"
+            slave.last_error = str(exc.detail)[:500]
+            slave.updated_at = get_utc_now()
+            db.commit()
+            raise
         except DeltaAPIError as exc:
             slave.connection_status = "error"
             slave.last_error = str(exc)[:500]
@@ -290,6 +421,14 @@ async def update_slave_account(
             try:
                 await client.test_connection()
                 wallet = await client.get_wallet_balance()
+                if not bool(getattr(slave, "is_virtual", False)):
+                    await assert_trading_permission(client)
+            except HTTPException as exc:
+                slave.connection_status = "error"
+                slave.last_error = str(exc.detail)[:500]
+                slave.updated_at = get_utc_now()
+                db.commit()
+                raise
             except DeltaAPIError as exc:
                 slave.connection_status = "error"
                 slave.last_error = str(exc)[:500]
