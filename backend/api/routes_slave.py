@@ -384,18 +384,53 @@ async def close_slave_structure(
         )
 
     slave: SlaveAccount | None = None
-    if payload.earner_user_id:
-        slave = (
-            db.query(SlaveAccount)
-            .filter(SlaveAccount.earner_user_id == str(payload.earner_user_id))
-            .first()
-        )
-    elif int(slave_id) > 0:
+    # Prefer path slave_id when supplied — never close a different account
+    # that shares the same earner_user_id.
+    if int(slave_id) > 0:
         slave = (
             db.query(SlaveAccount)
             .filter(SlaveAccount.id == int(slave_id))
             .first()
         )
+        if slave is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Slave account {int(slave_id)} not found",
+            )
+    elif payload.earner_user_id:
+        matches = (
+            db.query(SlaveAccount)
+            .filter(
+                SlaveAccount.earner_user_id == str(payload.earner_user_id)
+            )
+            .order_by(SlaveAccount.id.asc())
+            .all()
+        )
+        if not matches:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Slave account not found for "
+                    f"earner_user_id={payload.earner_user_id}"
+                ),
+            )
+        if len(matches) > 1:
+            ids = [int(s.id) for s in matches]
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Multiple slave accounts share this earner_user_id; "
+                    "pass slave_id in the path to choose one. "
+                    f"matching_slave_ids={ids}"
+                ),
+            )
+        slave = matches[0]
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide slave_id in the path or earner_user_id in the body",
+        )
+
     if slave is None:
         raise HTTPException(
             status_code=404,
