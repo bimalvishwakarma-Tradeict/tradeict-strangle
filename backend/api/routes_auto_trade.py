@@ -99,6 +99,9 @@ class AutoTradeSettingsSchema(BaseModel):
     target_theta_pct: float = Field(default=150.0, ge=10, le=1000)
     basket_target_mode: str = "THETA"  # THETA | PCT
     basket_target_multiple: float = Field(default=1.5, ge=0.1, le=10)
+    basket_qty_mode: str = "fixed"  # fixed | pct_of_hedge
+    basket_qty_pct_of_hedge: float = Field(default=20.0, gt=0, le=100)
+    hedge_qty_lots: int | None = Field(default=None, ge=1, le=10000)
     cooldown_after_loss_minutes: int = Field(default=120, ge=0, le=1440)
     adjustment_premium_tolerance_pct: float = Field(
         default=40.0, ge=5, le=200
@@ -168,6 +171,16 @@ class AutoTradeSettingsSchema(BaseModel):
         normalized = str(v or "THETA").upper().strip()
         if normalized not in {"THETA", "PCT"}:
             raise ValueError("basket_target_mode must be 'THETA' or 'PCT'")
+        return normalized
+
+    @field_validator("basket_qty_mode")
+    @classmethod
+    def validate_basket_qty_mode(cls, v: str) -> str:
+        normalized = str(v or "fixed").lower().strip()
+        if normalized not in {"fixed", "pct_of_hedge"}:
+            raise ValueError(
+                "basket_qty_mode must be 'fixed' or 'pct_of_hedge'"
+            )
         return normalized
 
     @field_validator("spread_mode")
@@ -464,6 +477,19 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             if getattr(s, "basket_target_multiple", None) is not None
             else 1.5
         ),
+        "basket_qty_mode": str(
+            getattr(s, "basket_qty_mode", None) or "fixed"
+        ).lower(),
+        "basket_qty_pct_of_hedge": float(
+            getattr(s, "basket_qty_pct_of_hedge", None)
+            if getattr(s, "basket_qty_pct_of_hedge", None) is not None
+            else 20.0
+        ),
+        "hedge_qty_lots": (
+            int(getattr(s, "hedge_qty_lots"))
+            if getattr(s, "hedge_qty_lots", None) is not None
+            else None
+        ),
         "cooldown_after_loss_minutes": int(
             getattr(s, "cooldown_after_loss_minutes", None)
             if getattr(s, "cooldown_after_loss_minutes", None) is not None
@@ -755,6 +781,13 @@ async def update_auto_trade_settings(
         payload.basket_target_mode or "THETA"
     ).upper().strip()
     settings.basket_target_multiple = float(payload.basket_target_multiple)
+    settings.basket_qty_mode = str(payload.basket_qty_mode or "fixed").lower().strip()
+    settings.basket_qty_pct_of_hedge = float(payload.basket_qty_pct_of_hedge)
+    settings.hedge_qty_lots = (
+        int(payload.hedge_qty_lots)
+        if payload.hedge_qty_lots is not None
+        else None
+    )
     settings.cooldown_after_loss_minutes = int(
         payload.cooldown_after_loss_minutes
     )

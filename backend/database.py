@@ -888,6 +888,9 @@ def _migrate_schema() -> None:
             ("basket_target_mode", "VARCHAR(10) NOT NULL DEFAULT 'THETA'"),
             ("basket_target_multiple", "FLOAT NOT NULL DEFAULT 1.5"),
             ("hedge_qty_ratio", "FLOAT NOT NULL DEFAULT 1.0"),
+            ("basket_qty_mode", "VARCHAR(20) NOT NULL DEFAULT 'fixed'"),
+            ("basket_qty_pct_of_hedge", "FLOAT NOT NULL DEFAULT 20.0"),
+            ("hedge_qty_lots", "INTEGER"),
             ("cooldown_after_loss_minutes", "INTEGER NOT NULL DEFAULT 120"),
             (
                 "adjustment_premium_tolerance_pct",

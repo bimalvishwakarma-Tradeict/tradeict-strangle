@@ -423,6 +423,17 @@ class AutoTradeSettings(Base):
     hedge_qty_ratio: Mapped[float] = mapped_column(
         Float, nullable=False, default=1.0
     )
+    # 'fixed' = use quantity + hedge_qty_ratio (current behaviour)
+    # 'pct_of_hedge' = basket qty derived from hedge_qty_lots × pct
+    basket_qty_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="fixed"
+    )
+    # Used when basket_qty_mode='pct_of_hedge': basket lots = ceil(hedge × pct / 100)
+    basket_qty_pct_of_hedge: Mapped[float] = mapped_column(
+        Float, nullable=False, default=20.0
+    )
+    # Used when basket_qty_mode='pct_of_hedge': fixed hedge long-straddle lot count
+    hedge_qty_lots: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cooldown_after_loss_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=120
     )
