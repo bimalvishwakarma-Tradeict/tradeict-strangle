@@ -58,6 +58,12 @@ function formatExpiryShort(iso) {
   }
 }
 
+function fmtLotsCount(n) {
+  const v = Number(n)
+  if (!Number.isFinite(v)) return '—'
+  return `${v} lot${v === 1 ? '' : 's'}`
+}
+
 function applyStatusToForm(data, setters) {
   if (!data) return
   setters.setUnderlying(data.underlying || 'BTC')
