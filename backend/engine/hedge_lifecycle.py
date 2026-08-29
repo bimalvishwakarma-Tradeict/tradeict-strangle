@@ -148,8 +148,8 @@ def compute_structure_gross_for_sl(
     open_basket_gross_mtm: float,
 ) -> float:
     """
-    Structure-wide SL basis (log-only in B4a): hedge + open baskets, spreads
-    neutralised. Fees stay deducted in hedge_net_mtm; exit spread is added back.
+    Structure-wide SL basis: hedge + open baskets, spreads neutralised.
+    Fees stay deducted in hedge_net_mtm; exit spread is added back.
     """
     hedge_component = (
         float(hedge_net_mtm)
@@ -157,6 +157,25 @@ def compute_structure_gross_for_sl(
         + float(hedge_est_exit_slippage_usd)
     )
     return float(open_basket_gross_mtm) + hedge_component
+
+
+def hedge_sl_room(budget: float, basis_usd: float) -> float:
+    """Headroom to stop line: positive = room left, <= 0 = at/beyond stop."""
+    return float(budget) + float(basis_usd)
+
+
+def hedge_sl_should_fire(
+    *,
+    budget: float,
+    structure_gross_for_sl: float,
+    already_fired: bool = False,
+) -> bool:
+    """True when structure-wide SL should close the hedge this cycle."""
+    return bool(
+        (not already_fired)
+        and float(budget) > 0
+        and float(structure_gross_for_sl) <= -float(budget)
+    )
 
 
 def _live_sl_budget_fields(db: Session, hedge: HedgePosition) -> dict[str, Any]:
@@ -177,14 +196,21 @@ def _live_sl_budget_fields(db: Session, hedge: HedgePosition) -> dict[str, Any]:
     cum = float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0)
     parts = compute_hedge_sl_budget(fixed_sl, floor_pct, cum)
     gross_for_sl = float(getattr(hedge, "hedge_gross_for_sl", 0.0) or 0.0)
+    structure_gross_for_sl = float(
+        getattr(hedge, "structure_gross_for_sl", 0.0) or 0.0
+    )
     budget = float(parts["budget"])
-    pct_to_stop = (-gross_for_sl / budget * 100.0) if budget > 0 else 0.0
+    pct_to_stop = (
+        (-structure_gross_for_sl / budget * 100.0) if budget > 0 else 0.0
+    )
     return {
         "hedge_fixed_sl_usd": round(float(parts["fixed_sl"]), 4),
         "hedge_sl_floor_pct": round(float(parts["floor_pct"]), 4),
         "sl_floor_usd": round(float(parts["floor"]), 4),
         "sl_budget": round(budget, 4),
         "pct_to_stop": round(pct_to_stop, 2),
+        "sl_basis_usd": round(structure_gross_for_sl, 4),
+        "hedge_only_for_sl": round(gross_for_sl, 4),
     }
 
 
@@ -2322,10 +2348,9 @@ async def evaluate_and_maybe_close_hedge(
     )
     sl_parts = compute_hedge_sl_budget(fixed_sl, floor_pct, cum_closed)
     budget = float(sl_parts["budget"])
-    room = budget + gross_for_sl  # positive = headroom remaining (decision unchanged)
-    room_today = room
-    room_new = budget + structure_gross_for_sl
-    would_differ = (room_today <= 0) != (room_new <= 0)
+    room_old = hedge_sl_room(budget, gross_for_sl)
+    room = hedge_sl_room(budget, structure_gross_for_sl)
+    would_have_fired_old = room_old <= 0
 
     _hedge_log(
         "HEDGE_SL_CHECK",
@@ -2334,37 +2359,39 @@ async def evaluate_and_maybe_close_hedge(
             "hedge": hid,
             "gross_for_sl": round(gross_for_sl, 6),
             "structure_gross_for_sl": round(structure_gross_for_sl, 6),
+            "sl_basis": "structure",
             "fixed_sl": round(float(sl_parts["fixed_sl"]), 6),
             "cum_closed": round(float(sl_parts["cum_closed"]), 6),
             "floor": round(float(sl_parts["floor"]), 6),
             "budget": round(budget, 6),
             "room": round(room, 6),
-            "room_today": round(room_today, 6),
-            "room_new": round(room_new, 6),
-            "would_differ": bool(would_differ),
+            "room_old": round(room_old, 6),
+            "would_have_fired_old": bool(would_have_fired_old),
             "summary": (
                 f"[HEDGE_SL_CHECK] hedge={hid} | "
                 f"gross_for_sl={round(gross_for_sl, 6)} | "
                 f"structure_gross_for_sl={round(structure_gross_for_sl, 6)} | "
+                f"sl_basis=structure | "
                 f"fixed_sl={round(float(sl_parts['fixed_sl']), 6)} | "
                 f"cum_closed={round(float(sl_parts['cum_closed']), 6)} | "
                 f"floor={round(float(sl_parts['floor']), 6)} | "
                 f"budget={round(budget, 6)} | "
-                f"room_today={round(room_today, 6)} | "
-                f"room_new={round(room_new, 6)} | "
-                f"would_differ={bool(would_differ)}"
+                f"room={round(room, 6)} | "
+                f"room_old={round(room_old, 6)} | "
+                f"would_have_fired_old={bool(would_have_fired_old)}"
             ),
         },
     )
 
     already_fired = hid in _hedge_sl_fired
-    will_close_stop = bool(
-        (not already_fired) and budget > 0 and gross_for_sl <= -budget
+    will_close_stop = hedge_sl_should_fire(
+        budget=budget,
+        structure_gross_for_sl=structure_gross_for_sl,
+        already_fired=already_fired,
     )
 
-    # How close gross_for_sl is to the stop line (−budget)
     pct_to_stop = (
-        (-gross_for_sl / budget * 100.0) if budget > 0 else 0.0
+        (-structure_gross_for_sl / budget * 100.0) if budget > 0 else 0.0
     )
 
     _hedge_log(
@@ -2384,6 +2411,8 @@ async def evaluate_and_maybe_close_hedge(
             "stoploss_usd": stoploss,
             "sl_budget": round(budget, 6),
             "hedge_gross_for_sl": round(gross_for_sl, 6),
+            "structure_gross_for_sl": round(structure_gross_for_sl, 6),
+            "sl_basis": "structure",
             "pct_to_target": round(pct_to_target, 2),
             "pct_to_stop": round(pct_to_stop, 2),
             "hours_to_expiry": round(hours_left, 4),
