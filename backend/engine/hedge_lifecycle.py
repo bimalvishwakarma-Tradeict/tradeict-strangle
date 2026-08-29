@@ -140,6 +140,25 @@ def compute_hedge_sl_budget(
     }
 
 
+def compute_structure_gross_for_sl(
+    *,
+    hedge_net_mtm: float,
+    entry_spread_usd: float,
+    hedge_est_exit_slippage_usd: float,
+    open_basket_gross_mtm: float,
+) -> float:
+    """
+    Structure-wide SL basis (log-only in B4a): hedge + open baskets, spreads
+    neutralised. Fees stay deducted in hedge_net_mtm; exit spread is added back.
+    """
+    hedge_component = (
+        float(hedge_net_mtm)
+        + float(entry_spread_usd)
+        + float(hedge_est_exit_slippage_usd)
+    )
+    return float(open_basket_gross_mtm) + hedge_component
+
+
 def _live_sl_budget_fields(db: Session, hedge: HedgePosition) -> dict[str, Any]:
     """Settings + live budget for the hedge card Stop line."""
     from backend.database import get_or_create_auto_settings
@@ -1881,6 +1900,33 @@ def _open_basket_net_mtm(
     return float(total)
 
 
+def _open_basket_gross_mtm(
+    db: Session,
+    hedge_id: int,
+    position_tracker: Any | None,
+) -> float:
+    """Sum last_pnl (gross) of active baskets under this hedge (0 if none / unknown)."""
+    from backend.config import TradeStatus
+
+    if position_tracker is None:
+        return 0.0
+    active = (
+        db.query(Trade)
+        .filter(
+            Trade.hedge_position_id == int(hedge_id),
+            Trade.status == TradeStatus.ACTIVE.value,
+        )
+        .all()
+    )
+    total = 0.0
+    for trade in active:
+        state = position_tracker.get(int(trade.id))
+        if state is None:
+            continue
+        total += float(getattr(state, "last_pnl", 0.0) or 0.0)
+    return float(total)
+
+
 def compute_hedge_net_mtm_fields(
     *,
     call_bid: float,
@@ -1999,12 +2045,22 @@ async def persist_structure_pnl(
     )
     cum_closed = _cum_closed_basket_pnl(db, hid)
     open_basket = _open_basket_net_mtm(db, hid, position_tracker)
+    open_basket_gross = _open_basket_gross_mtm(db, hid, position_tracker)
+    est_slip = float(mtm["hedge_est_exit_slippage_usd"])
+    structure_gross_sl = compute_structure_gross_for_sl(
+        hedge_net_mtm=float(mtm["hedge_net_mtm"]),
+        entry_spread_usd=float(entry_spread),
+        hedge_est_exit_slippage_usd=est_slip,
+        open_basket_gross_mtm=float(open_basket_gross),
+    )
     structure = (
         float(mtm["hedge_net_mtm"]) + float(cum_closed) + float(open_basket)
     )
 
     hedge.hedge_net_mtm = float(mtm["hedge_net_mtm"])
     hedge.hedge_gross_for_sl = float(mtm["hedge_gross_for_sl"])
+    hedge.hedge_est_exit_slippage_usd = est_slip
+    hedge.structure_gross_for_sl = float(structure_gross_sl)
     hedge.cum_closed_basket_pnl = float(cum_closed)
     hedge.structure_pnl = float(structure)
     db.commit()
@@ -2014,6 +2070,9 @@ async def persist_structure_pnl(
         "hedge": hid,
         "hedge_net": round(float(mtm["hedge_net_mtm"]), 6),
         "hedge_gross_sl": round(float(mtm["hedge_gross_for_sl"]), 6),
+        "structure_gross_sl": round(float(structure_gross_sl), 6),
+        "hedge_est_slip": round(est_slip, 6),
+        "open_basket_gross": round(float(open_basket_gross), 6),
         "entry_spread": round(float(entry_spread), 6),
         "cum_closed": round(float(cum_closed), 6),
         "open_basket": round(float(open_basket), 6),
@@ -2022,6 +2081,9 @@ async def persist_structure_pnl(
             f"[STRUCTURE_PNL] hedge={hid} | "
             f"hedge_net={round(float(mtm['hedge_net_mtm']), 6)} | "
             f"hedge_gross_sl={round(float(mtm['hedge_gross_for_sl']), 6)} | "
+            f"structure_gross_sl={round(float(structure_gross_sl), 6)} | "
+            f"hedge_est_slip={round(est_slip, 6)} | "
+            f"open_basket_gross={round(float(open_basket_gross), 6)} | "
             f"entry_spread={round(float(entry_spread), 6)} | "
             f"cum_closed={round(float(cum_closed), 6)} | "
             f"open_basket={round(float(open_basket), 6)} | "
@@ -2032,6 +2094,9 @@ async def persist_structure_pnl(
     return {
         "hedge_net_mtm": float(mtm["hedge_net_mtm"]),
         "hedge_gross_for_sl": float(mtm["hedge_gross_for_sl"]),
+        "hedge_est_exit_slippage_usd": est_slip,
+        "structure_gross_for_sl": float(structure_gross_sl),
+        "open_basket_gross_mtm": float(open_basket_gross),
         "entry_spread_usd": float(entry_spread),
         "cum_closed_basket_pnl": float(cum_closed),
         "open_basket_net_mtm": float(open_basket),
@@ -2252,9 +2317,15 @@ async def evaluate_and_maybe_close_hedge(
     )
     cum_closed = float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0)
     gross_for_sl = float(getattr(hedge, "hedge_gross_for_sl", 0.0) or 0.0)
+    structure_gross_for_sl = float(
+        getattr(hedge, "structure_gross_for_sl", 0.0) or 0.0
+    )
     sl_parts = compute_hedge_sl_budget(fixed_sl, floor_pct, cum_closed)
     budget = float(sl_parts["budget"])
-    room = budget + gross_for_sl  # positive = headroom remaining
+    room = budget + gross_for_sl  # positive = headroom remaining (decision unchanged)
+    room_today = room
+    room_new = budget + structure_gross_for_sl
+    would_differ = (room_today <= 0) != (room_new <= 0)
 
     _hedge_log(
         "HEDGE_SL_CHECK",
@@ -2262,19 +2333,26 @@ async def evaluate_and_maybe_close_hedge(
         {
             "hedge": hid,
             "gross_for_sl": round(gross_for_sl, 6),
+            "structure_gross_for_sl": round(structure_gross_for_sl, 6),
             "fixed_sl": round(float(sl_parts["fixed_sl"]), 6),
             "cum_closed": round(float(sl_parts["cum_closed"]), 6),
             "floor": round(float(sl_parts["floor"]), 6),
             "budget": round(budget, 6),
             "room": round(room, 6),
+            "room_today": round(room_today, 6),
+            "room_new": round(room_new, 6),
+            "would_differ": bool(would_differ),
             "summary": (
                 f"[HEDGE_SL_CHECK] hedge={hid} | "
                 f"gross_for_sl={round(gross_for_sl, 6)} | "
+                f"structure_gross_for_sl={round(structure_gross_for_sl, 6)} | "
                 f"fixed_sl={round(float(sl_parts['fixed_sl']), 6)} | "
                 f"cum_closed={round(float(sl_parts['cum_closed']), 6)} | "
                 f"floor={round(float(sl_parts['floor']), 6)} | "
                 f"budget={round(budget, 6)} | "
-                f"room={round(room, 6)}"
+                f"room_today={round(room_today, 6)} | "
+                f"room_new={round(room_new, 6)} | "
+                f"would_differ={bool(would_differ)}"
             ),
         },
     )

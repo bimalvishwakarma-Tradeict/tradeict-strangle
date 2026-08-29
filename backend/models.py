@@ -670,6 +670,12 @@ class HedgePosition(Base):
     entry_spread_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     hedge_net_mtm: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     hedge_gross_for_sl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    hedge_est_exit_slippage_usd: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
+    structure_gross_for_sl: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
     cum_closed_basket_pnl: Mapped[float] = mapped_column(
         Float, nullable=False, default=0.0
     )
