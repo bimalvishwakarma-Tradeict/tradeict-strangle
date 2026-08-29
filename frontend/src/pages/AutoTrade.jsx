@@ -66,6 +66,11 @@ function applyStatusToForm(data, setters) {
     setters.setSelectedExpiryDate(data.expiry_date_override)
   }
   setters.setQuantity(Number(data.quantity ?? 1))
+  setters.setBasketQtyMode(data.basket_qty_mode || 'fixed')
+  setters.setBasketQtyPctOfHedge(String(data.basket_qty_pct_of_hedge ?? 20))
+  setters.setHedgeQtyLots(
+    data.hedge_qty_lots == null ? '' : String(data.hedge_qty_lots),
+  )
   setters.setReEntryDelay(Number(data.re_entry_delay_minutes ?? 1))
   setters.setEntrySettlingSeconds(String(data.entry_settling_seconds ?? 60))
   setters.setAdjustmentSettlingSeconds(
@@ -204,6 +209,9 @@ export default function AutoTrade() {
   const [selectedExpiryDate, setSelectedExpiryDate] = useState(null)
   const [expiriesReady, setExpiriesReady] = useState(false)
   const [quantity, setQuantity] = useState(1)
+  const [basketQtyMode, setBasketQtyMode] = useState('fixed')
+  const [basketQtyPctOfHedge, setBasketQtyPctOfHedge] = useState('20')
+  const [hedgeQtyLots, setHedgeQtyLots] = useState('')
   const [reEntryDelay, setReEntryDelay] = useState(1)
   const [entrySettlingSeconds, setEntrySettlingSeconds] = useState('60')
   const [adjustmentSettlingSeconds, setAdjustmentSettlingSeconds] =
@@ -272,6 +280,9 @@ export default function AutoTrade() {
       setExpiryDte,
       setSelectedExpiryDate,
       setQuantity,
+      setBasketQtyMode,
+      setBasketQtyPctOfHedge,
+      setHedgeQtyLots,
       setReEntryDelay,
       setEntrySettlingSeconds,
       setAdjustmentSettlingSeconds,
@@ -640,6 +651,18 @@ export default function AutoTrade() {
         1440,
         Math.max(0, Number(cooldownAfterLossMinutes) || 0),
       ),
+      basket_qty_mode:
+        hedgeEnabled && basketQtyMode === 'pct_of_hedge'
+          ? 'pct_of_hedge'
+          : 'fixed',
+      basket_qty_pct_of_hedge: Math.min(
+        100,
+        Math.max(1, Number(basketQtyPctOfHedge) || 20),
+      ),
+      hedge_qty_lots:
+        hedgeEnabled && basketQtyMode === 'pct_of_hedge'
+          ? Math.max(1, Number(hedgeQtyLots) || 1)
+          : null,
     }
   }
 
@@ -783,11 +806,33 @@ export default function AutoTrade() {
   const spreadSettingsError =
     spreadCapPctError || basketExitSpreadPctError || hedgeExitSpreadPctError
 
+  const basketSizingPreview = useMemo(() => {
+    if (basketQtyMode !== 'pct_of_hedge' || !hedgeEnabled) return null
+    const hedgeLots = Math.max(1, Number(hedgeQtyLots) || 1)
+    const pct = Math.min(100, Math.max(1, Number(basketQtyPctOfHedge) || 20))
+    const basketLots = Math.ceil((hedgeLots * pct) / 100)
+    return { hedgeLots, pct, basketLots }
+  }, [basketQtyMode, hedgeEnabled, hedgeQtyLots, basketQtyPctOfHedge])
+
+  const pctOfHedgeSizingActive =
+    hedgeEnabled && basketQtyMode === 'pct_of_hedge'
+
   const buildPreviewParams = useCallback(() => {
     const dte = Math.max(0, Number(expiryDte) || 1)
+    const effectiveBasketQtyMode =
+      hedgeEnabled && basketQtyMode === 'pct_of_hedge' ? 'pct_of_hedge' : 'fixed'
     const params = {
       underlying,
       quantity: Math.max(1, Number(quantity) || 1),
+      basket_qty_mode: effectiveBasketQtyMode,
+      basket_qty_pct_of_hedge: Math.min(
+        100,
+        Math.max(1, Number(basketQtyPctOfHedge) || 20),
+      ),
+      hedge_qty_lots:
+        effectiveBasketQtyMode === 'pct_of_hedge'
+          ? Math.max(1, Number(hedgeQtyLots) || 1)
+          : null,
       hedge_expiry_mode: hedgeExpiryMode || 'month_1',
       margin_buffer_pct: Math.min(200, Math.max(0, Number(marginBufferPct) || 50)),
       theta_multiplier: Math.min(20, Math.max(0.01, Number(thetaMultiplier) || 3)),
@@ -802,6 +847,10 @@ export default function AutoTrade() {
   }, [
     underlying,
     quantity,
+    hedgeEnabled,
+    basketQtyMode,
+    basketQtyPctOfHedge,
+    hedgeQtyLots,
     hedgeExpiryMode,
     marginBufferPct,
     thetaMultiplier,
@@ -1119,7 +1168,11 @@ export default function AutoTrade() {
           )}
         </div>
 
-        <label className="block text-sm text-gray-300">
+        <label
+          className={`block text-sm text-gray-300 ${
+            pctOfHedgeSizingActive ? 'opacity-40' : ''
+          }`}
+        >
           Quantity
           <input
             type="number"
@@ -1129,7 +1182,134 @@ export default function AutoTrade() {
             onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
             className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
           />
+          {pctOfHedgeSizingActive && (
+            <p className="mt-1 text-xs text-gray-500">
+              Not used in % of hedge mode.
+            </p>
+          )}
         </label>
+
+        <section className="space-y-3 rounded-xl border border-sky-700/40 bg-gray-800/60 p-4">
+          <h2 className="text-sm font-semibold text-white">
+            SHORT BASKET SIZING
+          </h2>
+          <div className="space-y-2">
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="radio"
+                name="basket_qty_mode"
+                checked={basketQtyMode === 'fixed'}
+                onChange={() => setBasketQtyMode('fixed')}
+                className="mt-1"
+              />
+              <span className="text-sm text-gray-300">
+                Fixed quantity (current behaviour)
+                <span className="mt-0.5 block text-xs text-gray-500">
+                  Short basket qty = Quantity field. Hedge qty = basket × hedge
+                  ratio.
+                </span>
+              </span>
+            </label>
+            <label
+              className={`flex items-start gap-3 ${
+                hedgeEnabled
+                  ? 'cursor-pointer'
+                  : 'cursor-not-allowed opacity-40'
+              }`}
+            >
+              <input
+                type="radio"
+                name="basket_qty_mode"
+                checked={basketQtyMode === 'pct_of_hedge'}
+                disabled={!hedgeEnabled}
+                onChange={() => setBasketQtyMode('pct_of_hedge')}
+                className="mt-1 disabled:cursor-not-allowed"
+              />
+              <span className="text-sm text-gray-300">
+                % of hedge quantity
+                <span className="mt-0.5 block text-xs text-gray-500">
+                  Hedge qty aap tay karte ho; short basket uska % hoga (upar
+                  round off).
+                </span>
+              </span>
+            </label>
+          </div>
+          {!hedgeEnabled && (
+            <p className="text-xs text-amber-400/90">
+              Requires Hedge Mode. With hedge off, sizing falls back to Fixed
+              quantity.
+            </p>
+          )}
+          {pctOfHedgeSizingActive && (
+            <div className="space-y-3 border-t border-gray-700/60 pt-3">
+              <label className="block text-sm text-gray-300">
+                Hedge quantity (lots)
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={hedgeQtyLots}
+                  onChange={(e) =>
+                    setHedgeQtyLots(
+                      e.target.value === ''
+                        ? ''
+                        : String(Math.max(1, Number(e.target.value) || 1)),
+                    )
+                  }
+                  className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+                />
+              </label>
+              <label className="block text-sm text-gray-300">
+                Short basket % of hedge
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={basketQtyPctOfHedge}
+                  onChange={(e) =>
+                    setBasketQtyPctOfHedge(
+                      String(
+                        Math.min(
+                          100,
+                          Math.max(1, Number(e.target.value) || 1),
+                        ),
+                      ),
+                    )
+                  }
+                  className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+                />
+              </label>
+              {basketSizingPreview && (
+                <p
+                  className={`text-xs ${
+                    basketSizingPreview.basketLots === 0
+                      ? 'text-red-400'
+                      : 'text-gray-400'
+                  }`}
+                >
+                  {basketSizingPreview.basketLots === 0 ? (
+                    <>
+                      Short basket would be 0 lots — entry will be skipped.
+                    </>
+                  ) : (
+                    <>
+                      Hedge {basketSizingPreview.hedgeLots} lots → Short basket{' '}
+                      {basketSizingPreview.basketLots} lots (ceil of{' '}
+                      {basketSizingPreview.pct}% ={' '}
+                      {(
+                        (basketSizingPreview.hedgeLots *
+                          basketSizingPreview.pct) /
+                        100
+                      ).toFixed(1)}
+                      )
+                    </>
+                  )}
+                </p>
+              )}
+            </div>
+          )}
+        </section>
 
         <div>
           <div className="mb-2 text-sm text-gray-300">Trade Type</div>
@@ -1145,7 +1325,7 @@ export default function AutoTrade() {
             >
               <div className="font-medium">Short Straddle</div>
               <div className="mt-1 text-xs opacity-70">
-                ATM strike, same for Call & Put
+                ATM Call + premium-matched Put
               </div>
             </button>
             <button
