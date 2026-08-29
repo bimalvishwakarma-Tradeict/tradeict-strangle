@@ -25,10 +25,10 @@ function fmtDeduction(v, digits = 3) {
   return `−$${fmtMoney(Math.abs(n), digits)}`
 }
 
-function fmtLotsCount(n) {
-  const v = Number(n)
-  if (!Number.isFinite(v)) return '—'
-  return `${v} lot${v === 1 ? '' : 's'}`
+function fmtAddBack(v, digits = 3) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  return `+$${fmtMoney(Math.abs(n), digits)}`
 }
 
 function pnlClass(v) {
@@ -118,6 +118,15 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
   const exitSpreadPct = Number(hedge.hedge_exit_spread_pct)
   const slBasisUsd = hedge.sl_basis_usd
   const hedgeOnlyForSl = hedge.hedge_only_for_sl
+  const openBasketGross = Number(hedge.open_basket_gross)
+  const netNum = Number(net)
+  const grossNum = Number(gross)
+  const pnlBreakdownMismatch =
+    Number.isFinite(grossNum) &&
+    Number.isFinite(netNum) &&
+    Number.isFinite(estExitSlip) &&
+    Number.isFinite(feesUsd) &&
+    Math.abs(grossNum - estExitSlip - feesUsd - netNum) > 0.01
   const exitSlipUnavailable =
     Number.isFinite(estExitSlip) &&
     estExitSlip === 0 &&
@@ -282,10 +291,6 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                 <span className={pnlClass(gross)}>{fmtSigned(gross, 4)}</span>
               </div>
               <div className="flex justify-between gap-3 pl-2">
-                <span>less entry spread</span>
-                <span>{fmtDeduction(entrySpread, 3)}</span>
-              </div>
-              <div className="flex justify-between gap-3 pl-2">
                 <span>
                   less est. exit spread
                   {Number.isFinite(exitSpreadPct) ? (
@@ -319,11 +324,23 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
               <div className="flex justify-between gap-3">
                 <span className="font-semibold text-gray-300">
                   Hedge P&L (net)
+                  {pnlBreakdownMismatch ? (
+                    <span
+                      className="ml-1 font-normal text-amber-500/90"
+                      title="Gross − exit spread − fees does not match net — check backend payload"
+                    >
+                      ⚠ mismatch
+                    </span>
+                  ) : null}
                 </span>
                 <span className={`font-semibold ${pnlClass(net)}`}>
                   {fmtSigned(net, 4)}
                 </span>
               </div>
+              <p className="pt-0.5 text-[10px] leading-snug text-gray-600">
+                Gross is marked bid-vs-entry, so the entry spread is already
+                inside it.
+              </p>
             </div>
           </div>
 
@@ -405,16 +422,37 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                 </span>
               )}
             </div>
-            <div className="mt-0.5 text-[10px] leading-snug text-gray-500">
-              Structure basis:{' '}
-              <span className={pnlClass(slBasisUsd)}>
-                {fmtSigned(slBasisUsd, 4)}
-              </span>
-              <span className="mx-1 text-gray-600">·</span>
-              Hedge only:{' '}
-              <span className={pnlClass(hedgeOnlyForSl)}>
-                {fmtSigned(hedgeOnlyForSl, 4)}
-              </span>
+            <div className="mt-1 space-y-0.5 text-[10px] leading-snug text-gray-500">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+                <span>Hedge P&L (net)</span>
+                <span className={pnlClass(net)}>{fmtSigned(net, 4)}</span>
+              </div>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 pl-2">
+                <span>+ entry spread</span>
+                <span>{fmtAddBack(entrySpread, 3)}</span>
+              </div>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+                <span className="text-gray-400">Hedge only</span>
+                <span className={pnlClass(hedgeOnlyForSl)}>
+                  {fmtSigned(hedgeOnlyForSl, 4)}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 pl-2">
+                <span>+ est. exit spread</span>
+                <span>{fmtAddBack(estExitSlip, 3)}</span>
+              </div>
+              {Number.isFinite(openBasketGross) ? (
+                <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 pl-2">
+                  <span>+ open basket (gross)</span>
+                  <span>{fmtAddBack(openBasketGross, 3)}</span>
+                </div>
+              ) : null}
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+                <span className="text-gray-400">Structure basis</span>
+                <span className={pnlClass(slBasisUsd)}>
+                  {fmtSigned(slBasisUsd, 4)}
+                </span>
+              </div>
             </div>
           </div>
           <span>
