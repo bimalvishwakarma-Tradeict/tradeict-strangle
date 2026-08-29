@@ -71,6 +71,8 @@ function applyStatusToForm(data, setters) {
   setters.setHedgeQtyLots(
     data.hedge_qty_lots == null ? '' : String(data.hedge_qty_lots),
   )
+  setters.setBasketQtyDynamic(!!data.basket_qty_dynamic)
+  setters.setBasketQtyThetaMult(String(data.basket_qty_theta_mult ?? 2.0))
   setters.setReEntryDelay(Number(data.re_entry_delay_minutes ?? 1))
   setters.setEntrySettlingSeconds(String(data.entry_settling_seconds ?? 60))
   setters.setAdjustmentSettlingSeconds(
@@ -212,6 +214,8 @@ export default function AutoTrade() {
   const [basketQtyMode, setBasketQtyMode] = useState('fixed')
   const [basketQtyPctOfHedge, setBasketQtyPctOfHedge] = useState('20')
   const [hedgeQtyLots, setHedgeQtyLots] = useState('')
+  const [basketQtyDynamic, setBasketQtyDynamic] = useState(false)
+  const [basketQtyThetaMult, setBasketQtyThetaMult] = useState('2.0')
   const [reEntryDelay, setReEntryDelay] = useState(1)
   const [entrySettlingSeconds, setEntrySettlingSeconds] = useState('60')
   const [adjustmentSettlingSeconds, setAdjustmentSettlingSeconds] =
@@ -283,6 +287,8 @@ export default function AutoTrade() {
       setBasketQtyMode,
       setBasketQtyPctOfHedge,
       setHedgeQtyLots,
+      setBasketQtyDynamic,
+      setBasketQtyThetaMult,
       setReEntryDelay,
       setEntrySettlingSeconds,
       setAdjustmentSettlingSeconds,
@@ -663,6 +669,11 @@ export default function AutoTrade() {
         hedgeEnabled && basketQtyMode === 'pct_of_hedge'
           ? Math.max(1, Number(hedgeQtyLots) || 1)
           : null,
+      basket_qty_dynamic: pctOfHedgeSizingActive ? basketQtyDynamic : false,
+      basket_qty_theta_mult: Math.min(
+        10,
+        Math.max(0.1, Number(basketQtyThetaMult) || 2.0),
+      ),
     }
   }
 
@@ -808,14 +819,35 @@ export default function AutoTrade() {
 
   const basketSizingPreview = useMemo(() => {
     if (basketQtyMode !== 'pct_of_hedge' || !hedgeEnabled) return null
+    if (basketQtyDynamic) return null
     const hedgeLots = Math.max(1, Number(hedgeQtyLots) || 1)
     const pct = Math.min(100, Math.max(1, Number(basketQtyPctOfHedge) || 20))
     const basketLots = Math.ceil((hedgeLots * pct) / 100)
     return { hedgeLots, pct, basketLots }
-  }, [basketQtyMode, hedgeEnabled, hedgeQtyLots, basketQtyPctOfHedge])
+  }, [
+    basketQtyMode,
+    hedgeEnabled,
+    hedgeQtyLots,
+    basketQtyPctOfHedge,
+    basketQtyDynamic,
+  ])
+
+  const basketQtyThetaMultError = useMemo(() => {
+    const n = Number(basketQtyThetaMult)
+    if (basketQtyThetaMult === '' || Number.isNaN(n)) {
+      return 'Must be between 0.1 and 10'
+    }
+    if (n < 0.1 || n > 10) {
+      return 'Must be between 0.1 and 10'
+    }
+    return null
+  }, [basketQtyThetaMult])
 
   const pctOfHedgeSizingActive =
     hedgeEnabled && basketQtyMode === 'pct_of_hedge'
+
+  const dynamicBasketSizingActive =
+    pctOfHedgeSizingActive && basketQtyDynamic
 
   const buildPreviewParams = useCallback(() => {
     const dte = Math.max(0, Number(expiryDte) || 1)
@@ -833,6 +865,12 @@ export default function AutoTrade() {
         effectiveBasketQtyMode === 'pct_of_hedge'
           ? Math.max(1, Number(hedgeQtyLots) || 1)
           : null,
+      basket_qty_dynamic:
+        effectiveBasketQtyMode === 'pct_of_hedge' ? basketQtyDynamic : false,
+      basket_qty_theta_mult: Math.min(
+        10,
+        Math.max(0.1, Number(basketQtyThetaMult) || 2.0),
+      ),
       hedge_expiry_mode: hedgeExpiryMode || 'month_1',
       margin_buffer_pct: Math.min(200, Math.max(0, Number(marginBufferPct) || 50)),
       theta_multiplier: Math.min(20, Math.max(0.01, Number(thetaMultiplier) || 3)),
@@ -851,6 +889,8 @@ export default function AutoTrade() {
     basketQtyMode,
     basketQtyPctOfHedge,
     hedgeQtyLots,
+    basketQtyDynamic,
+    basketQtyThetaMult,
     hedgeExpiryMode,
     marginBufferPct,
     thetaMultiplier,
@@ -909,7 +949,8 @@ export default function AutoTrade() {
       hedgeRollDteError ||
       hedgeRollHardDteError ||
       hedgeDteOrderingError ||
-      spreadSettingsError
+      spreadSettingsError ||
+      basketQtyThetaMultError
     ) {
       setToast({
         type: 'error',
@@ -923,6 +964,7 @@ export default function AutoTrade() {
           hedgeRollHardDteError ||
           hedgeDteOrderingError ||
           spreadSettingsError ||
+          basketQtyThetaMultError ||
           'Fix validation errors before saving',
       })
       return
@@ -953,7 +995,8 @@ export default function AutoTrade() {
       hedgeRollDteError ||
       hedgeRollHardDteError ||
       hedgeDteOrderingError ||
-      spreadSettingsError
+      spreadSettingsError ||
+      basketQtyThetaMultError
     ) {
       setToast({
         type: 'error',
@@ -967,6 +1010,7 @@ export default function AutoTrade() {
           hedgeRollHardDteError ||
           hedgeDteOrderingError ||
           spreadSettingsError ||
+          basketQtyThetaMultError ||
           'Fix validation errors before enabling',
       })
       return
@@ -1259,7 +1303,11 @@ export default function AutoTrade() {
                   className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
                 />
               </label>
-              <label className="block text-sm text-gray-300">
+              <label
+                className={`block text-sm text-gray-300 ${
+                  dynamicBasketSizingActive ? 'opacity-40' : ''
+                }`}
+              >
                 Short basket % of hedge
                 <input
                   type="number"
@@ -1279,36 +1327,90 @@ export default function AutoTrade() {
                   }
                   className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
                 />
+                {dynamicBasketSizingActive && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    Not used when dynamic is on — % is computed at entry from
+                    live theta.
+                  </p>
+                )}
               </label>
-              {basketSizingPreview && (
-                <p
-                  className={`text-xs ${
-                    basketSizingPreview.basketLots === 0
-                      ? 'text-red-400'
-                      : 'text-gray-400'
-                  }`}
-                >
-                  {basketSizingPreview.basketLots === 0 ? (
-                    <>
-                      Short basket would be 0 lots — entry will be skipped.
-                    </>
-                  ) : (
-                    <>
-                      Hedge{' '}
-                      {basketSizingPreview.hedgeLots} lot
-                      {Number(basketSizingPreview.hedgeLots) === 1 ? '' : 's'} →
-                      Short basket {basketSizingPreview.basketLots} lot
-                      {Number(basketSizingPreview.basketLots) === 1 ? '' : 's'}{' '}
-                      (ceil of {basketSizingPreview.pct}% ={' '}
-                      {(
-                        (basketSizingPreview.hedgeLots *
-                          basketSizingPreview.pct) /
-                        100
-                      ).toFixed(1)}
-                      )
-                    </>
-                  )}
+              <div className="space-y-2 rounded-lg border border-gray-700/60 bg-gray-900/40 p-3">
+                <label className="flex cursor-pointer items-start gap-3">
+                  <input
+                    type="checkbox"
+                    checked={basketQtyDynamic}
+                    onChange={(e) => setBasketQtyDynamic(e.target.checked)}
+                    className="mt-1"
+                  />
+                  <span className="text-sm text-gray-300">
+                    Dynamic % (theta-based)
+                    <span className="mt-0.5 block text-xs text-gray-500">
+                      Formula: (hedge_call_theta × mult × 100) /
+                      call_ask_at_entry
+                    </span>
+                  </span>
+                </label>
+                {basketQtyDynamic && (
+                  <label className="block text-sm text-gray-300">
+                    Multiplier
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={10}
+                      step={0.1}
+                      value={basketQtyThetaMult}
+                      onChange={(e) => setBasketQtyThetaMult(e.target.value)}
+                      className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+                    />
+                    {basketQtyThetaMultError && (
+                      <p className="mt-1 text-xs text-red-400">
+                        {basketQtyThetaMultError}
+                      </p>
+                    )}
+                  </label>
+                )}
+              </div>
+              {dynamicBasketSizingActive ? (
+                <p className="text-xs text-gray-400">
+                  Dynamic: (hedge_theta ×{' '}
+                  {Number(basketQtyThetaMult) || 2.0} × 100) / call_ask →
+                  computed at entry
                 </p>
+              ) : (
+                basketSizingPreview && (
+                  <p
+                    className={`text-xs ${
+                      basketSizingPreview.basketLots === 0
+                        ? 'text-red-400'
+                        : 'text-gray-400'
+                    }`}
+                  >
+                    {basketSizingPreview.basketLots === 0 ? (
+                      <>
+                        Short basket would be 0 lots — entry will be skipped.
+                      </>
+                    ) : (
+                      <>
+                        Hedge{' '}
+                        {basketSizingPreview.hedgeLots} lot
+                        {Number(basketSizingPreview.hedgeLots) === 1
+                          ? ''
+                          : 's'}{' '}
+                        → Short basket {basketSizingPreview.basketLots} lot
+                        {Number(basketSizingPreview.basketLots) === 1
+                          ? ''
+                          : 's'}{' '}
+                        (ceil of {basketSizingPreview.pct}% ={' '}
+                        {(
+                          (basketSizingPreview.hedgeLots *
+                            basketSizingPreview.pct) /
+                          100
+                        ).toFixed(1)}
+                        )
+                      </>
+                    )}
+                  </p>
+                )
               )}
             </div>
           )}
