@@ -62,6 +62,14 @@ npm run dev
 
 UI will be available at `http://localhost:5173`
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [claude/SESSION_2026-08-29_BOT_CHANGES.md](claude/SESSION_2026-08-29_BOT_CHANGES.md) | **Latest** — B1–B8: basket sizing, ATM straddle, structure-wide hedge SL |
+| [docs/SESSION_2026-08-16_CHANGES.md](docs/SESSION_2026-08-16_CHANGES.md) | Aug 16 session — exit funnel, adjustment target, bracket orders |
+| [docs/HEDGE_MODE_SPEC.md](docs/HEDGE_MODE_SPEC.md) | Hedge mode design spec (partially superseded by session records above) |
+
 ## Notes
 
 - Delta Exchange API keys are stored encrypted in the database (not in `.env`)

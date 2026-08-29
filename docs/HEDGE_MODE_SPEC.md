@@ -129,8 +129,17 @@ strike multiplier 3 -> max profit 248.70 pts, target at 150% = 124.34 -> 50% of 
 ```
 Show the implied "% of max profit" next to the target input so the user sees this.
 
-**Stop loss is unchanged.** Existing gross-MTM logic, `sl_pct`, and the entry-spread
-reset all stay exactly as they are.
+**Hedge stop loss (IMPLEMENTED — B4b).** The hedge bracket SL decision uses a
+**structure-wide** basis, not hedge-only gross:
+
+```
+structure_gross_for_sl = hedge_net_mtm + entry_spread + est_exit_slip + open_basket_gross
+room                   = budget + structure_gross_for_sl
+fire when              room <= 0
+```
+
+Short-basket stop loss is unchanged (existing gross-MTM logic, `sl_pct`, entry-spread
+reset on adjustment). See `claude/SESSION_2026-08-29_BOT_CHANGES.md` Part 5.
 
 ## 1.5 Cooldown
 
@@ -247,7 +256,12 @@ hedge_enabled                bool    default False
 hedge_expiry_mode            str     'monthly' | 'date' | 'dte'
 hedge_expiry_date_override   str|None
 hedge_expiry_dte             int|None
-hedge_qty_ratio              float   default 1.0     (hedge qty = short qty × ratio)
+hedge_qty_ratio              float   default 1.0     (fixed mode: hedge qty = short qty × ratio)
+basket_qty_mode              str     'fixed' | 'pct_of_hedge'   default 'fixed'
+basket_qty_pct_of_hedge      float   default 20.0    (manual pct; ceil(hedge × pct / 100))
+hedge_qty_lots               int|None                 (pct mode: user-set hedge straddle lots)
+basket_qty_dynamic           bool    default False   (pct from hedge call theta at entry)
+basket_qty_theta_mult        float   default 2.0     (dynamic formula multiplier)
 hedge_target_usd             float|None
 hedge_stoploss_usd           float|None
 strike_selection_mode        str     'fixed_premium' | 'theta_based'
@@ -330,8 +344,9 @@ Implement `target_mode == 'theta_multiplier'`:
 ```
 profit_target_usd = hedge_total_theta × (target_theta_pct/100) × qty × CONTRACT_SIZE
 ```
-Keep `stoploss_usd` exactly as it is computed today. Log both the resulting target and
-its implied percentage of `initial_max_profit`, so an unreachable target is obvious:
+Hedge bracket SL uses the structure-wide basis (B4b); short-basket `stoploss_usd` is
+unchanged. Log both the resulting target and its implied percentage of
+`initial_max_profit`, so an unreachable target is obvious:
 `[TARGET_THETA] hedge_theta, target_theta_pct, target_usd, pct_of_max_profit`.
 
 **Verify:** target matches hand calculation; the implied % of max is sane.
