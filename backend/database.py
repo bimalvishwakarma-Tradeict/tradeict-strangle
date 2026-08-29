@@ -845,6 +845,7 @@ def _migrate_schema() -> None:
         for col_name, col_type in (
             ("target_source", "VARCHAR(10)"),
             ("hedge_theta_at_entry", "FLOAT"),
+            ("basket_qty_computed_pct", "FLOAT"),
         ):
             if col_name not in trade_cols:
                 with engine.begin() as conn:
@@ -895,6 +896,8 @@ def _migrate_schema() -> None:
             ("basket_qty_mode", "VARCHAR(20) NOT NULL DEFAULT 'fixed'"),
             ("basket_qty_pct_of_hedge", "FLOAT NOT NULL DEFAULT 20.0"),
             ("hedge_qty_lots", "INTEGER"),
+            ("basket_qty_dynamic", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("basket_qty_theta_mult", "FLOAT NOT NULL DEFAULT 2.0"),
             ("cooldown_after_loss_minutes", "INTEGER NOT NULL DEFAULT 120"),
             (
                 "adjustment_premium_tolerance_pct",

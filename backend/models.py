@@ -146,6 +146,10 @@ class Trade(Base):
     hedge_theta_at_entry: Mapped[float | None] = mapped_column(
         Float, nullable=True, default=None
     )
+    # pct_of_hedge + dynamic: formula result used at entry (audit)
+    basket_qty_computed_pct: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
 
     account: Mapped[Account] = relationship("Account", back_populates="trades")
     hedge_position: Mapped[HedgePosition | None] = relationship(
@@ -434,6 +438,13 @@ class AutoTradeSettings(Base):
     )
     # Used when basket_qty_mode='pct_of_hedge': fixed hedge long-straddle lot count
     hedge_qty_lots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # When True + pct_of_hedge: derive basket % from hedge call theta at entry
+    basket_qty_dynamic: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False
+    )
+    basket_qty_theta_mult: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="2.0", default=2.0
+    )
     cooldown_after_loss_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=120
     )

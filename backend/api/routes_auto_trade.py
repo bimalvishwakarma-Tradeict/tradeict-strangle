@@ -102,6 +102,8 @@ class AutoTradeSettingsSchema(BaseModel):
     basket_qty_mode: str = "fixed"  # fixed | pct_of_hedge
     basket_qty_pct_of_hedge: float = Field(default=20.0, gt=0, le=100)
     hedge_qty_lots: int | None = Field(default=None, ge=1, le=10000)
+    basket_qty_dynamic: bool = False
+    basket_qty_theta_mult: float = Field(default=2.0, ge=0.1, le=10.0)
     cooldown_after_loss_minutes: int = Field(default=120, ge=0, le=1440)
     adjustment_premium_tolerance_pct: float = Field(
         default=40.0, ge=5, le=200
@@ -490,6 +492,14 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             if getattr(s, "hedge_qty_lots", None) is not None
             else None
         ),
+        "basket_qty_dynamic": bool(
+            getattr(s, "basket_qty_dynamic", False)
+        ),
+        "basket_qty_theta_mult": float(
+            getattr(s, "basket_qty_theta_mult", None)
+            if getattr(s, "basket_qty_theta_mult", None) is not None
+            else 2.0
+        ),
         "cooldown_after_loss_minutes": int(
             getattr(s, "cooldown_after_loss_minutes", None)
             if getattr(s, "cooldown_after_loss_minutes", None) is not None
@@ -788,6 +798,8 @@ async def update_auto_trade_settings(
         if payload.hedge_qty_lots is not None
         else None
     )
+    settings.basket_qty_dynamic = bool(payload.basket_qty_dynamic)
+    settings.basket_qty_theta_mult = float(payload.basket_qty_theta_mult)
     settings.cooldown_after_loss_minutes = int(
         payload.cooldown_after_loss_minutes
     )

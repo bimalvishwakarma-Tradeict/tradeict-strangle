@@ -47,6 +47,65 @@ def resolve_basket_qty_from_hedge(hedge_qty: int, pct: float) -> int:
     return int(math.ceil(hq * p / 100.0))
 
 
+def compute_dynamic_basket_qty_pct(
+    *,
+    hedge_call_theta: float,
+    theta_mult: float,
+    call_ask: float,
+) -> float | None:
+    """
+    basket_qty_pct = (hedge_call_theta × theta_mult × 100) / call_ask
+    Returns None when call_ask or theta is non-positive.
+    """
+    try:
+        theta = abs(float(hedge_call_theta))
+        mult = float(theta_mult)
+        ask = float(call_ask)
+    except (TypeError, ValueError):
+        return None
+    if ask <= 0 or theta <= 0 or mult <= 0:
+        return None
+    return (theta * mult * 100.0) / ask
+
+
+def resolve_entry_basket_pct(
+    settings: Any,
+    *,
+    straddle: dict[str, Any],
+    hedge_call_theta: float | None,
+    sizing_mode: str,
+) -> tuple[float, float | None, bool]:
+    """
+    Return (pct_for_sizing, computed_pct_audit, dynamic_requested).
+
+    When dynamic is off or sizing is fixed, uses manual basket_qty_pct_of_hedge.
+    When dynamic is on but formula inputs are invalid, falls back to manual pct
+    and returns computed_pct_audit=None.
+    """
+    manual_pct = float(getattr(settings, "basket_qty_pct_of_hedge", None) or 20.0)
+    if sizing_mode != "pct_of_hedge":
+        return manual_pct, None, False
+
+    dynamic = bool(getattr(settings, "basket_qty_dynamic", False))
+    if not dynamic:
+        return manual_pct, None, False
+
+    if not bool(getattr(settings, "hedge_enabled", False)):
+        return manual_pct, None, False
+
+    mult = float(getattr(settings, "basket_qty_theta_mult", None) or 2.0)
+    call_ask = float(straddle.get("call_premium") or 0)
+    theta_val = float(hedge_call_theta or 0)
+    computed = compute_dynamic_basket_qty_pct(
+        hedge_call_theta=theta_val,
+        theta_mult=mult,
+        call_ask=call_ask,
+    )
+    if computed is not None and computed > 0:
+        return float(computed), float(computed), True
+    return manual_pct, None, True
+
+
 def resolve_sizing_mode(settings: Any) -> str:
     """
     Return 'pct_of_hedge' only when mode, hedge_enabled, and hedge_qty_lots
@@ -688,7 +747,9 @@ class AutoTradeEngine:
                 return
 
         entry_basket_qty: int | None = None
+        entry_computed_pct: float | None = None
         sizing_mode_for_entry = resolve_sizing_mode(settings)
+        theta_info: dict[str, Any] | None = None
         try:
             expiry_str = expiry_date.isoformat()
             logger.info("Auto trade: expiry=%s", expiry_str)
@@ -872,6 +933,7 @@ class AutoTradeEngine:
                 getattr(settings, "basket_qty_pct_of_hedge", None) or 20.0
             )
             if sizing_mode_for_entry == "pct_of_hedge":
+                from backend.core.bot_logger import log_and_buffer
                 from backend.engine.hedge_lifecycle import get_active_hedge
 
                 hedge_row = get_active_hedge(
@@ -893,8 +955,79 @@ class AutoTradeEngine:
                     )
                     return
                 hedge_qty_for_log = int(hedge_row.quantity)
+
+                hedge_call_theta_val: float | None = None
+                if theta_info is not None:
+                    hedge_call_theta_val = float(theta_info.get("call_theta") or 0)
+                elif bool(getattr(settings, "basket_qty_dynamic", False)):
+                    from backend.core.hedge_theta import get_hedge_theta
+
+                    try:
+                        fetched_theta = await get_hedge_theta(client, hedge_row)
+                        hedge_call_theta_val = float(
+                            fetched_theta.get("call_theta") or 0
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Dynamic basket pct: get_hedge_theta failed: %s",
+                            exc,
+                        )
+                        hedge_call_theta_val = 0.0
+
+                pct, entry_computed_pct, dynamic_requested = resolve_entry_basket_pct(
+                    settings,
+                    straddle=straddle,
+                    hedge_call_theta=hedge_call_theta_val,
+                    sizing_mode=sizing_mode_for_entry,
+                )
                 qty = resolve_basket_qty_from_hedge(hedge_qty_for_log, pct)
                 qty_source = "hedge_row"
+
+                if dynamic_requested:
+                    theta_mult = float(
+                        getattr(settings, "basket_qty_theta_mult", None) or 2.0
+                    )
+                    call_ask = float(straddle.get("call_premium") or 0)
+                    log_payload: dict[str, Any] = {
+                        "sizing_mode": sizing_mode_for_entry,
+                        "dynamic": True,
+                        "hedge_call_theta": (
+                            round(float(hedge_call_theta_val or 0), 6)
+                            if hedge_call_theta_val is not None
+                            else None
+                        ),
+                        "theta_mult": round(theta_mult, 4),
+                        "call_ask": round(call_ask, 6),
+                        "computed_pct": (
+                            round(float(entry_computed_pct), 6)
+                            if entry_computed_pct is not None
+                            else None
+                        ),
+                        "manual_pct_fallback": (
+                            round(pct, 6)
+                            if entry_computed_pct is None
+                            else None
+                        ),
+                        "hedge_qty": hedge_qty_for_log,
+                        "basket_qty": qty,
+                        "summary": (
+                            f"[BASKET_SIZING] sizing_mode=pct_of_hedge | "
+                            f"dynamic=True | "
+                            f"hedge_call_theta={round(float(hedge_call_theta_val or 0), 6)} | "
+                            f"theta_mult={round(theta_mult, 4)} | "
+                            f"call_ask={round(call_ask, 6)} | "
+                            f"computed_pct={round(float(entry_computed_pct), 6) if entry_computed_pct is not None else 'fallback'} | "
+                            f"hedge_qty={hedge_qty_for_log} | basket_qty={qty}"
+                        ),
+                    }
+                    if entry_computed_pct is None:
+                        log_payload["level"] = "WARNING"
+                        log_payload["reason"] = (
+                            "dynamic_pct_unavailable"
+                            if (call_ask <= 0 or float(hedge_call_theta_val or 0) == 0)
+                            else "dynamic_pct_invalid"
+                        )
+                    log_and_buffer("BASKET_SIZING", 0, log_payload)
             else:
                 qty = max(1, int(settings.quantity))
                 hedge_qty_for_log = None
@@ -1182,6 +1315,11 @@ class AutoTradeEngine:
                 hedge_theta_at_entry=(
                     float(hedge_theta_at_entry)
                     if hedge_theta_at_entry is not None
+                    else None
+                ),
+                basket_qty_computed_pct=(
+                    float(entry_computed_pct)
+                    if entry_computed_pct is not None
                     else None
                 ),
             )

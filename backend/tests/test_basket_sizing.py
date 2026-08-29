@@ -1,4 +1,4 @@
-# test_basket_sizing.py — pct_of_hedge basket qty helpers (B2)
+# test_basket_sizing.py — pct_of_hedge basket qty helpers (B2, B7)
 #
 # Run: python -m pytest backend/tests/test_basket_sizing.py -q
 # (from trading-bot/ root)
@@ -17,7 +17,9 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.engine.auto_trade_engine import (
+    compute_dynamic_basket_qty_pct,
     resolve_basket_qty_from_hedge,
+    resolve_entry_basket_pct,
     resolve_sizing_mode,
 )
 
@@ -53,6 +55,8 @@ def _settings(**kwargs: object) -> SimpleNamespace:
     base = {
         "basket_qty_mode": "fixed",
         "basket_qty_pct_of_hedge": 20.0,
+        "basket_qty_dynamic": False,
+        "basket_qty_theta_mult": 2.0,
         "hedge_enabled": False,
         "hedge_qty_lots": None,
     }
@@ -104,3 +108,90 @@ def test_fixed_mode_hedge_qty_formula_unchanged() -> None:
     ratio = 1.0
     hedge_qty = max(1, int(round(basket_qty * ratio)))
     assert hedge_qty == 3
+
+
+def test_dynamic_pct_formula_live_example() -> None:
+    pct = compute_dynamic_basket_qty_pct(
+        hedge_call_theta=57.0,
+        theta_mult=2.0,
+        call_ask=275.0,
+    )
+    assert pct == pytest.approx(41.454545, rel=1e-4)
+    assert resolve_basket_qty_from_hedge(5, pct) == 3
+
+
+def test_dynamic_pct_call_ask_zero_falls_back_to_manual() -> None:
+    settings = _settings(
+        basket_qty_mode="pct_of_hedge",
+        basket_qty_dynamic=True,
+        basket_qty_pct_of_hedge=20.0,
+        hedge_enabled=True,
+        hedge_qty_lots=5,
+    )
+    straddle = {"call_premium": 0.0}
+    pct, computed, dynamic = resolve_entry_basket_pct(
+        settings,
+        straddle=straddle,
+        hedge_call_theta=57.0,
+        sizing_mode="pct_of_hedge",
+    )
+    assert dynamic is True
+    assert computed is None
+    assert pct == 20.0
+
+
+def test_dynamic_pct_zero_theta_falls_back_to_manual() -> None:
+    settings = _settings(
+        basket_qty_mode="pct_of_hedge",
+        basket_qty_dynamic=True,
+        basket_qty_pct_of_hedge=25.0,
+        hedge_enabled=True,
+    )
+    straddle = {"call_premium": 275.0}
+    pct, computed, dynamic = resolve_entry_basket_pct(
+        settings,
+        straddle=straddle,
+        hedge_call_theta=0.0,
+        sizing_mode="pct_of_hedge",
+    )
+    assert dynamic is True
+    assert computed is None
+    assert pct == 25.0
+
+
+def test_dynamic_false_uses_manual_pct() -> None:
+    settings = _settings(
+        basket_qty_mode="pct_of_hedge",
+        basket_qty_dynamic=False,
+        basket_qty_pct_of_hedge=18.0,
+        hedge_enabled=True,
+    )
+    straddle = {"call_premium": 275.0}
+    pct, computed, dynamic = resolve_entry_basket_pct(
+        settings,
+        straddle=straddle,
+        hedge_call_theta=57.0,
+        sizing_mode="pct_of_hedge",
+    )
+    assert dynamic is False
+    assert computed is None
+    assert pct == 18.0
+
+
+def test_fixed_mode_ignores_dynamic_flag() -> None:
+    settings = _settings(
+        basket_qty_mode="fixed",
+        basket_qty_dynamic=True,
+        basket_qty_pct_of_hedge=18.0,
+        hedge_enabled=True,
+    )
+    straddle = {"call_premium": 275.0}
+    pct, computed, dynamic = resolve_entry_basket_pct(
+        settings,
+        straddle=straddle,
+        hedge_call_theta=57.0,
+        sizing_mode="fixed",
+    )
+    assert dynamic is False
+    assert computed is None
+    assert pct == 18.0
