@@ -240,6 +240,102 @@ class DeltaAPIError(Exception):
         super().__init__(f"Delta API error {status_code}: {message}")
 
 
+def _premium_diff_pct(call_p: float, put_p: float) -> float:
+    if call_p <= 0 or put_p <= 0:
+        return 999.0
+    return abs(call_p - put_p) / max(call_p, put_p) * 100.0
+
+
+def select_atm_anchored_pair(
+    chain: list[dict[str, Any]],
+    spot: float,
+    tolerance_pct: float | None = None,
+) -> dict[str, Any]:
+    """CALL at ATM; PUT = best premium match at or below the ATM strike."""
+    if not chain:
+        raise DeltaAPIError(
+            404, "Empty option chain for ATM-anchored straddle selection"
+        )
+    if spot <= 0:
+        raise DeltaAPIError(400, "Invalid spot price for ATM-anchored straddle")
+
+    atm_row = min(
+        chain,
+        key=lambda row: abs(_safe_float(row.get("strike")) - float(spot)),
+    )
+    call_mark = _safe_float(atm_row.get("call_mark_price"))
+    if call_mark <= 0:
+        raise DeltaAPIError(
+            404,
+            f"ATM strike {_safe_float(atm_row.get('strike'))} has no call premium",
+        )
+
+    atm_strike = _safe_float(atm_row.get("strike"))
+    put_candidates: list[tuple[float, float, dict[str, Any]]] = []
+    for row in chain:
+        strike = _safe_float(row.get("strike"))
+        put_mark = _safe_float(row.get("put_mark_price"))
+        if strike > atm_strike + 0.01:
+            continue
+        if put_mark <= 0:
+            continue
+        prem_diff = abs(put_mark - call_mark)
+        put_candidates.append((prem_diff, -strike, row))
+
+    candidates_scanned = len(put_candidates)
+    if not candidates_scanned:
+        raise DeltaAPIError(
+            404,
+            f"No put candidates at or below ATM strike {atm_strike}",
+        )
+
+    put_candidates.sort(key=lambda t: (t[0], t[1]))
+    put_row = put_candidates[0][2]
+    put_mark = _safe_float(put_row.get("put_mark_price"))
+    diff_pct = _premium_diff_pct(call_mark, put_mark)
+
+    try:
+        tolerance = float(tolerance_pct) if tolerance_pct is not None else 25.0
+    except (TypeError, ValueError):
+        tolerance = 25.0
+    tolerance = max(0.0, tolerance)
+
+    if diff_pct > tolerance:
+        from backend.core.bot_logger import log_and_buffer
+
+        call_strike = _safe_float(atm_row.get("strike"))
+        put_strike = _safe_float(put_row.get("strike"))
+        try:
+            log_and_buffer(
+                "ENTRY_PREMIUM_MISMATCH",
+                0,
+                {
+                    "call_strike": call_strike,
+                    "put_strike": put_strike,
+                    "call_premium": round(call_mark, 4),
+                    "put_premium": round(put_mark, 4),
+                    "diff_pct": round(diff_pct, 2),
+                    "tolerance": round(tolerance, 2),
+                    "summary": (
+                        f"[ENTRY_PREMIUM_MISMATCH] call={call_strike}@"
+                        f"{round(call_mark, 2)} put={put_strike}@"
+                        f"{round(put_mark, 2)} diff={round(diff_pct, 2)}% "
+                        f"tolerance={round(tolerance, 2)}%"
+                    ),
+                },
+            )
+        except Exception as exc:
+            logger.warning("ENTRY_PREMIUM_MISMATCH log_and_buffer failed: %s", exc)
+
+    return {
+        "call_row": atm_row,
+        "put_row": put_row,
+        "premium_diff_pct": float(diff_pct),
+        "candidates_scanned": candidates_scanned,
+        "spot_price": float(spot),
+    }
+
+
 class DeltaClient:
     """
     The ONE module that talks to Delta Exchange India REST API.
@@ -1758,12 +1854,11 @@ class DeltaClient:
         self,
         underlying: str,
         expiry_date: str,
+        tolerance_pct: float | None = None,
     ) -> dict[str, Any]:
         """
-        Find best premium-matched short straddle/strangle near ATM.
-
-        Considers call × put combinations from ATM and ±1 adjacent strikes
-        (same-strike straddle plus cross-strike pairs). Picks lowest premium diff %.
+        ATM-anchored short straddle: CALL pinned at ATM, PUT premium-matched
+        over the full chain at or below ATM (OTM puts only).
         """
         price_map = {"BTC": "BTCUSD", "ETH": "ETHUSD", "XAU": "XAUUSD"}
         key = underlying.upper().strip()
@@ -1786,88 +1881,37 @@ class DeltaClient:
             )
 
         logger.info(
-            "Finding ATM straddle: %s spot=%.2f expiry=%s chain_rows=%s",
+            "Finding ATM-anchored straddle: %s spot=%.2f expiry=%s chain_rows=%s",
             underlying,
             spot_price,
             expiry_date,
             len(chain),
         )
 
-        def premium_diff_pct(call_p: float, put_p: float) -> float:
-            if call_p <= 0 or put_p <= 0:
-                return 999.0
-            return abs(call_p - put_p) / max(call_p, put_p) * 100.0
-
-        def row_valid(row: dict[str, Any]) -> bool:
-            return (
-                _safe_float(row.get("call_mark_price")) > 0
-                and _safe_float(row.get("put_mark_price")) > 0
-            )
-
-        def distance_from_spot(row: dict[str, Any]) -> float:
-            return abs(_safe_float(row.get("strike")) - float(spot_price))
-
-        atm_row = min(chain, key=distance_from_spot)
-        atm_idx = next(
-            i for i, row in enumerate(chain) if row.get("strike") == atm_row.get("strike")
+        picked = select_atm_anchored_pair(
+            chain,
+            float(spot_price),
+            tolerance_pct=tolerance_pct,
         )
+        call_row = picked["call_row"]
+        put_row = picked["put_row"]
+        best_diff = float(picked["premium_diff_pct"])
+        candidates_scanned = int(picked["candidates_scanned"])
 
-        candidate_rows: dict[str, dict[str, Any]] = {"atm": atm_row}
-        if atm_idx > 0:
-            candidate_rows["atm_minus1"] = chain[atm_idx - 1]
-        if atm_idx < len(chain) - 1:
-            candidate_rows["atm_plus1"] = chain[atm_idx + 1]
-
-        valid_rows = {k: v for k, v in candidate_rows.items() if row_valid(v)}
-        if not valid_rows:
-            raise DeltaAPIError(
-                404,
-                f"No valid ATM strikes with positive premiums found "
-                f"for {underlying} {expiry_date}",
-            )
-
-        best: dict[str, Any] | None = None
-        best_diff = 999.0
-
-        for call_row in valid_rows.values():
-            for put_row in valid_rows.values():
-                call_p = _safe_float(call_row.get("call_mark_price"))
-                put_p = _safe_float(put_row.get("put_mark_price"))
-                diff = premium_diff_pct(call_p, put_p)
-                logger.debug(
-                    "Combination: call %s@%.0f + put %s@%.0f → diff=%.1f%%",
-                    call_row.get("strike"),
-                    call_p,
-                    put_row.get("strike"),
-                    put_p,
-                    diff,
-                )
-                if diff < best_diff:
-                    best_diff = diff
-                    best = {
-                        "call_row": call_row,
-                        "put_row": put_row,
-                        "diff_pct": diff,
-                    }
-
-        if best is None:
-            raise DeltaAPIError(
-                404,
-                f"No valid strike combination found for {underlying} {expiry_date}",
-            )
-
-        call_row = best["call_row"]
-        put_row = best["put_row"]
         call_strike = _safe_float(call_row.get("strike"))
         put_strike = _safe_float(put_row.get("strike"))
+        call_premium = _safe_float(call_row.get("call_mark_price"))
+        put_premium = _safe_float(put_row.get("put_mark_price"))
 
         logger.info(
-            "Best straddle: CALL %s@%.2f + PUT %s@%.2f diff=%.1f%% spot=%.2f",
+            "ATM-anchored: CALL %s@%.2f (ATM) + PUT %s@%.2f diff=%.1f%% "
+            "scanned=%s spot=%.2f",
             call_strike,
-            _safe_float(call_row.get("call_mark_price")),
+            call_premium,
             put_strike,
-            _safe_float(put_row.get("put_mark_price")),
+            put_premium,
             best_diff,
+            candidates_scanned,
             spot_price,
         )
 
@@ -1875,14 +1919,14 @@ class DeltaClient:
             "call_strike": call_strike,
             "call_symbol": str(call_row.get("call_symbol") or ""),
             "call_product_id": int(call_row.get("call_product_id") or 0),
-            "call_premium": _safe_float(call_row.get("call_mark_price")),
+            "call_premium": call_premium,
             "call_bid": _safe_float(call_row.get("call_bid")),
             "call_ask": _safe_float(call_row.get("call_ask")),
             "call_delta": _safe_float(call_row.get("call_delta")),
             "put_strike": put_strike,
             "put_symbol": str(put_row.get("put_symbol") or ""),
             "put_product_id": int(put_row.get("put_product_id") or 0),
-            "put_premium": _safe_float(put_row.get("put_mark_price")),
+            "put_premium": put_premium,
             "put_bid": _safe_float(put_row.get("put_bid")),
             "put_ask": _safe_float(put_row.get("put_ask")),
             "put_delta": _safe_float(put_row.get("put_delta")),

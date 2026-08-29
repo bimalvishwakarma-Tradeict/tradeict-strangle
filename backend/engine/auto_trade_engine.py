@@ -850,8 +850,13 @@ class AutoTradeEngine:
                 )
             else:
                 logger.info("Auto trade: STRADDLE mode (ATM)")
+                tol = getattr(
+                    settings, "entry_premium_match_tolerance_pct", None
+                )
                 straddle = await client.find_atm_straddle(
-                    str(settings.underlying), expiry_str
+                    str(settings.underlying),
+                    expiry_str,
+                    tolerance_pct=float(tol) if tol is not None else None,
                 )
             if not (hedge_on and strike_mode == "theta_based"):
                 logger.info(
