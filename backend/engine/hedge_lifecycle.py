@@ -209,6 +209,7 @@ def _live_sl_budget_fields(db: Session, hedge: HedgePosition) -> dict[str, Any]:
         "sl_floor_usd": round(float(parts["floor"]), 4),
         "sl_budget": round(budget, 4),
         "pct_to_stop": round(pct_to_stop, 2),
+        "sl_basis": "structure",
         "sl_basis_usd": round(structure_gross_for_sl, 4),
         "hedge_only_for_sl": round(gross_for_sl, 4),
     }
@@ -2829,14 +2830,24 @@ async def build_active_hedge_live(
         except Exception:
             btc = 0.0
 
+    from backend.database import get_or_create_auto_settings
+
+    settings = get_or_create_auto_settings(db)
+
     entry_fees = float(hedge.call_entry_fee_usd or 0) + float(
         hedge.put_entry_fee_usd or 0
     )
+    entry_spread = float(getattr(hedge, "entry_spread_usd", 0.0) or 0.0)
     est_exit = 0.0
+    est_slip_usd = float(getattr(hedge, "hedge_est_exit_slippage_usd", 0.0) or 0.0)
     call_upl: float | None = None
     put_upl: float | None = None
     gross_pnl: float | None = None
+    gross_upnl: float | None = None
     net_pnl: float | None = None
+    hedge_net_mtm_live: float | None = None
+    hedge_gross_for_sl_live: float | None = None
+    fees_usd: float | None = None
     current_value_usd: float | None = None
     cost_usd = base.get("cost_usd")
 
@@ -2859,38 +2870,68 @@ async def build_active_hedge_live(
                 quantity_lots=qty,
                 btc_index_price=btc,
             )
-        pnl = compute_long_hedge_pnl(
+        try:
+            spread_settings = get_or_create_auto_settings(db)
+            est_slip_usd = 0.0
+            if call_sym and float(call_bid) > 0:
+                est_slip_usd += await estimate_and_log_exit_spread_usd(
+                    symbol=call_sym,
+                    offer_price=float(call_bid),
+                    quantity=qty,
+                    settings=spread_settings,
+                    kind="hedge",
+                    client=client,
+                    log_id=hid,
+                )
+            if put_sym and float(put_bid) > 0:
+                est_slip_usd += await estimate_and_log_exit_spread_usd(
+                    symbol=put_sym,
+                    offer_price=float(put_bid),
+                    quantity=qty,
+                    settings=spread_settings,
+                    kind="hedge",
+                    client=client,
+                    log_id=hid,
+                )
+        except Exception as exc:
+            logger.warning(
+                "build_active_hedge_live exit-spread estimate failed hedge=%s: %s",
+                hid,
+                exc,
+            )
+            est_slip_usd = float(
+                getattr(hedge, "hedge_est_exit_slippage_usd", 0.0) or 0.0
+            )
+        mtm = compute_hedge_net_mtm_fields(
             call_bid=float(call_bid),
             put_bid=float(put_bid),
             call_entry=call_entry,
             put_entry=put_entry,
             quantity=qty,
             entry_fees=entry_fees,
-            estimated_exit_fees=est_exit,
+            estimated_exit_fees=float(est_exit),
+            entry_spread_usd=entry_spread,
+            hedge_est_exit_slippage_usd=float(est_slip_usd),
         )
-        call_upl = round(float(pnl["call_pnl"]), 6)
-        put_upl = round(float(pnl["put_pnl"]), 6)
-        gross_pnl = round(float(pnl["gross"]), 6)
-        net_pnl = round(float(pnl["net"]), 6)
+        call_upl = round(
+            (float(call_bid) - float(call_entry)) * qty * CONTRACT_SIZE, 6
+        )
+        put_upl = round(
+            (float(put_bid) - float(put_entry)) * qty * CONTRACT_SIZE, 6
+        )
+        gross_upnl = round(float(mtm["gross_upnl"]), 6)
+        gross_pnl = gross_upnl
+        hedge_net_mtm_live = round(float(mtm["hedge_net_mtm"]), 6)
+        hedge_gross_for_sl_live = round(float(mtm["hedge_gross_for_sl"]), 6)
+        net_pnl = hedge_net_mtm_live
+        fees_usd = round(
+            float(mtm["hedge_fees_paid"]) + float(mtm["hedge_est_exit_fees"]), 6
+        )
         current_value_usd = round(
             (float(call_bid) + float(put_bid)) * qty * CONTRACT_SIZE, 4
         )
 
-    pct_to_target = (
-        round((net_pnl / target) * 100.0, 2)
-        if net_pnl is not None and target > 0
-        else None
-    )
-    pct_to_stop = (
-        round((-net_pnl / stoploss) * 100.0, 2)
-        if net_pnl is not None and stoploss > 0
-        else None
-    )
-
     # Live structure target (multiple × expected monthly earnings)
-    from backend.database import get_or_create_auto_settings
-
-    settings = get_or_create_auto_settings(db)
     entry_cost_live = _hedge_entry_cost_usd(hedge)
     if entry_cost_live <= 0 and cost_usd is not None:
         try:
@@ -2985,6 +3026,48 @@ async def build_active_hedge_live(
             exc,
         )
 
+    from backend.engine.bot_engine import bot_engine
+
+    open_basket_gross = _open_basket_gross_mtm(
+        db, hid, bot_engine.position_tracker
+    )
+    structure_gross_for_sl = float(
+        getattr(hedge, "structure_gross_for_sl", 0.0) or 0.0
+    )
+    if hedge_net_mtm_live is not None:
+        structure_gross_for_sl = compute_structure_gross_for_sl(
+            hedge_net_mtm=float(hedge_net_mtm_live),
+            entry_spread_usd=entry_spread,
+            hedge_est_exit_slippage_usd=float(est_slip_usd),
+            open_basket_gross_mtm=float(open_basket_gross),
+        )
+    hedge_exit_spread_pct = float(
+        getattr(settings, "hedge_exit_spread_pct", None)
+        if getattr(settings, "hedge_exit_spread_pct", None) is not None
+        else 4.0
+    )
+
+    sl_fields = _live_sl_budget_fields(db, hedge)
+    if hedge_net_mtm_live is not None:
+        sl_fields = {
+            **sl_fields,
+            "sl_basis_usd": round(float(structure_gross_for_sl), 4),
+            "hedge_only_for_sl": round(
+                float(
+                    hedge_gross_for_sl_live
+                    if hedge_gross_for_sl_live is not None
+                    else hedge_net_mtm_live + entry_spread
+                ),
+                4,
+            ),
+        }
+        budget = float(sl_fields.get("sl_budget") or 0.0)
+        if budget > 0:
+            sl_fields["pct_to_stop"] = round(
+                (-float(structure_gross_for_sl) / budget * 100.0), 2
+            )
+    pct_to_stop = sl_fields.get("pct_to_stop")
+
     return {
         **base,
         "days_to_expiry": days_to_expiry,
@@ -3014,9 +3097,28 @@ async def build_active_hedge_live(
         "cost_usd": cost_usd,
         "current_value_usd": current_value_usd,
         "gross_pnl": gross_pnl,
+        "gross_upnl": gross_upnl,
         "net_pnl": net_pnl,
+        "hedge_net_mtm": (
+            hedge_net_mtm_live
+            if hedge_net_mtm_live is not None
+            else float(getattr(hedge, "hedge_net_mtm", 0.0) or 0.0)
+        ),
         "entry_fees_usd": round(entry_fees, 6),
         "est_exit_fees_usd": round(est_exit, 6),
+        "fees_usd": fees_usd,
+        "entry_spread_usd": round(entry_spread, 6),
+        "est_exit_slippage_usd": round(float(est_slip_usd), 6),
+        "hedge_est_exit_slippage_usd": round(float(est_slip_usd), 6),
+        "hedge_exit_spread_pct": round(hedge_exit_spread_pct, 2),
+        "open_basket_gross": round(float(open_basket_gross), 6),
+        "structure_gross_for_sl": round(float(structure_gross_for_sl), 6),
+        "hedge_only_for_sl": (
+            hedge_gross_for_sl_live
+            if hedge_gross_for_sl_live is not None
+            else float(getattr(hedge, "hedge_gross_for_sl", 0.0) or 0.0)
+        ),
+        "sl_basis": "structure",
         "today_theta": today_theta,
         "today_theta_usd": today_theta_usd,
         "theta_accrued_estimate": accrual["theta_accrued_estimate"],
@@ -3052,7 +3154,7 @@ async def build_active_hedge_live(
             getattr(hedge, "hedge_gross_for_sl", 0.0) or 0.0
         ),
         "structure_pnl": float(getattr(hedge, "structure_pnl", 0.0) or 0.0),
-        **_live_sl_budget_fields(db, hedge),
+        **sl_fields,
         **_roll_banner_fields(db, hedge),
     }
 
@@ -3187,6 +3289,13 @@ def hedge_to_dict(h: HedgePosition) -> dict[str, Any]:
         "entry_spread_usd": float(getattr(h, "entry_spread_usd", 0.0) or 0.0),
         "hedge_net_mtm": float(getattr(h, "hedge_net_mtm", 0.0) or 0.0),
         "hedge_gross_for_sl": float(getattr(h, "hedge_gross_for_sl", 0.0) or 0.0),
+        "hedge_only_for_sl": float(getattr(h, "hedge_gross_for_sl", 0.0) or 0.0),
+        "hedge_est_exit_slippage_usd": float(
+            getattr(h, "hedge_est_exit_slippage_usd", 0.0) or 0.0
+        ),
+        "structure_gross_for_sl": float(
+            getattr(h, "structure_gross_for_sl", 0.0) or 0.0
+        ),
         "cum_closed_basket_pnl": float(
             getattr(h, "cum_closed_basket_pnl", 0.0) or 0.0
         ),

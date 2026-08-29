@@ -19,6 +19,18 @@ function fmtSigned(v, digits = 2) {
   return `${sign}$${fmtMoney(Math.abs(n), digits)}`
 }
 
+function fmtDeduction(v, digits = 3) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n === 0) return '−$0.000'
+  return `−$${fmtMoney(Math.abs(n), digits)}`
+}
+
+function fmtLotsCount(n) {
+  const v = Number(n)
+  if (!Number.isFinite(v)) return '—'
+  return `${v} lot${v === 1 ? '' : 's'}`
+}
+
 function pnlClass(v) {
   const n = Number(v)
   if (!Number.isFinite(n)) return 'text-gray-400'
@@ -92,8 +104,24 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
   const put = hedge.put || {}
   const strike = hedge.strike
   const qty = Number(hedge.quantity) || 1
-  const net = hedge.net_pnl
-  const gross = hedge.gross_pnl
+  const net =
+    hedge.hedge_net_mtm != null && Number.isFinite(Number(hedge.hedge_net_mtm))
+      ? Number(hedge.hedge_net_mtm)
+      : hedge.net_pnl
+  const gross =
+    hedge.gross_upnl != null && Number.isFinite(Number(hedge.gross_upnl))
+      ? Number(hedge.gross_upnl)
+      : hedge.gross_pnl
+  const entrySpread = Number(hedge.entry_spread_usd)
+  const estExitSlip = Number(hedge.est_exit_slippage_usd)
+  const feesUsd = Number(hedge.fees_usd)
+  const exitSpreadPct = Number(hedge.hedge_exit_spread_pct)
+  const slBasisUsd = hedge.sl_basis_usd
+  const hedgeOnlyForSl = hedge.hedge_only_for_sl
+  const exitSlipUnavailable =
+    Number.isFinite(estExitSlip) &&
+    estExitSlip === 0 &&
+    String(hedge.status || '').toLowerCase() !== 'closed'
   const entryIv = avgIv(hedge.entry_call_iv, hedge.entry_put_iv)
   const liveIv = avgIv(hedge.current_call_iv, hedge.current_put_iv)
   const daysLogged = Number(hedge.days_logged) || 0
@@ -248,15 +276,54 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                 ${fmtMoney(hedge.current_value_usd, 3)}
               </span>
             </div>
-            <div className="flex justify-between gap-3 border-t border-gray-800 pt-1.5">
-              <span className="font-semibold text-gray-200">Hedge P&L</span>
-              <span className={`font-semibold ${pnlClass(net)}`}>
-                {fmtSigned(net, 4)}
-              </span>
-            </div>
-            <div className="flex justify-between gap-3 text-xs text-gray-500">
-              <span>Gross (pre-fees)</span>
-              <span className={pnlClass(gross)}>{fmtSigned(gross, 4)}</span>
+            <div className="space-y-0.5 border-t border-gray-800 pt-1.5 text-[11px] text-gray-500">
+              <div className="flex justify-between gap-3">
+                <span>Gross</span>
+                <span className={pnlClass(gross)}>{fmtSigned(gross, 4)}</span>
+              </div>
+              <div className="flex justify-between gap-3 pl-2">
+                <span>less entry spread</span>
+                <span>{fmtDeduction(entrySpread, 3)}</span>
+              </div>
+              <div className="flex justify-between gap-3 pl-2">
+                <span>
+                  less est. exit spread
+                  {Number.isFinite(exitSpreadPct) ? (
+                    <span className="ml-1 text-gray-600">
+                      ({fmtMoney(exitSpreadPct, 1)}%)
+                    </span>
+                  ) : null}
+                  {exitSlipUnavailable ? (
+                    <span
+                      className="ml-1 text-amber-500/90"
+                      title="Exit spread estimate unavailable — bid missing or estimate failed; stop basis may be tighter than intended"
+                    >
+                      ⚠
+                    </span>
+                  ) : null}
+                </span>
+                <span>
+                  {fmtDeduction(estExitSlip, 3)}
+                  {exitSlipUnavailable ? (
+                    <span className="ml-1 text-[10px] text-amber-500/90">
+                      estimate unavailable
+                    </span>
+                  ) : null}
+                </span>
+              </div>
+              <div className="flex justify-between gap-3 pl-2">
+                <span>less fees</span>
+                <span>{fmtDeduction(feesUsd, 3)}</span>
+              </div>
+              <div className="my-1 border-t border-gray-800/80" />
+              <div className="flex justify-between gap-3">
+                <span className="font-semibold text-gray-300">
+                  Hedge P&L (net)
+                </span>
+                <span className={`font-semibold ${pnlClass(net)}`}>
+                  {fmtSigned(net, 4)}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -312,29 +379,43 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
           </div>
           <div
             className="rounded-md px-1.5 py-0.5 text-left"
-            title="Live SL budget = max(floor, fixed SL + booked basket P&L)"
+            title="Stop uses the whole structure — hedge plus open baskets — with entry and exit spread added back, so execution cost cannot trigger the stop."
           >
-            Stop:{' '}
-            <span className="text-red-400">
-              −${fmtMoney(
-                hedge.sl_budget != null ? hedge.sl_budget : hedge.stoploss_usd,
-              )}
-            </span>
-            <span className="ml-1 text-gray-500">
-              (fixed $
-              {fmtMoney(
-                hedge.hedge_fixed_sl_usd != null
-                  ? hedge.hedge_fixed_sl_usd
-                  : 2,
-              )}{' '}
-              + booked $
-              {fmtMoney(hedge.cum_closed_basket_pnl ?? 0)})
-            </span>
-            {hedge.pct_to_stop != null && (
-              <span className="ml-1 text-gray-500">
-                ({fmtMoney(hedge.pct_to_stop, 1)}%)
+            <div>
+              Stop{' '}
+              <span className="text-gray-500">(structure basis)</span>:{' '}
+              <span className="text-red-400">
+                −${fmtMoney(
+                  hedge.sl_budget != null ? hedge.sl_budget : hedge.stoploss_usd,
+                )}
               </span>
-            )}
+              <span className="ml-1 text-gray-500">
+                (fixed $
+                {fmtMoney(
+                  hedge.hedge_fixed_sl_usd != null
+                    ? hedge.hedge_fixed_sl_usd
+                    : 2,
+                )}{' '}
+                + booked $
+                {fmtMoney(hedge.cum_closed_basket_pnl ?? 0)})
+              </span>
+              {hedge.pct_to_stop != null && (
+                <span className="ml-1 text-gray-500">
+                  ({fmtMoney(hedge.pct_to_stop, 1)}%)
+                </span>
+              )}
+            </div>
+            <div className="mt-0.5 text-[10px] leading-snug text-gray-500">
+              Structure basis:{' '}
+              <span className={pnlClass(slBasisUsd)}>
+                {fmtSigned(slBasisUsd, 4)}
+              </span>
+              <span className="mx-1 text-gray-600">·</span>
+              Hedge only:{' '}
+              <span className={pnlClass(hedgeOnlyForSl)}>
+                {fmtSigned(hedgeOnlyForSl, 4)}
+              </span>
+            </div>
           </div>
           <span>
             IV entry {fmtIv(entryIv)} · IV now {fmtIv(liveIv)}

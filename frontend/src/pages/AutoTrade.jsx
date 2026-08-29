@@ -1294,9 +1294,9 @@ export default function AutoTrade() {
                     </>
                   ) : (
                     <>
-                      Hedge {basketSizingPreview.hedgeLots} lots → Short basket{' '}
-                      {basketSizingPreview.basketLots} lots (ceil of{' '}
-                      {basketSizingPreview.pct}% ={' '}
+                      Hedge {fmtLotsCount(basketSizingPreview.hedgeLots)} → Short
+                      basket {fmtLotsCount(basketSizingPreview.basketLots)}{' '}
+                      (ceil of {basketSizingPreview.pct}% ={' '}
                       {(
                         (basketSizingPreview.hedgeLots *
                           basketSizingPreview.pct) /
