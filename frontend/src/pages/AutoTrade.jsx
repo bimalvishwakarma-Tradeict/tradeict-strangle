@@ -58,12 +58,6 @@ function formatExpiryShort(iso) {
   }
 }
 
-function fmtLotsCount(n) {
-  const v = Number(n)
-  if (!Number.isFinite(v)) return '—'
-  return `${v} lot${v === 1 ? '' : 's'}`
-}
-
 function applyStatusToForm(data, setters) {
   if (!data) return
   setters.setUnderlying(data.underlying || 'BTC')
@@ -1300,8 +1294,11 @@ export default function AutoTrade() {
                     </>
                   ) : (
                     <>
-                      Hedge {fmtLotsCount(basketSizingPreview.hedgeLots)} → Short
-                      basket {fmtLotsCount(basketSizingPreview.basketLots)}{' '}
+                      Hedge{' '}
+                      {basketSizingPreview.hedgeLots} lot
+                      {Number(basketSizingPreview.hedgeLots) === 1 ? '' : 's'} →
+                      Short basket {basketSizingPreview.basketLots} lot
+                      {Number(basketSizingPreview.basketLots) === 1 ? '' : 's'}{' '}
                       (ceil of {basketSizingPreview.pct}% ={' '}
                       {(
                         (basketSizingPreview.hedgeLots *
