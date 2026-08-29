@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,69 @@ _RETRY_DELAY_SECONDS = 60
 # After N consecutive hedge-gate failures, pause retries to avoid burning spread
 _HEDGE_GATE_FAIL_THRESHOLD = 3
 _HEDGE_GATE_BACKOFF_SECONDS = 15 * 60
+
+
+def resolve_basket_qty_from_hedge(hedge_qty: int, pct: float) -> int:
+    """ceil(hedge_qty × pct / 100). Returns 0 when inputs are non-positive."""
+    try:
+        hq = int(hedge_qty)
+        p = float(pct)
+    except (TypeError, ValueError):
+        return 0
+    if hq <= 0 or p <= 0:
+        return 0
+    return int(math.ceil(hq * p / 100.0))
+
+
+def resolve_sizing_mode(settings: Any) -> str:
+    """
+    Return 'pct_of_hedge' only when mode, hedge_enabled, and hedge_qty_lots
+    are all valid; otherwise 'fixed' (with a BASKET_SIZING warning when
+    pct_of_hedge was requested but prerequisites are missing).
+    """
+    from backend.core.bot_logger import log_and_buffer
+
+    requested = str(
+        getattr(settings, "basket_qty_mode", None) or "fixed"
+    ).lower().strip()
+    if requested != "pct_of_hedge":
+        return "fixed"
+
+    hedge_enabled = bool(getattr(settings, "hedge_enabled", False))
+    raw_lots = getattr(settings, "hedge_qty_lots", None)
+    try:
+        hedge_qty_lots = int(raw_lots) if raw_lots is not None else None
+    except (TypeError, ValueError):
+        hedge_qty_lots = None
+
+    if not hedge_enabled:
+        log_and_buffer(
+            "BASKET_SIZING",
+            0,
+            {
+                "level": "WARNING",
+                "reason": "hedge_disabled",
+                "requested_mode": "pct_of_hedge",
+                "resolved_mode": "fixed",
+            },
+        )
+        return "fixed"
+
+    if hedge_qty_lots is None or hedge_qty_lots <= 0:
+        log_and_buffer(
+            "BASKET_SIZING",
+            0,
+            {
+                "level": "WARNING",
+                "reason": "hedge_qty_lots_missing",
+                "requested_mode": "pct_of_hedge",
+                "resolved_mode": "fixed",
+                "hedge_qty_lots": raw_lots,
+            },
+        )
+        return "fixed"
+
+    return "pct_of_hedge"
 
 
 def _as_ist(dt: datetime | None) -> datetime | None:
@@ -623,6 +687,8 @@ class AutoTradeEngine:
                 )
                 return
 
+        entry_basket_qty: int | None = None
+        sizing_mode_for_entry = resolve_sizing_mode(settings)
         try:
             expiry_str = expiry_date.isoformat()
             logger.info("Auto trade: expiry=%s", expiry_str)
@@ -797,7 +863,60 @@ class AutoTradeEngine:
                     straddle["put_premium"],
                 )
 
-            qty = max(1, int(settings.quantity))
+            pct = float(
+                getattr(settings, "basket_qty_pct_of_hedge", None) or 20.0
+            )
+            if sizing_mode_for_entry == "pct_of_hedge":
+                from backend.engine.hedge_lifecycle import get_active_hedge
+
+                hedge_row = get_active_hedge(
+                    db,
+                    account_id=int(account.id),
+                    underlying=str(underlying),
+                )
+                if hedge_row is None:
+                    log_and_buffer(
+                        "ENTRY_GUARD_BLOCK",
+                        0,
+                        {
+                            "source": "auto",
+                            "guard": "no_active_hedge",
+                            "underlying": underlying,
+                            "sizing_mode": sizing_mode_for_entry,
+                            "context": "basket_qty_resolution",
+                        },
+                    )
+                    return
+                hedge_qty_for_log = int(hedge_row.quantity)
+                qty = resolve_basket_qty_from_hedge(hedge_qty_for_log, pct)
+                qty_source = "hedge_row"
+            else:
+                qty = max(1, int(settings.quantity))
+                hedge_qty_for_log = None
+                qty_source = "settings"
+
+            if qty <= 0:
+                log_and_buffer(
+                    "ENTRY_GUARD_BLOCK",
+                    0,
+                    {
+                        "source": "auto",
+                        "guard": "basket_qty_zero",
+                        "sizing_mode": sizing_mode_for_entry,
+                        "hedge_qty": hedge_qty_for_log,
+                        "pct": pct,
+                        "underlying": underlying,
+                    },
+                )
+                logger.warning(
+                    "Auto trade BLOCKED: basket_qty=0 (sizing_mode=%s hedge_qty=%s pct=%s)",
+                    sizing_mode_for_entry,
+                    hedge_qty_for_log,
+                    pct,
+                )
+                return
+
+            entry_basket_qty = qty
             call_mark = float(straddle["call_premium"])
             put_mark = float(straddle["put_premium"])
             tp_pct = float(settings.tp_pct or 50.0)
@@ -1073,6 +1192,18 @@ class AutoTradeEngine:
                 stoploss_usd=stoploss_usd,
                 tp_pct=tp_pct,
                 sl_pct=sl_pct,
+            )
+
+            log_and_buffer(
+                "BASKET_SIZING",
+                int(trade.id),
+                {
+                    "sizing_mode": sizing_mode_for_entry,
+                    "hedge_qty": hedge_qty_for_log,
+                    "pct": pct,
+                    "basket_qty": qty,
+                    "source": qty_source,
+                },
             )
 
             # Re-emit TARGET_UNREACHABLE with real trade id if capped
@@ -1463,7 +1594,11 @@ class AutoTradeEngine:
                     )
                     try:
                         call_pid = int(straddle["call_product_id"])
-                        call_qty = max(1, int(settings.quantity))
+                        call_qty = int(entry_basket_qty or 0)
+                        if call_qty <= 0:
+                            raise RuntimeError(
+                                "partial entry cleanup: entry_basket_qty missing"
+                            )
                         close_res = await client.close_position(
                             product_id=call_pid,
                             size=call_qty,
@@ -1506,6 +1641,13 @@ class AutoTradeEngine:
             bool(getattr(settings, "hedge_enabled", False)),
             int(getattr(settings, "quantity", 0) or 0),
             float(getattr(settings, "hedge_qty_ratio", 1.0) or 1.0),
+            str(getattr(settings, "basket_qty_mode", "fixed") or "fixed"),
+            float(getattr(settings, "basket_qty_pct_of_hedge", 20.0) or 20.0),
+            (
+                int(getattr(settings, "hedge_qty_lots"))
+                if getattr(settings, "hedge_qty_lots", None) is not None
+                else None
+            ),
             float(getattr(settings, "hedge_target_usd", 0) or 0),
             float(getattr(settings, "hedge_stoploss_usd", 0) or 0),
             str(getattr(settings, "hedge_expiry_mode", "") or ""),
@@ -1660,36 +1802,63 @@ class AutoTradeEngine:
             )
             return hid
 
-        basket_qty = max(1, int(settings.quantity or 1))
-        try:
-            ratio = float(getattr(settings, "hedge_qty_ratio", None) or 1.0)
-        except (TypeError, ValueError):
-            ratio = 1.0
-        if ratio <= 0:
-            ratio = 1.0
-        hedge_qty = max(1, int(round(basket_qty * ratio)))
+        sizing_mode = resolve_sizing_mode(settings)
+        pct = float(getattr(settings, "basket_qty_pct_of_hedge", None) or 20.0)
+
+        if sizing_mode == "pct_of_hedge":
+            hedge_qty = max(1, int(settings.hedge_qty_lots))
+            basket_qty = resolve_basket_qty_from_hedge(hedge_qty, pct)
+            ratio = None
+        else:
+            basket_qty = max(1, int(settings.quantity or 1))
+            try:
+                ratio = float(getattr(settings, "hedge_qty_ratio", None) or 1.0)
+            except (TypeError, ValueError):
+                ratio = 1.0
+            if ratio <= 0:
+                ratio = 1.0
+            hedge_qty = max(1, int(round(basket_qty * ratio)))
+
+        gate_payload: dict[str, Any] = {
+            "hedge_enabled": True,
+            "existing_hedge_id": None,
+            "action": "open",
+            "underlying": underlying,
+            "basket_qty": basket_qty,
+            "hedge_qty": hedge_qty,
+            "sizing_mode": sizing_mode,
+        }
+        if ratio is not None:
+            gate_payload["hedge_qty_ratio"] = ratio
+        if sizing_mode == "pct_of_hedge":
+            gate_payload["basket_qty_pct_of_hedge"] = pct
+            gate_payload["hedge_qty_lots"] = int(settings.hedge_qty_lots)
 
         log_and_buffer(
             "HEDGE_GATE",
             0,
-            {
-                "hedge_enabled": True,
-                "existing_hedge_id": None,
-                "action": "open",
-                "underlying": underlying,
-                "basket_qty": basket_qty,
-                "hedge_qty": hedge_qty,
-                "hedge_qty_ratio": ratio,
-            },
+            gate_payload,
         )
-        logger.info(
-            "HEDGE_GATE: no active hedge for %s — opening hedge qty=%s "
-            "(basket_qty=%s × ratio=%.2f)",
-            underlying,
-            hedge_qty,
-            basket_qty,
-            ratio,
-        )
+        if sizing_mode == "pct_of_hedge":
+            logger.info(
+                "HEDGE_GATE: no active hedge for %s — opening hedge qty=%s "
+                "(sizing_mode=pct_of_hedge hedge_qty_lots=%s basket_qty=%s "
+                "pct=%.2f)",
+                underlying,
+                hedge_qty,
+                int(settings.hedge_qty_lots),
+                basket_qty,
+                pct,
+            )
+        else:
+            logger.info(
+                "HEDGE_GATE: no active hedge for %s — opening hedge qty=%s "
+                "(basket_qty=%s × ratio=%.2f sizing_mode=fixed)",
+                underlying,
+                hedge_qty,
+                basket_qty,
+                ratio,
+            )
 
         try:
             hedge = await open_hedge(
