@@ -377,9 +377,10 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
         <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-gray-800 pt-3 text-xs text-gray-400">
           <div
             className="rounded-md px-1.5 py-0.5 text-left"
-            title="Live target = multiple × expected monthly on structure P&L"
+            title="Live target uses structure P&L: hedge + booked baskets + open basket gross, with hedge entry spread added back"
           >
-            Target:{' '}
+            Target{' '}
+            <span className="text-gray-500">(structure basis)</span>:{' '}
             <span className="text-green-400">
               +${fmtMoney(hedge.target_usd)}
             </span>

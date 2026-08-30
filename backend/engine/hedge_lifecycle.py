@@ -159,6 +159,40 @@ def compute_structure_gross_for_sl(
     return float(open_basket_gross_mtm) + hedge_component
 
 
+def compute_structure_pnl(
+    *,
+    hedge_net_mtm: float,
+    entry_spread_usd: float,
+    booked_closed_pnl: float,
+    open_basket_gross_mtm: float,
+) -> float:
+    """
+    Structure-wide target basis (same mix as SL, without exit-slip add-back).
+
+    structure_pnl = hedge_net + entry_spread + booked closed baskets + open gross
+    """
+    return (
+        float(hedge_net_mtm)
+        + float(entry_spread_usd)
+        + float(booked_closed_pnl)
+        + float(open_basket_gross_mtm)
+    )
+
+
+def hedge_target_should_fire(
+    *,
+    structure_pnl: float,
+    target_usd: float,
+    already_fired: bool = False,
+) -> bool:
+    """True when structure P&L has reached the live target this cycle."""
+    return bool(
+        (not already_fired)
+        and float(target_usd) > 0
+        and float(structure_pnl) >= float(target_usd)
+    )
+
+
 def hedge_sl_room(budget: float, basis_usd: float) -> float:
     """Headroom to stop line: positive = room left, <= 0 = at/beyond stop."""
     return float(budget) + float(basis_usd)
@@ -2080,8 +2114,11 @@ async def persist_structure_pnl(
         hedge_est_exit_slippage_usd=est_slip,
         open_basket_gross_mtm=float(open_basket_gross),
     )
-    structure = (
-        float(mtm["hedge_net_mtm"]) + float(cum_closed) + float(open_basket)
+    structure = compute_structure_pnl(
+        hedge_net_mtm=float(mtm["hedge_net_mtm"]),
+        entry_spread_usd=float(entry_spread),
+        booked_closed_pnl=float(cum_closed),
+        open_basket_gross_mtm=float(open_basket_gross),
     )
 
     hedge.hedge_net_mtm = float(mtm["hedge_net_mtm"])
@@ -2202,9 +2239,9 @@ async def evaluate_and_maybe_close_hedge(
             btc_index_price=btc,
         )
 
-    # Calculation only — does NOT change target/SL/expiry triggers below
+    structure_snap: dict[str, float] | None = None
     try:
-        await persist_structure_pnl(
+        structure_snap = await persist_structure_pnl(
             hedge,
             db,
             call_bid=float(call_bid),
@@ -2264,7 +2301,28 @@ async def evaluate_and_maybe_close_hedge(
     )
     min_hold = max(0, min(60, min_hold))
     days_held = _hedge_days_held(hedge)
-    structure_pnl = float(getattr(hedge, "structure_pnl", 0.0) or 0.0)
+    hedge_net_for_target = float(getattr(hedge, "hedge_net_mtm", 0.0) or 0.0)
+    entry_spread_for_target = float(
+        getattr(hedge, "entry_spread_usd", 0.0) or 0.0
+    )
+    booked_for_target = float(
+        getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0
+    )
+    if structure_snap is not None:
+        hedge_net_for_target = float(structure_snap["hedge_net_mtm"])
+        entry_spread_for_target = float(structure_snap["entry_spread_usd"])
+        booked_for_target = float(structure_snap["cum_closed_basket_pnl"])
+        open_gross_for_target = float(structure_snap["open_basket_gross_mtm"])
+    else:
+        open_gross_for_target = float(
+            getattr(hedge, "structure_pnl", 0.0) or 0.0
+        ) - hedge_net_for_target - entry_spread_for_target - booked_for_target
+    structure_pnl = compute_structure_pnl(
+        hedge_net_mtm=hedge_net_for_target,
+        entry_spread_usd=entry_spread_for_target,
+        booked_closed_pnl=booked_for_target,
+        open_basket_gross_mtm=open_gross_for_target,
+    )
     tgt = compute_hedge_structure_target(
         entry_cost_usd=entry_cost,
         expected_monthly_pct=monthly_pct,
@@ -2275,16 +2333,42 @@ async def evaluate_and_maybe_close_hedge(
     pct_to_target = (
         (structure_pnl / live_target_usd * 100.0) if live_target_usd > 0 else 0.0
     )
+    room_to_target = float(live_target_usd) - float(structure_pnl)
 
     target_already_fired = hid in _hedge_target_fired
-    pnl_hits_target = bool(
-        live_target_usd > 0 and structure_pnl >= live_target_usd
+    pnl_hits_target = hedge_target_should_fire(
+        structure_pnl=structure_pnl,
+        target_usd=live_target_usd,
     )
     hold_ok = bool(days_held >= float(min_hold))
     will_close_target = bool(
         (not target_already_fired) and pnl_hits_target and hold_ok
     )
 
+    _hedge_log(
+        "STRUCTURE_TARGET_CHECK",
+        hid,
+        {
+            "hedge": hid,
+            "hedge_net": round(hedge_net_for_target, 6),
+            "entry_spread": round(entry_spread_for_target, 6),
+            "booked": round(booked_for_target, 6),
+            "open_gross": round(open_gross_for_target, 6),
+            "structure_pnl": round(structure_pnl, 6),
+            "target": round(live_target_usd, 6),
+            "room_to_target": round(room_to_target, 6),
+            "summary": (
+                f"[STRUCTURE_TARGET_CHECK] hedge_id={hid} | "
+                f"hedge_net={round(hedge_net_for_target, 6)} | "
+                f"entry_spread={round(entry_spread_for_target, 6)} | "
+                f"booked={round(booked_for_target, 6)} | "
+                f"open_gross={round(open_gross_for_target, 6)} | "
+                f"structure_pnl={round(structure_pnl, 6)} | "
+                f"target={round(live_target_usd, 6)} | "
+                f"room_to_target={round(room_to_target, 6)}"
+            ),
+        },
+    )
     _hedge_log(
         "HEDGE_TARGET_CHECK",
         hid,
@@ -3126,6 +3210,7 @@ async def build_active_hedge_live(
         "theta_accrued_note": accrual.get("theta_accrued_note"),
         "days_logged": accrual["days_logged"],
         "target_usd": round(live_target_usd, 4) if live_target_usd > 0 else None,
+        "target_basis": "structure",
         "legacy_target_usd": target if target > 0 else hedge.target_usd,
         "stoploss_usd": stoploss if stoploss > 0 else hedge.stoploss_usd,
         "pct_to_target": pct_to_target,
@@ -3144,6 +3229,7 @@ async def build_active_hedge_live(
         "open_basket_net_mtm": round(
             float(getattr(hedge, "structure_pnl", 0.0) or 0.0)
             - float(getattr(hedge, "hedge_net_mtm", 0.0) or 0.0)
+            - float(getattr(hedge, "entry_spread_usd", 0.0) or 0.0)
             - float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0),
             6,
         ),
