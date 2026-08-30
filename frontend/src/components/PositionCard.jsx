@@ -5,6 +5,7 @@ import LoadingSpinner from './ui/LoadingSpinner'
 import EmergencyExit from './EmergencyExit'
 import PayoffGraph from './PayoffGraph'
 import AdjustmentSlabs from './AdjustmentSlabs'
+import PnlSlider from './PnlSlider'
 import { closeLeg, getAdjustments, updateSettings } from '../services/api'
 
 function fmtMoney(v) {
@@ -196,7 +197,7 @@ function formatAdjTime(iso) {
   }
 }
 
-function LegRow({ label, leg }) {
+function LegRow({ label, leg, compact = false }) {
   return (
     <tr className={leg.closed ? 'opacity-50' : ''}>
       <td className="px-2 py-2 font-medium text-white">{label}</td>
@@ -209,16 +210,20 @@ function LegRow({ label, leg }) {
       <td className={`px-2 py-2 font-medium ${pnlColor(leg.leg_pnl)}`}>
         {fmtSignedMoney(leg.leg_pnl)}
       </td>
-      <td className="px-2 py-2 text-amber-200/90">
-        {leg.entry_fee_usd != null ? `$${fmtMoney(leg.entry_fee_usd)}` : '—'}
-      </td>
-      <td className="px-2 py-2 text-amber-200/90">
-        {leg.closed
-          ? '—'
-          : leg.est_exit_fee_usd != null
-            ? `$${fmtMoney(leg.est_exit_fee_usd)}`
-            : '—'}
-      </td>
+      {!compact && (
+        <>
+          <td className="px-2 py-2 text-amber-200/90">
+            {leg.entry_fee_usd != null ? `$${fmtMoney(leg.entry_fee_usd)}` : '—'}
+          </td>
+          <td className="px-2 py-2 text-amber-200/90">
+            {leg.closed
+              ? '—'
+              : leg.est_exit_fee_usd != null
+                ? `$${fmtMoney(leg.est_exit_fee_usd)}`
+                : '—'}
+          </td>
+        </>
+      )}
     </tr>
   )
 }
@@ -530,9 +535,16 @@ function BasketStory({ trade, call, put, mergedAdj }) {
 }
 
 /**
- * Props: { trade, recentAdjustments? }
+ * Props: { trade, recentAdjustments?, compact?, monitoringOnly? }
+ * compact — dashboard side-by-side basket panel (B13)
+ * monitoringOnly — bot monitoring + story below the grid
  */
-export default function PositionCard({ trade, recentAdjustments = [] }) {
+export default function PositionCard({
+  trade,
+  recentAdjustments = [],
+  compact = false,
+  monitoringOnly = false,
+}) {
   const call = normalizeLeg(trade, 'call')
   const put = normalizeLeg(trade, 'put')
   const countdown = useCountdown(trade.hours_to_expiry)
@@ -896,6 +908,310 @@ export default function PositionCard({ trade, recentAdjustments = [] }) {
     adjRemaining != null &&
     Number.isFinite(adjRemaining) &&
     adjRemaining === 1
+
+  const slConsumedPct =
+    stoploss > 0 && grossMtmForSl != null
+      ? Math.min(100, Math.max(0, (-grossMtmForSl / stoploss) * 100))
+      : 0
+
+  const basketDeductions = [
+    {
+      label: 'Entry spread',
+      amount: entrySpreadForSl ?? 0,
+      title: 'Entry spread deducted from gross for net',
+    },
+    {
+      label: 'Fees',
+      amount: feesPaid + estExitFees,
+      title: 'Fees paid + estimated exit fees',
+    },
+    {
+      label: 'Est exit',
+      amount:
+        slippageAmount +
+        (expectedExitSpread != null ? expectedExitSpread : 0),
+      title: 'Slippage + expected exit spread',
+    },
+  ]
+
+  if (monitoringOnly) {
+    return (
+      <article className="overflow-hidden rounded-xl border border-gray-700 bg-gray-800 shadow-lg">
+        <div className="border-t border-gray-700 px-4 py-3">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-white">
+              🤖 Bot Monitoring Plan
+            </div>
+            <div
+              className={`text-xs ${
+                deltaSlActive ? 'text-green-400' : 'text-amber-300'
+              }`}
+            >
+              {deltaSlActive
+                ? '🔒 Bracket SL: Active'
+                : '⚠️ Bracket SL: Not set'}
+            </div>
+          </div>
+          {(() => {
+            const action = String(
+              trade.bot_next_action ||
+                trade.next_action_plan?.next_action ||
+                'HOLD',
+            )
+            const badge = NEXT_ACTION_BADGE[action] || NEXT_ACTION_BADGE.HOLD
+            return (
+              <div
+                className={`mb-3 inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${badge.className}`}
+              >
+                {badge.label}
+              </div>
+            )
+          })()}
+          {combinedMode ? (
+            <div className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 p-3 text-xs text-cyan-200">
+              Combined trigger mode active — {fmtMoney(combinedTrigPct)}% of
+              combined entry (${fmtMoney(combinedEntry)})
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <TriggerWatch
+                title="Call Leg Watch"
+                entry={callEntry}
+                baseline={callBaseline}
+                trigger={callTrigger}
+                current={call.current_premium}
+                distance={callDistance}
+                progressPct={callProgress}
+                triggerPct={callTriggerPct}
+                triggerMode={triggerMode}
+                deltaSlPrice={callDeltaSl}
+                universalSlPct={universalSlPct}
+              />
+              <TriggerWatch
+                title="Put Leg Watch"
+                entry={putEntry}
+                baseline={putBaseline}
+                trigger={putTrigger}
+                current={put.current_premium}
+                distance={putDistance}
+                progressPct={putProgress}
+                triggerPct={putTriggerPct}
+                triggerMode={triggerMode}
+                deltaSlPrice={putDeltaSl}
+                universalSlPct={universalSlPct}
+              />
+            </div>
+          )}
+        </div>
+        <BasketStory
+          trade={trade}
+          call={call}
+          put={put}
+          mergedAdj={mergedAdj}
+        />
+      </article>
+    )
+  }
+
+  if (compact) {
+    return (
+      <article className="flex h-full flex-col overflow-hidden rounded-xl border border-gray-700 bg-gray-800 shadow-lg">
+        <header className="border-b border-gray-700 bg-gray-900/60 px-4 py-3 text-sm">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h2 className="font-bold text-white">
+                🟠 Basket #{basketNo} · {trade.underlying || 'BTC'} Short Strangle
+              </h2>
+              {adjMax != null && (
+                <span className="mt-1 inline-block rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">
+                  Adjustments {adjCount}/{adjMax}
+                </span>
+              )}
+            </div>
+            <div className="text-right text-xs text-gray-400">
+              <div>Exp: {expiryLabel}</div>
+              <div
+                className={
+                  countdown.expiringSoon
+                    ? 'font-semibold text-red-400'
+                    : 'text-gray-300'
+                }
+              >
+                ⏱ {countdown.text}
+              </div>
+            </div>
+          </div>
+        </header>
+
+        {settling.isSettling && (
+          <div className="border-b border-amber-800/60 bg-amber-950/40 px-4 py-2 text-xs text-amber-200">
+            Settling… P&L checks start in {settling.text}
+          </div>
+        )}
+
+        <div className="flex-1 space-y-3 px-2 py-2">
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-xs text-gray-200">
+              <thead className="text-[10px] uppercase tracking-wide text-gray-500">
+                <tr>
+                  <th className="px-2 py-1">Type</th>
+                  <th className="px-2 py-1">Strike</th>
+                  <th className="px-2 py-1">Entry</th>
+                  <th className="px-2 py-1">Offer</th>
+                  <th className="px-2 py-1">Change</th>
+                  <th className="px-2 py-1">Leg P&L*</th>
+                </tr>
+              </thead>
+              <tbody>
+                <LegRow label="CALL" leg={call} compact />
+                <LegRow label="PUT" leg={put} compact />
+              </tbody>
+            </table>
+            <div className="px-2 pb-1 text-[10px] text-gray-500">
+              * Leg P&L = live offer estimate
+            </div>
+          </div>
+
+          <div className="px-2">
+            <PnlSlider
+              grossLabel="GROSS MTM"
+              gross={grossMtm}
+              net={netMtm}
+              netLabel="NET MTM"
+              deductions={basketDeductions}
+              targetPct={displayPct}
+              targetUsd={target}
+              slPct={slConsumedPct}
+              slUsd={stoploss}
+            />
+          </div>
+
+          <div className="mx-2 flex flex-wrap items-center gap-3 rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs">
+            <span className="text-green-400">
+              🎯 Target: <span className="font-bold">+${fmtMoney(target)}</span>
+            </span>
+            <span className="text-red-400">
+              🛑 SL: <span className="font-bold">−${fmtMoney(stoploss)}</span>
+            </span>
+            <span className={pnlColor(netMtm)}>
+              📊 Net: <span className="font-bold">{fmtSignedMoney(netMtm)}</span>
+            </span>
+          </div>
+        </div>
+
+        <div className="mt-auto space-y-2 border-t border-gray-700 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={call.closed || closingLeg === 'call'}
+                onClick={() => setConfirmLeg('call')}
+                className="inline-flex items-center gap-1 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-700 disabled:opacity-40"
+              >
+                {closingLeg === 'call' && <LoadingSpinner size="sm" />}
+                Exit Basket (Call)
+              </button>
+              <button
+                type="button"
+                disabled={put.closed || closingLeg === 'put'}
+                onClick={() => setConfirmLeg('put')}
+                className="inline-flex items-center gap-1 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-700 disabled:opacity-40"
+              >
+                {closingLeg === 'put' && <LoadingSpinner size="sm" />}
+                Exit Basket (Put)
+              </button>
+            </div>
+            {anyOpen && (
+              <EmergencyExit
+                tradeId={trade.trade_id}
+                finalMtmHint={totalMtm}
+                onSuccess={() =>
+                  setToast({
+                    type: 'success',
+                    message: 'Trade closed via emergency exit',
+                  })
+                }
+              />
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => openEdit('target')}
+              className="rounded-md border border-gray-600 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-700"
+            >
+              Edit Target %
+            </button>
+            <button
+              type="button"
+              onClick={() => openEdit('sl')}
+              className="rounded-md border border-gray-600 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-700"
+            >
+              Edit SL %
+            </button>
+            <button
+              type="button"
+              onClick={() => openEdit('slippage')}
+              className="rounded-md border border-gray-600 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-700"
+            >
+              Edit Slippage %
+            </button>
+            <button
+              type="button"
+              onClick={() => openEdit('trigger')}
+              className="rounded-md border border-gray-600 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-700"
+            >
+              Edit Trigger
+            </button>
+          </div>
+        </div>
+
+        <ConfirmDialog
+          isOpen={Boolean(confirmLeg)}
+          title={`Exit entire basket via ${confirmLeg === 'call' ? 'Call' : 'Put'}?`}
+          message="This closes BOTH legs and mirrored slaves."
+          confirmLabel="Exit Entire Basket"
+          onCancel={() => setConfirmLeg(null)}
+          onConfirm={handleConfirmClose}
+        />
+        <ConfirmDialog
+          isOpen={Boolean(editField)}
+          title="Edit settings"
+          message={
+            editField === 'trigger' ? (
+              <AdjustmentSlabs
+                compact
+                defaultMode={triggerMode}
+                initialValues={triggerDraft}
+                onChange={setTriggerDraft}
+              />
+            ) : (
+              <input
+                type="number"
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                className="mt-2 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+              />
+            )
+          }
+          confirmLabel={savingEdit ? 'Saving…' : 'Save'}
+          confirmDisabled={savingEdit}
+          onCancel={() => {
+            setEditField(null)
+            setTriggerDraft(null)
+          }}
+          onConfirm={saveEdit}
+        />
+        {toast && (
+          <Toast
+            message={toast.message}
+            type={toast.type}
+            onClose={() => setToast(null)}
+          />
+        )}
+      </article>
+    )
+  }
 
   return (
     <article className="overflow-hidden rounded-xl border border-gray-700 bg-gray-800 shadow-lg">

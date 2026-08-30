@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import LoadingSpinner from './ui/LoadingSpinner'
 import ConfirmDialog from './ui/ConfirmDialog'
+import PnlSlider from './PnlSlider'
 import { closeHedge, updateHedgeSettings } from '../services/api'
 
 function fmtMoney(v, digits = 2) {
@@ -12,23 +13,11 @@ function fmtMoney(v, digits = 2) {
   })
 }
 
-function fmtSigned(v, digits = 2) {
+function fmtSigned(v, digits = 4) {
   const n = Number(v)
   if (!Number.isFinite(n)) return '—'
   const sign = n > 0 ? '+' : n < 0 ? '−' : ''
   return `${sign}$${fmtMoney(Math.abs(n), digits)}`
-}
-
-function fmtDeduction(v, digits = 3) {
-  const n = Number(v)
-  if (!Number.isFinite(n) || n === 0) return '−$0.000'
-  return `−$${fmtMoney(Math.abs(n), digits)}`
-}
-
-function fmtAddBack(v, digits = 3) {
-  const n = Number(v)
-  if (!Number.isFinite(n)) return '—'
-  return `+$${fmtMoney(Math.abs(n), digits)}`
 }
 
 function pnlClass(v) {
@@ -72,7 +61,6 @@ function fmtTimeLeft(hours) {
 function fmtIv(v) {
   const n = Number(v)
   if (!Number.isFinite(n) || n <= 0) return '—'
-  // Stored as fraction (0.36) or percent (36)
   const pct = n <= 2 ? n * 100 : n
   return `${pct.toFixed(1)}%`
 }
@@ -85,15 +73,33 @@ function avgIv(a, b) {
   return vals.reduce((s, n) => s + n, 0) / vals.length
 }
 
+function MiniProgress({ label, pct, barClass, suffix }) {
+  const width = Math.min(100, Math.max(0, Math.abs(Number(pct) || 0)))
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-baseline justify-between gap-1 text-[11px] text-gray-400">
+        <span>{label}</span>
+        {suffix ? <span>{suffix}</span> : null}
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-800">
+        <div
+          className={`h-full rounded-full transition-all ${barClass}`}
+          style={{ width: `${width}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
 /**
- * Live long-hedge panel (spec 5.1). Renders above basket cards.
+ * Live long-hedge panel — dashboard left column (B13).
  */
 export default function HedgePanel({ hedge, onClosed, onUpdated }) {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [done, setDone] = useState(null)
   const [error, setError] = useState('')
-  const [editField, setEditField] = useState(null) // 'target' | 'sl' | null
+  const [editField, setEditField] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState('')
@@ -112,21 +118,8 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
     hedge.gross_upnl != null && Number.isFinite(Number(hedge.gross_upnl))
       ? Number(hedge.gross_upnl)
       : hedge.gross_pnl
-  const entrySpread = Number(hedge.entry_spread_usd)
   const estExitSlip = Number(hedge.est_exit_slippage_usd)
   const feesUsd = Number(hedge.fees_usd)
-  const exitSpreadPct = Number(hedge.hedge_exit_spread_pct)
-  const slBasisUsd = hedge.sl_basis_usd
-  const hedgeOnlyForSl = hedge.hedge_only_for_sl
-  const openBasketGross = Number(hedge.open_basket_gross)
-  const netNum = Number(net)
-  const grossNum = Number(gross)
-  const pnlBreakdownMismatch =
-    Number.isFinite(grossNum) &&
-    Number.isFinite(netNum) &&
-    Number.isFinite(estExitSlip) &&
-    Number.isFinite(feesUsd) &&
-    Math.abs(grossNum - estExitSlip - feesUsd - netNum) > 0.01
   const exitSlipUnavailable =
     Number.isFinite(estExitSlip) &&
     estExitSlip === 0 &&
@@ -134,13 +127,19 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
   const entryIv = avgIv(hedge.entry_call_iv, hedge.entry_put_iv)
   const liveIv = avgIv(hedge.current_call_iv, hedge.current_put_iv)
   const daysLogged = Number(hedge.days_logged) || 0
-  // Long theta decays — show today's theta USD as a cost (negative)
   const todayThetaUsd = Number(hedge.today_theta_usd)
   const todayThetaDisplay = Number.isFinite(todayThetaUsd)
     ? -Math.abs(todayThetaUsd)
     : null
   const accrued = Number(hedge.theta_accrued_estimate)
   const accruedDisplay = Number.isFinite(accrued) ? -Math.abs(accrued) : null
+  const targetUsd = Number(hedge.target_usd)
+  const slBudget =
+    hedge.sl_budget != null ? Number(hedge.sl_budget) : Number(hedge.stoploss_usd)
+  const pctTarget = hedge.pct_to_target
+  const pctStop = hedge.pct_to_stop
+  const daysHeld = hedge.days_held ?? hedge.days_since_entry ?? 0
+  const minHold = hedge.hedge_min_hold_days ?? 10
 
   const openEdit = (field) => {
     setEditError('')
@@ -214,257 +213,198 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
     }
   }
 
+  const hedgeDeductions = [
+    {
+      label: 'Exit spread',
+      amount: estExitSlip,
+      title: exitSlipUnavailable
+        ? 'Exit spread estimate unavailable'
+        : 'Estimated exit spread on close',
+    },
+    { label: 'Fees', amount: feesUsd, title: 'Round-trip fees' },
+  ]
+
   return (
     <>
-      <section className="mb-6 rounded-xl border border-emerald-800/50 bg-gradient-to-br from-gray-900 via-gray-900 to-emerald-950/30 px-5 py-4 shadow-lg">
-        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-emerald-300">
-            Long Hedge #{hedge.id}
-          </h2>
-          <div className="text-xs text-gray-400">
-            {String(hedge.underlying || 'BTC').toUpperCase()}{' '}
-            {fmtStrike(strike)} Straddle · {fmtExpiry(hedge.expiry_date)} ·{' '}
-            {fmtTimeLeft(hedge.hours_to_expiry)} · {qty} lot
-            {qty === 1 ? '' : 's'}
+      <section className="flex h-full flex-col rounded-xl border border-emerald-800/50 bg-gray-900 shadow-lg">
+        {/* Header */}
+        <header className="border-b border-gray-800 px-4 py-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-white">
+                <span className="mr-1.5 text-green-400">●</span>
+                LONG HEDGE #{hedge.id}
+              </h2>
+              <p className="mt-0.5 text-xs text-gray-400">
+                {String(hedge.underlying || 'BTC').toUpperCase()} ·{' '}
+                {fmtStrike(strike)} Straddle
+              </p>
+            </div>
+            <div className="text-right text-xs text-gray-400">
+              <div>
+                {fmtExpiry(hedge.expiry_date)} · {fmtTimeLeft(hedge.hours_to_expiry)}
+              </div>
+              <div className="mt-0.5 font-medium text-gray-300">
+                {qty} lot{qty === 1 ? '' : 's'}
+              </div>
+            </div>
           </div>
-        </div>
+        </header>
 
         {hedge.roll_pending ? (
           <div
-            className="mb-4 rounded-lg border border-amber-600/60 bg-amber-950/40 px-3 py-2 text-sm text-amber-200"
+            className="mx-4 mt-3 rounded-lg border border-amber-600/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-200"
             role="status"
           >
-            ROLLING - waiting for basket #
+            ROLLING — waiting for basket #
             {hedge.roll_waiting_basket_seq != null
               ? hedge.roll_waiting_basket_seq
-              : hedge.roll_waiting_trade_id != null
-                ? hedge.roll_waiting_trade_id
-                : '—'}{' '}
-            to close. Force close at {Number(hedge.hedge_roll_hard_dte) || 5} DTE.
+              : hedge.roll_waiting_trade_id ?? '—'}{' '}
+            to close.
           </div>
         ) : null}
 
-        <div className="mb-4 grid gap-2 text-sm sm:grid-cols-2">
-          <div className="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-2 font-mono text-xs sm:text-sm">
-            <span className="text-blue-300">CALL {fmtStrike(strike)}</span>
-            <span className="mx-2 text-gray-600">·</span>
-            <span className="text-gray-400">entry</span>{' '}
-            <span className="text-gray-200">${fmtMoney(call.entry_fill)}</span>
-            <span className="mx-2 text-gray-600">·</span>
-            <span className="text-gray-400">now</span>{' '}
-            <span className="text-gray-200">${fmtMoney(call.current_bid)}</span>
-            <span className="mx-2 text-gray-600">·</span>
-            <span className="text-gray-400">UPL</span>{' '}
-            <span className={pnlClass(call.upl)}>{fmtSigned(call.upl, 4)}</span>
-          </div>
-          <div className="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-2 font-mono text-xs sm:text-sm">
-            <span className="text-amber-300">PUT {fmtStrike(strike)}</span>
-            <span className="mx-2 text-gray-600">·</span>
-            <span className="text-gray-400">entry</span>{' '}
-            <span className="text-gray-200">${fmtMoney(put.entry_fill)}</span>
-            <span className="mx-2 text-gray-600">·</span>
-            <span className="text-gray-400">now</span>{' '}
-            <span className="text-gray-200">${fmtMoney(put.current_bid)}</span>
-            <span className="mx-2 text-gray-600">·</span>
-            <span className="text-gray-400">UPL</span>{' '}
-            <span className={pnlClass(put.upl)}>{fmtSigned(put.upl, 4)}</span>
-          </div>
-        </div>
-
-        <div className="mb-4 grid gap-3 text-sm sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <div className="flex justify-between gap-3">
-              <span className="text-gray-400">Entry cost</span>
-              <span className="font-medium text-gray-100">
-                ${fmtMoney(hedge.cost_usd, 3)}
-              </span>
-            </div>
-            <div className="flex justify-between gap-3">
-              <span className="text-gray-400">Current value</span>
-              <span className="font-medium text-gray-100">
-                ${fmtMoney(hedge.current_value_usd, 3)}
-              </span>
-            </div>
-            <div className="space-y-0.5 border-t border-gray-800 pt-1.5 text-[11px] text-gray-500">
-              <div className="flex justify-between gap-3">
-                <span>Gross</span>
-                <span className={pnlClass(gross)}>{fmtSigned(gross, 4)}</span>
-              </div>
-              <div className="flex justify-between gap-3 pl-2">
-                <span>
-                  less est. exit spread
-                  {Number.isFinite(exitSpreadPct) ? (
-                    <span className="ml-1 text-gray-600">
-                      ({fmtMoney(exitSpreadPct, 1)}%)
-                    </span>
-                  ) : null}
-                  {exitSlipUnavailable ? (
-                    <span
-                      className="ml-1 text-amber-500/90"
-                      title="Exit spread estimate unavailable — bid missing or estimate failed; stop basis may be tighter than intended"
-                    >
-                      ⚠
-                    </span>
-                  ) : null}
-                </span>
-                <span>
-                  {fmtDeduction(estExitSlip, 3)}
-                  {exitSlipUnavailable ? (
-                    <span className="ml-1 text-[10px] text-amber-500/90">
-                      estimate unavailable
-                    </span>
-                  ) : null}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3 pl-2">
-                <span>less fees</span>
-                <span>{fmtDeduction(feesUsd, 3)}</span>
-              </div>
-              <div className="my-1 border-t border-gray-800/80" />
-              <div className="flex justify-between gap-3">
-                <span className="font-semibold text-gray-300">
-                  Hedge P&L (net)
-                  {pnlBreakdownMismatch ? (
-                    <span
-                      className="ml-1 font-normal text-amber-500/90"
-                      title="Gross − exit spread − fees does not match net — check backend payload"
-                    >
-                      ⚠ mismatch
-                    </span>
-                  ) : null}
-                </span>
-                <span className={`font-semibold ${pnlClass(net)}`}>
-                  {fmtSigned(net, 4)}
-                </span>
-              </div>
-              <p className="pt-0.5 text-[10px] leading-snug text-gray-600">
-                Gross is marked bid-vs-entry, so the entry spread is already
-                inside it.
-              </p>
-            </div>
+        <div className="flex-1 space-y-4 px-4 py-3">
+          {/* Legs table */}
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-xs">
+              <thead className="text-[10px] uppercase tracking-wide text-gray-500">
+                <tr>
+                  <th className="pb-1 pr-2">Type</th>
+                  <th className="pb-1 pr-2">Strike</th>
+                  <th className="pb-1 pr-2">Entry</th>
+                  <th className="pb-1 pr-2">Now</th>
+                  <th className="pb-1">UPL</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono text-gray-200">
+                <tr>
+                  <td className="py-1 pr-2 font-medium text-blue-300">CALL</td>
+                  <td className="py-1 pr-2">{fmtStrike(strike)}</td>
+                  <td className="py-1 pr-2">${fmtMoney(call.entry_fill)}</td>
+                  <td className="py-1 pr-2">${fmtMoney(call.current_bid)}</td>
+                  <td className={`py-1 font-medium ${pnlClass(call.upl)}`}>
+                    {fmtSigned(call.upl, 4)}
+                  </td>
+                </tr>
+                <tr>
+                  <td className="py-1 pr-2 font-medium text-amber-300">PUT</td>
+                  <td className="py-1 pr-2">{fmtStrike(strike)}</td>
+                  <td className="py-1 pr-2">${fmtMoney(put.entry_fill)}</td>
+                  <td className="py-1 pr-2">${fmtMoney(put.current_bid)}</td>
+                  <td className={`py-1 font-medium ${pnlClass(put.upl)}`}>
+                    {fmtSigned(put.upl, 4)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
 
-          <div className="space-y-1.5">
-            <div className="flex justify-between gap-3">
-              <span className="text-gray-400">Today&apos;s theta</span>
-              <span className={pnlClass(todayThetaDisplay)}>
-                {fmtSigned(todayThetaDisplay, 4)}
-              </span>
-            </div>
-            <div className="flex justify-between gap-3">
-              <span className="text-gray-400">
-                Theta accrued{' '}
-                <span className="text-[10px] uppercase tracking-wide text-amber-500/90">
-                  estimate
+          <div className="grid gap-4 lg:grid-cols-2">
+            {/* P&L block */}
+            <div className="space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-400">Entry cost</span>
+                <span className="font-medium text-gray-100">
+                  ${fmtMoney(hedge.cost_usd, 3)}
                 </span>
-              </span>
-              <span className={pnlClass(accruedDisplay)}>
-                {fmtSigned(accruedDisplay, 4)}
-                {daysLogged > 0 ? (
-                  <span className="ml-1 text-xs text-gray-500">
-                    ({daysLogged} day{daysLogged === 1 ? '' : 's'})
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-400">Current value</span>
+                <span className="font-medium text-gray-100">
+                  ${fmtMoney(hedge.current_value_usd, 3)}
+                </span>
+              </div>
+              <PnlSlider
+                grossLabel="Gross"
+                gross={gross}
+                net={net}
+                netLabel="Net MTM"
+                deductions={hedgeDeductions}
+              />
+            </div>
+
+            {/* Theta + IV */}
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between gap-2">
+                <span className="text-gray-400">Today&apos;s theta</span>
+                <span className={pnlClass(todayThetaDisplay)}>
+                  {fmtSigned(todayThetaDisplay, 4)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-gray-400">
+                  Theta accrued{' '}
+                  <span className="rounded bg-amber-950/60 px-1 text-[9px] uppercase text-amber-400">
+                    estimate
                   </span>
-                ) : null}
+                </span>
+                <span className={pnlClass(accruedDisplay)}>
+                  {fmtSigned(accruedDisplay, 4)}
+                  {daysLogged > 0 ? (
+                    <span className="ml-1 text-gray-500">({daysLogged}d)</span>
+                  ) : null}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2 border-t border-gray-800 pt-2">
+                <span className="text-gray-400">IV entry / now</span>
+                <span className="text-gray-200">
+                  {fmtIv(entryIv)} · {fmtIv(liveIv)}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Target / SL compact */}
+          <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-3 text-xs">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <span className="text-green-400">
+                🎯 Target (structure):{' '}
+                <span className="font-bold">+${fmtMoney(targetUsd)}</span>
+              </span>
+              <span className="text-gray-500">
+                held {fmtMoney(daysHeld, 0)}/{minHold}d
+                {pctTarget != null ? ` · ${fmtMoney(pctTarget, 1)}% progress` : ''}
               </span>
             </div>
-            <p className="text-[11px] leading-snug text-gray-500">
-              Theta accrued is an ESTIMATE (sum of daily snapshots), not a cash
-              flow. Real hedge P&L combines theta, vega, and delta.
-            </p>
-          </div>
-        </div>
+            <MiniProgress
+              label="Target progress"
+              pct={pctTarget}
+              barClass="bg-green-500/80"
+              suffix={
+                pctTarget != null
+                  ? `${fmtMoney(pctTarget, 1)}% of target reached`
+                  : null
+              }
+            />
 
-        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-gray-800 pt-3 text-xs text-gray-400">
-          <div
-            className="rounded-md px-1.5 py-0.5 text-left"
-            title="Live target uses structure P&L: hedge + booked baskets + open basket gross, with hedge entry spread added back"
-          >
-            Target{' '}
-            <span className="text-gray-500">(structure basis)</span>:{' '}
-            <span className="text-green-400">
-              +${fmtMoney(hedge.target_usd)}
-            </span>
-            <span className="ml-1 text-gray-500">
-              ({fmtMoney(hedge.hedge_target_multiple ?? 3, 1)}x monthly, held{' '}
-              {fmtMoney(hedge.days_held ?? hedge.days_since_entry ?? 0, 0)}/
-              {hedge.hedge_min_hold_days ?? 10}d)
-            </span>
-            {hedge.pct_to_target != null && (
-              <span className="ml-1 text-gray-500">
-                ({fmtMoney(hedge.pct_to_target, 1)}%)
-              </span>
-            )}
-          </div>
-          <div
-            className="rounded-md px-1.5 py-0.5 text-left"
-            title="Stop uses the whole structure — hedge plus open baskets — with entry and exit spread added back, so execution cost cannot trigger the stop."
-          >
-            <div>
-              Stop{' '}
-              <span className="text-gray-500">(structure basis)</span>:{' '}
+            <div className="flex flex-wrap items-baseline justify-between gap-2 pt-1">
               <span className="text-red-400">
-                −${fmtMoney(
-                  hedge.sl_budget != null ? hedge.sl_budget : hedge.stoploss_usd,
-                )}
+                🛑 Stop (structure):{' '}
+                <span className="font-bold">−${fmtMoney(slBudget)}</span>
               </span>
-              <span className="ml-1 text-gray-500">
-                (fixed $
-                {fmtMoney(
-                  hedge.hedge_fixed_sl_usd != null
-                    ? hedge.hedge_fixed_sl_usd
-                    : 2,
-                )}{' '}
-                + booked $
-                {fmtMoney(hedge.cum_closed_basket_pnl ?? 0)})
-              </span>
-              {hedge.pct_to_stop != null && (
-                <span className="ml-1 text-gray-500">
-                  ({fmtMoney(hedge.pct_to_stop, 1)}%)
-                </span>
-              )}
-            </div>
-            <div className="mt-1 space-y-0.5 text-[10px] leading-snug text-gray-500">
-              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
-                <span>Hedge P&L (net)</span>
-                <span className={pnlClass(net)}>{fmtSigned(net, 4)}</span>
-              </div>
-              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 pl-2">
-                <span>+ entry spread</span>
-                <span>{fmtAddBack(entrySpread, 3)}</span>
-              </div>
-              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
-                <span className="text-gray-400">Hedge only</span>
-                <span className={pnlClass(hedgeOnlyForSl)}>
-                  {fmtSigned(hedgeOnlyForSl, 4)}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 pl-2">
-                <span>+ est. exit spread</span>
-                <span>{fmtAddBack(estExitSlip, 3)}</span>
-              </div>
-              {Number.isFinite(openBasketGross) ? (
-                <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 pl-2">
-                  <span>+ open basket (gross)</span>
-                  <span>{fmtAddBack(openBasketGross, 3)}</span>
-                </div>
+              {pctStop != null ? (
+                <span className="text-gray-500">{fmtMoney(pctStop, 1)}% used</span>
               ) : null}
-              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
-                <span className="text-gray-400">Structure basis</span>
-                <span className={pnlClass(slBasisUsd)}>
-                  {fmtSigned(slBasisUsd, 4)}
-                </span>
-              </div>
             </div>
+            <MiniProgress
+              label="SL consumed"
+              pct={pctStop}
+              barClass="bg-red-500/80"
+              suffix={
+                pctStop != null
+                  ? `${fmtMoney(pctStop, 1)}% of SL consumed`
+                  : null
+              }
+            />
           </div>
-          <span>
-            IV entry {fmtIv(entryIv)} · IV now {fmtIv(liveIv)}
-          </span>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-xs text-gray-500">
-            Bracket SL: N/A on hedge (closes via target / stop / expiry)
-          </div>
+        {/* Footer */}
+        <footer className="mt-auto flex flex-wrap items-center justify-between gap-3 border-t border-gray-800 px-4 py-3">
+          <p className="text-[11px] text-gray-500">
+            Bracket SL: N/A — closes via target / stop / expiry
+          </p>
           <button
             type="button"
             disabled={loading}
@@ -478,7 +418,7 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
             {loading && <LoadingSpinner size="sm" color="white" />}
             Close Hedge
           </button>
-        </div>
+        </footer>
       </section>
 
       {confirmOpen && (
@@ -512,36 +452,28 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                   Close Hedge #{hedge.id}?
                 </h3>
                 <p className="mt-3 text-sm text-gray-300">
-                  This will close BOTH hedge legs (call and put) at market with
-                  reduce-only orders.
+                  This will close BOTH hedge legs at market with reduce-only
+                  orders.
                 </p>
                 <p className="mt-2 text-sm text-amber-200">
                   {Number(hedge.open_basket_count) > 0 ? (
                     <>
-                      It will also close{' '}
+                      Also closes{' '}
                       <span className="font-semibold">
                         {Number(hedge.open_basket_count)} open basket
                         {Number(hedge.open_basket_count) === 1 ? '' : 's'}
                       </span>{' '}
-                      under this hedge and all mirrored slave positions. Short
-                      strikes were sized for this hedge — they cannot stay open
-                      alone.
+                      and mirrored slaves.
                     </>
                   ) : (
-                    <>
-                      No open baskets are linked to this hedge right now. If any
-                      appear before confirm completes, they will be closed too.
-                    </>
+                    <>No open baskets linked right now.</>
                   )}
                 </p>
-                <p className="mt-2 text-sm font-medium text-gray-200">
-                  This action cannot be undone.
-                </p>
-                {error && (
+                {error ? (
                   <p className="mt-3 rounded-md border border-red-700/50 bg-red-950/40 px-3 py-2 text-sm text-red-300">
                     {error}
                   </p>
-                )}
+                ) : null}
                 <div className="mt-5 flex justify-end gap-2">
                   <button
                     type="button"
@@ -559,11 +491,6 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                   >
                     {loading && <LoadingSpinner size="sm" color="white" />}
                     Yes, Close Hedge
-                    {Number(hedge.open_basket_count) > 0
-                      ? ` + ${Number(hedge.open_basket_count)} Basket${
-                          Number(hedge.open_basket_count) === 1 ? '' : 's'
-                        }`
-                      : ''}
                   </button>
                 </div>
               </>
@@ -575,13 +502,15 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
       <ConfirmDialog
         isOpen={Boolean(editField)}
         title={
-          editField === 'target' ? 'Edit Hedge Target ($)' : 'Edit Hedge Stop Loss ($)'
+          editField === 'target'
+            ? 'Edit Hedge Target ($)'
+            : 'Edit Hedge Stop Loss ($)'
         }
         message={
           <label className="block text-left text-sm text-gray-300">
             {editField === 'target'
-              ? 'Profit target in USD (must be > 0). Takes effect next monitor cycle.'
-              : 'Stop loss in USD (must be > 0). Takes effect next monitor cycle.'}
+              ? 'Profit target in USD (must be > 0).'
+              : 'Stop loss in USD (must be > 0).'}
             <input
               type="number"
               min={0.01}
@@ -590,9 +519,9 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
               onChange={(e) => setEditValue(e.target.value)}
               className="mt-2 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
             />
-            {editError && (
+            {editError ? (
               <span className="mt-2 block text-xs text-red-400">{editError}</span>
-            )}
+            ) : null}
           </label>
         }
         confirmLabel={editSaving ? 'Saving…' : 'Save'}

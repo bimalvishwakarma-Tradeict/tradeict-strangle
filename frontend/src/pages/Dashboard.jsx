@@ -356,6 +356,7 @@ function AccountOverviewRow({
   availableUsd,
   availableInr,
   netMtm,
+  mtmLabel,
   mtmSource,
   mtmSyncIso,
   targetUsd,
@@ -447,6 +448,11 @@ function AccountOverviewRow({
           ) : (
             <>
               <div>{formatSignedMoney(netMtm)}</div>
+              {mtmLabel ? (
+                <div className="text-[10px] font-normal text-gray-500">
+                  {mtmLabel}
+                </div>
+              ) : null}
               {mtmSourceLabel ? (
                 <div
                   className={`text-[10px] font-normal ${
@@ -490,14 +496,32 @@ function AccountOverviewRow({
   )
 }
 
-function MultiAccountOverview({ overview, onRefresh }) {
+function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
   const [expanded, setExpanded] = useState({})
+  const [sectionOpen, setSectionOpen] = useState(false)
 
   if (!overview?.has_slaves) return null
 
   const master = overview.master || {}
   const slaves = overview.slaves || []
-  const combined = Number(overview.combined_mtm || 0)
+
+  const masterStructureMtm =
+    activeHedge?.structure_pnl != null &&
+    Number.isFinite(Number(activeHedge.structure_pnl))
+      ? Number(activeHedge.structure_pnl)
+      : null
+
+  let combined = 0.0
+  if (masterStructureMtm != null) {
+    combined += masterStructureMtm
+  } else if (master.active_trade?.net_mtm != null) {
+    combined += Number(master.active_trade.net_mtm)
+  }
+  for (const s of slaves) {
+    const st = s.active_slave_trade
+    const m = st?.net_mtm ?? st?.last_mtm
+    if (m != null && Number.isFinite(Number(m))) combined += Number(m)
+  }
 
   const toggle = (key) => {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))
@@ -547,11 +571,18 @@ function MultiAccountOverview({ overview, onRefresh }) {
 
   return (
     <section className="mb-8 overflow-hidden rounded-xl border border-gray-700 bg-gray-900">
-      <div className="border-b border-gray-700 px-4 py-3">
+      <button
+        type="button"
+        onClick={() => setSectionOpen((v) => !v)}
+        className="flex w-full items-center justify-between border-b border-gray-700 px-4 py-3 text-left hover:bg-gray-800/50"
+      >
         <h2 className="text-sm font-semibold text-white">
           📊 Multi-Account Overview
         </h2>
-      </div>
+        <span className="text-xs text-gray-400">{sectionOpen ? '▼' : '▶'}</span>
+      </button>
+      {sectionOpen && (
+      <>
       <div className="overflow-x-auto">
         <table className="min-w-full text-left">
           <thead className="bg-gray-800 text-[10px] uppercase tracking-wide text-gray-400">
@@ -561,7 +592,12 @@ function MultiAccountOverview({ overview, onRefresh }) {
               <th className="px-3 py-2">Status</th>
               <th className="px-3 py-2">Capital</th>
               <th className="px-3 py-2">Avail.</th>
-              <th className="px-3 py-2" title="Net MTM = Gross UPNL − Fees − Slippage">Net MTM ↓</th>
+              <th
+                className="px-3 py-2"
+                title="Master = Hedge + All Baskets | Slave = Active Basket only"
+              >
+                Structure Net MTM ↓
+              </th>
               <th className="px-3 py-2">Target</th>
             </tr>
           </thead>
@@ -578,8 +614,11 @@ function MultiAccountOverview({ overview, onRefresh }) {
                 master.connected ? master.available_usd ?? null : null
               }
               availableInr={master.available_inr}
-              netMtm={masterTrade?.net_mtm ?? null}
-              targetUsd={masterTrade?.profit_target_usd ?? null}
+              netMtm={masterStructureMtm ?? masterTrade?.net_mtm ?? null}
+              mtmLabel="Structure MTM"
+              targetUsd={
+                activeHedge?.target_usd ?? masterTrade?.profit_target_usd ?? null
+              }
               isExpanded={Boolean(expanded.master)}
               onToggle={() => toggle('master')}
               borderClass="border-l-2 border-l-amber-500"
@@ -683,6 +722,7 @@ function MultiAccountOverview({ overview, onRefresh }) {
                   }
                   availableInr={slave.available_inr}
                   netMtm={slaveMtm}
+                  mtmLabel="Basket MTM"
                   mtmSource={st?.mtm_source ?? null}
                   mtmSyncIso={slaveMtmUpdated}
                   targetUsd={st?.profit_target_usd ?? null}
@@ -705,7 +745,9 @@ function MultiAccountOverview({ overview, onRefresh }) {
                 colSpan={5}
                 className="px-3 py-3 text-right text-sm font-semibold text-gray-300"
               >
-                <span title="Sum of Net MTM across all accounts (fees + slippage deducted)">Combined Net MTM:</span>
+                <span title="Master structure MTM + slave basket MTMs">
+                  Combined MTM:
+                </span>
               </td>
               <td
                 colSpan={2}
@@ -722,6 +764,8 @@ function MultiAccountOverview({ overview, onRefresh }) {
           Manage accounts →
         </Link>
       </div>
+      </>
+      )}
     </section>
   )
 }
@@ -1337,56 +1381,83 @@ export default function Dashboard() {
         onEnterNow={handleEnterNow}
       />
 
-      <MultiAccountOverview overview={slaveOverview} onRefresh={refreshSlaveOverview} />
-
       {!loading && activeHedge && (
-        <>
-          <StructurePnlBar
-            hedgeNetPnl={
-              activeHedge.hedge_net_mtm != null &&
-              Number.isFinite(Number(activeHedge.hedge_net_mtm))
-                ? Number(activeHedge.hedge_net_mtm)
-                : activeHedge.net_pnl
-            }
-            closedBasketPnl={activeHedge.cum_closed_basket_pnl ?? 0}
-            openBasketNetPnl={activeHedge.open_basket_net_mtm ?? 0}
-            structurePnl={activeHedge.structure_pnl ?? 0}
-          />
-          <HedgePanel
-            hedge={activeHedge}
-            onClosed={() => refetch()}
-            onUpdated={() => refetch()}
-          />
-        </>
+        <StructurePnlBar
+          hedgeNetPnl={
+            activeHedge.hedge_net_mtm != null &&
+            Number.isFinite(Number(activeHedge.hedge_net_mtm))
+              ? Number(activeHedge.hedge_net_mtm)
+              : activeHedge.net_pnl
+          }
+          closedBasketPnl={activeHedge.cum_closed_basket_pnl ?? 0}
+          openBasketNetPnl={activeHedge.open_basket_net_mtm ?? 0}
+          structurePnl={activeHedge.structure_pnl ?? 0}
+        />
       )}
 
       {loading ? (
         <div className="space-y-4">
           <SkeletonCard />
           <SkeletonCard />
-          <SkeletonCard />
         </div>
-      ) : trades.length === 0 ? (
+      ) : activeHedge || trades.length > 0 ? (
+        <>
+          <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {activeHedge ? (
+              <HedgePanel
+                hedge={activeHedge}
+                onClosed={() => refetch()}
+                onUpdated={() => refetch()}
+              />
+            ) : (
+              <div className="hidden lg:block" />
+            )}
+            {trades.length > 0 ? (
+              <PositionCard
+                trade={trades[0]}
+                recentAdjustments={adjustments}
+                compact
+              />
+            ) : (
+              <div className="rounded-xl border border-dashed border-gray-700 bg-gray-800/40 px-6 py-10 text-center text-sm text-gray-400">
+                No active short baskets — hedge is open, waiting for basket entry
+              </div>
+            )}
+          </div>
+
+          {trades.length > 0 && (
+            <div className="mb-4">
+              <PositionCard
+                trade={trades[0]}
+                recentAdjustments={adjustments}
+                monitoringOnly
+              />
+            </div>
+          )}
+
+          {trades.length > 1 && (
+            <div className="mb-4 space-y-4">
+              {trades.slice(1).map((trade) => (
+                <PositionCard
+                  key={trade.trade_id}
+                  trade={trade}
+                  recentAdjustments={adjustments}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
         <div className="rounded-xl border border-dashed border-gray-700 bg-gray-800/50 px-6 py-12 text-center">
           <div className="mb-3 text-4xl">🤖</div>
-          <p className="text-lg font-medium text-white">
-            {activeHedge ? 'No active short baskets' : 'No active trades'}
-          </p>
-          <p className="mt-1 text-sm text-gray-400">
-            {activeHedge
-              ? 'Long hedge is open — short baskets will appear here when placed'
-              : 'Bot is ready and monitoring'}
-          </p>
+          <p className="text-lg font-medium text-white">No active trades</p>
+          <p className="mt-1 text-sm text-gray-400">Bot is ready and monitoring</p>
           <Link
             to="/new-trade"
             className="mt-6 inline-block rounded-md bg-blue-500 px-4 py-2 text-sm font-medium text-white hover:bg-blue-400"
           >
             → Place New Strangle
           </Link>
-          <p className="mx-auto mt-4 max-w-md text-sm text-gray-400">
-            Select strikes in the bot — orders are placed on Delta Exchange
-            automatically, then monitored.
-          </p>
           {accountConnected && (
             <div className="mt-6 space-y-1 text-sm text-gray-400">
               <div>Connected: {accountName || '—'}</div>
@@ -1394,17 +1465,13 @@ export default function Dashboard() {
             </div>
           )}
         </div>
-      ) : (
-        <div className="space-y-4">
-          {trades.map((trade) => (
-            <PositionCard
-              key={trade.trade_id}
-              trade={trade}
-              recentAdjustments={adjustments}
-            />
-          ))}
-        </div>
       )}
+
+      <MultiAccountOverview
+        overview={slaveOverview}
+        onRefresh={refreshSlaveOverview}
+        activeHedge={activeHedge}
+      />
 
       <section className="mt-10">
         <h2 className="mb-3 text-lg font-semibold text-white">
