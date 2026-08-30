@@ -1,6 +1,6 @@
 # Session Record — 29 August 2026
 ## Delta Exchange India Short Strangle Bot (Tradeict)
-### B1–B10. Read this BEFORE `docs/HEDGE_MODE_SPEC.md` — hedge SL basis and basket sizing sections there are stale.
+### B1–B13. Read this BEFORE `docs/HEDGE_MODE_SPEC.md` — hedge SL basis and basket sizing sections there are stale.
 
 ---
 
@@ -20,6 +20,9 @@
 | B8 | `72fb8a7` | Auto Trade UI: `basket_qty_dynamic` toggle + `basket_qty_theta_mult` input |
 | B9 | `bc368a4` | ✅ live | Structure-wide target: `structure_pnl = hedge_net + entry_spread + booked_closed + open_basket_gross`. Fires when structure_pnl >= target_pnl. UI label updated to "Target (structure basis)". `hedge_lifecycle.py` mein `compute_structure_pnl()` added. 29 tests pass |
 | B10 | `c434d01` | ✅ live | SL double-count fix: `booked_closed_pnl` sirf `compute_hedge_sl_budget()` mein (budget shrinks). `compute_structure_gross_for_sl()` basis = hedge_net + entry_spread + open_gross only. `[SL_BASIS]` log added every cycle. Was already correct — B10 made it explicit + tested. 77 tests pass |
+| B11 | `bc368a4`(backend)+UI | ✅ live | Structure P&L realtime fix: open_basket reads net_mtm not target. [STRUCTURE_PNL] log every cycle. Card ke andar structure section added |
+| B12 | `fccb9ee` partial | ✅ live | Structure P&L: 4-column bar (Hedge Net / Closed Basket / Open Basket / Structure Net) above hedge card |
+| B13 | `fccb9ee` | ✅ live | Dashboard full redesign: lg:grid-cols-2 side-by-side hedge+basket, PnlSlider.jsx (gross→exit spread→fees→net waterfall), target/SL mini progress bars, Multi-Account Overview collapsible+below Bot Monitoring, master shows structure_pnl not basket MTM |
 | Fix | `c2ba4fc`, `95c6265` | Auto Trade crash: `fmtLotsCount is not defined` (stale frontend bundle) |
 
 ---
