@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useTrades } from '../hooks/useTrades'
 import HedgePanel from '../components/HedgePanel'
+import StructurePnlBar from '../components/StructurePnlBar'
 import PositionCard from '../components/PositionCard'
 import {
   checkHealth,
@@ -1339,11 +1340,24 @@ export default function Dashboard() {
       <MultiAccountOverview overview={slaveOverview} onRefresh={refreshSlaveOverview} />
 
       {!loading && activeHedge && (
-        <HedgePanel
-          hedge={activeHedge}
-          onClosed={() => refetch()}
-          onUpdated={() => refetch()}
-        />
+        <>
+          <StructurePnlBar
+            hedgeNetPnl={
+              activeHedge.hedge_net_mtm != null &&
+              Number.isFinite(Number(activeHedge.hedge_net_mtm))
+                ? Number(activeHedge.hedge_net_mtm)
+                : activeHedge.net_pnl
+            }
+            closedBasketPnl={activeHedge.cum_closed_basket_pnl ?? 0}
+            openBasketNetPnl={activeHedge.open_basket_net_mtm ?? 0}
+            structurePnl={activeHedge.structure_pnl ?? 0}
+          />
+          <HedgePanel
+            hedge={activeHedge}
+            onClosed={() => refetch()}
+            onUpdated={() => refetch()}
+          />
+        </>
       )}
 
       {loading ? (
