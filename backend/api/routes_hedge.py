@@ -91,6 +91,10 @@ async def list_structures(
     """
     from backend.config import TradeStatus
     from backend.engine.bot_engine import bot_engine
+    from backend.engine.hedge_lifecycle import (
+        _open_basket_net_mtm,
+        compute_structure_pnl_live,
+    )
     from backend.models import Adjustment, Leg, Trade
 
     account = _get_active_account(db)
@@ -111,7 +115,6 @@ async def list_structures(
         if hedge_status == "closed" and h.realized_pnl is not None:
             hedge_net = float(h.realized_pnl)
         cum_closed = float(getattr(h, "cum_closed_basket_pnl", 0.0) or 0.0)
-        structure = float(getattr(h, "structure_pnl", 0.0) or 0.0)
 
         baskets_orm = (
             db.query(Trade)
@@ -128,7 +131,14 @@ async def list_structures(
         if hedge_status == "closed" or not has_active_basket:
             open_basket = 0.0
         else:
-            open_basket = round(structure - hedge_net - cum_closed, 6)
+            open_basket = _open_basket_net_mtm(
+                db, hid, bot_engine.position_tracker
+            )
+        structure = compute_structure_pnl_live(
+            hedge_net_mtm=hedge_net,
+            booked_closed_pnl=cum_closed,
+            open_basket_net_mtm=open_basket,
+        )
 
         entry_cost = None
         if h.call_fill_price is not None and h.put_fill_price is not None:

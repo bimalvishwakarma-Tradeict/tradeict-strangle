@@ -119,6 +119,9 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
   const slBasisUsd = hedge.sl_basis_usd
   const hedgeOnlyForSl = hedge.hedge_only_for_sl
   const openBasketGross = Number(hedge.open_basket_gross)
+  const structurePnl = Number(hedge.structure_pnl)
+  const cumClosedBaskets = Number(hedge.cum_closed_basket_pnl ?? 0)
+  const openBasketNet = Number(hedge.open_basket_net_mtm ?? 0)
   const netNum = Number(net)
   const grossNum = Number(gross)
   const pnlBreakdownMismatch =
@@ -452,6 +455,35 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                 <span className="text-gray-400">Structure basis</span>
                 <span className={pnlClass(slBasisUsd)}>
                   {fmtSigned(slBasisUsd, 4)}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="w-full border-t border-gray-800 pt-2">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+              <span className="font-medium text-gray-300">
+                Structure P&amp;L{' '}
+                <span className="text-gray-500">(live)</span>
+              </span>
+              <span className={`font-semibold ${pnlClass(structurePnl)}`}>
+                {fmtSigned(structurePnl, 4)}
+              </span>
+            </div>
+            <div className="mt-1 space-y-0.5 text-[10px] leading-snug text-gray-500">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+                <span>Hedge P&amp;L (net)</span>
+                <span className={pnlClass(net)}>{fmtSigned(net, 4)}</span>
+              </div>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 pl-2">
+                <span>+ Closed baskets</span>
+                <span className={pnlClass(cumClosedBaskets)}>
+                  {fmtSigned(cumClosedBaskets, 4)}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 pl-2">
+                <span>+ Open basket (net)</span>
+                <span className={pnlClass(openBasketNet)}>
+                  {fmtSigned(openBasketNet, 4)}
                 </span>
               </div>
             </div>

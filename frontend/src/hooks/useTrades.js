@@ -578,6 +578,30 @@ export function useTrades() {
       return
     }
 
+    if (msg.type === 'HEDGE_UPDATE') {
+      setActiveHedge((prev) => {
+        if (!prev || Number(prev.id) !== Number(msg.hedge_id)) return prev
+        return {
+          ...prev,
+          hedge_net_mtm:
+            msg.hedge_net_mtm != null ? Number(msg.hedge_net_mtm) : prev.hedge_net_mtm,
+          cum_closed_basket_pnl:
+            msg.cum_closed_basket_pnl != null
+              ? Number(msg.cum_closed_basket_pnl)
+              : prev.cum_closed_basket_pnl,
+          open_basket_net_mtm:
+            msg.open_basket_net_mtm != null
+              ? Number(msg.open_basket_net_mtm)
+              : prev.open_basket_net_mtm,
+          structure_pnl:
+            msg.structure_pnl != null ? Number(msg.structure_pnl) : prev.structure_pnl,
+          pct_to_target:
+            msg.pct_to_target != null ? Number(msg.pct_to_target) : prev.pct_to_target,
+        }
+      })
+      return
+    }
+
     if (msg.type === 'HEDGE_CLOSED') {
       setActiveHedge((prev) => {
         if (prev && Number(prev.id) === Number(msg.hedge_id)) return null

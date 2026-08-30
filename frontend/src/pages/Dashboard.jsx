@@ -866,52 +866,6 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
   )
 }
 
-function StructurePnlPanel({ structure }) {
-  if (!structure) return null
-  const hedgeNet = Number(structure.hedge?.hedge_net_mtm ?? structure.hedge_net_mtm ?? 0)
-  const openBasket = Number(structure.open_basket_net_mtm ?? 0)
-  const cumClosed = Number(structure.cum_closed_basket_pnl ?? 0)
-  const structurePnl = Number(structure.structure_pnl ?? 0)
-
-  return (
-    <section className="mb-6 rounded-xl border border-emerald-800/40 bg-gradient-to-br from-gray-900 to-gray-800 px-5 py-4">
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-emerald-400/90">
-        Structure P&amp;L
-        {structure.hedge?.id != null ? (
-          <span className="ml-2 font-normal text-gray-500">
-            · Structure #{structure.hedge.id}
-          </span>
-        ) : null}
-      </h2>
-      <div className="space-y-1.5 font-mono text-sm text-gray-300">
-        <div className="flex justify-between gap-4">
-          <span>Hedge P&amp;L</span>
-          <span className={pnlColor(hedgeNet)}>{formatSignedMoney(hedgeNet)}</span>
-        </div>
-        <div className="flex justify-between gap-4">
-          <span>Open basket net MTM</span>
-          <span className={pnlColor(openBasket)}>
-            {formatSignedMoney(openBasket)}
-          </span>
-        </div>
-        <div className="flex justify-between gap-4">
-          <span>Cumulative closed basket P&amp;L</span>
-          <span className={pnlColor(cumClosed)}>
-            {formatSignedMoney(cumClosed)}
-          </span>
-        </div>
-        <div className="my-2 border-t border-gray-600" />
-        <div className="flex justify-between gap-4 text-base font-bold">
-          <span className="text-white">STRUCTURE P&amp;L</span>
-          <span className={pnlColor(structurePnl)}>
-            {formatSignedMoney(structurePnl)}
-          </span>
-        </div>
-      </div>
-    </section>
-  )
-}
-
 function StructureBasketRow({ basket, ledgerLegs = [] }) {
   const [open, setOpen] = useState(false)
   const seq = basket.basket_seq_in_structure ?? '—'
@@ -1327,29 +1281,6 @@ export default function Dashboard() {
     }
   }, [trades, adjustments, activeHedge])
 
-  const activeStructure = useMemo(() => {
-    const fromList = structures.find(
-      (s) => String(s?.hedge?.status || '').toLowerCase() === 'active',
-    )
-    if (fromList) return fromList
-    if (!activeHedge) return null
-    const hedgeNet = Number(activeHedge.hedge_net_mtm ?? activeHedge.net_pnl ?? 0)
-    const cumClosed = Number(activeHedge.cum_closed_basket_pnl ?? 0)
-    const structurePnl = Number(activeHedge.structure_pnl ?? 0)
-    return {
-      hedge: {
-        id: activeHedge.id,
-        hedge_net_mtm: hedgeNet,
-      },
-      open_basket_net_mtm: Number(
-        activeHedge.open_basket_net_mtm ??
-          structurePnl - hedgeNet - cumClosed,
-      ),
-      cum_closed_basket_pnl: cumClosed,
-      structure_pnl: structurePnl,
-    }
-  }, [structures, activeHedge])
-
   const wsLabel = useMemo(() => {
     if (wsStatus === 'connected') return { text: 'connected', className: 'text-green-400' }
     if (wsStatus === 'connecting') {
@@ -1460,8 +1391,6 @@ export default function Dashboard() {
           ))}
         </div>
       )}
-
-      <StructurePnlPanel structure={activeStructure} />
 
       <section className="mt-10">
         <h2 className="mb-3 text-lg font-semibold text-white">

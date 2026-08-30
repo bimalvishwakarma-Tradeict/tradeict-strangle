@@ -162,6 +162,24 @@ def compute_structure_gross_for_sl(
     return float(open_basket_gross_mtm) + hedge_component
 
 
+def compute_structure_pnl_live(
+    *,
+    hedge_net_mtm: float,
+    booked_closed_pnl: float,
+    open_basket_net_mtm: float,
+) -> float:
+    """
+    Live structure P&L for dashboard (B11).
+
+    structure_pnl = hedge_net + booked closed baskets + open basket net MTM
+    """
+    return (
+        float(hedge_net_mtm)
+        + float(booked_closed_pnl)
+        + float(open_basket_net_mtm)
+    )
+
+
 def compute_structure_pnl(
     *,
     hedge_net_mtm: float,
@@ -2117,11 +2135,10 @@ async def persist_structure_pnl(
         hedge_est_exit_slippage_usd=est_slip,
         open_basket_gross_mtm=float(open_basket_gross),
     )
-    structure = compute_structure_pnl(
+    structure = compute_structure_pnl_live(
         hedge_net_mtm=float(mtm["hedge_net_mtm"]),
-        entry_spread_usd=float(entry_spread),
         booked_closed_pnl=float(cum_closed),
-        open_basket_gross_mtm=float(open_basket_gross),
+        open_basket_net_mtm=float(open_basket),
     )
 
     hedge.hedge_net_mtm = float(mtm["hedge_net_mtm"])
@@ -2145,19 +2162,33 @@ async def persist_structure_pnl(
         "open_basket": round(float(open_basket), 6),
         "structure": round(float(structure), 6),
         "summary": (
-            f"[STRUCTURE_PNL] hedge={hid} | "
+            f"[STRUCTURE_PNL] hedge_id={hid} | "
             f"hedge_net={round(float(mtm['hedge_net_mtm']), 6)} | "
-            f"hedge_gross_sl={round(float(mtm['hedge_gross_for_sl']), 6)} | "
-            f"structure_gross_sl={round(float(structure_gross_sl), 6)} | "
-            f"hedge_est_slip={round(est_slip, 6)} | "
-            f"open_basket_gross={round(float(open_basket_gross), 6)} | "
-            f"entry_spread={round(float(entry_spread), 6)} | "
-            f"cum_closed={round(float(cum_closed), 6)} | "
-            f"open_basket={round(float(open_basket), 6)} | "
-            f"structure={round(float(structure), 6)}"
+            f"booked={round(float(cum_closed), 6)} | "
+            f"open_net_mtm={round(float(open_basket), 6)} | "
+            f"structure_pnl={round(float(structure), 6)}"
         ),
     }
     _hedge_log("STRUCTURE_PNL", hid, details)
+    try:
+        from backend.core.ws_manager import ws_manager
+
+        await ws_manager.broadcast(
+            {
+                "type": "HEDGE_UPDATE",
+                "hedge_id": hid,
+                "hedge_net_mtm": round(float(mtm["hedge_net_mtm"]), 6),
+                "cum_closed_basket_pnl": round(float(cum_closed), 6),
+                "open_basket_net_mtm": round(float(open_basket), 6),
+                "structure_pnl": round(float(structure), 6),
+            }
+        )
+    except Exception as ws_exc:
+        logger.warning(
+            "[STRUCTURE_PNL] HEDGE_UPDATE broadcast failed hedge_id=%s: %s",
+            hid,
+            ws_exc,
+        )
     return {
         "hedge_net_mtm": float(mtm["hedge_net_mtm"]),
         "hedge_gross_for_sl": float(mtm["hedge_gross_for_sl"]),
@@ -3094,12 +3125,6 @@ async def build_active_hedge_live(
         target_multiple=target_multiple,
     )
     live_target_usd = float(tgt["target_usd"])
-    structure_pnl_live = float(getattr(hedge, "structure_pnl", 0.0) or 0.0)
-    pct_to_target = (
-        round(structure_pnl_live / live_target_usd * 100.0, 2)
-        if live_target_usd > 0
-        else None
-    )
 
     today_theta: float | None = None
     today_theta_usd: float | None = None
@@ -3153,6 +3178,36 @@ async def build_active_hedge_live(
     open_basket_gross = _open_basket_gross_mtm(
         db, hid, bot_engine.position_tracker
     )
+    cum_closed_live = float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0)
+    open_basket_net_live = _open_basket_net_mtm(
+        db, hid, bot_engine.position_tracker
+    )
+    hedge_net_for_display = (
+        hedge_net_mtm_live
+        if hedge_net_mtm_live is not None
+        else float(getattr(hedge, "hedge_net_mtm", 0.0) or 0.0)
+    )
+    structure_pnl_live = compute_structure_pnl_live(
+        hedge_net_mtm=float(hedge_net_for_display),
+        booked_closed_pnl=cum_closed_live,
+        open_basket_net_mtm=float(open_basket_net_live),
+    )
+    if hedge_net_mtm_live is not None and live_target_usd > 0:
+        target_structure_pnl = compute_structure_pnl(
+            hedge_net_mtm=float(hedge_net_for_display),
+            entry_spread_usd=entry_spread,
+            booked_closed_pnl=cum_closed_live,
+            open_basket_gross_mtm=float(open_basket_gross),
+        )
+        pct_to_target = round(
+            target_structure_pnl / live_target_usd * 100.0, 2
+        )
+    else:
+        pct_to_target = (
+            round(structure_pnl_live / live_target_usd * 100.0, 2)
+            if live_target_usd > 0
+            else None
+        )
     structure_gross_for_sl = float(
         getattr(hedge, "structure_gross_for_sl", 0.0) or 0.0
     )
@@ -3264,20 +3319,12 @@ async def build_active_hedge_live(
         "current_call_iv": current_call_iv,
         "current_put_iv": current_put_iv,
         "open_basket_count": count_active_baskets_for_hedge(db, hid),
-        "open_basket_net_mtm": round(
-            float(getattr(hedge, "structure_pnl", 0.0) or 0.0)
-            - float(getattr(hedge, "hedge_net_mtm", 0.0) or 0.0)
-            - float(getattr(hedge, "entry_spread_usd", 0.0) or 0.0)
-            - float(getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0),
-            6,
-        ),
-        "cum_closed_basket_pnl": float(
-            getattr(hedge, "cum_closed_basket_pnl", 0.0) or 0.0
-        ),
+        "open_basket_net_mtm": round(float(open_basket_net_live), 6),
+        "cum_closed_basket_pnl": float(cum_closed_live),
         "hedge_gross_for_sl": float(
             getattr(hedge, "hedge_gross_for_sl", 0.0) or 0.0
         ),
-        "structure_pnl": float(getattr(hedge, "structure_pnl", 0.0) or 0.0),
+        "structure_pnl": round(float(structure_pnl_live), 6),
         **sl_fields,
         **_roll_banner_fields(db, hedge),
     }

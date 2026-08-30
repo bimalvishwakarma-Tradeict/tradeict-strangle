@@ -16,8 +16,18 @@ if str(_ROOT) not in sys.path:
 
 from backend.engine.hedge_lifecycle import (
     compute_structure_pnl,
+    compute_structure_pnl_live,
     hedge_target_should_fire,
 )
+
+
+def test_structure_pnl_live_sum() -> None:
+    live = compute_structure_pnl_live(
+        hedge_net_mtm=-2.6661,
+        booked_closed_pnl=-0.259,
+        open_basket_net_mtm=0.968,
+    )
+    assert live == pytest.approx(-1.9571, rel=1e-4)
 
 
 def test_structure_pnl_sum_fires_target() -> None:
