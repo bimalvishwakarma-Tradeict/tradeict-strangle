@@ -1,6 +1,6 @@
 # Session Record — 29 August 2026
 ## Delta Exchange India Short Strangle Bot (Tradeict)
-### B1–B8 (12 commits). Read this BEFORE `docs/HEDGE_MODE_SPEC.md` — hedge SL basis and basket sizing sections there are stale.
+### B1–B10. Read this BEFORE `docs/HEDGE_MODE_SPEC.md` — hedge SL basis and basket sizing sections there are stale.
 
 ---
 
@@ -18,13 +18,15 @@
 | B6a | `bfabd7e` | Breakdown math fix — entry spread in SL add-back ladder, no double-count |
 | B7 | `b78332c` | Dynamic basket qty % from hedge call theta at entry; audit column on Trade |
 | B8 | `72fb8a7` | Auto Trade UI: `basket_qty_dynamic` toggle + `basket_qty_theta_mult` input |
+| B9 | `bc368a4` | ✅ live | Structure-wide target: `structure_pnl = hedge_net + entry_spread + booked_closed + open_basket_gross`. Fires when structure_pnl >= target_pnl. UI label updated to "Target (structure basis)". `hedge_lifecycle.py` mein `compute_structure_pnl()` added. 29 tests pass |
+| B10 | `c434d01` | ✅ live | SL double-count fix: `booked_closed_pnl` sirf `compute_hedge_sl_budget()` mein (budget shrinks). `compute_structure_gross_for_sl()` basis = hedge_net + entry_spread + open_gross only. `[SL_BASIS]` log added every cycle. Was already correct — B10 made it explicit + tested. 77 tests pass |
 | Fix | `c2ba4fc`, `95c6265` | Auto Trade crash: `fmtLotsCount is not defined` (stale frontend bundle) |
 
 ---
 
 # PART 2 — WHAT IN OLD DOCS IS NOW OBSOLETE
 
-| Old doc says | Reality after B1–B8 |
+| Old doc says | Reality after B1–B10 |
 |---|---|
 | `HEDGE_MODE_SPEC.md` §1.4 "Stop loss is unchanged" | **Wrong for hedge mode.** Hedge SL now uses **structure-wide** basis (B4b), not hedge-only gross. |
 | `HEDGE_MODE_SPEC.md` STEP 7 "Keep stoploss_usd exactly as it is computed today" | Hedge bracket SL uses `structure_gross_for_sl`; short-basket SL unchanged. |
@@ -156,6 +158,34 @@ Backend helper: `_live_sl_budget_fields()` returns `sl_basis_usd`, `hedge_only_f
 
 ---
 
+# PART 5b — SL vs Target basis — confirmed design (B9/B10)
+
+### SL vs Target basis — confirmed design (B9/B10)
+
+SL basis (`compute_structure_gross_for_sl`):
+  hedge_net + entry_spread + est_exit_slip + open_basket_gross
+  booked_closed: NAHI (via budget only)
+
+SL budget (`compute_hedge_sl_budget`):
+  budget = fixed_sl + cum_closed_basket_pnl
+  (booked losses shrink the budget — single-count)
+
+SL fires when: basis <= -budget
+
+Target basis (`compute_structure_pnl`):
+  hedge_net + entry_spread + booked_closed + open_basket_gross
+  (no exit_slip — actual realized)
+
+Target fires when: structure_pnl >= live_target_usd
+
+UI: hedge card Target line shows `(structure basis)` next to SL.
+
+Logs:
+- `[STRUCTURE_TARGET_CHECK]` — hedge_net, entry_spread, booked, open_gross, structure_pnl, target, room_to_target
+- `[SL_BASIS]` — hedge_net, entry_spread, open_gross, basis (booked not on this line)
+
+---
+
 # PART 6 — KEY FILES TOUCHED
 
 | Area | Files |
@@ -165,7 +195,7 @@ Backend helper: `_live_sl_budget_fields()` returns `sl_basis_usd`, `hedge_only_f
 | ATM straddle | `backend/core/delta_client.py` |
 | Structure SL | `backend/engine/hedge_lifecycle.py` |
 | UI | `frontend/src/pages/AutoTrade.jsx`, `frontend/src/components/HedgePanel.jsx` |
-| Tests | `backend/tests/test_basket_sizing.py`, `test_atm_anchored_pair.py`, `test_structure_sl_basis.py` |
+| Tests | `backend/tests/test_basket_sizing.py`, `test_atm_anchored_pair.py`, `test_structure_sl_basis.py`, `test_structure_target.py` |
 
 ---
 
@@ -188,4 +218,13 @@ Stale bundle (`index-CwamrdqJ.js`) caused `fmtLotsCount is not defined` even aft
 
 ---
 
-*End of session record — 29 August 2026*
+# PART 9 — WHAT REMAINS — BOT SIDE
+
+### Immediate
+- basket_qty_dynamic = TRUE — already enabled (Option A). Next basket entry
+  mein log dikhega: `dynamic=True | computed_pct=<x>`
+- B7 first live verification: next BASKET_SIZING log confirm karo
+
+---
+
+*End of session record — 30 August 2026*
