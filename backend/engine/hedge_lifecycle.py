@@ -149,6 +149,9 @@ def compute_structure_gross_for_sl(
 ) -> float:
     """
     Structure-wide SL basis: hedge + open baskets, spreads neutralised.
+
+    Closed basket P&L is NOT included here — it tightens the SL budget only
+    via compute_hedge_sl_budget() (single-count; see B10).
     Fees stay deducted in hedge_net_mtm; exit spread is added back.
     """
     hedge_component = (
@@ -2431,12 +2434,47 @@ async def evaluate_and_maybe_close_hedge(
     structure_gross_for_sl = float(
         getattr(hedge, "structure_gross_for_sl", 0.0) or 0.0
     )
+    hedge_net_for_sl = float(getattr(hedge, "hedge_net_mtm", 0.0) or 0.0)
+    entry_spread_for_sl = float(getattr(hedge, "entry_spread_usd", 0.0) or 0.0)
+    est_exit_slip_for_sl = float(
+        getattr(hedge, "hedge_est_exit_slippage_usd", 0.0) or 0.0
+    )
+    if structure_snap is not None:
+        hedge_net_for_sl = float(structure_snap["hedge_net_mtm"])
+        entry_spread_for_sl = float(structure_snap["entry_spread_usd"])
+        open_gross_for_sl = float(structure_snap["open_basket_gross_mtm"])
+        structure_gross_for_sl = float(structure_snap["structure_gross_for_sl"])
+    else:
+        open_gross_for_sl = (
+            structure_gross_for_sl
+            - hedge_net_for_sl
+            - entry_spread_for_sl
+            - est_exit_slip_for_sl
+        )
     sl_parts = compute_hedge_sl_budget(fixed_sl, floor_pct, cum_closed)
     budget = float(sl_parts["budget"])
     room_old = hedge_sl_room(budget, gross_for_sl)
     room = hedge_sl_room(budget, structure_gross_for_sl)
     would_have_fired_old = room_old <= 0
 
+    _hedge_log(
+        "SL_BASIS",
+        hid,
+        {
+            "hedge": hid,
+            "hedge_net": round(hedge_net_for_sl, 6),
+            "entry_spread": round(entry_spread_for_sl, 6),
+            "open_gross": round(open_gross_for_sl, 6),
+            "basis": round(structure_gross_for_sl, 6),
+            "summary": (
+                f"[SL_BASIS] hedge_id={hid} | "
+                f"hedge_net={round(hedge_net_for_sl, 6)} | "
+                f"entry_spread={round(entry_spread_for_sl, 6)} | "
+                f"open_gross={round(open_gross_for_sl, 6)} | "
+                f"basis={round(structure_gross_for_sl, 6)}"
+            ),
+        },
+    )
     _hedge_log(
         "HEDGE_SL_CHECK",
         hid,

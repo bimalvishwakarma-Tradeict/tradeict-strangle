@@ -20,6 +20,7 @@ from backend.engine.hedge_lifecycle import (
     _live_sl_budget_fields,
     _open_basket_gross_mtm,
     _open_basket_net_mtm,
+    compute_hedge_sl_budget,
     compute_structure_gross_for_sl,
     hedge_sl_room,
     hedge_sl_should_fire,
@@ -130,6 +131,30 @@ def test_both_bases_fire_when_structure_deeply_negative() -> None:
         budget=budget,
         structure_gross_for_sl=structure_gross_for_sl,
     ) is True
+
+
+def test_sl_basis_excludes_booked_closed_budget_only() -> None:
+    """cum_closed = -0.26 tightens budget only — not counted in SL basis (B10)."""
+    fixed_sl = 3.0
+    cum_closed = -0.26
+    budget = compute_hedge_sl_budget(fixed_sl, 25.0, cum_closed)["budget"]
+    assert budget == pytest.approx(2.74)
+
+    hedge_net = -2.0
+    entry_spread = 0.13
+    open_gross = 0.10
+    basis = compute_structure_gross_for_sl(
+        hedge_net_mtm=hedge_net,
+        entry_spread_usd=entry_spread,
+        hedge_est_exit_slippage_usd=0.0,
+        open_basket_gross_mtm=open_gross,
+    )
+    assert basis == pytest.approx(hedge_net + entry_spread + open_gross)
+    assert basis != pytest.approx(hedge_net + entry_spread + cum_closed + open_gross)
+    assert hedge_sl_should_fire(
+        budget=budget,
+        structure_gross_for_sl=basis,
+    ) == (basis <= -budget)
 
 
 def test_live_sl_budget_fields_zero_budget_pct_to_stop_safe() -> None:
