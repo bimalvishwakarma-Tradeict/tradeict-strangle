@@ -32,9 +32,9 @@
 | B20 | `46aedf5` | ✅ | AVAIL BAL column removed — Delta API does not expose mark-price unrealised cashflow |
 | B21 | `ac556e1` | ✅ | PnlSlider bar widths fixed: proportional to max absolute value across all bars in slider |
 | B22 | `f126217` | ✅ | Frontend gross_mtm uses calculated_pnl (mark-based) not offer-based recompute |
-| B23 | `e230f11` | ✅ | Basket per-structure numbering, basket story below card + collapsible, payoff collapsible, structure history pagination (20/page) |
-| B24 | `(deploy pending)` | ✅ | Gross MTM = delta_upnl only (Delta UI match), Realized P&L shown separately, Net = UPNL+realized-all_deductions |
-| B25 | `26b7050` | ✅ | Dynamic qty at adjustment: re-calculates basket qty using B7 formula at adjustment time, untested leg topped up, 50% hedge cap, OFF by default |
+| B23 | `e230f11` | ✅ | Basket per-structure numbering, basket story below card + collapsible, payoff collapsible, structure history pagination 20/page |
+| B24 | — | ✅ | Gross MTM = delta_upnl only (Delta UI match), Realized P&L shown separately, Net = UPNL+realized-all_deductions |
+| B25 | `26b7050` | ✅ | Dynamic qty at adjustment: re-calculates using B7 formula, untested leg topped up, 50% hedge cap, OFF by default |
 | Fix | `c2ba4fc`, `95c6265` | Auto Trade crash: `fmtLotsCount is not defined` (stale frontend bundle) |
 
 ---
@@ -241,25 +241,6 @@ Stale bundle (`index-CwamrdqJ.js`) caused `fmtLotsCount is not defined` even aft
 - **Next verification:** BASKET_SIZING log mein `dynamic=True` dikhna chahiye
 - **B11–B25:** UI + balance + WS margins + P&L display + dashboard UX + dynamic adj qty complete
 
-### P&L Display — Confirmed Design (B22-B24)
-
-Gross MTM (display) = delta_upnl (mark-price based, matches Delta UI)
-Realized P&L        = shown as separate line (booked losses/gains)
-Net MTM             = delta_upnl + realized_pnl - entry_fees - exit_fees - exit_spread
-Target basis        = Net MTM vs profit_target_usd (unchanged)
-SL basis            = gross_mtm_for_sl = gross_mtm + entry_spread (unchanged)
-
-### B25 — Dynamic Adj Qty Design
-
-Setting: `use_dynamic_qty_on_adjustment` (bool, default False)
-Only active when `basket_qty_dynamic=True` also
-Formula: `raw_pct = (hedge_theta × mult × 100) / new_strike_ask`
-         `new_qty = max(1, min(ceil(hedge_qty × raw_pct/100), floor(hedge_qty×0.5)))`
-Cap: max 50% of hedge qty (e.g. hedge=5 → max_qty=2)
-Triggered leg: uses new_qty lots at new strike
-Untested leg: topped up by (new_qty - current_qty) extra lots
-Fail-safe: untested top-up failure does NOT abort adjustment — logged as WARNING
-
 ### SL/Target/Balance — Confirmed Design (B17-B21)
 
 Balance mapping (confirmed live):
@@ -277,6 +258,26 @@ WS margins channel (B19):
 
 Dashboard columns (B20 final):
   ACTUAL BAL | BLOCKED | FREE CASH | DAILY Δ% | STRUCTURE MTM | TARGET
+
+---
+
+### P&L Display Design (B22-B24)
+
+Gross MTM = delta_upnl (mark-price, matches Delta UI)
+Realized P&L = separate line item (booked)
+Net MTM = delta_upnl + realized_pnl - entry_fees - exit_fees - exit_spread
+Target = Net MTM vs profit_target_usd (unchanged)
+SL = gross_mtm_for_sl = gross_mtm + entry_spread (unchanged)
+
+### B25 Dynamic Adj Qty
+
+Setting: use_dynamic_qty_on_adjustment (bool, default False)
+Only when basket_qty_dynamic=True
+Formula: raw_pct=(hedge_theta×mult×100)/new_ask; new_qty=max(1,min(ceil(hedge_qty×pct/100),floor(hedge_qty×0.5)))
+Cap: 50% of hedge qty
+Triggered leg: new_qty lots at new strike
+Untested leg: topped up by (new_qty - current_qty) extra lots
+Fail-safe: untested top-up failure does NOT abort adjustment
 
 ---
 
