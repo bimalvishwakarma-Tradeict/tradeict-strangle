@@ -1139,6 +1139,58 @@ class AdjustmentExecutor:
 
             # --- AUDIT: verify triggered leg still on Delta before close ---
             trade_is_demo = bool(getattr(trade, "is_demo", False))
+
+            from backend.database import get_or_create_auto_settings
+            from backend.engine.auto_trade_engine import resolve_adjustment_basket_qty
+            from backend.models import HedgePosition
+
+            adj_cfg = get_or_create_auto_settings(db_session)
+            new_strike_ask = await _resolve_offer_price(
+                delta_client,
+                str(plan.new_symbol),
+                keep_if_missing=float(plan.target_premium or 0),
+            )
+            hedge_qty = 0
+            hedge_call_theta = 0.0
+            hp_id = getattr(trade, "hedge_position_id", None)
+            if hp_id is not None:
+                hedge_row = (
+                    db_session.query(HedgePosition)
+                    .filter(HedgePosition.id == int(hp_id))
+                    .first()
+                )
+                if hedge_row is not None:
+                    hedge_qty = int(hedge_row.quantity or 0)
+                    if not trade_is_demo:
+                        try:
+                            from backend.core.hedge_theta import get_hedge_theta
+
+                            theta_info = await get_hedge_theta(
+                                delta_client, hedge_row
+                            )
+                            hedge_call_theta = abs(
+                                float(theta_info.get("call_theta") or 0)
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "[ADJ_QTY] get_hedge_theta failed trade=%s: %s",
+                                trade.id,
+                                exc,
+                            )
+                    elif getattr(hedge_row, "entry_total_theta", None) is not None:
+                        hedge_call_theta = abs(
+                            float(hedge_row.entry_total_theta or 0) / 2.0
+                        )
+
+            new_qty = resolve_adjustment_basket_qty(
+                settings=adj_cfg,
+                triggered_leg_qty=int(triggered_leg.quantity),
+                hedge_qty=hedge_qty,
+                hedge_call_theta=hedge_call_theta,
+                new_strike_ask=new_strike_ask,
+                trade_id=int(trade.id),
+            )
+
             if trade_is_demo:
                 logger.info(
                     "[DEMO] Virtual adjustment — skipping Delta pre-close audit"
@@ -1295,7 +1347,7 @@ class AdjustmentExecutor:
                 new_leg_open_ts = get_utc_now()
                 entry_result = await order_executor.sell_option(
                     product_id=int(plan.new_product_id),
-                    quantity=int(triggered_leg.quantity),
+                    quantity=int(new_qty),
                     delta_client=delta_client,
                     symbol_for_fallback=str(plan.new_symbol),
                     bracket_sl_price=adj_prov_sl if adj_prov_sl > 0 else None,
@@ -1357,6 +1409,82 @@ class AdjustmentExecutor:
                 )
             else:
                 logger.info("[AUDIT] New leg confirmed on Delta")
+
+            extra_qty = int(new_qty) - int(other_leg.quantity or 0)
+            if (
+                extra_qty > 0
+                and bool(getattr(adj_cfg, "use_dynamic_qty_on_adjustment", False))
+                and bool(getattr(adj_cfg, "basket_qty_dynamic", False))
+            ):
+                untested_side = str(other_leg.leg_type)
+                current_untested_qty = int(other_leg.quantity or 0)
+                try:
+                    untested_offer = await _resolve_offer_price(
+                        delta_client,
+                        str(other_leg.symbol),
+                        keep_if_missing=float(other_old_baseline or 0),
+                    )
+                    if untested_offer <= 0:
+                        untested_offer = float(
+                            other_leg.trigger_baseline_premium
+                            or other_leg.initial_premium
+                            or 0
+                        )
+                    extra_prov_sl, extra_prov_limit = compute_bracket_sl(
+                        untested_offer,
+                        uni_sl,
+                        master_mark=untested_offer,
+                        leg=str(other_leg.leg_type),
+                        trade_id=int(trade.id),
+                    )
+                    if trade_is_demo:
+                        extra_result = await _demo_mark_order_result(
+                            delta_client,
+                            str(other_leg.symbol),
+                            untested_offer,
+                        )
+                    else:
+                        extra_result = await order_executor.sell_option(
+                            product_id=int(other_leg.product_id),
+                            quantity=int(extra_qty),
+                            delta_client=delta_client,
+                            symbol_for_fallback=str(other_leg.symbol),
+                            bracket_sl_price=(
+                                extra_prov_sl if extra_prov_sl > 0 else None
+                            ),
+                            bracket_sl_limit=(
+                                extra_prov_limit if extra_prov_sl > 0 else None
+                            ),
+                        )
+                    if extra_result.success:
+                        other_leg.quantity = current_untested_qty + extra_qty
+                        logger.info(
+                            "[ADJ_UNTESTED_QTY] trade=%s | side=%s | old_qty=%d | "
+                            "extra=%d | new_qty=%d",
+                            trade.id,
+                            untested_side,
+                            current_untested_qty,
+                            extra_qty,
+                            other_leg.quantity,
+                        )
+                    else:
+                        logger.warning(
+                            "[ADJ_UNTESTED_QTY_FAIL] trade=%s | side=%s | extra=%d | "
+                            "error=%s — untested qty NOT increased",
+                            trade.id,
+                            untested_side,
+                            extra_qty,
+                            getattr(extra_result, "error", None),
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[ADJ_UNTESTED_QTY_FAIL] trade=%s | side=%s | extra=%d | "
+                        "error=%s — untested qty NOT increased",
+                        trade.id,
+                        str(other_leg.leg_type),
+                        extra_qty,
+                        exc,
+                    )
 
             # Re-attach legs/trade after potential cross-session commits
             # (e.g. reconcile emergency close on another SessionLocal).
@@ -1421,7 +1549,7 @@ class AdjustmentExecutor:
             new_leg_spread = compute_entry_spread_usd(
                 sent_price=float(expected_new_entry),
                 fill_price=new_entry_premium,
-                quantity=int(triggered_leg.quantity),
+                quantity=int(new_qty),
                 is_long=False,
             )
             new_leg = Leg(
@@ -1433,7 +1561,7 @@ class AdjustmentExecutor:
                 initial_premium=new_entry_premium,
                 trigger_baseline_premium=new_entry_premium,
                 trigger_premium=new_entry_premium,
-                quantity=int(triggered_leg.quantity),
+                quantity=int(new_qty),
                 entry_time=now_utc,
                 status="open",
                 delta_at_entry=None,
@@ -1599,7 +1727,7 @@ class AdjustmentExecutor:
             committed_trade_realized = float(
                 getattr(trade_row, "realized_pnl", None) or 0.0
             )
-            committed_triggered_qty = int(triggered_leg.quantity)
+            committed_triggered_qty = int(new_qty)
             committed_old_product_id = int(triggered_leg.product_id)
 
             # Commit with one retry on session errors (new leg already on Delta)

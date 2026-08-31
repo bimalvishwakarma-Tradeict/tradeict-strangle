@@ -445,6 +445,10 @@ class AutoTradeSettings(Base):
     basket_qty_theta_mult: Mapped[float] = mapped_column(
         Float, nullable=False, server_default="2.0", default=2.0
     )
+    # When True + basket_qty_dynamic: recalculate basket qty at each adjustment
+    use_dynamic_qty_on_adjustment: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False
+    )
     cooldown_after_loss_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=120
     )

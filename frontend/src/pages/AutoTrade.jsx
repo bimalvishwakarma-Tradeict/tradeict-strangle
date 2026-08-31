@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import AdjustmentSlabs from '../components/AdjustmentSlabs'
+import InfoTooltip from '../components/InfoTooltip'
 import {
   AutoTradeStickyHeader,
   AutoTradeStickyNav,
@@ -79,6 +80,7 @@ function applyStatusToForm(data, setters) {
     data.hedge_qty_lots == null ? '' : String(data.hedge_qty_lots),
   )
   setters.setBasketQtyDynamic(!!data.basket_qty_dynamic)
+  setters.setUseDynamicQtyOnAdj(!!data.use_dynamic_qty_on_adjustment)
   setters.setBasketQtyThetaMult(String(data.basket_qty_theta_mult ?? 2.0))
   setters.setReEntryDelay(Number(data.re_entry_delay_minutes ?? 1))
   setters.setEntrySettlingSeconds(String(data.entry_settling_seconds ?? 60))
@@ -223,6 +225,7 @@ export default function AutoTrade() {
   const [basketQtyPctOfHedge, setBasketQtyPctOfHedge] = useState('20')
   const [hedgeQtyLots, setHedgeQtyLots] = useState('')
   const [basketQtyDynamic, setBasketQtyDynamic] = useState(false)
+  const [useDynamicQtyOnAdj, setUseDynamicQtyOnAdj] = useState(false)
   const [basketQtyThetaMult, setBasketQtyThetaMult] = useState('2.0')
   const [reEntryDelay, setReEntryDelay] = useState(1)
   const [entrySettlingSeconds, setEntrySettlingSeconds] = useState('60')
@@ -296,6 +299,7 @@ export default function AutoTrade() {
       setBasketQtyPctOfHedge,
       setHedgeQtyLots,
       setBasketQtyDynamic,
+      setUseDynamicQtyOnAdj,
       setBasketQtyThetaMult,
       setReEntryDelay,
       setEntrySettlingSeconds,
@@ -678,6 +682,10 @@ export default function AutoTrade() {
           ? Math.max(1, Number(hedgeQtyLots) || 1)
           : null,
       basket_qty_dynamic: pctOfHedgeSizingActive ? basketQtyDynamic : false,
+      use_dynamic_qty_on_adjustment:
+        pctOfHedgeSizingActive && basketQtyDynamic
+          ? useDynamicQtyOnAdj
+          : false,
       basket_qty_theta_mult: Math.min(
         10,
         Math.max(0.1, Number(basketQtyThetaMult) || 2.0),
@@ -1434,6 +1442,27 @@ export default function AutoTrade() {
                       </p>
                     )}
                   </label>
+                )}
+                {basketQtyDynamic && (
+                  <div className="ml-6 mt-2">
+                    <label className="flex cursor-pointer items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={useDynamicQtyOnAdj}
+                        onChange={(e) =>
+                          setUseDynamicQtyOnAdj(e.target.checked)
+                        }
+                      />
+                      <span className="text-sm text-white">
+                        Re-calculate qty at each adjustment
+                      </span>
+                      <InfoTooltip text="At adjustment, bot recalculates basket qty using live hedge theta and new strike ask price. Untested leg qty increases to match. Hard cap: max 50% of hedge qty (e.g. max 2 for 5-lot hedge). Entry target ($) stays unchanged — higher qty helps reach it faster." />
+                    </label>
+                    <p className="ml-6 mt-1 text-xs text-gray-400">
+                      Uses dynamic % formula at adjustment time. Untested leg
+                      qty also increases to match. Max qty: 50% of hedge qty.
+                    </p>
+                  </div>
                 )}
               </div>
               {dynamicBasketSizingActive ? (

@@ -104,6 +104,7 @@ class AutoTradeSettingsSchema(BaseModel):
     hedge_qty_lots: int | None = Field(default=None, ge=1, le=10000)
     basket_qty_dynamic: bool = False
     basket_qty_theta_mult: float = Field(default=2.0, ge=0.1, le=10.0)
+    use_dynamic_qty_on_adjustment: bool = False
     cooldown_after_loss_minutes: int = Field(default=120, ge=0, le=1440)
     adjustment_premium_tolerance_pct: float = Field(
         default=40.0, ge=5, le=200
@@ -500,6 +501,9 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             if getattr(s, "basket_qty_theta_mult", None) is not None
             else 2.0
         ),
+        "use_dynamic_qty_on_adjustment": bool(
+            getattr(s, "use_dynamic_qty_on_adjustment", False)
+        ),
         "cooldown_after_loss_minutes": int(
             getattr(s, "cooldown_after_loss_minutes", None)
             if getattr(s, "cooldown_after_loss_minutes", None) is not None
@@ -800,6 +804,9 @@ async def update_auto_trade_settings(
     )
     settings.basket_qty_dynamic = bool(payload.basket_qty_dynamic)
     settings.basket_qty_theta_mult = float(payload.basket_qty_theta_mult)
+    settings.use_dynamic_qty_on_adjustment = bool(
+        payload.use_dynamic_qty_on_adjustment and payload.basket_qty_dynamic
+    )
     settings.cooldown_after_loss_minutes = int(
         payload.cooldown_after_loss_minutes
     )

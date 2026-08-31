@@ -106,6 +106,56 @@ def resolve_entry_basket_pct(
     return manual_pct, None, True
 
 
+def resolve_adjustment_basket_qty(
+    *,
+    settings: Any,
+    triggered_leg_qty: int,
+    hedge_qty: int,
+    hedge_call_theta: float,
+    new_strike_ask: float,
+    trade_id: int | None = None,
+) -> int:
+    """
+    Lot count for replacement leg at adjustment (B25).
+
+    When use_dynamic_qty_on_adjustment and basket_qty_dynamic are both enabled,
+    recomputes qty from live hedge call theta and new-strike ask, capped at
+    floor(hedge_qty × 0.5). Otherwise returns triggered_leg_qty unchanged.
+    """
+    base_qty = max(1, int(triggered_leg_qty or 1))
+    use_dyn = bool(getattr(settings, "use_dynamic_qty_on_adjustment", False))
+    basket_dyn = bool(getattr(settings, "basket_qty_dynamic", False))
+    if not (use_dyn and basket_dyn):
+        return base_qty
+
+    mult = float(getattr(settings, "basket_qty_theta_mult", None) or 2.0)
+    raw_pct = compute_dynamic_basket_qty_pct(
+        hedge_call_theta=hedge_call_theta,
+        theta_mult=mult,
+        call_ask=new_strike_ask,
+    )
+    hq = int(hedge_qty or 0)
+    if raw_pct is None or raw_pct <= 0 or hq <= 0:
+        return base_qty
+
+    raw_qty = int(math.ceil(hq * float(raw_pct) / 100.0))
+    max_qty = max(1, int(math.floor(hq * 0.5)))
+    new_qty = max(1, min(raw_qty, max_qty))
+    logger.info(
+        "[ADJ_QTY_DYNAMIC] trade=%s | hedge_theta=%.4f | mult=%.1f | "
+        "call_ask=%.2f | raw_pct=%.2f | raw_qty=%d | cap=%d | new_qty=%d",
+        trade_id if trade_id is not None else "?",
+        float(hedge_call_theta),
+        mult,
+        float(new_strike_ask),
+        float(raw_pct),
+        raw_qty,
+        max_qty,
+        new_qty,
+    )
+    return new_qty
+
+
 def resolve_sizing_mode(settings: Any) -> str:
     """
     Return 'pct_of_hedge' only when mode, hedge_enabled, and hedge_qty_lots

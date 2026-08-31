@@ -898,6 +898,7 @@ def _migrate_schema() -> None:
             ("hedge_qty_lots", "INTEGER"),
             ("basket_qty_dynamic", "BOOLEAN NOT NULL DEFAULT 0"),
             ("basket_qty_theta_mult", "FLOAT NOT NULL DEFAULT 2.0"),
+            ("use_dynamic_qty_on_adjustment", "BOOLEAN NOT NULL DEFAULT 0"),
             ("cooldown_after_loss_minutes", "INTEGER NOT NULL DEFAULT 120"),
             (
                 "adjustment_premium_tolerance_pct",
