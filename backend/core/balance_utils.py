@@ -31,21 +31,36 @@ def wallet_to_balance_fields(
             "actual_balance": None,
             "blocked_amount": None,
             "available_balance": None,
+            "available_margin": None,
+            "unrealised_pnl": None,
+            "free_cash": None,
             "actual_balance_inr": None,
             "available_balance_inr": None,
             "blocked_amount_inr": None,
+            "available_margin_inr": None,
+            "unrealised_pnl_inr": None,
+            "free_cash_inr": None,
         }
     actual = float(wallet.get("wallet_balance") or wallet.get("balance_usdt") or 0.0)
     blocked = float(wallet.get("position_margin") or 0.0)
-    # Use Delta's available_balance directly — includes unrealised cashflows / margin
-    # adjustments; do NOT derive as wallet_balance - position_margin.
-    available = float(wallet.get("available_balance") or 0.0)
+    # Delta's free-to-trade settled cash — NOT the same as Available Margin in UI.
+    free_cash = float(wallet.get("available_balance") or 0.0)
+    unrealised = float(wallet.get("unrealised_pnl") or 0.0)
+    available_margin = float(
+        wallet.get("available_margin") or (actual + unrealised - blocked)
+    )
     rate = float(usd_inr_rate or 85.0)
     return {
         "actual_balance": round(actual, 4),
         "blocked_amount": round(blocked, 4),
-        "available_balance": round(available, 4),
+        "available_balance": round(free_cash, 4),
+        "available_margin": round(available_margin, 4),
+        "unrealised_pnl": round(unrealised, 4),
+        "free_cash": round(free_cash, 4),
         "actual_balance_inr": round(actual * rate, 0),
-        "available_balance_inr": round(available * rate, 0),
+        "available_balance_inr": round(free_cash * rate, 0),
         "blocked_amount_inr": round(blocked * rate, 0),
+        "available_margin_inr": round(available_margin * rate, 0),
+        "unrealised_pnl_inr": round(unrealised * rate, 0),
+        "free_cash_inr": round(free_cash * rate, 0),
     }

@@ -45,29 +45,66 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _parse_wallet_asset(asset: dict[str, Any]) -> dict[str, float]:
+def _unrealised_from_asset_row(asset: dict[str, Any]) -> float | None:
+    """Return unrealised P&L from wallet row if Delta exposes it (usually absent)."""
+    for key in (
+        "unrealized_cashflow",
+        "unrealised_cashflow",
+        "unrealized_pnl",
+        "unrealised_pnl",
+        "cashflow",
+    ):
+        if key in asset and asset.get(key) not in (None, ""):
+            return _safe_float(asset.get(key))
+    return None
+
+
+def _parse_wallet_asset(
+    asset: dict[str, Any],
+    *,
+    unrealised_pnl: float | None = None,
+) -> dict[str, float]:
     """Normalize one /v2/wallet/balances row — use Delta fields as-is."""
     wallet_balance = _safe_float(
         asset.get("wallet_balance") or asset.get("balance")
     )
+    available_balance = _safe_float(
+        asset.get("available_balance") or asset.get("available")
+    )
+    # Delta reports blocked funds in `blocked_margin`. In cross-margin mode
+    # `position_margin` is always 0 and the real figure lives in
+    # cross_position_margin + cross_commission, which blocked_margin sums.
+    blocked_margin = _safe_float(
+        asset.get("blocked_margin")
+        or (
+            _safe_float(asset.get("cross_position_margin"))
+            + _safe_float(asset.get("cross_commission"))
+        )
+        or asset.get("position_margin")
+    )
+
+    if unrealised_pnl is not None:
+        unrealised = float(unrealised_pnl)
+        unrealised_pending = False
+    else:
+        from_row = _unrealised_from_asset_row(asset)
+        if from_row is not None:
+            unrealised = from_row
+            unrealised_pending = False
+        else:
+            # Wallet schema has no UCF field — filled via get_positions_upnl() sum.
+            unrealised = 0.0
+            unrealised_pending = True
+
     return {
         "wallet_balance": wallet_balance,
         "balance_usdt": wallet_balance,
-        "available_balance": _safe_float(
-            asset.get("available_balance") or asset.get("available")
-        ),
-        # Delta reports blocked funds in `blocked_margin`. In cross-margin mode
-        # `position_margin` is always 0 and the real figure lives in
-        # cross_position_margin + cross_commission, which blocked_margin sums.
-        "position_margin": _safe_float(
-            asset.get("blocked_margin")
-            or (
-                _safe_float(asset.get("cross_position_margin"))
-                + _safe_float(asset.get("cross_commission"))
-            )
-            or asset.get("position_margin")
-        ),
+        "available_balance": available_balance,
+        "position_margin": blocked_margin,
         "order_margin": _safe_float(asset.get("order_margin")),
+        "unrealised_pnl": unrealised,
+        "available_margin": wallet_balance + unrealised - blocked_margin,
+        "unrealised_pnl_pending": float(unrealised_pending),
     }
 
 
@@ -499,6 +536,35 @@ class DeltaClient:
             "id": result.get("id"),
         }
 
+    async def _sum_open_positions_unrealised(self) -> float:
+        """
+        Sum UPL@Offer across all open positions.
+
+        Delta /v2/wallet/balances has no unrealised-cashflow field on the USD
+        row (verified against OpenAPI Wallet schema) — UCF is derived here.
+        """
+        upnl_map = await self.get_positions_upnl(None)
+        return round(
+            sum(float(row.get("upnl") or 0.0) for row in upnl_map.values()),
+            4,
+        )
+
+    async def _enrich_wallet_unrealised(self, parsed: dict[str, float]) -> dict[str, float]:
+        """Fill unrealised_pnl + available_margin when absent from wallet row."""
+        if not parsed.get("unrealised_pnl_pending"):
+            parsed.pop("unrealised_pnl_pending", None)
+            return parsed
+        unrealised = await self._sum_open_positions_unrealised()
+        parsed["unrealised_pnl"] = unrealised
+        parsed["available_margin"] = round(
+            float(parsed["wallet_balance"])
+            + unrealised
+            - float(parsed["position_margin"]),
+            4,
+        )
+        parsed.pop("unrealised_pnl_pending", None)
+        return parsed
+
     async def get_wallet_balance(self) -> dict[str, float]:
         """
         GET /v2/wallet/balances — return USD/USDT balance summary.
@@ -534,11 +600,11 @@ class DeltaClient:
                 fallback = parsed
 
         if preferred is not None:
-            return preferred
+            return await self._enrich_wallet_unrealised(preferred)
         if fallback is not None:
-            return fallback
+            return await self._enrich_wallet_unrealised(fallback)
         if first is not None:
-            return first
+            return await self._enrich_wallet_unrealised(first)
 
         logger.warning("USD/USDT balance not found in wallet balances response")
         return {
@@ -547,6 +613,8 @@ class DeltaClient:
             "available_balance": 0.0,
             "position_margin": 0.0,
             "order_margin": 0.0,
+            "unrealised_pnl": 0.0,
+            "available_margin": 0.0,
         }
 
     async def get_positions(self) -> list[dict[str, Any]]:

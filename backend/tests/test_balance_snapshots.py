@@ -1,11 +1,14 @@
-"""Tests for balance snapshot helpers (B14)."""
+"""Tests for balance snapshot helpers (B14+)."""
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
+import anyio
 import pytest
 
 from backend.core.balance_utils import compute_daily_growth_pct, wallet_to_balance_fields
-from backend.core.delta_client import _parse_wallet_asset
+from backend.core.delta_client import DeltaClient, _parse_wallet_asset
 
 
 def test_compute_daily_growth_pct_positive() -> None:
@@ -26,14 +29,72 @@ def test_wallet_to_balance_fields_mapping() -> None:
         {
             "wallet_balance": 8.77,
             "position_margin": 1.75,
-            "available_balance": 45.99,
+            "available_balance": 7.03,
+            "unrealised_pnl": 44.44,
+            "available_margin": 51.46,
         },
         usd_inr_rate=85.0,
     )
     assert out["actual_balance"] == 8.77
     assert out["blocked_amount"] == 1.75
-    assert out["available_balance"] == 45.99
+    assert out["free_cash"] == 7.03
+    assert out["available_balance"] == 7.03
+    assert out["available_margin"] == 51.46
+    assert out["unrealised_pnl"] == 44.44
     assert out["actual_balance_inr"] == 745.0
+
+
+def test_wallet_available_margin_and_free_cash() -> None:
+    wallet = _parse_wallet_asset(
+        {
+            "balance": "8.78",
+            "available_balance": "7.03",
+            "blocked_margin": "1.75",
+            "unrealized_cashflow": "44.44",
+        }
+    )
+    fields = wallet_to_balance_fields(wallet, usd_inr_rate=85.0)
+    assert fields["available_margin"] == pytest.approx(51.47, abs=0.01)
+    assert fields["free_cash"] == pytest.approx(7.03)
+
+
+def test_available_margin_zero_unrealised() -> None:
+    wallet = _parse_wallet_asset(
+        {
+            "balance": "10.0",
+            "available_balance": "8.0",
+            "blocked_margin": "2.0",
+            "unrealized_cashflow": "0",
+        }
+    )
+    assert wallet["available_margin"] == pytest.approx(8.0)
+    assert wallet["unrealised_pnl"] == pytest.approx(0.0)
+
+
+def test_wallet_enriches_unrealised_from_positions() -> None:
+    async def _run() -> None:
+        client = DeltaClient("test-key", "test-secret")
+        parsed = _parse_wallet_asset(
+            {
+                "balance": "8.78",
+                "available_balance": "7.03",
+                "blocked_margin": "1.75",
+                "asset_symbol": "USD",
+            }
+        )
+        assert parsed["unrealised_pnl_pending"] == 1.0
+        with patch.object(
+            client,
+            "_sum_open_positions_unrealised",
+            new_callable=AsyncMock,
+            return_value=44.44,
+        ):
+            enriched = await client._enrich_wallet_unrealised(parsed)
+        assert enriched["unrealised_pnl"] == pytest.approx(44.44)
+        assert enriched["available_margin"] == pytest.approx(51.47, abs=0.01)
+        assert "unrealised_pnl_pending" not in enriched
+
+    anyio.run(_run)
 
 
 def test_parse_wallet_asset_reads_blocked_margin_cross_mode() -> None:

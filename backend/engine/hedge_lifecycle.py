@@ -740,6 +740,9 @@ async def open_hedge(
 
         try:
             wallet = await client.get_wallet_balance()
+            # HEDGE_GATE affordability: use free cash (available_balance), NOT
+            # available_margin — margin includes unrealised P&L the bot must not
+            # size against until positions close.
             available = float(wallet.get("available_balance") or 0)
         except Exception as exc:
             raise HedgeOpenError(

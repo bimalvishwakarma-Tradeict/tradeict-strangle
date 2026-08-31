@@ -5,6 +5,7 @@ import HedgePanel from '../components/HedgePanel'
 import StructurePnlBar from '../components/StructurePnlBar'
 import PositionCard from '../components/PositionCard'
 import PayoffGraph from '../components/PayoffGraph'
+import InfoTooltip from '../components/InfoTooltip'
 import {
   checkHealth,
   enableAutoTrade,
@@ -374,6 +375,19 @@ function BalanceCell({ usd, inr, className = 'text-gray-200' }) {
   )
 }
 
+function HeaderCell({ children, tooltip, align = 'right' }) {
+  const alignClass = align === 'right' ? 'text-right' : 'text-left'
+  const flexClass = align === 'right' ? 'justify-end' : ''
+  return (
+    <th className={`px-2 py-2 ${alignClass}`}>
+      <span className={`inline-flex items-center gap-0.5 ${flexClass}`}>
+        {children}
+        {tooltip ? <InfoTooltip text={tooltip} /> : null}
+      </span>
+    </th>
+  )
+}
+
 function AccountOverviewRow({
   role,
   name,
@@ -384,8 +398,11 @@ function AccountOverviewRow({
   actualBalanceInr,
   blockedAmount,
   blockedAmountInr,
-  availableBalance,
-  availableBalanceInr,
+  availableMargin,
+  availableMarginInr,
+  unrealisedPnl,
+  freeCash,
+  freeCashInr,
   dailyGrowthPct,
   netMtm,
   mtmLabel,
@@ -462,7 +479,20 @@ function AccountOverviewRow({
           />
         </td>
         <td className="px-2 py-2.5 text-xs">
-          <BalanceCell usd={availableBalance} inr={availableBalanceInr} />
+          <BalanceCell
+            usd={availableMargin}
+            inr={availableMarginInr}
+          />
+          {unrealisedPnl != null &&
+          Number.isFinite(Number(unrealisedPnl)) &&
+          Math.abs(Number(unrealisedPnl)) > 0.001 ? (
+            <div className="text-[10px] text-gray-500">
+              incl. {formatSignedMoney(unrealisedPnl)} unrealised
+            </div>
+          ) : null}
+        </td>
+        <td className="px-2 py-2.5 text-xs">
+          <BalanceCell usd={freeCash} inr={freeCashInr} />
         </td>
         <td
           className={`px-2 py-2.5 text-right text-xs font-medium ${growthClass(dailyGrowthPct)}`}
@@ -506,7 +536,7 @@ function AccountOverviewRow({
       </tr>
       {isExpanded && (
         <tr className="border-b border-gray-800 bg-gray-800/40">
-          <td colSpan={9} className="px-4 py-3 text-xs text-gray-300">
+          <td colSpan={10} className="px-4 py-3 text-xs text-gray-300">
             {expandContent}
           </td>
         </tr>
@@ -613,19 +643,31 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
               <th className="px-2 py-2 text-left">Role</th>
               <th className="px-2 py-2 text-left">Account</th>
               <th className="px-2 py-2 text-left">Status</th>
-              <th className="px-2 py-2 text-right">Actual Bal</th>
-              <th className="px-2 py-2 text-right">Blocked</th>
-              <th className="px-2 py-2 text-right">Avail Bal</th>
-              <th className="px-2 py-2 text-right" title="vs yesterday 12pm IST">
-                Daily Δ%
-              </th>
-              <th
-                className="px-2 py-2 text-right"
-                title="Master = Hedge + All Baskets | Slave = Active Basket only"
+              <HeaderCell
+                tooltip="Settled cash in the wallet. Matches Wallet Balance on Delta."
               >
+                Actual Bal
+              </HeaderCell>
+              <HeaderCell
+                tooltip="Margin held against open positions and orders. Matches Blocked Amount on Delta."
+              >
+                Blocked
+              </HeaderCell>
+              <HeaderCell
+                tooltip="Wallet balance plus unrealised P&L, minus blocked margin. Matches Available Margin on Delta. Includes profit that is only realised when positions close."
+              >
+                Avail Bal
+              </HeaderCell>
+              <HeaderCell
+                tooltip="Settled cash the bot can size new trades against. Excludes unrealised P&L, so it is lower than Available Margin — this is deliberate."
+              >
+                Free Cash
+              </HeaderCell>
+              <HeaderCell tooltip="vs yesterday 12pm IST">Daily Δ%</HeaderCell>
+              <HeaderCell tooltip="Master = Hedge + All Baskets | Slave = Active Basket only">
                 Structure MTM
-              </th>
-              <th className="px-2 py-2 text-right">Target</th>
+              </HeaderCell>
+              <HeaderCell>Target</HeaderCell>
             </tr>
           </thead>
           <tbody>
@@ -638,9 +680,14 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
               actualBalanceInr={master.actual_balance_inr ?? master.balance_inr}
               blockedAmount={master.blocked_amount ?? master.blocked_usd}
               blockedAmountInr={master.blocked_amount_inr ?? master.blocked_inr}
-              availableBalance={master.available_balance ?? master.available_usd}
-              availableBalanceInr={
-                master.available_balance_inr ?? master.available_inr
+              availableMargin={master.available_margin}
+              availableMarginInr={master.available_margin_inr}
+              unrealisedPnl={master.unrealised_pnl}
+              freeCash={master.free_cash ?? master.available_balance ?? master.available_usd}
+              freeCashInr={
+                master.free_cash_inr ??
+                master.available_balance_inr ??
+                master.available_inr
               }
               dailyGrowthPct={master.daily_growth_pct}
               netMtm={masterStructureMtm}
@@ -757,15 +804,34 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                       ? null
                       : slave.blocked_amount_inr ?? slave.blocked_inr
                   }
-                  availableBalance={
+                  availableMargin={
                     statusKind === 'error' || !slave.is_active
                       ? null
-                      : slave.available_balance ?? slave.available_usd
+                      : slave.available_margin
                   }
-                  availableBalanceInr={
+                  availableMarginInr={
                     statusKind === 'error' || !slave.is_active
                       ? null
-                      : slave.available_balance_inr ?? slave.available_inr
+                      : slave.available_margin_inr
+                  }
+                  unrealisedPnl={
+                    statusKind === 'error' || !slave.is_active
+                      ? null
+                      : slave.unrealised_pnl
+                  }
+                  freeCash={
+                    statusKind === 'error' || !slave.is_active
+                      ? null
+                      : slave.free_cash ??
+                        slave.available_balance ??
+                        slave.available_usd
+                  }
+                  freeCashInr={
+                    statusKind === 'error' || !slave.is_active
+                      ? null
+                      : slave.free_cash_inr ??
+                        slave.available_balance_inr ??
+                        slave.available_inr
                   }
                   dailyGrowthPct={slave.daily_growth_pct}
                   netMtm={slaveMtm}
@@ -789,7 +855,7 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
           <tfoot>
             <tr className="border-t border-gray-600 bg-gray-800/60">
               <td
-                colSpan={7}
+                colSpan={8}
                 className="px-2 py-2.5 text-right text-xs font-semibold text-gray-300"
               >
                 Combined Structure MTM:
