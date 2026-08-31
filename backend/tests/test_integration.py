@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +26,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from backend.config import IST
 from dotenv import load_dotenv
 
 load_dotenv(_ROOT / ".env")
@@ -121,7 +122,11 @@ async def test_2_option_chain() -> None:
         assert expiries, "Expected non-empty expiries list"
         first = expiries[0]
         first_date = date.fromisoformat(str(first["date"]))
-        assert first_date >= date.today(), f"First expiry {first_date} < today"
+        from backend.core.time_utils import get_ist_now
+
+        assert first_date >= get_ist_now().date(), (
+            f"First expiry {first_date} < IST today"
+        )
 
         chain = await client.get_option_chain("BTC", first_date.isoformat())
         assert len(chain) > 0, "Option chain empty"
@@ -270,11 +275,12 @@ async def test_4_pnl_calculation() -> None:
 
 async def test_5_adjustment_trigger_logic() -> None:
     print("\n🧪 Test 5: Adjustment Trigger Logic (Unit)")
+    from backend.core.time_utils import get_ist_now
     from backend.strategies.s001_short_strangle.logic import ShortStrangleStrategy
 
     strategy = ShortStrangleStrategy()
     # Use +3 days so hours_left > 24 → slab_24h=200 (tomorrow may be <24h)
-    expiry = date.today() + timedelta(days=3)
+    expiry = get_ist_now().date() + timedelta(days=3)
     trade = SimpleNamespace(
         id=1,
         profit_target_usd=200.0,
@@ -348,10 +354,11 @@ async def test_5b_combined_trigger_mode() -> None:
     is covered by test_5; this covers the True path on purpose).
     """
     print("\n🧪 Test 5b: Combined Trigger Mode (Unit)")
+    from backend.core.time_utils import get_ist_now
     from backend.strategies.s001_short_strangle.logic import ShortStrangleStrategy
 
     strategy = ShortStrangleStrategy()
-    expiry = date.today() + timedelta(days=3)
+    expiry = get_ist_now().date() + timedelta(days=3)
     trade = SimpleNamespace(
         id=2,
         profit_target_usd=10_000.0,
@@ -421,8 +428,9 @@ async def test_6_time_utils() -> None:
     tz_name = getattr(now.tzinfo, "zone", None) or str(now.tzinfo)
     assert "Kolkata" in tz_name or "IST" in tz_name, f"Expected IST tz, got {tz_name}"
 
-    tomorrow = date.today() + timedelta(days=1)
-    yesterday = date.today() - timedelta(days=1)
+    ist_today = now.date()
+    tomorrow = ist_today + timedelta(days=1)
+    yesterday = ist_today - timedelta(days=1)
     hours_tmr = get_hours_to_expiry(tomorrow)
     assert 0 < hours_tmr < 48, f"hours_to_expiry(tomorrow)={hours_tmr}"
     assert get_hours_to_expiry(yesterday) == 0.0
@@ -438,11 +446,27 @@ async def test_6_time_utils() -> None:
     assert get_trigger_pct(18, default_slabs) == 175.0
     assert get_trigger_pct(8, default_slabs) == 150.0
     assert get_trigger_pct(3, default_slabs) == 150.0
-    # Format includes calendar date: "1DTE (27 Aug)"
+    # Format includes calendar date: "1DTE (27 Aug)" — DTE keyed off IST today
     expected_label = f"1DTE ({tomorrow.strftime('%d %b')})"
     assert get_dte_label(tomorrow) == expected_label, (
         f"expected {expected_label!r}, got {get_dte_label(tomorrow)!r}"
     )
+
+    # Regression: IST calendar date ahead of system local (00:00–03:30 IST)
+    fake_ist_ahead = IST.localize(datetime(2026, 9, 1, 0, 30, 0))
+    with patch("backend.core.time_utils.get_ist_now", return_value=fake_ist_ahead):
+        assert get_dte_label(date(2026, 9, 1)) == "0DTE (01 Sep)"
+        assert get_dte_label(date(2026, 9, 2)) == "1DTE (02 Sep)"
+
+    # Regression: system and IST share the same calendar date
+    fake_same_day = IST.localize(datetime(2026, 8, 31, 14, 0, 0))
+    with patch("backend.core.time_utils.get_ist_now", return_value=fake_same_day):
+        same_today = fake_same_day.date()
+        same_tomorrow = same_today + timedelta(days=1)
+        assert get_dte_label(same_tomorrow) == (
+            f"1DTE ({same_tomorrow.strftime('%d %b')})"
+        )
+
     print("All time utils assertions passed")
 
 

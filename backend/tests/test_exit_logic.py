@@ -15,6 +15,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from backend.core.time_utils import get_ist_now
 from backend.strategies.s001_short_strangle.logic import ShortStrangleStrategy
 
 
@@ -29,7 +30,7 @@ def make_trade(
     trade.profit_target_usd = tp_usd
     trade.stoploss_usd = sl_usd
     trade.slippage_pct = slippage_pct
-    trade.expiry_date = date.today() + timedelta(days=3)
+    trade.expiry_date = get_ist_now().date() + timedelta(days=3)
     trade.trigger_mode = trigger_mode
     trade.monitoring_starts_at = None
     trade.adjust_settling_until = None
