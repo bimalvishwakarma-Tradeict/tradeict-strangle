@@ -534,26 +534,27 @@ class ShortStrangleStrategy(BaseStrategy):
         decay_enabled = False
         decay_pct = 50.0
         decay_mode = "both_legs"
-        try:
-            from backend.database import get_or_create_auto_settings
+        if db_session is not None:
+            try:
+                from backend.database import get_or_create_auto_settings
 
-            decay_settings = get_or_create_auto_settings(db_session)
-            decay_enabled = bool(
-                getattr(decay_settings, "basket_decay_exit_enabled", False)
-            )
-            decay_pct = float(
-                getattr(decay_settings, "basket_decay_exit_pct", None) or 50.0
-            )
-            decay_mode = str(
-                getattr(decay_settings, "basket_decay_exit_mode", None)
-                or "both_legs"
-            ).lower().strip()
-        except Exception as exc:
-            logger.warning(
-                "Premium decay settings load failed trade=%s: %s",
-                trade_id,
-                exc,
-            )
+                decay_settings = get_or_create_auto_settings(db_session)
+                decay_enabled = bool(
+                    getattr(decay_settings, "basket_decay_exit_enabled", False)
+                )
+                decay_pct = float(
+                    getattr(decay_settings, "basket_decay_exit_pct", None) or 50.0
+                )
+                decay_mode = str(
+                    getattr(decay_settings, "basket_decay_exit_mode", None)
+                    or "both_legs"
+                ).lower().strip()
+            except Exception as exc:
+                logger.warning(
+                    "Premium decay settings load failed trade=%s: %s",
+                    trade_id,
+                    exc,
+                )
 
         should_decay, decay_detail = evaluate_premium_decay_exit(
             call_leg=call_leg,

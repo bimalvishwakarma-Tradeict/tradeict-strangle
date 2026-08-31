@@ -97,6 +97,11 @@ def evaluate_premium_decay_exit(
         detail["mode"] = normalized_mode
 
     if normalized_mode == "both_legs":
+        if any(int(row["qty"]) <= 0 for row in legs_info):
+            detail["block_reason"] = "invalid_qty"
+            detail["combined_remaining_pct"] = None
+            detail["should_exit"] = False
+            return False, detail
         all_at_threshold = all(
             float(row["remaining_pct"]) <= threshold for row in legs_info
         )
@@ -107,8 +112,19 @@ def evaluate_premium_decay_exit(
         return all_at_threshold, detail
 
     entry_sum = sum(float(row["entry"]) * int(row["qty"]) for row in legs_info)
+    if entry_sum <= 0:
+        detail["block_reason"] = "no_entry_basis"
+        detail["combined_remaining_pct"] = None
+        detail["should_exit"] = False
+        return False, detail
+    if any(int(row["qty"]) <= 0 for row in legs_info):
+        detail["block_reason"] = "invalid_qty"
+        detail["combined_remaining_pct"] = None
+        detail["should_exit"] = False
+        return False, detail
+
     current_sum = sum(float(row["current"]) * int(row["qty"]) for row in legs_info)
-    combined_remaining = (current_sum / entry_sum) * 100.0 if entry_sum > 0 else 0.0
+    combined_remaining = (current_sum / entry_sum) * 100.0
     detail["combined_remaining_pct"] = round(combined_remaining, 4)
     should_exit = combined_remaining <= threshold
     detail["should_exit"] = should_exit

@@ -154,3 +154,52 @@ def test_disabled_never_exits() -> None:
     )
     assert should_exit is False
     assert detail["block_reason"] == "disabled"
+
+
+def test_combined_mode_zero_qty_both_legs_blocks_exit() -> None:
+    call = _leg(leg_type="call", entry=181.0, current=131.0, qty=0)
+    put = _leg(leg_type="put", entry=214.0, current=44.0, qty=0)
+    should_exit, detail = evaluate_premium_decay_exit(
+        call_leg=call,
+        put_leg=put,
+        call_premium=131.0,
+        put_premium=44.0,
+        enabled=True,
+        decay_pct=50.0,
+        mode="combined",
+    )
+    assert should_exit is False
+    assert detail["block_reason"] == "no_entry_basis"
+    assert detail["combined_remaining_pct"] is None
+
+
+def test_both_legs_mode_one_zero_qty_blocks_exit() -> None:
+    call = _leg(leg_type="call", entry=200.0, current=90.0, qty=0)
+    put = _leg(leg_type="put", entry=200.0, current=90.0, qty=1)
+    should_exit, detail = evaluate_premium_decay_exit(
+        call_leg=call,
+        put_leg=put,
+        call_premium=90.0,
+        put_premium=90.0,
+        enabled=True,
+        decay_pct=50.0,
+        mode="both_legs",
+    )
+    assert should_exit is False
+    assert detail["block_reason"] == "invalid_qty"
+
+
+def test_combined_mode_normal_qty_regression() -> None:
+    call = _leg(leg_type="call", entry=181.0, current=131.0, qty=1)
+    put = _leg(leg_type="put", entry=214.0, current=44.0, qty=1)
+    should_exit, detail = evaluate_premium_decay_exit(
+        call_leg=call,
+        put_leg=put,
+        call_premium=131.0,
+        put_premium=44.0,
+        enabled=True,
+        decay_pct=50.0,
+        mode="combined",
+    )
+    assert should_exit is True
+    assert detail["combined_remaining_pct"] == 44.3038
