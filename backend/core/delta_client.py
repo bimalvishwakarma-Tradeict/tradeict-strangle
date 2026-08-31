@@ -45,6 +45,22 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _parse_wallet_asset(asset: dict[str, Any]) -> dict[str, float]:
+    """Normalize one /v2/wallet/balances row — use Delta fields as-is."""
+    wallet_balance = _safe_float(
+        asset.get("wallet_balance") or asset.get("balance")
+    )
+    return {
+        "wallet_balance": wallet_balance,
+        "balance_usdt": wallet_balance,
+        "available_balance": _safe_float(
+            asset.get("available_balance") or asset.get("available")
+        ),
+        "position_margin": _safe_float(asset.get("position_margin")),
+        "order_margin": _safe_float(asset.get("order_margin")),
+    }
+
+
 def compute_signed_upnl(
     entry_price: float,
     mark_price: float,
@@ -478,51 +494,41 @@ class DeltaClient:
         GET /v2/wallet/balances — return USD/USDT balance summary.
 
         Delta Exchange India typically returns asset_symbol=USD (not USDT).
-        Returns: { balance_usdt, available_balance }  # field name kept for API schema
+        Uses Delta's available_balance and position_margin directly — never
+        recomputes available from wallet minus margin.
         """
         result = await self._request("GET", "/v2/wallet/balances")
         balances = result if isinstance(result, list) else result.get("balances", [])
 
         preferred: dict[str, float] | None = None
         fallback: dict[str, float] | None = None
+        first: dict[str, float] | None = None
 
         for asset in balances:
+            if not isinstance(asset, dict):
+                continue
+            parsed = _parse_wallet_asset(asset)
+            if first is None:
+                first = parsed
             symbol = (
                 asset.get("asset_symbol")
                 or asset.get("symbol")
                 or asset.get("currency")
                 or ""
             ).upper()
-            parsed = {
-                "wallet_balance": _safe_float(
-                    asset.get("wallet_balance", asset.get("balance", 0))
-                ),
-                "balance_usdt": _safe_float(
-                    asset.get("wallet_balance", asset.get("balance", 0))
-                ),
-                "available_balance": _safe_float(
-                    asset.get("available_balance", asset.get("available", 0))
-                ),
-                "position_margin": _safe_float(asset.get("position_margin", 0)),
-                "order_margin": _safe_float(asset.get("order_margin", 0)),
-            }
-            if parsed["available_balance"] <= 0 and parsed["wallet_balance"] > 0:
-                parsed["available_balance"] = max(
-                    0.0,
-                    parsed["wallet_balance"]
-                    - parsed["position_margin"]
-                    - parsed["order_margin"],
-                )
-            if symbol == "USDT":
+            # India desk: USD is the trading wallet; prefer it over USDT stub rows.
+            if symbol == "USD":
                 preferred = parsed
                 break
-            if symbol == "USD" and fallback is None:
+            if symbol == "USDT" and fallback is None:
                 fallback = parsed
 
         if preferred is not None:
             return preferred
         if fallback is not None:
             return fallback
+        if first is not None:
+            return first
 
         logger.warning("USD/USDT balance not found in wallet balances response")
         return {

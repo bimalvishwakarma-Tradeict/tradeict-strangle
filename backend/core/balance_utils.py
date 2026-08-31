@@ -37,6 +37,8 @@ def wallet_to_balance_fields(
         }
     actual = float(wallet.get("wallet_balance") or wallet.get("balance_usdt") or 0.0)
     blocked = float(wallet.get("position_margin") or 0.0)
+    # Use Delta's available_balance directly — includes unrealised cashflows / margin
+    # adjustments; do NOT derive as wallet_balance - position_margin.
     available = float(wallet.get("available_balance") or 0.0)
     rate = float(usd_inr_rate or 85.0)
     return {

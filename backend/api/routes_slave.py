@@ -905,6 +905,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
     """
     from backend.config import TradeStatus
     from backend.core.balance_snapshots import build_balance_detail
+    from backend.core.balance_utils import wallet_to_balance_fields
     from backend.engine.bot_engine import bot_engine
 
     rate = get_usd_inr_rate(db)
@@ -936,13 +937,12 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             try:
                 wallet = await client.get_wallet_balance()
                 master_wallet = wallet
-                master_balance_usd = float(
-                    wallet.get("wallet_balance") or wallet.get("balance_usdt", 0.0) or 0.0
-                )
+                master_fields = wallet_to_balance_fields(wallet, usd_inr_rate=rate)
+                master_balance_usd = float(master_fields.get("actual_balance") or 0.0)
                 master_available_usd = float(
-                    wallet.get("available_balance", master_balance_usd) or 0.0
+                    master_fields.get("available_balance") or 0.0
                 )
-                master_blocked_usd = float(wallet.get("position_margin") or 0.0)
+                master_blocked_usd = float(master_fields.get("blocked_amount") or 0.0)
             finally:
                 await client.close()
         except Exception as exc:
@@ -1099,13 +1099,10 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 try:
                     wallet = await client.get_wallet_balance()
                     slave_wallet = wallet
-                    bal_usd = float(
-                        wallet.get("wallet_balance") or wallet.get("balance_usdt", 0.0) or 0.0
-                    )
-                    avail_usd = float(
-                        wallet.get("available_balance", bal_usd) or 0.0
-                    )
-                    blocked_usd = float(wallet.get("position_margin") or 0.0)
+                    slave_fields = wallet_to_balance_fields(wallet, usd_inr_rate=rate)
+                    bal_usd = float(slave_fields.get("actual_balance") or 0.0)
+                    avail_usd = float(slave_fields.get("available_balance") or 0.0)
+                    blocked_usd = float(slave_fields.get("blocked_amount") or 0.0)
                     slave.balance_usd = bal_usd
                     slave.balance_inr = round(bal_usd * rate, 2)
                     slave.connection_status = "connected"

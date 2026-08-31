@@ -4,6 +4,7 @@ import { useTrades } from '../hooks/useTrades'
 import HedgePanel from '../components/HedgePanel'
 import StructurePnlBar from '../components/StructurePnlBar'
 import PositionCard from '../components/PositionCard'
+import PayoffGraph from '../components/PayoffGraph'
 import {
   checkHealth,
   enableAutoTrade,
@@ -1516,6 +1517,55 @@ export default function Dashboard() {
         onRefresh={refreshSlaveOverview}
         activeHedge={activeHedge}
       />
+
+      {trades.length > 0 && (() => {
+        const activeTrade = trades[0]
+        const callStrike = Number(
+          activeTrade.call_leg?.strike ?? activeTrade.call_strike,
+        )
+        const putStrike = Number(
+          activeTrade.put_leg?.strike ?? activeTrade.put_strike,
+        )
+        const callPremium = Number(
+          activeTrade.call_entry_premium ??
+            activeTrade.call_leg?.initial_premium ??
+            activeTrade.call_premium,
+        )
+        const putPremium = Number(
+          activeTrade.put_entry_premium ??
+            activeTrade.put_leg?.initial_premium ??
+            activeTrade.put_premium,
+        )
+        const quantity = Number(
+          activeTrade.call_leg?.quantity ??
+            activeTrade.put_leg?.quantity ??
+            activeTrade.call_quantity ??
+            activeTrade.put_quantity ??
+            activeTrade.quantity ??
+            1,
+        )
+        const currentPrice = Number(activeTrade.underlying_price)
+        return (
+          <div className="mt-4 rounded-xl border border-gray-700 bg-gray-800 p-4">
+            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-300">
+              Payoff Graph
+            </h2>
+            <PayoffGraph
+              callStrike={callStrike}
+              putStrike={putStrike}
+              callPremium={callPremium}
+              putPremium={putPremium}
+              quantity={quantity}
+              currentPrice={currentPrice > 0 ? currentPrice : undefined}
+              expiryDate={activeTrade.expiry_date || undefined}
+              initialHoursRemaining={
+                Number(activeTrade.hours_to_expiry) || undefined
+              }
+              emptyMessage="Waiting for BTC price…"
+            />
+          </div>
+        )
+      })()}
 
       <section className="mt-10">
         <h2 className="mb-3 text-lg font-semibold text-white">

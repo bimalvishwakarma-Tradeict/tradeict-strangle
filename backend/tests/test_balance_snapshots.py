@@ -23,11 +23,11 @@ def test_wallet_to_balance_fields_mapping() -> None:
         {
             "wallet_balance": 8.77,
             "position_margin": 1.75,
-            "available_balance": 7.02,
+            "available_balance": 45.99,
         },
         usd_inr_rate=85.0,
     )
     assert out["actual_balance"] == 8.77
     assert out["blocked_amount"] == 1.75
-    assert out["available_balance"] == 7.02
+    assert out["available_balance"] == 45.99
     assert out["actual_balance_inr"] == 745.0
