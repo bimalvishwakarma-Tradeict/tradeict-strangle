@@ -19,11 +19,20 @@ from backend.core.realized_booking import (
     recompute_trade_realized_from_legs,
 )
 from backend.core.backfill_realized import (
+    SelectionCriteria,
     analyze_trade,
+    audit_json_path,
     bucket_trade_ids,
     classify_unresolved_bucket,
+    collect_unrecoverable_legs,
+    format_filtered_out_message,
+    new_audit_trail,
+    parse_trade_ids_csv,
     repair_b1_leg,
+    select_analyses,
     sum_closed_leg_realized,
+    trade_abs_diff,
+    write_audit_json,
 )
 from backend.core.delta_client import short_leg_realized_pnl
 
@@ -296,7 +305,108 @@ def test_repair_b1_idempotent_second_apply() -> None:
     assert leg.realized_pnl == first
 
 
-if __name__ == "__main__":
+def _analysis(trade_id: int, stored: float, resolved: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        trade_id=trade_id,
+        stored=stored,
+        resolved_total=resolved,
+        unresolved=[],
+        b1_legs=[],
+        b2_legs=[],
+        class_a=abs(stored - resolved) >= 1e-6,
+        hedge_position_id=None,
+        status="closed",
+        false_healthy=False,
+    )
+
+
+def test_select_max_abs_diff() -> None:
+    rows = [
+        _analysis(1, 0.10, 0.15),
+        _analysis(2, 0.10, 0.80),
+        _analysis(3, -0.05, -0.08),
+    ]
+    result = select_analyses(rows, SelectionCriteria(max_abs_diff=0.5))
+    assert sorted(a.trade_id for a in result.selected) == [1, 3]
+    assert sorted(a.trade_id for a in result.filtered_out) == [2]
+    msg = format_filtered_out_message(result)
+    assert msg is not None
+    assert "FILTERED OUT: 1 trade(s)" in msg
+    assert "--max-abs-diff=0.5" in msg
+
+
+def test_select_min_abs_diff() -> None:
+    rows = [
+        _analysis(1, 0.10, 0.15),
+        _analysis(2, 0.10, 0.80),
+    ]
+    result = select_analyses(rows, SelectionCriteria(min_abs_diff=0.5))
+    assert [a.trade_id for a in result.selected] == [2]
+    assert [a.trade_id for a in result.filtered_out] == [1]
+
+
+def test_parse_trade_ids_csv() -> None:
+    assert parse_trade_ids_csv("121, 122,121") == [121, 122]
+    assert parse_trade_ids_csv(None) is None
+
+
+def test_select_trade_ids_only() -> None:
+    rows = [_analysis(1, 0.0, 0.0), _analysis(2, 0.0, 0.0)]
+    result = select_analyses(rows, SelectionCriteria(trade_ids=[2]))
+    assert [a.trade_id for a in result.selected] == [2]
+    assert [a.trade_id for a in result.filtered_out] == [1]
+
+
+def test_unrecoverable_one_row_per_leg() -> None:
+    trade = SimpleNamespace(
+        id=117,
+        realized_pnl=0.0,
+        hedge_position_id=None,
+        status="closed",
+    )
+    legs = [
+        _leg(
+            id=343,
+            leg_type="put",
+            status="closed",
+            initial_premium=10.0,
+            exit_premium=None,
+            exit_order_id=None,
+            realized_pnl=None,
+        ),
+        _leg(
+            id=344,
+            leg_type="call",
+            status="closed",
+            initial_premium=10.0,
+            exit_premium=None,
+            exit_order_id=None,
+            realized_pnl=None,
+        ),
+    ]
+    analysis = analyze_trade(trade, legs)
+    rows = collect_unrecoverable_legs([analysis])
+    assert len(rows) == 2
+    assert {r["leg_id"] for r in rows} == {343, 344}
+    assert all(r["trade_id"] == 117 for r in rows)
+
+
+def test_audit_json_written_on_apply_only(tmp_path: Path) -> None:
+    trail = new_audit_trail({"max_abs_diff": 0.5})
+    out = audit_json_path(tmp_path, trail.timestamp_utc)
+    write_audit_json(out, trail)
+    assert out.is_file()
+    assert "backfill_audit_" in out.name
+    assert out.read_text(encoding="utf-8").strip().startswith("{")
+
+
+def test_trade_abs_diff_for_class_a_filter() -> None:
+    trade = SimpleNamespace(id=10, realized_pnl=0.10, status="closed")
+    legs = [
+        _leg(id=1, status="closed", realized_pnl=0.60),
+    ]
+    analysis = analyze_trade(trade, legs)
+    assert trade_abs_diff(analysis) == 0.5
     test_book_leg_close_skips_already_closed()
     test_book_leg_close_never_writes_zero()
     test_recompute_trade_realized_from_legs()

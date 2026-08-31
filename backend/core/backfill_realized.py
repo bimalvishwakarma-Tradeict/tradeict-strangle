@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from backend.core.delta_client import short_leg_realized_pnl
@@ -208,3 +211,207 @@ def bucket_trade_ids(analyses: list[TradeBackfillAnalysis]) -> dict[str, list[in
         "CLASS_B2": sorted(set(b2_trades)),
         "FALSE_HEALTHY": sorted(set(false_healthy)),
     }
+
+
+def trade_diff(analysis: TradeBackfillAnalysis) -> float:
+    """resolved_sum − stored (stored None treated as 0)."""
+    stored = float(analysis.stored) if analysis.stored is not None else 0.0
+    return round(float(analysis.resolved_total) - stored, 6)
+
+
+def trade_abs_diff(analysis: TradeBackfillAnalysis) -> float:
+    return abs(trade_diff(analysis))
+
+
+def parse_trade_ids_csv(raw: str | None) -> list[int] | None:
+    if raw is None or not str(raw).strip():
+        return None
+    out: list[int] = []
+    for part in str(raw).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        out.append(int(part))
+    return sorted(set(out)) if out else None
+
+
+@dataclass
+class SelectionCriteria:
+    max_abs_diff: float | None = None
+    min_abs_diff: float | None = None
+    trade_ids: list[int] | None = None
+
+    def describe_filters(self) -> list[str]:
+        parts: list[str] = []
+        if self.trade_ids is not None:
+            parts.append(f"--trade-ids={','.join(str(i) for i in self.trade_ids)}")
+        if self.max_abs_diff is not None:
+            parts.append(f"--max-abs-diff={self.max_abs_diff}")
+        if self.min_abs_diff is not None:
+            parts.append(f"--min-abs-diff={self.min_abs_diff}")
+        return parts
+
+
+@dataclass
+class SelectionResult:
+    selected: list[TradeBackfillAnalysis] = field(default_factory=list)
+    filtered_out: list[TradeBackfillAnalysis] = field(default_factory=list)
+    filter_labels: list[str] = field(default_factory=list)
+
+
+def select_analyses(
+    analyses: list[TradeBackfillAnalysis],
+    criteria: SelectionCriteria,
+) -> SelectionResult:
+    """
+    Apply selection filters (not scan filters).
+
+    When no criteria fields are set, all analyses are selected.
+    """
+    has_filter = (
+        criteria.max_abs_diff is not None
+        or criteria.min_abs_diff is not None
+        or criteria.trade_ids is not None
+    )
+    if not has_filter:
+        return SelectionResult(selected=list(analyses))
+
+    selected: list[TradeBackfillAnalysis] = []
+    filtered: list[TradeBackfillAnalysis] = []
+    for row in analyses:
+        tid = int(row.trade_id)
+        ad = trade_abs_diff(row)
+        if criteria.trade_ids is not None and tid not in criteria.trade_ids:
+            filtered.append(row)
+            continue
+        if criteria.max_abs_diff is not None and ad > float(criteria.max_abs_diff):
+            filtered.append(row)
+            continue
+        if criteria.min_abs_diff is not None and ad < float(criteria.min_abs_diff):
+            filtered.append(row)
+            continue
+        selected.append(row)
+
+    labels = criteria.describe_filters()
+    return SelectionResult(
+        selected=selected,
+        filtered_out=filtered,
+        filter_labels=labels,
+    )
+
+
+def format_filtered_out_message(result: SelectionResult) -> str | None:
+    if not result.filtered_out:
+        return None
+    label = " ".join(result.filter_labels) if result.filter_labels else "selection criteria"
+    return (
+        f"FILTERED OUT: {len(result.filtered_out)} trade(s) outside {label} "
+        f"— not modified"
+    )
+
+
+def collect_unrecoverable_legs(
+    analyses: list[TradeBackfillAnalysis],
+    *,
+    include_needs_delta: bool = False,
+) -> list[dict[str, Any]]:
+    """
+    One row per B2 leg — never dedupe by trade_id.
+
+    Default: legs with no exit_order_id (cannot recover without manual/Delta).
+    When include_needs_delta=True, also list B2 legs that have order_id but
+    still lack exit premium (pending Delta fetch).
+    """
+    rows: list[dict[str, Any]] = []
+    for analysis in analyses:
+        for snap in analysis.b2_legs:
+            oid = snap.get("exit_order_id")
+            has_oid = oid is not None and str(oid).strip() != ""
+            if has_oid and not include_needs_delta:
+                continue
+            reason = (
+                "delta_fill_not_found"
+                if has_oid
+                else "no_exit_order_id"
+            )
+            rows.append(
+                {
+                    "trade_id": int(analysis.trade_id),
+                    "leg_id": int(snap["leg_id"]),
+                    "leg_type": snap.get("leg_type"),
+                    "symbol": snap.get("symbol"),
+                    "exit_order_id": str(oid) if has_oid else None,
+                    "reason": reason,
+                }
+            )
+    return rows
+
+
+@dataclass
+class LegChangeRecord:
+    leg_id: int
+    field: str
+    before: Any
+    after: Any
+
+
+@dataclass
+class TradeAuditRecord:
+    trade_id: int
+    stored_before: float | None
+    applied_value: float | None
+    diff: float
+    hedge_position_id: int | None
+    leg_changes: list[LegChangeRecord] = field(default_factory=list)
+
+
+@dataclass
+class BackfillAuditTrail:
+    timestamp_utc: str
+    filters: dict[str, Any]
+    trades: list[TradeAuditRecord] = field(default_factory=list)
+
+    def add_trade(self, record: TradeAuditRecord) -> None:
+        self.trades.append(record)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "timestamp_utc": self.timestamp_utc,
+            "filters": self.filters,
+            "trades": [
+                {
+                    "trade_id": t.trade_id,
+                    "stored_before": t.stored_before,
+                    "applied_value": t.applied_value,
+                    "diff": t.diff,
+                    "hedge_position_id": t.hedge_position_id,
+                    "legs": [
+                        {
+                            "leg_id": lc.leg_id,
+                            "field": lc.field,
+                            "before": lc.before,
+                            "after": lc.after,
+                        }
+                        for lc in t.leg_changes
+                    ],
+                }
+                for t in self.trades
+            ],
+        }
+
+
+def new_audit_trail(filters: dict[str, Any]) -> BackfillAuditTrail:
+    return BackfillAuditTrail(
+        timestamp_utc=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        filters=filters,
+    )
+
+
+def audit_json_path(deploy_dir: Path, timestamp_utc: str) -> Path:
+    return deploy_dir / f"backfill_audit_{timestamp_utc}.json"
+
+
+def write_audit_json(path: Path, trail: BackfillAuditTrail) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(trail.to_dict(), indent=2), encoding="utf-8")
+    return path
