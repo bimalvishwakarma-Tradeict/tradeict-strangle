@@ -53,8 +53,16 @@ export default function PnlSlider({
   const netNum = Number(net)
   const grossAbs = Number.isFinite(grossNum) ? Math.abs(grossNum) : 0
   const netAbs = Number.isFinite(netNum) ? Math.abs(netNum) : 0
-  const netPctOfGross =
-    grossAbs > 0 ? Math.min((netAbs / grossAbs) * 100, 100) : 0
+  const deductionAbsValues = deductions.map((d) =>
+    Math.abs(Number(d.amount) || 0),
+  )
+  const maxScale = Math.max(grossAbs, netAbs, ...deductionAbsValues, 0)
+
+  const barWidthPct = (value) => {
+    const abs = Math.abs(Number(value) || 0)
+    if (!Number.isFinite(abs) || maxScale <= 0) return 0
+    return Math.min(100, (abs / maxScale) * 100)
+  }
 
   const targetProgress =
     targetPct != null && Number.isFinite(Number(targetPct))
@@ -81,7 +89,7 @@ export default function PnlSlider({
       <div className="mb-1 h-2 w-full overflow-hidden rounded-full bg-gray-800">
         <div
           className={`h-full rounded-full transition-all ${barColor(gross)}`}
-          style={{ width: '100%' }}
+          style={{ width: `${barWidthPct(grossNum)}%` }}
         />
       </div>
 
@@ -96,12 +104,7 @@ export default function PnlSlider({
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-800">
             <div
               className="h-full rounded-full bg-yellow-600/70 transition-all"
-              style={{
-                width:
-                  grossAbs > 0
-                    ? `${Math.min(100, (Math.abs(Number(amount) || 0) / grossAbs) * 100)}%`
-                    : '0%',
-              }}
+              style={{ width: `${barWidthPct(amount)}%` }}
             />
           </div>
         </div>
@@ -120,7 +123,7 @@ export default function PnlSlider({
       <div className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-gray-800">
         <div
           className={`h-full rounded-full transition-all ${barColor(net)}`}
-          style={{ width: `${netPctOfGross}%` }}
+          style={{ width: `${barWidthPct(netNum)}%` }}
         />
       </div>
 
