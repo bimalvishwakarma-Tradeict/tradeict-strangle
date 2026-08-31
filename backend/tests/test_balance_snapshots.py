@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock, patch
 
 import anyio
 import pytest
+import time
 
 from backend.core.balance_utils import compute_daily_growth_pct, wallet_to_balance_fields
 from backend.core.delta_client import DeltaClient, _parse_wallet_asset
+from backend.core.delta_ws import client_cache_key, get_ws_margins, _ws_margins_cache
 
 
 def test_compute_daily_growth_pct_positive() -> None:
@@ -83,16 +85,116 @@ def test_wallet_enriches_unrealised_from_positions() -> None:
             }
         )
         assert parsed["unrealised_pnl_pending"] == 1.0
+        with patch(
+            "backend.core.delta_client.get_ws_margins",
+            return_value=None,
+        ):
+            with patch.object(
+                client,
+                "_sum_open_positions_unrealised",
+                new_callable=AsyncMock,
+                return_value=44.44,
+            ):
+                enriched = await client._apply_ws_margins(parsed)
+        assert enriched["unrealised_pnl"] == pytest.approx(44.44)
+        assert enriched["available_margin"] == pytest.approx(51.47, abs=0.01)
+        assert enriched["balance_source"] == "rest_computed"
+        assert enriched["free_cash"] == pytest.approx(7.03)
+        assert "unrealised_pnl_pending" not in enriched
+
+    anyio.run(_run)
+
+
+def test_ws_margins_cache_hit_uses_ws_available_margin() -> None:
+    async def _run() -> None:
+        client = DeltaClient("test-key", "test-secret")
+        ck = client_cache_key("test-key")
+        _ws_margins_cache[ck] = {
+            "USD": {
+                "available_balance": 45.99,
+                "balance": 8.77,
+                "blocked_margin": 1.75,
+                "ts": time.time(),
+            }
+        }
+        parsed = _parse_wallet_asset(
+            {
+                "balance": "8.78",
+                "available_balance": "7.03",
+                "blocked_margin": "1.75",
+                "asset_symbol": "USD",
+            }
+        )
+        with patch.object(
+            client,
+            "_sum_open_positions_unrealised",
+            new_callable=AsyncMock,
+        ) as mock_sum:
+            result = await client._apply_ws_margins(parsed)
+            mock_sum.assert_not_called()
+        assert result["available_margin"] == pytest.approx(45.99)
+        assert result["available_balance"] == pytest.approx(7.03)
+        assert result["free_cash"] == pytest.approx(7.03)
+        assert result["balance_source"] == "websocket"
+        fields = wallet_to_balance_fields(result, usd_inr_rate=85.0)
+        assert fields["balance_source"] == "websocket"
+        assert fields["free_cash"] == pytest.approx(7.03)
+
+    anyio.run(_run)
+
+
+def test_ws_margins_cache_stale_falls_back_to_rest() -> None:
+    async def _run() -> None:
+        client = DeltaClient("test-key", "test-secret")
+        ck = client_cache_key("test-key")
+        _ws_margins_cache[ck] = {
+            "USD": {
+                "available_balance": 45.99,
+                "balance": 8.77,
+                "blocked_margin": 1.75,
+                "ts": time.time() - 120.0,
+            }
+        }
+        assert get_ws_margins("USD", cache_key=ck) is None
+        parsed = _parse_wallet_asset(
+            {
+                "balance": "8.78",
+                "available_balance": "7.03",
+                "blocked_margin": "1.75",
+                "asset_symbol": "USD",
+            }
+        )
         with patch.object(
             client,
             "_sum_open_positions_unrealised",
             new_callable=AsyncMock,
             return_value=44.44,
         ):
-            enriched = await client._enrich_wallet_unrealised(parsed)
-        assert enriched["unrealised_pnl"] == pytest.approx(44.44)
-        assert enriched["available_margin"] == pytest.approx(51.47, abs=0.01)
-        assert "unrealised_pnl_pending" not in enriched
+            result = await client._apply_ws_margins(parsed)
+        assert result["balance_source"] == "rest_computed"
+        assert result["available_margin"] == pytest.approx(51.47, abs=0.01)
+
+    anyio.run(_run)
+
+
+def test_ws_margins_cache_miss_falls_back_to_rest() -> None:
+    async def _run() -> None:
+        client = DeltaClient("other-key", "other-secret")
+        parsed = _parse_wallet_asset(
+            {
+                "balance": "10.0",
+                "available_balance": "8.0",
+                "blocked_margin": "2.0",
+                "unrealized_cashflow": "0",
+            }
+        )
+        with patch(
+            "backend.core.delta_client.get_ws_margins",
+            return_value=None,
+        ):
+            result = await client._apply_ws_margins(parsed)
+        assert result["balance_source"] == "rest_computed"
+        assert result["available_margin"] == pytest.approx(8.0)
 
     anyio.run(_run)
 

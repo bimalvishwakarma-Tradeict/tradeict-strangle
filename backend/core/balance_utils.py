@@ -40,11 +40,14 @@ def wallet_to_balance_fields(
             "available_margin_inr": None,
             "unrealised_pnl_inr": None,
             "free_cash_inr": None,
+            "balance_source": None,
         }
     actual = float(wallet.get("wallet_balance") or wallet.get("balance_usdt") or 0.0)
     blocked = float(wallet.get("position_margin") or 0.0)
-    # Delta's free-to-trade settled cash — NOT the same as Available Margin in UI.
-    free_cash = float(wallet.get("available_balance") or 0.0)
+    # REST settled cash for bot sizing — not WS available_margin.
+    free_cash = float(
+        wallet.get("free_cash") or wallet.get("available_balance") or 0.0
+    )
     unrealised = float(wallet.get("unrealised_pnl") or 0.0)
     available_margin = float(
         wallet.get("available_margin") or (actual + unrealised - blocked)
@@ -57,6 +60,7 @@ def wallet_to_balance_fields(
         "available_margin": round(available_margin, 4),
         "unrealised_pnl": round(unrealised, 4),
         "free_cash": round(free_cash, 4),
+        "balance_source": str(wallet.get("balance_source") or "rest_computed"),
         "actual_balance_inr": round(actual * rate, 0),
         "available_balance_inr": round(free_cash * rate, 0),
         "blocked_amount_inr": round(blocked * rate, 0),

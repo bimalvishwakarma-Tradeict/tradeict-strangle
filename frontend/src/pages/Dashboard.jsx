@@ -401,6 +401,7 @@ function AccountOverviewRow({
   availableMargin,
   availableMarginInr,
   unrealisedPnl,
+  balanceSource,
   freeCash,
   freeCashInr,
   dailyGrowthPct,
@@ -483,6 +484,9 @@ function AccountOverviewRow({
             usd={availableMargin}
             inr={availableMarginInr}
           />
+          {balanceSource !== 'websocket' ? (
+            <div className="text-[10px] text-gray-500">(estimated)</div>
+          ) : null}
           {unrealisedPnl != null &&
           Number.isFinite(Number(unrealisedPnl)) &&
           Math.abs(Number(unrealisedPnl)) > 0.001 ? (
@@ -683,6 +687,7 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
               availableMargin={master.available_margin}
               availableMarginInr={master.available_margin_inr}
               unrealisedPnl={master.unrealised_pnl}
+              balanceSource={master.balance_source}
               freeCash={master.free_cash ?? master.available_balance ?? master.available_usd}
               freeCashInr={
                 master.free_cash_inr ??
@@ -818,6 +823,11 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                     statusKind === 'error' || !slave.is_active
                       ? null
                       : slave.unrealised_pnl
+                  }
+                  balanceSource={
+                    statusKind === 'error' || !slave.is_active
+                      ? null
+                      : slave.balance_source
                   }
                   freeCash={
                     statusKind === 'error' || !slave.is_active

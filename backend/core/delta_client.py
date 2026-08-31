@@ -21,6 +21,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.config import DELTA_EXCHANGE_BASE_URL, IST
+from backend.core.delta_ws import (
+    client_cache_key,
+    ensure_margins_feed,
+    get_ws_margins,
+)
 from backend.core.time_utils import get_dte_label, get_expiry_label_key, get_ist_now
 
 logger = logging.getLogger(__name__)
@@ -553,6 +558,8 @@ class DeltaClient:
         """Fill unrealised_pnl + available_margin when absent from wallet row."""
         if not parsed.get("unrealised_pnl_pending"):
             parsed.pop("unrealised_pnl_pending", None)
+            if "balance_source" not in parsed:
+                parsed["balance_source"] = "rest_computed"
             return parsed
         unrealised = await self._sum_open_positions_unrealised()
         parsed["unrealised_pnl"] = unrealised
@@ -562,8 +569,33 @@ class DeltaClient:
             - float(parsed["position_margin"]),
             4,
         )
+        parsed["balance_source"] = "rest_computed"
         parsed.pop("unrealised_pnl_pending", None)
         return parsed
+
+    async def _apply_ws_margins(self, parsed: dict[str, float]) -> dict[str, float]:
+        """
+        Prefer Delta private WS margins for Available Margin (UI figure).
+
+        REST ``available_balance`` stays as settled free cash for bot sizing.
+        Source when WS live: margins channel ``available_balance`` field.
+        """
+        parsed["free_cash"] = float(parsed.get("available_balance") or 0.0)
+        ck = client_cache_key(self.api_key)
+        ws = get_ws_margins("USD", cache_key=ck)
+        if ws is not None:
+            avail_margin = float(ws["available_balance"])
+            parsed["available_margin"] = round(avail_margin, 4)
+            parsed["unrealised_pnl"] = round(
+                avail_margin
+                - float(parsed["wallet_balance"])
+                + float(parsed["position_margin"]),
+                4,
+            )
+            parsed["balance_source"] = "websocket"
+            parsed.pop("unrealised_pnl_pending", None)
+            return parsed
+        return await self._enrich_wallet_unrealised(parsed)
 
     async def get_wallet_balance(self) -> dict[str, float]:
         """
@@ -573,6 +605,7 @@ class DeltaClient:
         Uses Delta's available_balance and position_margin directly — never
         recomputes available from wallet minus margin.
         """
+        await ensure_margins_feed(self.api_key, self.api_secret)
         result = await self._request("GET", "/v2/wallet/balances")
         balances = result if isinstance(result, list) else result.get("balances", [])
 
@@ -600,21 +633,23 @@ class DeltaClient:
                 fallback = parsed
 
         if preferred is not None:
-            return await self._enrich_wallet_unrealised(preferred)
+            return await self._apply_ws_margins(preferred)
         if fallback is not None:
-            return await self._enrich_wallet_unrealised(fallback)
+            return await self._apply_ws_margins(fallback)
         if first is not None:
-            return await self._enrich_wallet_unrealised(first)
+            return await self._apply_ws_margins(first)
 
         logger.warning("USD/USDT balance not found in wallet balances response")
         return {
             "wallet_balance": 0.0,
             "balance_usdt": 0.0,
             "available_balance": 0.0,
+            "free_cash": 0.0,
             "position_margin": 0.0,
             "order_margin": 0.0,
             "unrealised_pnl": 0.0,
             "available_margin": 0.0,
+            "balance_source": "rest_computed",
         }
 
     async def get_positions(self) -> list[dict[str, Any]]:
