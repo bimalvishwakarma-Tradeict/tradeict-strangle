@@ -95,6 +95,7 @@ async def list_structures(
         _open_basket_net_mtm,
         compute_structure_pnl_live,
     )
+    from backend.engine.trade_reconcile import basket_realized_breakdown
     from backend.models import Adjustment, Leg, Trade
 
     account = _get_active_account(db)
@@ -232,6 +233,7 @@ async def list_structures(
                 net_mtm = float(trade.realized_pnl)
 
             seq = getattr(trade, "basket_seq_in_structure", None)
+            pnl_breakdown = basket_realized_breakdown(legs, trade)
             baskets_out.append(
                 {
                     "basket_seq_in_structure": (
@@ -264,6 +266,7 @@ async def list_structures(
                         else None
                     ),
                     "net_mtm": net_mtm,
+                    **pnl_breakdown,
                     "legs": [
                         {
                             "id": int(lg.id),

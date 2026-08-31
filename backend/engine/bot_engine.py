@@ -1161,6 +1161,7 @@ class BotEngine:
                         trade=trade,
                         exit_premium=exit_px,
                         exit_time=now_utc,
+                        db=db,
                     )
                 else:
                     leg.status = "closed"
@@ -1339,12 +1340,13 @@ class BotEngine:
                 missing_px = await resolve_external_exit_fill(
                     self.delta_client, missing_leg
                 )
-                book_leg_close(
-                    leg=missing_leg,
-                    trade=trade,
-                    exit_premium=missing_px,
-                    exit_time=now_utc,
-                )
+                        book_leg_close(
+                            leg=missing_leg,
+                            trade=trade,
+                            exit_premium=missing_px,
+                            exit_time=now_utc,
+                            db=db,
+                        )
 
             if remaining_leg is not None:
                 await cancel_leg_sl_order(
@@ -1375,6 +1377,7 @@ class BotEngine:
                                 if result.order_id is not None
                                 else None
                             ),
+                            db=db,
                         )
                 else:
                     logger.critical(
@@ -1442,6 +1445,7 @@ class BotEngine:
                         trade=trade,
                         exit_premium=exit_px,
                         exit_time=now_utc,
+                        db=db,
                     )
                 else:
                     leftover.status = "closed"
@@ -3162,6 +3166,7 @@ class BotEngine:
                         if res is not None and res.order_id is not None
                         else None
                     ),
+                    db=exit_db,
                 )
                 booked_ids.add(int(leg_db.id))
                 lt = str(leg_db.leg_type or "").lower()
@@ -3222,6 +3227,7 @@ class BotEngine:
                         trade=trade_row,
                         exit_premium=exit_px,
                         exit_time=now_utc,
+                        db=exit_db,
                     )
             for leftover in leftover_tracked:
                 logger.info(
@@ -3242,6 +3248,7 @@ class BotEngine:
                     trade=trade_row,
                     exit_premium=exit_px,
                     exit_time=now_utc,
+                    db=exit_db,
                 )
 
             # Clear conversion mode

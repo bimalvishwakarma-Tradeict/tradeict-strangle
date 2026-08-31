@@ -40,7 +40,9 @@ from backend.engine.trade_reconcile import (
     next_basket_number,
     next_basket_seq_in_structure,
     pick_call_put_legs,
+    recompute_trade_realized_pnl,
     reconcile_open_legs_with_delta,
+    resolve_external_exit_fill,
 )
 from backend.models import Account, Adjustment, Leg, Setting, Trade
 from backend.schemas import (
@@ -2227,7 +2229,9 @@ async def exit_trade(
                 is_long = bool(getattr(leftover, "is_long", False)) or str(
                     leftover.leg_type or ""
                 ).startswith("hedge")
-                exit_px = float(leftover.exit_premium or 0.0)
+                exit_px: float | None = None
+                exit_fee: float | None = None
+                exit_oid: str | None = None
                 try:
                     if is_long:
                         res = await bot_engine.order_executor.close_long_position(
@@ -2241,16 +2245,28 @@ async def exit_trade(
                             leftover, client
                         )
                     if res.success:
-                        exit_px = float(res.filled_price or 0)
+                        px = float(res.filled_price or 0)
+                        exit_px = px if px > 0 else None
+                        if res.commission is not None:
+                            exit_fee = abs(float(res.commission))
+                        if res.order_id is not None:
+                            exit_oid = str(res.order_id)
                 except Exception as exc:
                     logger.warning(
                         "Emergency leftover close failed %s: %s",
                         leftover.symbol,
                         exc,
                     )
-                leftover.status = "closed"
-                leftover.exit_time = get_utc_now()
-                leftover.exit_premium = exit_px
+                book_leg_close(
+                    leg=leftover,
+                    trade=trade,
+                    exit_premium=exit_px,
+                    exit_time=get_utc_now(),
+                    exit_fee_usd=exit_fee,
+                    exit_order_id=exit_oid,
+                    db=db,
+                )
+            recompute_trade_realized_pnl(db, trade)
             db.commit()
 
             # Funnel owns Trade.status / mark_closed (slaves already mirrored)
@@ -2320,6 +2336,7 @@ async def exit_trade(
 
         # Close tracked long hedge with SELL
         if hedge_leg is not None:
+            hedge_close = None
             try:
                 hedge_exists = await client.verify_position_exists(
                     int(hedge_leg.product_id)
@@ -2333,44 +2350,89 @@ async def exit_trade(
                     delta_client=client,
                     symbol_for_fallback=str(hedge_leg.symbol),
                 )
-                if hedge_close.success:
-                    hedge_leg.status = "closed"
-                    hedge_leg.exit_time = get_utc_now()
-                    hedge_leg.exit_premium = float(hedge_close.filled_price or 0)
-                else:
+                if not hedge_close.success:
                     logger.critical(
                         "Exit hedge failed trade=%s: %s",
                         trade_id,
                         hedge_close.error,
                     )
-            else:
-                hedge_leg.status = "closed"
-                hedge_leg.exit_time = get_utc_now()
+            hedge_px: float | None = None
+            if hedge_close is not None and hedge_close.success:
+                px = float(hedge_close.filled_price or 0)
+                hedge_px = px if px > 0 else None
+            elif not hedge_exists:
+                hedge_px = await resolve_external_exit_fill(client, hedge_leg)
+            book_leg_close(
+                leg=hedge_leg,
+                trade=trade,
+                exit_premium=hedge_px,
+                exit_time=get_utc_now(),
+                exit_fee_usd=(
+                    abs(float(hedge_close.commission))
+                    if hedge_close is not None
+                    and hedge_close.commission is not None
+                    else None
+                ),
+                exit_order_id=(
+                    str(hedge_close.order_id)
+                    if hedge_close is not None and hedge_close.order_id is not None
+                    else None
+                ),
+                db=db,
+            )
 
         now_utc = get_utc_now()
         if call_leg is not None:
-            call_leg.status = "closed"
-            call_leg.exit_time = now_utc
+            call_px: float | None = None
             if call_close is not None and call_close.success:
-                call_leg.exit_premium = float(call_close.filled_price or 0.0)
-                if call_close.order_id is not None:
-                    call_leg.exit_order_id = str(call_close.order_id)
-                if call_close.commission is not None:
-                    call_leg.exit_fee_usd = abs(float(call_close.commission))
+                px = float(call_close.filled_price or 0.0)
+                call_px = px if px > 0 else None
             elif not call_exists:
-                call_leg.exit_premium = float(call_leg.exit_premium or 0.0)
+                call_px = await resolve_external_exit_fill(client, call_leg)
+            book_leg_close(
+                leg=call_leg,
+                trade=trade,
+                exit_premium=call_px,
+                exit_time=now_utc,
+                exit_fee_usd=(
+                    abs(float(call_close.commission))
+                    if call_close is not None
+                    and call_close.commission is not None
+                    else None
+                ),
+                exit_order_id=(
+                    str(call_close.order_id)
+                    if call_close is not None and call_close.order_id is not None
+                    else None
+                ),
+                db=db,
+            )
 
         if put_leg is not None:
-            put_leg.status = "closed"
-            put_leg.exit_time = now_utc
+            put_px: float | None = None
             if put_close is not None and put_close.success:
-                put_leg.exit_premium = float(put_close.filled_price or 0.0)
-                if put_close.order_id is not None:
-                    put_leg.exit_order_id = str(put_close.order_id)
-                if put_close.commission is not None:
-                    put_leg.exit_fee_usd = abs(float(put_close.commission))
+                px = float(put_close.filled_price or 0.0)
+                put_px = px if px > 0 else None
             elif not put_exists:
-                put_leg.exit_premium = float(put_leg.exit_premium or 0.0)
+                put_px = await resolve_external_exit_fill(client, put_leg)
+            book_leg_close(
+                leg=put_leg,
+                trade=trade,
+                exit_premium=put_px,
+                exit_time=now_utc,
+                exit_fee_usd=(
+                    abs(float(put_close.commission))
+                    if put_close is not None
+                    and put_close.commission is not None
+                    else None
+                ),
+                exit_order_id=(
+                    str(put_close.order_id)
+                    if put_close is not None and put_close.order_id is not None
+                    else None
+                ),
+                db=db,
+            )
 
         # True orphans only — hedge_call/hedge_put are tracked basket legs
         tracked_types = {"call", "put", "hedge_call", "hedge_put"}
@@ -2392,9 +2454,21 @@ async def exit_trade(
                     "[EXIT_CLEANUP] Closing untracked orphan leg %s",
                     leftover.symbol,
                 )
-            leftover.status = "closed"
-            leftover.exit_time = get_utc_now()
-            leftover.exit_premium = float(leftover.exit_premium or 0.0)
+            existing_px = getattr(leftover, "exit_premium", None)
+            exit_px = (
+                float(existing_px)
+                if existing_px is not None and float(existing_px) > 0
+                else await resolve_external_exit_fill(client, leftover)
+            )
+            book_leg_close(
+                leg=leftover,
+                trade=trade,
+                exit_premium=exit_px,
+                exit_time=get_utc_now(),
+                db=db,
+            )
+
+        recompute_trade_realized_pnl(db, trade)
 
         call_ok = (
             call_leg is None
@@ -2412,8 +2486,6 @@ async def exit_trade(
             "slaves_failed": 0,
         }
         if success:
-            if trade.realized_pnl is None:
-                trade.realized_pnl = 0.0
             db.commit()
             # Funnel owns Trade.status / mark_closed (mirror already hoisted)
             funnel = await bot_engine.close_master_trade(

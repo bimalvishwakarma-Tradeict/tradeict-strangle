@@ -984,6 +984,73 @@ function AutoTradeBanner({ status, activeTrade, onEnterNow }) {
   )
 }
 
+function formatSignedMoney2(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  const sign = n > 0 ? '+' : n < 0 ? '−' : ''
+  return `${sign}$${Math.abs(n).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
+}
+
+function formatDeduction2(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n === 0) return '−$0.00'
+  return `−$${Math.abs(n).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
+}
+
+function BasketRealizedBreakdown({ basket }) {
+  const gross = basket.gross_realized
+  const entryFees = basket.entry_fees_usd
+  const exitFees = basket.exit_fees_usd
+  const entrySpread = basket.entry_spread_usd
+  const net = basket.net_realized
+  const unresolved = Number(basket.legs_unresolved || 0)
+  const hasBreakdown =
+    gross != null ||
+    entryFees != null ||
+    exitFees != null ||
+    entrySpread != null ||
+    net != null
+
+  if (!hasBreakdown) return null
+
+  const rows = [
+    { label: 'Gross realized', value: formatSignedMoney2(gross), className: pnlColor(gross) },
+    { label: 'Entry fees', value: formatDeduction2(entryFees), className: 'text-yellow-400/90' },
+    { label: 'Exit fees', value: formatDeduction2(exitFees), className: 'text-yellow-400/90' },
+    { label: 'Entry spread', value: formatDeduction2(entrySpread), className: 'text-yellow-400/90' },
+  ]
+
+  return (
+    <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs">
+      {rows.map(({ label, value, className }) => (
+        <div
+          key={label}
+          className="flex items-baseline justify-between gap-2 py-0.5"
+        >
+          <span className="text-gray-500">{label}</span>
+          <span className={className}>{value}</span>
+        </div>
+      ))}
+      <div className="my-1.5 border-t border-gray-700" />
+      <div className="flex items-baseline justify-between gap-2 font-semibold">
+        <span className="text-gray-300">Net</span>
+        <span className={pnlColor(net)}>{formatSignedMoney2(net)}</span>
+      </div>
+      {unresolved > 0 && (
+        <p className="mt-2 text-[11px] text-amber-400">
+          ⚠ {unresolved} leg(s) unresolved — P&amp;L incomplete
+        </p>
+      )}
+    </div>
+  )
+}
+
 function StructureBasketRow({ basket, ledgerLegs = [] }) {
   const [open, setOpen] = useState(false)
   const seq = basket.basket_seq_in_structure ?? '—'
@@ -1071,6 +1138,7 @@ function StructureBasketRow({ basket, ledgerLegs = [] }) {
               </tbody>
             </table>
           </div>
+          <BasketRealizedBreakdown basket={basket} />
           {(basket.adjustments || []).length > 0 && (
             <div>
               <div className="mb-1 text-xs font-semibold uppercase text-gray-500">
