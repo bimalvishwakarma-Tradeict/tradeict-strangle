@@ -199,6 +199,50 @@ def test_ws_margins_cache_miss_falls_back_to_rest() -> None:
     anyio.run(_run)
 
 
+def test_seed_margins_cache_from_rest() -> None:
+    async def _run() -> None:
+        from backend.core.delta_ws import (
+            DeltaMarginsWebSocket,
+            get_ws_margins,
+            _ws_margins_cache,
+        )
+
+        ws = DeltaMarginsWebSocket("test-key", "test-secret", "master")
+        mock_wallet = [
+            {
+                "asset_symbol": "USD",
+                "balance": "8.78",
+                "available_balance": "7.03",
+                "blocked_margin": "1.75",
+            }
+        ]
+        with patch(
+            "backend.core.delta_client.DeltaClient._request",
+            new_callable=AsyncMock,
+            return_value=mock_wallet,
+        ):
+            with patch.object(
+                DeltaClient,
+                "_sum_open_positions_unrealised",
+                new_callable=AsyncMock,
+                return_value=44.44,
+            ):
+                with patch.object(
+                    DeltaClient,
+                    "close",
+                    new_callable=AsyncMock,
+                ):
+                    await ws._seed_margins_cache_from_rest()
+
+        cached = get_ws_margins("USD", cache_key="master")
+        assert cached is not None
+        assert cached["available_balance"] == pytest.approx(51.47, abs=0.01)
+        assert cached.get("source") == "rest_seed"
+        _ws_margins_cache.pop("master", None)
+
+    anyio.run(_run)
+
+
 def test_parse_wallet_asset_reads_blocked_margin_cross_mode() -> None:
     asset = {
         "balance": "8.7799",

@@ -314,6 +314,82 @@ class DeltaMarginsWebSocket:
         await self._ws.send(json.dumps(payload))
         logger.info("[MARGINS_WS] Subscribed margins %s", self.cache_key)
 
+    async def _seed_margins_cache_from_rest(self) -> None:
+        """
+        Seed cache right after subscribe — Delta only pushes margins on change.
+
+        available_margin = wallet_balance + sum(positions upnl) - blocked_margin
+        """
+        from backend.core.delta_client import DeltaClient, _parse_wallet_asset
+
+        client = DeltaClient(self.api_key, self.api_secret)
+        try:
+            result = await client._request("GET", "/v2/wallet/balances")
+            balances = result if isinstance(result, list) else result.get("balances", [])
+
+            parsed: dict[str, float] | None = None
+            fallback: dict[str, float] | None = None
+            for asset in balances:
+                if not isinstance(asset, dict):
+                    continue
+                row = _parse_wallet_asset(asset)
+                if fallback is None:
+                    fallback = row
+                symbol = (
+                    asset.get("asset_symbol")
+                    or asset.get("symbol")
+                    or asset.get("currency")
+                    or ""
+                ).upper()
+                if symbol == "USD":
+                    parsed = row
+                    break
+            if parsed is None:
+                parsed = fallback
+            if parsed is None:
+                logger.warning(
+                    "[MARGINS_WS] REST seed skipped — no wallet row for %s",
+                    self.cache_key,
+                )
+                return
+
+            bal = float(parsed["wallet_balance"])
+            blocked = float(parsed["position_margin"])
+            total_upnl = await client._sum_open_positions_unrealised()
+            available_margin = round(bal + total_upnl - blocked, 4)
+
+            _store_ws_margins(
+                self.cache_key,
+                "USD",
+                {
+                    "available_balance": available_margin,
+                    "balance": bal,
+                    "blocked_margin": blocked,
+                    "ts": time.time(),
+                    "source": "rest_seed",
+                },
+            )
+            logger.info(
+                "[MARGINS_WS] Cache seeded from REST for %s: avail=%.4f",
+                self.cache_key,
+                available_margin,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[MARGINS_WS] REST seed failed for %s: %s",
+                self.cache_key,
+                exc,
+            )
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                logger.debug(
+                    "[MARGINS_WS] REST seed client close ignored for %s",
+                    self.cache_key,
+                    exc_info=True,
+                )
+
     async def run(self) -> None:
         """Connect, authenticate, subscribe margins, listen until disconnect."""
         self._closed = False
@@ -349,6 +425,7 @@ class DeltaMarginsWebSocket:
                         self._authenticated = True
                         logger.info("[MARGINS_WS] Authenticated %s", self.cache_key)
                         await self._subscribe_margins()
+                        await self._seed_margins_cache_from_rest()
                     else:
                         logger.error(
                             "[MARGINS_WS] Auth failed %s: %s",
