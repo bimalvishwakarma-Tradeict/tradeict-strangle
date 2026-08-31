@@ -28,7 +28,7 @@ from backend.config import (
 )
 from backend.core.bot_logger import log_and_buffer
 from backend.core.delta_client import DeltaClient
-from backend.core.delta_ws import DeltaWebSocket
+from backend.core.delta_ws import DeltaWebSocket, ensure_margins_feed
 from backend.core.encryption import decrypt
 from backend.core.time_utils import (
     get_hours_to_expiry,
@@ -109,6 +109,7 @@ class BotEngine:
         self.is_running = True
         logger.info("🤖 Bot engine started")
         self._refresh_delta_client()
+        await self._start_margins_feed()
         with self.db_factory() as db:
             count = self.position_tracker.load_from_db(db)
             logger.info("Loaded %s active trades into position tracker", count)
@@ -126,6 +127,30 @@ class BotEngine:
         )
         logger.info("Starting monitoring loop...")
         await self.monitoring_loop()
+
+    async def _start_margins_feed(self) -> None:
+        """Start master margins WS at bot startup (do not wait for first API call)."""
+        try:
+            with self.db_factory() as db:
+                account = (
+                    db.query(Account)
+                    .filter(Account.is_active.is_(True))
+                    .order_by(Account.id.asc())
+                    .first()
+                )
+                if account is None:
+                    logger.info("[MARGINS_WS] No active master account — feed skipped")
+                    return
+                api_key = decrypt(account.api_key_encrypted)
+                api_secret = decrypt(account.api_secret_encrypted)
+            await ensure_margins_feed(api_key, api_secret)
+            logger.info("[MARGINS_WS] Master margins feed started at bot startup")
+        except Exception as exc:
+            logger.warning(
+                "[MARGINS_WS] Failed to start master margins feed: %s",
+                exc,
+                exc_info=True,
+            )
 
     async def stop(self) -> None:
         self.is_running = False

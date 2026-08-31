@@ -300,7 +300,7 @@ class DeltaMarginsWebSocket:
             },
         }
         await self._ws.send(json.dumps(payload))
-        logger.info("Sent Delta margins WS key-auth (cache_key=%s…)", self.cache_key[:8])
+        logger.info("[MARGINS_WS] Sent key-auth for %s", self.cache_key)
 
     async def _subscribe_margins(self) -> None:
         if self._ws is None:
@@ -312,13 +312,13 @@ class DeltaMarginsWebSocket:
             },
         }
         await self._ws.send(json.dumps(payload))
-        logger.info("Subscribed Delta margins channel (cache_key=%s…)", self.cache_key[:8])
+        logger.info("[MARGINS_WS] Subscribed margins %s", self.cache_key)
 
     async def run(self) -> None:
         """Connect, authenticate, subscribe margins, listen until disconnect."""
         self._closed = False
         self._authenticated = False
-        logger.info("Connecting Delta margins WS: %s", self.WS_URL)
+        logger.info("[MARGINS_WS] Connecting %s to %s", self.cache_key, self.WS_URL)
         async with websockets.connect(
             self.WS_URL,
             ping_interval=20,
@@ -347,30 +347,30 @@ class DeltaMarginsWebSocket:
                 if msg_type == "key-auth":
                     if data.get("success"):
                         self._authenticated = True
-                        logger.info(
-                            "Delta margins WS authenticated (cache_key=%s…)",
-                            self.cache_key[:8],
-                        )
+                        logger.info("[MARGINS_WS] Authenticated %s", self.cache_key)
                         await self._subscribe_margins()
                     else:
                         logger.error(
-                            "Delta margins WS auth failed: %s",
+                            "[MARGINS_WS] Auth failed %s: %s",
+                            self.cache_key,
                             data.get("message") or data.get("status"),
                         )
                         return
                     continue
                 if not self._authenticated and time.time() > auth_deadline:
-                    logger.error("Delta margins WS auth timeout (cache_key=%s…)", self.cache_key[:8])
+                    logger.error(
+                        "[MARGINS_WS] Auth timeout %s",
+                        self.cache_key,
+                    )
                     return
                 if msg_type == "margins":
                     parsed = _parse_margins_message(data)
                     if parsed is not None:
                         _store_ws_margins(self.cache_key, "USD", parsed)
                         logger.debug(
-                            "Margins WS USD update avail=%s balance=%s blocked=%s",
+                            "[MARGINS_WS] Cache updated %s: avail=%s",
+                            self.cache_key,
                             parsed["available_balance"],
-                            parsed["balance"],
-                            parsed["blocked_margin"],
                         )
         self._ws = None
 
@@ -405,19 +405,22 @@ class MarginsFeedManager:
 
     @classmethod
     async def _run_feed(cls, api_key: str, api_secret: str, cache_key: str) -> None:
+        logger.info("[MARGINS_WS] Starting feed for %s", cache_key)
         while True:
             try:
-                feed = DeltaMarginsWebSocket(api_key, api_secret, cache_key)
-                await feed.run()
+                ws = DeltaMarginsWebSocket(api_key, api_secret, cache_key)
+                logger.info("[MARGINS_WS] Connecting %s...", cache_key)
+                await ws.run()
             except asyncio.CancelledError:
-                raise
+                logger.info("[MARGINS_WS] Feed cancelled for %s", cache_key)
+                break
             except Exception as exc:
                 logger.warning(
-                    "Margins feed reconnecting (cache_key=%s…): %s",
-                    cache_key[:8],
+                    "[MARGINS_WS] Feed error %s: %s — retry in 30s",
+                    cache_key,
                     exc,
                 )
-            await asyncio.sleep(5.0)
+                await asyncio.sleep(30.0)
 
     @classmethod
     async def stop_all(cls) -> None:
