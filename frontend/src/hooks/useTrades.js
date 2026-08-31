@@ -15,12 +15,23 @@ function shortLegUpnl(entry, offer, qty) {
   return (o - e) * -q * OPTIONS_CONTRACT_VALUE
 }
 
-/** Bot-engine mark-based gross (realized + delta_upnl). Prefer over REST gross_mtm (offer-based). */
-function resolveMarkGrossMtm(trade) {
-  const calc = Number(trade?.calculated_pnl)
-  if (Number.isFinite(calc)) return calc
+/** Live mark-based UPNL only — matches Delta UI gross display (B24). */
+function resolveDisplayGrossUpnl(trade) {
+  const upnl = Number(
+    trade?.delta_upnl ?? trade?.unrealized_pnl ?? trade?.combined_upnl,
+  )
+  if (Number.isFinite(upnl)) return upnl
   const gross = Number(trade?.gross_mtm ?? trade?.total_pnl)
   return Number.isFinite(gross) ? gross : 0
+}
+
+/** Total position value (realized + live UPNL) — used for net MTM math. */
+function resolveCalculatedPnl(trade, deltaUpnl) {
+  const calc = Number(trade?.calculated_pnl)
+  if (Number.isFinite(calc)) return calc
+  const realized = Number(trade?.realized_pnl)
+  const realizedNum = Number.isFinite(realized) ? realized : 0
+  return deltaUpnl + realizedNum
 }
 
 /**
@@ -48,7 +59,8 @@ export function useTrades() {
       // Never keep flat/closed baskets on the live dashboard
       if (status && status !== 'active') continue
       if (Number.isFinite(openCount) && openCount <= 0) continue
-      const gross = resolveMarkGrossMtm(trade)
+      const grossDisplay = resolveDisplayGrossUpnl(trade)
+      const calculated = resolveCalculatedPnl(trade, grossDisplay)
       const slipPct =
         trade.slippage_pct != null && Number.isFinite(Number(trade.slippage_pct))
           ? Number(trade.slippage_pct)
@@ -57,7 +69,7 @@ export function useTrades() {
         trade.slippage_amount != null &&
         Number.isFinite(Number(trade.slippage_amount))
           ? Number(trade.slippage_amount)
-          : Math.abs(gross) * (slipPct / 100)
+          : Math.abs(calculated) * (slipPct / 100)
       const fees = Number(trade.fees_paid) || 0
       const estExit = Number(trade.est_exit_fees) || 0
       const deductions =
@@ -68,14 +80,16 @@ export function useTrades() {
       const net =
         trade.net_mtm != null && Number.isFinite(Number(trade.net_mtm))
           ? Number(trade.net_mtm)
-          : gross - deductions
+          : calculated - deductions
       next.set(id, {
         ...trade,
         slippage_pct: slipPct,
         slippage_amount: slipAmt,
         total_deductions: deductions,
         net_mtm: net,
-        gross_mtm: gross,
+        gross_mtm: grossDisplay,
+        calculated_pnl: calculated,
+        total_pnl: calculated,
       })
     }
     setTradeMap(next)
@@ -220,14 +234,17 @@ export function useTrades() {
           msg.realized_pnl != null
             ? Number(msg.realized_pnl)
             : existing.realized_pnl
-        const gross =
+        const grossDisplay =
+          deltaUpnl != null && Number.isFinite(Number(deltaUpnl))
+            ? Number(deltaUpnl)
+            : resolveDisplayGrossUpnl({ ...existing, ...msg })
+        const calculated =
           msg.calculated_pnl != null && Number.isFinite(Number(msg.calculated_pnl))
             ? Number(msg.calculated_pnl)
-            : msg.gross_mtm != null
-              ? Number(msg.gross_mtm)
-              : msg.total_pnl != null
-                ? Number(msg.total_pnl)
-                : existing.gross_mtm
+            : resolveCalculatedPnl(
+                { ...existing, ...msg, delta_upnl: grossDisplay, realized_pnl: realized },
+                grossDisplay,
+              )
         const feesPaid =
           msg.fees_paid != null ? Number(msg.fees_paid) : existing.fees_paid
         const estExit =
@@ -249,7 +266,7 @@ export function useTrades() {
         const slipAmt =
           slipAmtRaw != null && Number.isFinite(Number(slipAmtRaw))
             ? Number(slipAmtRaw)
-            : Math.abs(Number(gross) || 0) * (slipPct / 100)
+            : Math.abs(Number(calculated) || 0) * (slipPct / 100)
         const deductionsRaw =
           msg.total_deductions != null
             ? Number(msg.total_deductions)
@@ -263,7 +280,7 @@ export function useTrades() {
             ? Number(msg.net_mtm)
             : existing.net_mtm != null
               ? Number(existing.net_mtm)
-              : (Number(gross) || 0) - deductions
+              : (Number(calculated) || 0) - deductions
 
         next.set(msg.trade_id, {
           ...existing,
@@ -361,12 +378,9 @@ export function useTrades() {
           combined_upnl: deltaUpnl,
           unrealized_pnl: deltaUpnl,
           realized_pnl: realized,
-          calculated_pnl:
-            msg.calculated_pnl != null
-              ? Number(msg.calculated_pnl)
-              : existing.calculated_pnl,
-          gross_mtm: gross,
-          total_pnl: gross,
+          calculated_pnl: calculated,
+          gross_mtm: grossDisplay,
+          total_pnl: calculated,
           net_mtm: net,
           fees_paid: feesPaid,
           est_exit_fees: estExit,

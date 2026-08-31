@@ -671,12 +671,15 @@ export default function PositionCard({
   )
   const feesPaid = n(trade.fees_paid)
   const estExitFees = n(trade.est_exit_fees)
-  const grossMtm =
+  const grossDisplay = n(
+    trade.delta_upnl ?? trade.unrealized_pnl ?? unrealized ?? trade.gross_mtm,
+  )
+  const calculatedTotal =
     trade.calculated_pnl != null &&
     trade.calculated_pnl !== '' &&
     Number.isFinite(Number(trade.calculated_pnl))
       ? n(trade.calculated_pnl)
-      : n(trade.gross_mtm)
+      : grossDisplay + realized
   const entrySpreadForSl =
     trade.entry_spread_for_sl != null && trade.entry_spread_for_sl !== ''
       ? n(trade.entry_spread_for_sl)
@@ -687,7 +690,7 @@ export default function PositionCard({
     trade.gross_mtm_for_stoploss != null && trade.gross_mtm_for_stoploss !== ''
       ? n(trade.gross_mtm_for_stoploss)
       : entrySpreadForSl != null
-        ? grossMtm + entrySpreadForSl
+        ? calculatedTotal + entrySpreadForSl
         : null
   const expectedExitSpread =
     trade.expected_exit_spread_usd != null && trade.expected_exit_spread_usd !== ''
@@ -702,7 +705,7 @@ export default function PositionCard({
     trade.slippage_pct != null && trade.slippage_pct !== ''
       ? n(trade.slippage_pct)
       : 2.0
-  const slippageAmountComputed = Math.abs(grossMtm) * (slippagePct / 100)
+  const slippageAmountComputed = Math.abs(calculatedTotal) * (slippagePct / 100)
   const slippageAmount =
     trade.slippage_amount != null && trade.slippage_amount !== ''
       ? n(trade.slippage_amount)
@@ -715,7 +718,7 @@ export default function PositionCard({
         slippageAmount +
         (expectedExitSpread != null ? expectedExitSpread : 0)
   const computedNet =
-    grossMtm -
+    calculatedTotal -
     feesPaid -
     estExitFees -
     slippageAmount -
@@ -1168,7 +1171,8 @@ export default function PositionCard({
           <div className="px-2">
             <PnlSlider
               grossLabel="GROSS MTM"
-              gross={grossMtm}
+              gross={grossDisplay}
+              realized={realized}
               net={netMtm}
               netLabel="NET MTM"
               deductions={basketDeductions}
@@ -1499,8 +1503,10 @@ export default function PositionCard({
           </div>
           <div className="my-1 border-t border-gray-600" />
           <div className="flex justify-between font-medium text-white">
-            <span>Gross MTM</span>
-            <span className={pnlColor(grossMtm)}>{fmtSignedMoney(grossMtm)}</span>
+            <span>Gross MTM (live UPNL)</span>
+            <span className={pnlColor(grossDisplay)}>
+              {fmtSignedMoney(grossDisplay)}
+            </span>
           </div>
           <div className="flex justify-between text-yellow-300">
             <span>Entry Spread (for SL)</span>
@@ -1559,8 +1565,10 @@ export default function PositionCard({
         </div>
         <div className="flex items-center gap-2 text-lg font-bold">
           <span className="text-gray-300">GROSS:</span>
-          <span className={pnlColor(grossMtm)}>{fmtSignedMoney(grossMtm)}</span>
-          <span className="text-xs font-normal text-gray-500">← Delta Total UPNL</span>
+          <span className={pnlColor(grossDisplay)}>
+            {fmtSignedMoney(grossDisplay)}
+          </span>
+          <span className="text-xs font-normal text-gray-500">← Delta live UPNL</span>
         </div>
         <div className="h-2.5 w-full overflow-hidden rounded-full bg-gray-700">
           <div
@@ -2136,9 +2144,9 @@ export default function PositionCard({
                 <span className="mt-2 block text-xs text-gray-400">
                   = $
                   {fmtMoney(
-                    (Math.abs(grossMtm) * (Number(editValue) || 0)) / 100,
+                    (Math.abs(calculatedTotal) * (Number(editValue) || 0)) / 100,
                   )}{' '}
-                  on current ${fmtMoney(grossMtm)} gross MTM
+                  on current ${fmtMoney(calculatedTotal)} position value
                 </span>
               )}
             </label>

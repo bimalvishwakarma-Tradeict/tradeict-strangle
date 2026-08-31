@@ -42,6 +42,8 @@ export default function PnlSlider({
   gross,
   net,
   netLabel = 'Net MTM',
+  realized,
+  realizedLabel = '📌 Realized P&L',
   deductions = [],
   targetPct,
   targetUsd,
@@ -51,12 +53,21 @@ export default function PnlSlider({
 }) {
   const grossNum = Number(gross)
   const netNum = Number(net)
+  const realizedNum = Number(realized)
+  const showRealized = Number.isFinite(realizedNum)
   const grossAbs = Number.isFinite(grossNum) ? Math.abs(grossNum) : 0
   const netAbs = Number.isFinite(netNum) ? Math.abs(netNum) : 0
+  const realizedAbs = showRealized ? Math.abs(realizedNum) : 0
   const deductionAbsValues = deductions.map((d) =>
     Math.abs(Number(d.amount) || 0),
   )
-  const maxScale = Math.max(grossAbs, netAbs, ...deductionAbsValues, 0)
+  const maxScale = Math.max(
+    grossAbs,
+    netAbs,
+    realizedAbs,
+    ...deductionAbsValues,
+    0,
+  )
 
   const barWidthPct = (value) => {
     const abs = Math.abs(Number(value) || 0)
@@ -92,6 +103,19 @@ export default function PnlSlider({
           style={{ width: `${barWidthPct(grossNum)}%` }}
         />
       </div>
+
+      {showRealized && (
+        <div className="mt-2 rounded-md border border-gray-700/80 bg-gray-900/40 px-2 py-1.5">
+          <div className="flex items-baseline justify-between gap-2 text-xs">
+            <span className="text-gray-400" title="Booked P&L from closed legs">
+              {realizedLabel}
+            </span>
+            <span className={`font-medium ${pnlClass(realized)}`}>
+              {fmtSigned(realized, 4)}
+            </span>
+          </div>
+        </div>
+      )}
 
       {deductions.map(({ label, amount, title }) => (
         <div key={label} className="mt-2">
