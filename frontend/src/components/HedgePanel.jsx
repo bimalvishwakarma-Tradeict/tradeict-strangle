@@ -274,7 +274,8 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                   <th className="pb-1 pr-2">Strike</th>
                   <th className="pb-1 pr-2">Entry</th>
                   <th className="pb-1 pr-2">Now</th>
-                  <th className="pb-1">UPL</th>
+                  <th className="pb-1 pr-2">UPL</th>
+                  <th className="pb-1">Qty</th>
                 </tr>
               </thead>
               <tbody className="font-mono text-gray-200">
@@ -283,18 +284,20 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
                   <td className="py-1 pr-2">{fmtStrike(strike)}</td>
                   <td className="py-1 pr-2">${fmtMoney(call.entry_fill)}</td>
                   <td className="py-1 pr-2">${fmtMoney(call.current_bid)}</td>
-                  <td className={`py-1 font-medium ${pnlClass(call.upl)}`}>
+                  <td className={`py-1 pr-2 font-medium ${pnlClass(call.upl)}`}>
                     {fmtSigned(call.upl, 4)}
                   </td>
+                  <td className="py-1 text-gray-300">{qty}</td>
                 </tr>
                 <tr>
                   <td className="py-1 pr-2 font-medium text-amber-300">PUT</td>
                   <td className="py-1 pr-2">{fmtStrike(strike)}</td>
                   <td className="py-1 pr-2">${fmtMoney(put.entry_fill)}</td>
                   <td className="py-1 pr-2">${fmtMoney(put.current_bid)}</td>
-                  <td className={`py-1 font-medium ${pnlClass(put.upl)}`}>
+                  <td className={`py-1 pr-2 font-medium ${pnlClass(put.upl)}`}>
                     {fmtSigned(put.upl, 4)}
                   </td>
+                  <td className="py-1 text-gray-300">{qty}</td>
                 </tr>
               </tbody>
             </table>

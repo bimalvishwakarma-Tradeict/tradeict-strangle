@@ -12,7 +12,7 @@ from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt, encrypt
 from backend.core.time_utils import get_utc_now
 from backend.database import get_db, get_or_create_auto_settings, get_usd_inr_rate
-from backend.models import Account, SlaveAccount, SlaveTrade, Structure, Trade
+from backend.models import Account, HedgePosition, SlaveAccount, SlaveTrade, Structure, Trade
 from backend.schemas import (
     SlaveAccountCreate,
     SlaveAccountResponse,
@@ -904,6 +904,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
     Aggregate dashboard view: master + each slave with balances, MTM, targets.
     """
     from backend.config import TradeStatus
+    from backend.core.balance_snapshots import build_balance_detail
     from backend.engine.bot_engine import bot_engine
 
     rate = get_usd_inr_rate(db)
@@ -918,6 +919,8 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
 
     master_balance_usd = 0.0
     master_available_usd = 0.0
+    master_blocked_usd = 0.0
+    master_wallet: dict[str, float] | None = None
     master_name = "Not connected"
     master_connected = False
     master_error: str | None = None
@@ -932,15 +935,60 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             )
             try:
                 wallet = await client.get_wallet_balance()
-                master_balance_usd = float(wallet.get("balance_usdt", 0.0) or 0.0)
+                master_wallet = wallet
+                master_balance_usd = float(
+                    wallet.get("wallet_balance") or wallet.get("balance_usdt", 0.0) or 0.0
+                )
                 master_available_usd = float(
                     wallet.get("available_balance", master_balance_usd) or 0.0
                 )
+                master_blocked_usd = float(wallet.get("position_margin") or 0.0)
             finally:
                 await client.close()
         except Exception as exc:
             logger.warning("Master balance fetch failed for overview: %s", exc)
             master_error = str(exc)
+            master_connected = False
+
+    master_balance_detail = (
+        build_balance_detail(
+            db,
+            master_wallet,
+            account_id=int(master_account.id),
+            account_type="master",
+            usd_inr_rate=rate,
+        )
+        if master_account is not None and master_wallet is not None
+        else build_balance_detail(
+            db,
+            None,
+            account_id=int(master_account.id) if master_account else 0,
+            account_type="master",
+            usd_inr_rate=rate,
+        )
+    )
+
+    active_hedge_row = (
+        db.query(HedgePosition)
+        .filter(
+            HedgePosition.account_id == int(master_account.id),
+            HedgePosition.status == "active",
+        )
+        .order_by(HedgePosition.id.desc())
+        .first()
+        if master_account is not None
+        else None
+    )
+    structure_net_mtm = (
+        round(float(getattr(active_hedge_row, "structure_pnl", 0.0) or 0.0), 4)
+        if active_hedge_row is not None
+        else None
+    )
+    structure_target_usd = (
+        round(float(getattr(active_hedge_row, "target_usd", 0.0) or 0.0), 4)
+        if active_hedge_row is not None
+        else None
+    )
 
     # Master active trades from in-memory tracker (keyed by trade id)
     master_states = bot_engine.position_tracker.get_all_active()
@@ -1036,6 +1084,8 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         # Refresh balance opportunistically (skip for virtual — no real Delta)
         bal_usd = float(slave.balance_usd or 0.0)
         avail_usd: float | None = None
+        blocked_usd: float | None = None
+        slave_wallet: dict[str, float] | None = None
         if (
             not is_virtual
             and slave.is_active
@@ -1048,10 +1098,14 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 )
                 try:
                     wallet = await client.get_wallet_balance()
-                    bal_usd = float(wallet.get("balance_usdt", 0.0) or 0.0)
+                    slave_wallet = wallet
+                    bal_usd = float(
+                        wallet.get("wallet_balance") or wallet.get("balance_usdt", 0.0) or 0.0
+                    )
                     avail_usd = float(
                         wallet.get("available_balance", bal_usd) or 0.0
                     )
+                    blocked_usd = float(wallet.get("position_margin") or 0.0)
                     slave.balance_usd = bal_usd
                     slave.balance_inr = round(bal_usd * rate, 2)
                     slave.connection_status = "connected"
@@ -1206,6 +1260,27 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "available_inr": (
                     round(avail_usd * rate, 2) if avail_usd is not None else None
                 ),
+                "blocked_usd": blocked_usd,
+                "blocked_inr": (
+                    round(blocked_usd * rate, 2) if blocked_usd is not None else None
+                ),
+                **build_balance_detail(
+                    db,
+                    slave_wallet
+                    if slave_wallet is not None
+                    else (
+                        {
+                            "wallet_balance": bal_usd,
+                            "available_balance": float(avail_usd or 0.0),
+                            "position_margin": float(blocked_usd or 0.0),
+                        }
+                        if not is_virtual and slave.is_active and bal_usd > 0
+                        else None
+                    ),
+                    account_id=int(slave.id),
+                    account_type="slave",
+                    usd_inr_rate=rate,
+                ),
                 "last_error": slave.last_error,
                 "last_connected_at": _iso(slave.last_connected_at),
                 "active_slave_trade": slave_trade_data,
@@ -1214,7 +1289,9 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         )
 
     combined_mtm = 0.0
-    if master_trade_data:
+    if structure_net_mtm is not None:
+        combined_mtm += float(structure_net_mtm)
+    elif master_trade_data:
         combined_mtm += float(master_trade_data.get("net_mtm") or 0)
     for s in slaves_data:
         st = s.get("active_slave_trade")
@@ -1237,13 +1314,25 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         "auto_trade_enabled": bool(settings.is_enabled),
         "has_slaves": len(slaves) > 0,
         "combined_mtm": round(combined_mtm, 4),
+        "combined_structure_mtm": round(combined_mtm, 4),
         "master": {
+            "account_id": int(master_account.id) if master_account else None,
             "name": master_name,
             "connected": master_connected,
             "balance_usd": master_balance_usd,
             "balance_inr": round(master_balance_usd * rate, 2),
             "available_usd": master_available_usd,
             "available_inr": round(master_available_usd * rate, 2),
+            "blocked_usd": master_blocked_usd,
+            "blocked_inr": round(master_blocked_usd * rate, 2),
+            **master_balance_detail,
+            "structure_net_mtm": structure_net_mtm,
+            "target": structure_target_usd
+            or (
+                float(master_trade_data["profit_target_usd"])
+                if master_trade_data
+                else None
+            ),
             "active_trade_count": master_active_count,
             "active_trade": master_trade_data,
             "last_error": master_error,

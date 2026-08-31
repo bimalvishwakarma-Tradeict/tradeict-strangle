@@ -563,6 +563,17 @@ class BotEngine:
             await asyncio.sleep(MONITORING_INTERVAL_SECONDS)
 
     async def _process_all_trades(self) -> None:
+        # Daily noon IST balance snapshots (no-op outside 12:00–12:02 window)
+        if self.delta_client is not None:
+            try:
+                from backend.core.balance_snapshots import take_daily_balance_snapshot
+                from backend.database import SessionLocal
+
+                with SessionLocal() as snap_db:
+                    await take_daily_balance_snapshot(snap_db, self.delta_client)
+            except Exception as exc:
+                logger.warning("Balance snapshot task failed: %s", exc)
+
         # Heal DB vs Delta before monitoring (external closes, zombies)
         if self.delta_client is None:
             self._refresh_delta_client()

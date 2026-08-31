@@ -197,7 +197,7 @@ Logs:
 | Basket sizing | `backend/engine/auto_trade_engine.py` |
 | ATM straddle | `backend/core/delta_client.py` |
 | Structure SL | `backend/engine/hedge_lifecycle.py` |
-| UI | `frontend/src/pages/AutoTrade.jsx`, `frontend/src/components/HedgePanel.jsx` |
+| UI | `frontend/src/pages/AutoTrade.jsx`, `frontend/src/components/HedgePanel.jsx`, `frontend/src/components/StructurePnlBar.jsx`, `frontend/src/components/PnlSlider.jsx`, `frontend/src/pages/Dashboard.jsx` |
 | Tests | `backend/tests/test_basket_sizing.py`, `test_atm_anchored_pair.py`, `test_structure_sl_basis.py`, `test_structure_target.py` |
 
 ---
@@ -224,9 +224,9 @@ Stale bundle (`index-CwamrdqJ.js`) caused `fmtLotsCount is not defined` even aft
 # PART 9 — WHAT REMAINS — BOT SIDE
 
 ### Immediate
-- basket_qty_dynamic = TRUE — already enabled (Option A). Next basket entry
-  mein log dikhega: `dynamic=True | computed_pct=<x>`
-- B7 first live verification: next BASKET_SIZING log confirm karo
+- **B7 dynamic qty:** `basket_qty_dynamic = TRUE`, live since 30 Aug
+- **Next verification:** BASKET_SIZING log mein `dynamic=True` dikhna chahiye
+- **B11–B13:** UI complete
 
 ---
 

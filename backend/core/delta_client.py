@@ -494,11 +494,25 @@ class DeltaClient:
                 or ""
             ).upper()
             parsed = {
-                "balance_usdt": float(asset.get("balance", 0) or 0),
-                "available_balance": float(
-                    asset.get("available_balance", asset.get("available", 0)) or 0
+                "wallet_balance": _safe_float(
+                    asset.get("wallet_balance", asset.get("balance", 0))
                 ),
+                "balance_usdt": _safe_float(
+                    asset.get("wallet_balance", asset.get("balance", 0))
+                ),
+                "available_balance": _safe_float(
+                    asset.get("available_balance", asset.get("available", 0))
+                ),
+                "position_margin": _safe_float(asset.get("position_margin", 0)),
+                "order_margin": _safe_float(asset.get("order_margin", 0)),
             }
+            if parsed["available_balance"] <= 0 and parsed["wallet_balance"] > 0:
+                parsed["available_balance"] = max(
+                    0.0,
+                    parsed["wallet_balance"]
+                    - parsed["position_margin"]
+                    - parsed["order_margin"],
+                )
             if symbol == "USDT":
                 preferred = parsed
                 break
@@ -511,7 +525,13 @@ class DeltaClient:
             return fallback
 
         logger.warning("USD/USDT balance not found in wallet balances response")
-        return {"balance_usdt": 0.0, "available_balance": 0.0}
+        return {
+            "wallet_balance": 0.0,
+            "balance_usdt": 0.0,
+            "available_balance": 0.0,
+            "position_margin": 0.0,
+            "order_margin": 0.0,
+        }
 
     async def get_positions(self) -> list[dict[str, Any]]:
         """

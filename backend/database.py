@@ -1046,6 +1046,34 @@ def _migrate_schema() -> None:
                     )
                 )
 
+    if "balance_snapshots" not in tables:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS balance_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        account_id INTEGER NOT NULL,
+                        account_type TEXT NOT NULL,
+                        snapshot_time DATETIME NOT NULL,
+                        wallet_balance REAL NOT NULL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_balance_snapshots_account_id "
+                    "ON balance_snapshots (account_id)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_balance_snapshots_account_type_id "
+                    "ON balance_snapshots (account_type, account_id)"
+                )
+            )
+
 
 def get_usd_inr_rate(db: Session) -> float:
     """Return configured USD→INR rate from global auto_trade_settings row."""

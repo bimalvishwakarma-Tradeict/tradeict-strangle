@@ -210,6 +210,7 @@ function LegRow({ label, leg, compact = false }) {
       <td className={`px-2 py-2 font-medium ${pnlColor(leg.leg_pnl)}`}>
         {fmtSignedMoney(leg.leg_pnl)}
       </td>
+      <td className="px-2 py-2 text-gray-300">{leg.quantity ?? '—'}</td>
       {!compact && (
         <>
           <td className="px-2 py-2 text-amber-200/90">
@@ -1060,6 +1061,7 @@ export default function PositionCard({
                   <th className="px-2 py-1">Offer</th>
                   <th className="px-2 py-1">Change</th>
                   <th className="px-2 py-1">Leg P&L*</th>
+                  <th className="px-2 py-1">Qty</th>
                 </tr>
               </thead>
               <tbody>
@@ -1292,6 +1294,7 @@ export default function PositionCard({
               <th className="px-2 py-2">Offer $</th>
               <th className="px-2 py-2">Change</th>
               <th className="px-2 py-2">Leg P&L*</th>
+              <th className="px-2 py-2">Qty</th>
               <th className="px-2 py-2">Entry Fee</th>
               <th className="px-2 py-2">Est Exit Fee</th>
             </tr>

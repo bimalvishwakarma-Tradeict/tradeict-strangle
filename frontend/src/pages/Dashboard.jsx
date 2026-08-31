@@ -344,17 +344,48 @@ function ForceCloseSlaveAction({ slave, onComplete }) {
   )
 }
 
+function growthClass(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return 'text-gray-500'
+  if (n > 0) return 'text-green-400'
+  if (n < 0) return 'text-red-400'
+  return 'text-gray-300'
+}
+
+function fmtPct1(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  const sign = n > 0 ? '+' : ''
+  return `${sign}${n.toFixed(1)}%`
+}
+
+function BalanceCell({ usd, inr, className = 'text-gray-200' }) {
+  if (usd == null || !Number.isFinite(Number(usd))) {
+    return <span className="text-gray-500">—</span>
+  }
+  return (
+    <div className={`text-right ${className}`}>
+      <div>${formatBalance(usd)}</div>
+      {inr != null ? (
+        <div className="text-[10px] text-gray-500">₹{formatInr(inr)}</div>
+      ) : null}
+    </div>
+  )
+}
+
 function AccountOverviewRow({
-  rowKey,
   role,
   name,
   multiplier,
   statusKind,
   statusText,
-  balanceUsd,
-  balanceInr,
-  availableUsd,
-  availableInr,
+  actualBalance,
+  actualBalanceInr,
+  blockedAmount,
+  blockedAmountInr,
+  availableBalance,
+  availableBalanceInr,
+  dailyGrowthPct,
   netMtm,
   mtmLabel,
   mtmSource,
@@ -369,39 +400,38 @@ function AccountOverviewRow({
   const syncAge = formatSyncAge(mtmSyncIso)
   const syncSecs = syncAgeSeconds(mtmSyncIso)
   const syncStale = syncSecs != null && syncSecs > 60
-  const mtmSourceLabel =
-    mtmSource === 'computed'
-      ? 'computed'
-      : mtmSource === 'copied'
-        ? 'copied (legacy row)'
-        : null
+  const blockedHigh =
+    actualBalance != null &&
+    blockedAmount != null &&
+    Number(actualBalance) > 0 &&
+    Number(blockedAmount) / Number(actualBalance) > 0.5
 
   return (
     <>
       <tr
         onClick={onToggle}
         className={`cursor-pointer border-b border-gray-800 hover:bg-gray-800/80 ${
-          dimmed ? 'opacity-50 italic' : ''
+          dimmed ? 'opacity-60' : ''
         } ${isExpanded ? 'bg-gray-800/50' : ''}`}
       >
-        <td className={`px-3 py-3 text-sm ${borderClass}`}>
+        <td className={`px-2 py-2.5 text-xs ${borderClass}`}>
           {role === 'master' ? (
-            <span className="font-medium text-amber-200">⭐ Master</span>
+            <span className="font-semibold text-amber-200">⭐ Master</span>
           ) : (
             <span className="font-medium text-blue-300">
               📋 Slave
               {multiplier != null ? (
-                <span className="ml-1 text-xs text-gray-400">
+                <span className="ml-1 text-[10px] text-gray-400">
                   ({Number(multiplier)}×)
                 </span>
               ) : null}
             </span>
           )}
         </td>
-        <td className="px-3 py-3 text-sm text-white" title={name}>
-          {truncateName(name)}
+        <td className="px-2 py-2.5 text-xs text-white" title={name}>
+          {truncateName(name, 14)}
         </td>
-        <td className="px-3 py-3 text-sm">
+        <td className="px-2 py-2.5 text-xs">
           {statusKind === 'live' && (
             <span className="text-green-400">🟢 Live</span>
           )}
@@ -410,7 +440,7 @@ function AccountOverviewRow({
           )}
           {statusKind === 'error' && (
             <span className="text-red-400" title={statusText}>
-              🔴 {truncateName(statusText || 'Error', 16)}
+              🔴 {truncateName(statusText || 'Error', 12)}
             </span>
           )}
           {statusKind === 'paused' && (
@@ -420,66 +450,54 @@ function AccountOverviewRow({
             <span className="text-gray-500">⚪ Offline</span>
           )}
         </td>
-        <td className="px-3 py-3 text-sm text-gray-200">
-          {balanceUsd != null ? (
-            <>
-              <div>${formatBalance(balanceUsd)}</div>
-              <div className="text-xs text-gray-500">₹{formatInr(balanceInr)}</div>
-            </>
+        <td className="px-2 py-2.5 text-xs">
+          <BalanceCell usd={actualBalance} inr={actualBalanceInr} />
+        </td>
+        <td className="px-2 py-2.5 text-xs">
+          <BalanceCell
+            usd={blockedAmount}
+            inr={blockedAmountInr}
+            className={blockedHigh ? 'text-red-300' : 'text-gray-300'}
+          />
+        </td>
+        <td className="px-2 py-2.5 text-xs">
+          <BalanceCell usd={availableBalance} inr={availableBalanceInr} />
+        </td>
+        <td
+          className={`px-2 py-2.5 text-right text-xs font-medium ${growthClass(dailyGrowthPct)}`}
+          title="vs yesterday 12pm IST"
+        >
+          {dailyGrowthPct != null && Number.isFinite(Number(dailyGrowthPct)) ? (
+            fmtPct1(dailyGrowthPct)
           ) : (
-            <span className="text-gray-500">—</span>
+            <span className="font-normal text-gray-500">No snapshot</span>
           )}
         </td>
-        <td className="px-3 py-3 text-sm text-gray-200">
-          {availableUsd != null ? (
-            <>
-              <div>${formatBalance(availableUsd)}</div>
-              <div className="text-xs text-gray-500">
-                ₹{formatInr(availableInr)}
-              </div>
-            </>
-          ) : (
-            <span className="text-gray-500">—</span>
-          )}
-        </td>
-        <td className={`px-3 py-3 text-sm font-medium ${mtmClass(netMtm)}`}>
+        <td className={`px-2 py-2.5 text-right text-xs font-medium ${mtmClass(netMtm)}`}>
           {netMtm == null || !Number.isFinite(Number(netMtm)) ? (
             '—'
           ) : (
             <>
               <div>{formatSignedMoney(netMtm)}</div>
               {mtmLabel ? (
-                <div className="text-[10px] font-normal text-gray-500">
-                  {mtmLabel}
-                </div>
+                <div className="text-[10px] font-normal text-gray-500">{mtmLabel}</div>
               ) : null}
-              {mtmSourceLabel ? (
-                <div
-                  className={`text-[10px] font-normal ${
-                    mtmSource === 'copied' ? 'text-yellow-300' : 'text-gray-500'
-                  }`}
-                >
-                  {mtmSourceLabel}
-                </div>
+              {mtmSource === 'copied' ? (
+                <div className="text-[10px] font-normal text-yellow-300">copied</div>
               ) : null}
               {syncAge ? (
                 <div
                   className={`text-[10px] font-normal ${
                     syncStale ? 'text-yellow-300' : 'text-gray-500'
                   }`}
-                  title={
-                    syncStale
-                      ? 'MTM sync older than 60s — may be stale'
-                      : undefined
-                  }
                 >
-                  {syncStale ? '⚠️ ' : ''}last sync: {syncAge}
+                  {syncStale ? '⚠️ ' : ''}{syncAge}
                 </div>
               ) : null}
             </>
           )}
         </td>
-        <td className="px-3 py-3 text-sm text-gray-300">
+        <td className="px-2 py-2.5 text-right text-xs text-gray-300">
           {targetUsd != null && Number.isFinite(Number(targetUsd))
             ? `$${fmtMoney(targetUsd)}`
             : '—'}
@@ -487,7 +505,7 @@ function AccountOverviewRow({
       </tr>
       {isExpanded && (
         <tr className="border-b border-gray-800 bg-gray-800/40">
-          <td colSpan={7} className="px-4 py-3 text-xs text-gray-300">
+          <td colSpan={9} className="px-4 py-3 text-xs text-gray-300">
             {expandContent}
           </td>
         </tr>
@@ -506,21 +524,25 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
   const slaves = overview.slaves || []
 
   const masterStructureMtm =
-    activeHedge?.structure_pnl != null &&
-    Number.isFinite(Number(activeHedge.structure_pnl))
-      ? Number(activeHedge.structure_pnl)
-      : null
+    master.structure_net_mtm != null &&
+    Number.isFinite(Number(master.structure_net_mtm))
+      ? Number(master.structure_net_mtm)
+      : activeHedge?.structure_pnl != null &&
+          Number.isFinite(Number(activeHedge.structure_pnl))
+        ? Number(activeHedge.structure_pnl)
+        : null
 
-  let combined = 0.0
-  if (masterStructureMtm != null) {
-    combined += masterStructureMtm
-  } else if (master.active_trade?.net_mtm != null) {
-    combined += Number(master.active_trade.net_mtm)
-  }
-  for (const s of slaves) {
-    const st = s.active_slave_trade
-    const m = st?.net_mtm ?? st?.last_mtm
-    if (m != null && Number.isFinite(Number(m))) combined += Number(m)
+  let combined = Number(
+    overview.combined_structure_mtm ?? overview.combined_mtm ?? 0,
+  )
+  if (!Number.isFinite(combined)) {
+    combined = 0
+    if (masterStructureMtm != null) combined += masterStructureMtm
+    for (const s of slaves) {
+      const st = s.active_slave_trade
+      const m = st?.net_mtm ?? st?.last_mtm
+      if (m != null && Number.isFinite(Number(m))) combined += Number(m)
+    }
   }
 
   const toggle = (key) => {
@@ -587,38 +609,42 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
         <table className="min-w-full text-left">
           <thead className="bg-gray-800 text-[10px] uppercase tracking-wide text-gray-400">
             <tr>
-              <th className="px-3 py-2">Role</th>
-              <th className="px-3 py-2">Account</th>
-              <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2">Capital</th>
-              <th className="px-3 py-2">Avail.</th>
+              <th className="px-2 py-2 text-left">Role</th>
+              <th className="px-2 py-2 text-left">Account</th>
+              <th className="px-2 py-2 text-left">Status</th>
+              <th className="px-2 py-2 text-right">Actual Bal</th>
+              <th className="px-2 py-2 text-right">Blocked</th>
+              <th className="px-2 py-2 text-right">Avail Bal</th>
+              <th className="px-2 py-2 text-right" title="vs yesterday 12pm IST">
+                Daily Δ%
+              </th>
               <th
-                className="px-3 py-2"
+                className="px-2 py-2 text-right"
                 title="Master = Hedge + All Baskets | Slave = Active Basket only"
               >
-                Structure Net MTM ↓
+                Structure MTM
               </th>
-              <th className="px-3 py-2">Target</th>
+              <th className="px-2 py-2 text-right">Target</th>
             </tr>
           </thead>
           <tbody>
             <AccountOverviewRow
-              rowKey="master"
               role="master"
               name={master.name || 'Master'}
               statusKind={masterStatus}
               statusText={masterStatusText}
-              balanceUsd={master.connected ? master.balance_usd : null}
-              balanceInr={master.balance_inr}
-              availableUsd={
-                master.connected ? master.available_usd ?? null : null
+              actualBalance={master.actual_balance ?? master.balance_usd}
+              actualBalanceInr={master.actual_balance_inr ?? master.balance_inr}
+              blockedAmount={master.blocked_amount ?? master.blocked_usd}
+              blockedAmountInr={master.blocked_amount_inr ?? master.blocked_inr}
+              availableBalance={master.available_balance ?? master.available_usd}
+              availableBalanceInr={
+                master.available_balance_inr ?? master.available_inr
               }
-              availableInr={master.available_inr}
-              netMtm={masterStructureMtm ?? masterTrade?.net_mtm ?? null}
+              dailyGrowthPct={master.daily_growth_pct}
+              netMtm={masterStructureMtm}
               mtmLabel="Structure MTM"
-              targetUsd={
-                activeHedge?.target_usd ?? masterTrade?.profit_target_usd ?? null
-              }
+              targetUsd={master.target ?? masterTrade?.profit_target_usd ?? null}
               isExpanded={Boolean(expanded.master)}
               onToggle={() => toggle('master')}
               borderClass="border-l-2 border-l-amber-500"
@@ -705,22 +731,42 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
               return (
                 <AccountOverviewRow
                   key={key}
-                  rowKey={key}
                   role="slave"
                   name={slave.name}
                   multiplier={slave.qty_multiplier}
                   statusKind={statusKind}
                   statusText={statusText}
-                  balanceUsd={
-                    statusKind === 'error' ? null : slave.balance_usd
-                  }
-                  balanceInr={slave.balance_inr}
-                  availableUsd={
-                    statusKind === 'error'
+                  actualBalance={
+                    statusKind === 'error' || !slave.is_active
                       ? null
-                      : slave.available_usd ?? null
+                      : slave.actual_balance ?? slave.balance_usd
                   }
-                  availableInr={slave.available_inr}
+                  actualBalanceInr={
+                    statusKind === 'error' || !slave.is_active
+                      ? null
+                      : slave.actual_balance_inr ?? slave.balance_inr
+                  }
+                  blockedAmount={
+                    statusKind === 'error' || !slave.is_active
+                      ? null
+                      : slave.blocked_amount ?? slave.blocked_usd
+                  }
+                  blockedAmountInr={
+                    statusKind === 'error' || !slave.is_active
+                      ? null
+                      : slave.blocked_amount_inr ?? slave.blocked_inr
+                  }
+                  availableBalance={
+                    statusKind === 'error' || !slave.is_active
+                      ? null
+                      : slave.available_balance ?? slave.available_usd
+                  }
+                  availableBalanceInr={
+                    statusKind === 'error' || !slave.is_active
+                      ? null
+                      : slave.available_balance_inr ?? slave.available_inr
+                  }
+                  dailyGrowthPct={slave.daily_growth_pct}
                   netMtm={slaveMtm}
                   mtmLabel="Basket MTM"
                   mtmSource={st?.mtm_source ?? null}
@@ -733,7 +779,7 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                       ? 'border-l-2 border-l-red-500'
                       : 'border-l-2 border-l-blue-500'
                   }
-                  dimmed={!slave.is_active}
+                  dimmed={!slave.is_active || statusKind === 'ready'}
                   expandContent={expandWithActions}
                 />
               )
@@ -742,16 +788,14 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
           <tfoot>
             <tr className="border-t border-gray-600 bg-gray-800/60">
               <td
-                colSpan={5}
-                className="px-3 py-3 text-right text-sm font-semibold text-gray-300"
+                colSpan={7}
+                className="px-2 py-2.5 text-right text-xs font-semibold text-gray-300"
               >
-                <span title="Master structure MTM + slave basket MTMs">
-                  Combined MTM:
-                </span>
+                Combined Structure MTM:
               </td>
               <td
                 colSpan={2}
-                className={`px-3 py-3 text-base font-bold ${mtmClass(combined)}`}
+                className={`px-2 py-2.5 text-right text-sm font-bold ${mtmClass(combined)}`}
               >
                 {formatSignedMoney(combined)}
               </td>

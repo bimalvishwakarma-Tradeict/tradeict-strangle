@@ -898,3 +898,23 @@ class StructureLeg(Base):
     close_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     structure: Mapped[Structure] = relationship("Structure", back_populates="legs")
+
+
+class BalanceSnapshot(Base):
+    """Daily noon IST wallet_balance snapshot for daily growth % on dashboard."""
+
+    __tablename__ = "balance_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # accounts.id for master, slave_accounts.id for slaves
+    account_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    # "master" or "slave"
+    snapshot_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    wallet_balance: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_balance_snapshots_account_type_id", "account_type", "account_id"),
+    )
