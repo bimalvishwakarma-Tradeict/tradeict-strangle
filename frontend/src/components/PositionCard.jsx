@@ -567,7 +567,12 @@ export default function PositionCard({
   )
   const feesPaid = n(trade.fees_paid)
   const estExitFees = n(trade.est_exit_fees)
-  const grossMtm = n(trade.gross_mtm)
+  const grossMtm =
+    trade.calculated_pnl != null &&
+    trade.calculated_pnl !== '' &&
+    Number.isFinite(Number(trade.calculated_pnl))
+      ? n(trade.calculated_pnl)
+      : n(trade.gross_mtm)
   const entrySpreadForSl =
     trade.entry_spread_for_sl != null && trade.entry_spread_for_sl !== ''
       ? n(trade.entry_spread_for_sl)

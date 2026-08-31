@@ -117,7 +117,9 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
   const gross =
     hedge.gross_upnl != null && Number.isFinite(Number(hedge.gross_upnl))
       ? Number(hedge.gross_upnl)
-      : hedge.gross_pnl
+      : hedge.gross_pnl != null && Number.isFinite(Number(hedge.gross_pnl))
+        ? Number(hedge.gross_pnl)
+        : null
   const estExitSlip = Number(hedge.est_exit_slippage_usd)
   const feesUsd = Number(hedge.fees_usd)
   const exitSlipUnavailable =

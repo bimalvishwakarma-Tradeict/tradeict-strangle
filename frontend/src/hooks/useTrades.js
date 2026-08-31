@@ -15,6 +15,14 @@ function shortLegUpnl(entry, offer, qty) {
   return (o - e) * -q * OPTIONS_CONTRACT_VALUE
 }
 
+/** Bot-engine mark-based gross (realized + delta_upnl). Prefer over REST gross_mtm (offer-based). */
+function resolveMarkGrossMtm(trade) {
+  const calc = Number(trade?.calculated_pnl)
+  if (Number.isFinite(calc)) return calc
+  const gross = Number(trade?.gross_mtm ?? trade?.total_pnl)
+  return Number.isFinite(gross) ? gross : 0
+}
+
 /**
  * Live trade state for Dashboard.
  * Prefers WebSocket; falls back to REST polling when disconnected.
@@ -40,7 +48,7 @@ export function useTrades() {
       // Never keep flat/closed baskets on the live dashboard
       if (status && status !== 'active') continue
       if (Number.isFinite(openCount) && openCount <= 0) continue
-      const gross = Number(trade.gross_mtm ?? trade.total_pnl ?? 0) || 0
+      const gross = resolveMarkGrossMtm(trade)
       const slipPct =
         trade.slippage_pct != null && Number.isFinite(Number(trade.slippage_pct))
           ? Number(trade.slippage_pct)
@@ -213,11 +221,13 @@ export function useTrades() {
             ? Number(msg.realized_pnl)
             : existing.realized_pnl
         const gross =
-          msg.gross_mtm != null
-            ? Number(msg.gross_mtm)
-            : msg.total_pnl != null
-              ? Number(msg.total_pnl)
-              : existing.gross_mtm
+          msg.calculated_pnl != null && Number.isFinite(Number(msg.calculated_pnl))
+            ? Number(msg.calculated_pnl)
+            : msg.gross_mtm != null
+              ? Number(msg.gross_mtm)
+              : msg.total_pnl != null
+                ? Number(msg.total_pnl)
+                : existing.gross_mtm
         const feesPaid =
           msg.fees_paid != null ? Number(msg.fees_paid) : existing.fees_paid
         const estExit =
@@ -351,6 +361,10 @@ export function useTrades() {
           combined_upnl: deltaUpnl,
           unrealized_pnl: deltaUpnl,
           realized_pnl: realized,
+          calculated_pnl:
+            msg.calculated_pnl != null
+              ? Number(msg.calculated_pnl)
+              : existing.calculated_pnl,
           gross_mtm: gross,
           total_pnl: gross,
           net_mtm: net,
