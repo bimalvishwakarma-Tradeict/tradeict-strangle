@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import AdjustmentSlabs from '../components/AdjustmentSlabs'
+import {
+  AutoTradeStickyHeader,
+  AutoTradeStickyNav,
+  FieldLabel,
+  SectionCard,
+  SectionDivider,
+} from '../components/AutoTradeUi'
 import ConfirmDialog from '../components/ui/ConfirmDialog'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
 import Toast from '../components/ui/Toast'
@@ -194,6 +201,7 @@ export default function AutoTrade() {
   const [saving, setSaving] = useState(false)
   const [toggling, setToggling] = useState(false)
   const [disableOpen, setDisableOpen] = useState(false)
+  const [legacyHedgeOpen, setLegacyHedgeOpen] = useState(false)
   const [toast, setToast] = useState(null)
 
   const [isEnabled, setIsEnabled] = useState(false)
@@ -1117,166 +1125,224 @@ export default function AutoTrade() {
     tradeTypeLabel,
   ])
 
+  const headerStatusText = useMemo(() => {
+    if (!isEnabled) return 'Disabled'
+    if (activeTrade && tradeLabel != null) {
+      return `Active — ${tradeTypeLabel} — trade #${tradeLabel}`
+    }
+    if (lastError) return `Error — ${lastError}`
+    if (secondsUntilEntry != null && secondsUntilEntry > 0) {
+      return `${tradeTypeLabel} — ${formatNextEntryWait(secondsUntilEntry, nextEntrySource)}`
+    }
+    return `${tradeTypeLabel} — ready`
+  }, [
+    isEnabled,
+    activeTrade,
+    tradeLabel,
+    lastError,
+    secondsUntilEntry,
+    nextEntrySource,
+    tradeTypeLabel,
+  ])
+
   if (loading) {
     return (
-      <main className="mx-auto flex max-w-3xl items-center justify-center px-4 py-20">
+      <main className="mx-auto flex max-w-7xl items-center justify-center px-4 py-20">
         <LoadingSpinner />
       </main>
     )
   }
 
   return (
-    <main className="mx-auto max-w-3xl space-y-6 px-4 py-6">
-      <h1 className="text-xl font-semibold text-white">🔄 Auto Trade</h1>
+    <main className="mx-auto max-w-7xl bg-gray-900">
+      <AutoTradeStickyHeader
+        isEnabled={isEnabled}
+        statusText={headerStatusText}
+        saving={saving}
+        toggling={toggling}
+        onSave={handleSave}
+        onEnable={handleEnable}
+        onDisable={() => setDisableOpen(true)}
+      />
+      <AutoTradeStickyNav />
 
-      {/* Mode / status */}
-      <section
-        className={`space-y-3 rounded-xl border p-4 ${statusView.bg}`}
-      >
-        <div className="text-xs font-semibold tracking-wide text-gray-400">
-          AUTO TRADE MODE
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <span
-            className={`rounded-full px-3 py-1 text-sm font-semibold ${
-              isEnabled
-                ? 'bg-green-600 text-white'
-                : 'bg-gray-700 text-gray-300'
-            }`}
-          >
-            {isEnabled ? '● ENABLED' : 'DISABLED ●'}
-          </span>
-        </div>
-        <p className={`text-sm ${statusView.color}`}>{statusView.text}</p>
-      </section>
-
-      {/* Trade structure */}
-      <section className="space-y-4 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">Trade Structure</h2>
-
-        <div>
-          <div className="mb-2 text-sm text-gray-300">Underlying</div>
-          <div className="flex flex-wrap gap-2">
-            {UNDERLYINGS.map((u) => (
-              <button
-                key={u}
-                type="button"
-                onClick={() => setUnderlying(u)}
-                className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                  underlying === u
-                    ? 'bg-blue-500 text-white'
-                    : 'bg-gray-900 text-gray-300 hover:bg-gray-700'
-                }`}
-              >
-                {u}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <div className="mb-2 text-sm text-gray-300">Expiry</div>
-          <div className="flex max-w-xs items-center gap-2">
-            <select
-              value={selectedExpiryDate || ''}
-              onChange={(e) => setSelectedExpiryDate(e.target.value || null)}
-              disabled={expiryLoading}
-              className="mt-0 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            >
-              {expiryLoading && (
-                <option value="">Loading expiries...</option>
-              )}
-              {!expiryLoading && expiryOptions.length === 0 && (
-                <option value="">No expiries available</option>
-              )}
-              {expiryOptions.map((opt) => (
-                <option key={opt.date} value={opt.date}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={() => fetchExpiries(underlying, selectedExpiryDate)}
-              title="Refresh expiries"
-              className="shrink-0 px-2 text-sm text-gray-400 hover:text-white"
-            >
-              ↻
-            </button>
-          </div>
-          {expiryError && (
-            <p className="mt-1 text-xs text-red-400">{expiryError}</p>
-          )}
-          {!expiryLoading && !expiryError && (
-            <p className="mt-1 text-xs text-gray-500">Live from Delta Exchange</p>
-          )}
-        </div>
-
-        <label
-          className={`block text-sm text-gray-300 ${
-            pctOfHedgeSizingActive ? 'opacity-40' : ''
-          }`}
+      {isEnabled && statusView.text !== '⚪ Disabled' ? (
+        <div
+          className={`mx-4 mt-3 rounded-lg border px-4 py-2 text-sm sm:mx-6 ${statusView.bg} ${statusView.color}`}
         >
-          Quantity
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={quantity}
-            onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
-            className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-          />
-          {pctOfHedgeSizingActive && (
-            <p className="mt-1 text-xs text-gray-500">
-              Not used in % of hedge mode.
-            </p>
-          )}
-        </label>
+          {statusView.text}
+        </div>
+      ) : null}
 
-        <section className="space-y-3 rounded-xl border border-sky-700/40 bg-gray-800/60 p-4">
-          <h2 className="text-sm font-semibold text-white">
-            SHORT BASKET SIZING
-          </h2>
-          <div className="space-y-2">
-            <label className="flex cursor-pointer items-start gap-3">
-              <input
-                type="radio"
-                name="basket_qty_mode"
-                checked={basketQtyMode === 'fixed'}
-                onChange={() => setBasketQtyMode('fixed')}
-                className="mt-1"
-              />
-              <span className="text-sm text-gray-300">
-                Fixed quantity (current behaviour)
-                <span className="mt-0.5 block text-xs text-gray-500">
-                  Short basket qty = Quantity field. Hedge qty = basket × hedge
-                  ratio.
-                </span>
-              </span>
-            </label>
+      <div className="grid grid-cols-1 gap-6 p-4 sm:p-6 xl:grid-cols-2">
+        {/* LEFT COLUMN */}
+        <div className="space-y-6">
+          {/* A — Trade Setup */}
+          <SectionCard id="trade-setup" icon="📊" title="Trade Setup">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <FieldLabel tooltip="Which crypto asset's options to trade">
+                  Underlying
+                </FieldLabel>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {UNDERLYINGS.map((u) => (
+                    <button
+                      key={u}
+                      type="button"
+                      onClick={() => setUnderlying(u)}
+                      className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                        underlying === u
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                      }`}
+                    >
+                      {u}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <FieldLabel tooltip="Straddle = ATM Call + premium-matched Put at same/nearby strike. Strangle = OTM Call + OTM Put, strikes chosen by premium target">
+                  Trade Type
+                </FieldLabel>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTradeType('straddle')}
+                    className={`rounded-lg border p-2 text-left text-xs transition-all ${
+                      tradeType === 'straddle'
+                        ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                        : 'border-gray-700 bg-gray-700/50 text-gray-400 hover:border-gray-600'
+                    }`}
+                  >
+                    <div className="font-medium">Short Straddle</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTradeType('strangle')}
+                    className={`rounded-lg border p-2 text-left text-xs transition-all ${
+                      tradeType === 'strangle'
+                        ? 'border-purple-500 bg-purple-500/10 text-purple-400'
+                        : 'border-gray-700 bg-gray-700/50 text-gray-400 hover:border-gray-600'
+                    }`}
+                  >
+                    <div className="font-medium">Short Strangle</div>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <FieldLabel tooltip="Option expiry date for each new short basket">
+                Expiry
+              </FieldLabel>
+              <div className="mt-2 flex max-w-full items-center gap-2">
+                <select
+                  value={selectedExpiryDate || ''}
+                  onChange={(e) => setSelectedExpiryDate(e.target.value || null)}
+                  disabled={expiryLoading}
+                  className="w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                >
+                  {expiryLoading && (
+                    <option value="">Loading expiries...</option>
+                  )}
+                  {!expiryLoading && expiryOptions.length === 0 && (
+                    <option value="">No expiries available</option>
+                  )}
+                  {expiryOptions.map((opt) => (
+                    <option key={opt.date} value={opt.date}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => fetchExpiries(underlying, selectedExpiryDate)}
+                  title="Refresh expiries"
+                  className="shrink-0 px-2 text-sm text-gray-400 hover:text-white"
+                >
+                  ↻
+                </button>
+              </div>
+              {expiryError && (
+                <p className="mt-1 text-xs text-red-400">{expiryError}</p>
+              )}
+              {!expiryLoading && !expiryError && (
+                <p className="mt-1 text-xs text-gray-500">Live from Delta Exchange</p>
+              )}
+            </div>
+
             <label
-              className={`flex items-start gap-3 ${
-                hedgeEnabled
-                  ? 'cursor-pointer'
-                  : 'cursor-not-allowed opacity-40'
+              className={`block ${
+                pctOfHedgeSizingActive ? 'opacity-40' : ''
               }`}
             >
+              <FieldLabel tooltip="Lots per basket. Not used in % of hedge mode — basket qty is derived from hedge">
+                Quantity
+              </FieldLabel>
               <input
-                type="radio"
-                name="basket_qty_mode"
-                checked={basketQtyMode === 'pct_of_hedge'}
-                disabled={!hedgeEnabled}
-                onChange={() => setBasketQtyMode('pct_of_hedge')}
-                className="mt-1 disabled:cursor-not-allowed"
+                type="number"
+                min={1}
+                step={1}
+                value={quantity}
+                onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
+                className="mt-2 w-full max-w-xs rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
               />
-              <span className="text-sm text-gray-300">
-                % of hedge quantity
-                <span className="mt-0.5 block text-xs text-gray-500">
-                  Hedge qty aap tay karte ho; short basket uska % hoga (upar
-                  round off).
-                </span>
-              </span>
+              {pctOfHedgeSizingActive && (
+                <p className="mt-1 text-xs text-gray-500">
+                  Not used in % of hedge mode.
+                </p>
+              )}
             </label>
+
+            {tradeType === 'strangle' && (
+              <div className="rounded-lg border border-purple-500/30 bg-gray-700/40 p-4">
+                <FieldLabel>Target Premium per Side ($)</FieldLabel>
+                <input
+                  type="number"
+                  value={targetPremium}
+                  onChange={(e) =>
+                    setTargetPremium(parseFloat(e.target.value) || 0)
+                  }
+                  className="mt-2 w-full rounded-md bg-gray-700 px-3 py-2 text-white"
+                  placeholder="e.g. 150"
+                  min={1}
+                  max={10000}
+                />
+                <p className="mt-2 text-xs text-gray-500">
+                  Bot finds OTM Call & Put where premium ≈ ${targetPremium}
+                </p>
+              </div>
+            )}
+          </SectionCard>
+
+          {/* B — Basket Sizing */}
+          <SectionCard id="basket-sizing" icon="📐" title="Basket Sizing">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setBasketQtyMode('fixed')}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                basketQtyMode === 'fixed'
+                  ? 'bg-blue-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              Fixed quantity
+            </button>
+            <button
+              type="button"
+              onClick={() => hedgeEnabled && setBasketQtyMode('pct_of_hedge')}
+              disabled={!hedgeEnabled}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                basketQtyMode === 'pct_of_hedge'
+                  ? 'bg-blue-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              } disabled:cursor-not-allowed disabled:opacity-40`}
+            >
+              % of hedge
+            </button>
           </div>
           {!hedgeEnabled && (
             <p className="text-xs text-amber-400/90">
@@ -1414,366 +1480,366 @@ export default function AutoTrade() {
               )}
             </div>
           )}
-        </section>
+          </SectionCard>
 
-        <div>
-          <div className="mb-2 text-sm text-gray-300">Trade Type</div>
-          <div className="grid grid-cols-2 gap-3">
-            <button
-              type="button"
-              onClick={() => setTradeType('straddle')}
-              className={`rounded-lg border p-3 text-left transition-all ${
-                tradeType === 'straddle'
-                  ? 'border-blue-500 bg-blue-500/10 text-blue-400'
-                  : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
+          {/* C — Adjustment Trigger */}
+          <SectionCard id="adjustment-trigger" icon="⚡" title="Adjustment Trigger">
+            {slabsInitial && (
+              <AdjustmentSlabs
+                key={slabsKey}
+                onChange={onSlabsChange}
+                defaultMode={slabsInitial.mode || 'slab'}
+                initialValues={slabsInitial}
+              />
+            )}
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                checked={combinedTriggerMode}
+                onChange={async (e) => {
+                  const on = e.target.checked
+                  setCombinedTriggerMode(on)
+                  try {
+                    const updated = await saveAutoTradeSettings({
+                      ...buildPayload(),
+                      combined_trigger_mode: on,
+                    })
+                    applyStatusToForm(updated, formSetters)
+                    setToast({
+                      type: 'success',
+                      message: on
+                        ? '✅ Combined trigger ON'
+                        : '✅ Combined trigger OFF',
+                    })
+                  } catch (err) {
+                    setCombinedTriggerMode(!on)
+                    setToast({
+                      type: 'error',
+                      message:
+                        err.message || 'Failed to save combined trigger mode',
+                    })
+                  }
+                }}
+                className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-500"
+              />
+              <span className="text-sm text-gray-300">
+                <FieldLabel
+                  as="span"
+                  tooltip="Instead of per-leg trigger, fire when CALL+PUT combined premium rises by trigger %. Adjusts the leg with higher % increase"
+                >
+                  Combined Premium Trigger
+                </FieldLabel>{' '}
+                <span className="text-gray-500">
+                  ({combinedTriggerMode ? 'ON' : 'OFF'})
+                </span>
+              </span>
+            </label>
+          </SectionCard>
+
+          {/* D — Adjustment Behaviour */}
+          <SectionCard id="adjustment-behaviour" icon="🔄" title="Adjustment Behaviour">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={adjLowPremiumExitEnabled}
+                  onChange={(e) => setAdjLowPremiumExitEnabled(e.target.checked)}
+                  className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-500"
+                />
+                <span className="text-sm text-gray-300">
+                  Adjustment Exit on Low Premium
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={premiumCoverLossEnabled}
+                  onChange={(e) => setPremiumCoverLossEnabled(e.target.checked)}
+                  className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-500"
+                />
+                <span className="text-sm text-gray-300">
+                  Premium Cover Loss ({premiumCoverLossEnabled ? 'ON' : 'OFF'})
+                </span>
+              </label>
+            </div>
+            {adjLowPremiumExitEnabled && (
+              <div className="rounded-lg border border-amber-500/30 bg-gray-700/40 p-4">
+                <FieldLabel>Minimum replacement premium ($)</FieldLabel>
+                <input
+                  type="number"
+                  min={10}
+                  max={500}
+                  step={10}
+                  value={adjLowPremiumMinUsd}
+                  onChange={(e) =>
+                    setAdjLowPremiumMinUsd(Number(e.target.value) || 150)
+                  }
+                  className="mt-2 w-full max-w-xs rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                />
+              </div>
+            )}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={conversionModeEnabled}
+                  onChange={(e) => {
+                    const on = e.target.checked
+                    setConversionModeEnabled(on)
+                    if (on) setMaxAdjustmentsPerBasket('')
+                  }}
+                  className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-500"
+                />
+                <span className="text-sm text-gray-300">
+                  Conversion Mode ({conversionModeEnabled ? 'ON' : 'OFF'})
+                </span>
+              </label>
+              {!conversionModeEnabled ? (
+                <label className="block text-sm text-gray-300">
+                  <FieldLabel>Max Adjustments</FieldLabel>
+                  <select
+                    value={
+                      maxAdjustmentsPerBasket === ''
+                        ? 'unlimited'
+                        : maxAdjustmentsPerBasket
+                    }
+                    onChange={(e) => {
+                      const v = e.target.value
+                      setMaxAdjustmentsPerBasket(v === 'unlimited' ? '' : v)
+                    }}
+                    className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                  >
+                    <option value="unlimited">Unlimited</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                  </select>
+                </label>
+              ) : (
+                <div />
+              )}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="block text-sm text-gray-300">
+                <FieldLabel>Entry settling (sec)</FieldLabel>
+                <input
+                  type="number"
+                  min={0}
+                  max={300}
+                  step={1}
+                  value={entrySettlingSeconds}
+                  onChange={(e) => setEntrySettlingSeconds(e.target.value)}
+                  className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                />
+              </label>
+              <label className="block text-sm text-gray-300">
+                <FieldLabel>Adjustment settling (sec)</FieldLabel>
+                <input
+                  type="number"
+                  min={0}
+                  max={300}
+                  step={1}
+                  value={adjustmentSettlingSeconds}
+                  onChange={(e) => setAdjustmentSettlingSeconds(e.target.value)}
+                  className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                />
+              </label>
+            </div>
+            <label className="block text-sm text-gray-300">
+              <FieldLabel>Re-entry delay (min)</FieldLabel>
+              <div className="mt-2 flex max-w-xs items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={reEntryDelay}
+                  onChange={(e) =>
+                    setReEntryDelay(Math.max(0, Number(e.target.value) || 0))
+                  }
+                  className="w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                />
+                <span className="shrink-0 text-gray-400">minutes</span>
+              </div>
+            </label>
+          </SectionCard>
+        </div>
+
+        <div className="space-y-6">
+          <SectionCard id="risk-target" icon="🎯" title="Risk & Target">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="text-sm text-gray-300">
+                <FieldLabel>Profit Target % of max premium</FieldLabel>
+                <input
+                  type="number"
+                  min={1}
+                  max={500}
+                  step={1}
+                  value={tpPct}
+                  onChange={(e) => setTpPct(e.target.value)}
+                  className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                />
+              </label>
+              <label className="text-sm text-gray-300">
+                <FieldLabel>Stop Loss % of max premium</FieldLabel>
+                <input
+                  type="number"
+                  min={1}
+                  max={1000}
+                  step={1}
+                  value={slPct}
+                  onChange={(e) => setSlPct(e.target.value)}
+                  className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                />
+              </label>
+              <label className="text-sm text-gray-300">
+                <FieldLabel>Delta SL (%)</FieldLabel>
+                <input
+                  type="number"
+                  min={100}
+                  max={1000}
+                  step={1}
+                  value={universalSlPct}
+                  onChange={(e) => setUniversalSlPct(e.target.value)}
+                  className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                />
+              </label>
+              <label className="text-sm text-gray-300">
+                <FieldLabel>Slippage Est (%)</FieldLabel>
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  step={0.1}
+                  value={slippagePct}
+                  onChange={(e) => setSlippagePct(e.target.value)}
+                  className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                />
+              </label>
+            </div>
+            <SectionDivider>Basket Profit Target Mode</SectionDivider>
+            <div className="space-y-2">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="radio"
+                  name="basket_target_mode"
+                  checked={basketTargetMode === 'THETA'}
+                  onChange={() => setBasketTargetMode('THETA')}
+                  className="mt-1"
+                />
+                <span className="text-sm text-gray-300">
+                  Theta — multiple of hedge daily theta
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="radio"
+                  name="basket_target_mode"
+                  checked={basketTargetMode === 'PCT'}
+                  onChange={() => setBasketTargetMode('PCT')}
+                  className="mt-1"
+                />
+                <span className="text-sm text-gray-300">
+                  Percent — % of basket credit (legacy)
+                </span>
+              </label>
+            </div>
+            {basketTargetMode === 'THETA' ? (
+              <label className="block text-sm text-gray-300">
+                Basket target multiple
+                <input
+                  type="number"
+                  min={0.1}
+                  max={10}
+                  step={0.1}
+                  value={basketTargetMultiple}
+                  onChange={(e) => setBasketTargetMultiple(e.target.value)}
+                  className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                />
+              </label>
+            ) : null}
+            <SectionDivider>Target Calculation</SectionDivider>
+            <div className="space-y-2">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="radio"
+                  name="target_mode"
+                  checked={targetMode === 'payoff_pct'}
+                  onChange={() => setTargetMode('payoff_pct')}
+                  className="mt-1"
+                />
+                <span className="text-sm text-gray-300">
+                  Payoff % of max premium
+                </span>
+              </label>
+              <label
+                className={`flex items-start gap-3 ${
+                  hedgeEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="target_mode"
+                  checked={targetMode === 'theta_multiplier'}
+                  disabled={!hedgeEnabled}
+                  onChange={() => setTargetMode('theta_multiplier')}
+                  className="mt-1 disabled:cursor-not-allowed"
+                />
+                <span className="text-sm text-gray-300">Theta multiplier target</span>
+              </label>
+            </div>
+            <label
+              className={`block text-sm text-gray-300 ${
+                hedgeEnabled && targetMode === 'theta_multiplier'
+                  ? ''
+                  : 'opacity-40'
               }`}
             >
-              <div className="font-medium">Short Straddle</div>
-              <div className="mt-1 text-xs opacity-70">
-                ATM Call + premium-matched Put
+              <FieldLabel>Target theta %</FieldLabel>
+              <input
+                type="number"
+                min={10}
+                max={1000}
+                step={1}
+                value={targetThetaPct}
+                disabled={!hedgeEnabled || targetMode !== 'theta_multiplier'}
+                onChange={(e) => setTargetThetaPct(e.target.value)}
+                className="mt-2 w-full max-w-xs rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white disabled:cursor-not-allowed"
+              />
+            </label>
+            <div className="rounded-lg border border-green-700/50 bg-gray-900/50 p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400/90">
+                  Live preview
+                </p>
+                {previewLoading ? (
+                  <span className="text-[10px] text-gray-500">Refreshing…</span>
+                ) : null}
               </div>
-            </button>
-            <button
-              type="button"
-              onClick={() => setTradeType('strangle')}
-              className={`rounded-lg border p-3 text-left transition-all ${
-                tradeType === 'strangle'
-                  ? 'border-purple-500 bg-purple-500/10 text-purple-400'
-                  : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
-              }`}
-            >
-              <div className="font-medium">Short Strangle</div>
-              <div className="mt-1 text-xs opacity-70">
-                OTM strikes, premium matching
-              </div>
-            </button>
-          </div>
-        </div>
+              {targetPreview?.unavailable || targetPreview?.success === false ? (
+                <p className="text-sm text-amber-400">
+                  {targetPreview?.message || 'unavailable - chain fetch failed'}
+                </p>
+              ) : targetPreview?.success ? (
+                <div className="space-y-1.5 font-mono text-xs text-gray-300">
+                  <p className="text-gray-500">
+                    Short {formatExpiryShort(targetPreview.short_expiry)} · CALL{' '}
+                    {Math.round(Number(targetPreview.call_strike))} @{' '}
+                    {formatMoney(targetPreview.call_premium)} · PUT{' '}
+                    {Math.round(Number(targetPreview.put_strike))} @{' '}
+                    {formatMoney(targetPreview.put_premium)}
+                  </p>
+                  <p className="text-sm text-white">
+                    = {formatMoney(targetPreview.target_usd)} ={' '}
+                    {Number(targetPreview.pct_of_max).toFixed(0)}% of max profit
+                  </p>
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">Loading preview…</p>
+              )}
+            </div>
+          </SectionCard>
 
-        {tradeType === 'strangle' && (
-          <div className="rounded-lg border border-purple-500/30 bg-gray-800 p-4">
-            <label className="mb-2 block text-sm text-gray-400">
-              Target Premium per Side ($)
-            </label>
-            <input
-              type="number"
-              value={targetPremium}
-              onChange={(e) =>
-                setTargetPremium(parseFloat(e.target.value) || 0)
-              }
-              className="w-full rounded bg-gray-700 px-3 py-2 text-white"
-              placeholder="e.g. 150"
-              min={1}
-              max={10000}
-            />
-            <p className="mt-2 text-xs text-gray-500">
-              Bot finds OTM Call & Put where premium ≈ ${targetPremium}
-              <br />
-              Strikes may be different for Call and Put
-            </p>
-          </div>
-        )}
-
-        <label className="block text-sm text-gray-300">
-          Re-entry delay
-          <div className="mt-1 flex max-w-xs items-center gap-2">
-            <input
-              type="number"
-              min={0}
-              step={1}
-              value={reEntryDelay}
-              onChange={(e) =>
-                setReEntryDelay(Math.max(0, Number(e.target.value) || 0))
-              }
-              className="w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-            <span className="shrink-0 text-gray-400">minutes</span>
-          </div>
-          <span className="mt-1 block text-xs text-gray-500">
-            0 = immediate re-entry after exit
-          </span>
-        </label>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block text-sm text-gray-300">
-            Entry Settling (seconds)
-            <input
-              type="number"
-              min={0}
-              max={300}
-              step={1}
-              value={entrySettlingSeconds}
-              onChange={(e) => setEntrySettlingSeconds(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-            <span className="mt-1 block text-xs text-gray-500">
-              Pause profit-target and adjustment checks after a new entry.
-              Stop loss is never paused. 0–300.
-            </span>
-          </label>
-          <label className="block text-sm text-gray-300">
-            Adjustment Settling (seconds)
-            <input
-              type="number"
-              min={0}
-              max={300}
-              step={1}
-              value={adjustmentSettlingSeconds}
-              onChange={(e) => setAdjustmentSettlingSeconds(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-            <span className="mt-1 block text-xs text-gray-500">
-              Pause profit-target and adjustment checks for this long after an
-              adjustment, while the new leg settles and slaves finish mirroring.
-              Stop loss is never paused.
-            </span>
-          </label>
-        </div>
-      </section>
-
-      {/* Risk */}
-      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">Risk Settings</h2>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="text-sm text-gray-300">
-            Profit Target (% of max premium)
-            <input
-              type="number"
-              min={1}
-              max={500}
-              step={1}
-              value={tpPct}
-              onChange={(e) => setTpPct(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-          </label>
-          <label className="text-sm text-gray-300">
-            Stop Loss (% of max premium)
-            <input
-              type="number"
-              min={1}
-              max={1000}
-              step={1}
-              value={slPct}
-              onChange={(e) => setSlPct(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-          </label>
-          <label className="text-sm text-gray-300">
-            Delta SL (%)
-            <input
-              type="number"
-              min={100}
-              max={1000}
-              step={1}
-              value={universalSlPct}
-              onChange={(e) => setUniversalSlPct(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-          </label>
-          <label className="text-sm text-gray-300">
-            Slippage Est (%)
-            <input
-              type="number"
-              min={0}
-              max={10}
-              step={0.1}
-              value={slippagePct}
-              onChange={(e) => setSlippagePct(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-          </label>
-        </div>
-      </section>
-
-      {/* Triggers */}
-      {slabsInitial && (
-        <AdjustmentSlabs
-          key={slabsKey}
-          onChange={onSlabsChange}
-          defaultMode={slabsInitial.mode || 'slab'}
-          initialValues={slabsInitial}
-        />
-      )}
-
-      {/* Combined Premium Trigger */}
-      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">
-          Combined Trigger Mode
-        </h2>
-        <label className="flex cursor-pointer items-start gap-3">
-          <input
-            type="checkbox"
-            checked={combinedTriggerMode}
-            onChange={async (e) => {
-              const on = e.target.checked
-              setCombinedTriggerMode(on)
-              // Persist immediately — toggle alone used to leave DB at False
-              // until Save, so on_tick kept using individual triggers.
-              try {
-                const updated = await saveAutoTradeSettings({
-                  ...buildPayload(),
-                  combined_trigger_mode: on,
-                })
-                applyStatusToForm(updated, formSetters)
-                setToast({
-                  type: 'success',
-                  message: on
-                    ? '✅ Combined trigger ON'
-                    : '✅ Combined trigger OFF',
-                })
-              } catch (err) {
-                setCombinedTriggerMode(!on)
-                setToast({
-                  type: 'error',
-                  message:
-                    err.message || 'Failed to save combined trigger mode',
-                })
-              }
-            }}
-            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
-            title="Adjustment triggers when TOTAL premium (call+put) reaches trigger%, not individual legs"
-          />
-          <span className="text-sm text-gray-300">
-            Combined Premium Trigger{' '}
-            <span className="text-gray-500">
-              ({combinedTriggerMode ? 'ON' : 'OFF'})
-            </span>
-          </span>
-        </label>
-        <p className="text-xs text-gray-500">
-          When ON: adjustment triggers when TOTAL premium (call + put)
-          reaches trigger %, not individual legs. The leg with the higher
-          % increase is adjusted. Default OFF = per-leg triggers.
-        </p>
-      </section>
-
-      {/* Low-premium adjustment exit */}
-      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">
-          Adjustment Exit on Low Premium
-        </h2>
-        <label className="flex cursor-pointer items-start gap-3">
-          <input
-            type="checkbox"
-            checked={adjLowPremiumExitEnabled}
-            onChange={(e) => setAdjLowPremiumExitEnabled(e.target.checked)}
-            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
-          />
-          <span className="text-sm text-gray-300">
-            Close basket if replacement premium is too low
-          </span>
-        </label>
-        {adjLowPremiumExitEnabled && (
-          <div className="rounded-lg border border-amber-500/30 bg-gray-900/60 p-4">
-            <label className="mb-2 block text-sm text-gray-400">
-              Minimum replacement premium ($)
-            </label>
-            <input
-              type="number"
-              min={10}
-              max={500}
-              step={10}
-              value={adjLowPremiumMinUsd}
-              onChange={(e) =>
-                setAdjLowPremiumMinUsd(Number(e.target.value) || 150)
-              }
-              className="w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-            <p className="mt-2 text-xs text-gray-500">
-              If an adjustment would require shorting a new leg below $
-              {adjLowPremiumMinUsd}, special handling applies (conversion or
-              exit — see Conversion Mode below).
-            </p>
-          </div>
-        )}
-      </section>
-
-      {/* Conversion Mode + Max Adjustments */}
-      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">Conversion Mode</h2>
-        <label className="flex cursor-pointer items-start gap-3">
-          <input
-            type="checkbox"
-            checked={conversionModeEnabled}
-            onChange={(e) => {
-              const on = e.target.checked
-              setConversionModeEnabled(on)
-              if (on) setMaxAdjustmentsPerBasket('')
-            }}
-            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
-          />
-          <span className="text-sm text-gray-300">
-            Conversion Mode{' '}
-            <span className="text-gray-500">
-              ({conversionModeEnabled ? 'ON' : 'OFF'})
-            </span>
-          </span>
-        </label>
-        <p className="text-xs text-gray-500">
-          When ON: bot buys a hedge and restructures basket if replacement
-          premium is too low. When OFF: bot exits the basket instead.
-        </p>
-        {!conversionModeEnabled && (
-          <div className="rounded-lg border border-orange-500/30 bg-gray-900/60 p-4">
-            <label className="mb-2 block text-sm text-gray-400">
-              Max Adjustments Per Basket
-            </label>
-            <select
-              value={maxAdjustmentsPerBasket === '' ? 'unlimited' : maxAdjustmentsPerBasket}
-              onChange={(e) => {
-                const v = e.target.value
-                setMaxAdjustmentsPerBasket(v === 'unlimited' ? '' : v)
-              }}
-              className="w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            >
-              <option value="unlimited">Unlimited</option>
-              <option value="1">1</option>
-              <option value="2">2</option>
-              <option value="3">3</option>
-            </select>
-            <p className="mt-2 text-xs text-gray-500">
-              Bot will exit the basket after this many adjustments instead of
-              adjusting again. Only active when Conversion Mode is OFF.
-            </p>
-          </div>
-        )}
-      </section>
-
-      {/* Premium Cover Loss */}
-      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">Premium Cover Loss</h2>
-        <label className="flex cursor-pointer items-start gap-3">
-          <input
-            type="checkbox"
-            checked={premiumCoverLossEnabled}
-            onChange={(e) => setPremiumCoverLossEnabled(e.target.checked)}
-            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
-          />
-          <span className="text-sm text-gray-300">
-            Premium Cover Loss{' '}
-            <span className="text-gray-500">
-              ({premiumCoverLossEnabled ? 'ON' : 'OFF'})
-            </span>
-          </span>
-        </label>
-        <p className="text-xs text-gray-500">
-          When ON: bot targets new strike premium equal to the realized loss
-          on the triggered leg (e.g. if CALL lost $150 in premium points,
-          bot finds new CALL with ~$150 premium). Helps recover the loss if
-          both legs expire worthless, and gives more breathing room before
-          next trigger.
-        </p>
-      </section>
-
-      {/* ===== HEDGE MODE (config only — engine not wired yet) ===== */}
-      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">HEDGE MODE</h2>
-        <p className="text-xs text-gray-500">
-          A permanent long ATM straddle held alongside daily short baskets.
-          The hedge is NOT closed when a basket closes — it outlives many
-          baskets and has its own target / stop / lifecycle.
-        </p>
+          <SectionCard id="hedge-mode" icon="🛡️" title="Hedge Mode" accent>
         <label className="flex cursor-pointer items-start gap-3">
           <input
             type="checkbox"
@@ -1969,42 +2035,8 @@ export default function AutoTrade() {
               </span>
             </span>
           </label>
+          <SectionDivider>Stop Loss</SectionDivider>
           <label className="block text-sm text-gray-300">
-            Hedge target ($) — legacy
-            <input
-              type="number"
-              min={0.01}
-              step={1}
-              value={hedgeTargetUsd}
-              onChange={(e) => setHedgeTargetUsd(e.target.value)}
-              disabled={!hedgeEnabled}
-              placeholder="Optional"
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
-            />
-            <span className="mt-1 block text-xs text-amber-500/90">
-              Legacy display only — not used by the live trigger. Live target =
-              multiple × expected monthly earnings on structure P&amp;L.
-            </span>
-          </label>
-          <label className="block text-sm text-gray-300">
-            Hedge stop loss ($) — legacy
-            <input
-              type="number"
-              min={0.01}
-              step={1}
-              value={hedgeStoplossUsd}
-              onChange={(e) => setHedgeStoplossUsd(e.target.value)}
-              disabled={!hedgeEnabled}
-              placeholder="Optional"
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
-            />
-            <span className="mt-1 block text-xs text-amber-500/90">
-              Legacy display only — not used by the live trigger. Live stop uses
-              Fixed SL + booked baskets below.
-            </span>
-          </label>
-          <label className="block text-sm text-gray-300">
-            Hedge fixed SL ($)
             <input
               type="number"
               min={0.1}
@@ -2047,6 +2079,7 @@ export default function AutoTrade() {
               </span>
             )}
           </label>
+          <SectionDivider>Target</SectionDivider>
           <label className="block text-sm text-gray-300">
             Expected monthly earnings (%)
             <input
@@ -2152,10 +2185,46 @@ export default function AutoTrade() {
               until live order margin is available.
             </span>
           </label>
+          <button
+            type="button"
+            onClick={() => setLegacyHedgeOpen((o) => !o)}
+            className="text-xs text-purple-400 hover:text-purple-300"
+          >
+            {legacyHedgeOpen ? 'Hide legacy fields ▲' : 'Show legacy fields ▼'}
+          </button>
+          {legacyHedgeOpen ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block text-sm text-gray-300">
+                Hedge target ($) — legacy
+                <input
+                  type="number"
+                  min={0.01}
+                  step={1}
+                  value={hedgeTargetUsd}
+                  onChange={(e) => setHedgeTargetUsd(e.target.value)}
+                  disabled={!hedgeEnabled}
+                  placeholder="Optional"
+                  className="mt-1 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white disabled:cursor-not-allowed"
+                />
+              </label>
+              <label className="block text-sm text-gray-300">
+                Hedge stop loss ($) — legacy
+                <input
+                  type="number"
+                  min={0.01}
+                  step={1}
+                  value={hedgeStoplossUsd}
+                  onChange={(e) => setHedgeStoplossUsd(e.target.value)}
+                  disabled={!hedgeEnabled}
+                  placeholder="Optional"
+                  className="mt-1 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white disabled:cursor-not-allowed"
+                />
+              </label>
+            </div>
+          ) : null}
         </div>
 
-        {/* Live hedge preview — always visible (hypothetical before any hedge) */}
-        <div className="mt-2 rounded-lg border border-gray-700/80 bg-gray-900/50 p-3">
+        <div className="mt-2 rounded-lg border border-green-700/50 bg-gray-900/50 p-3">
           <div className="mb-2 flex items-center justify-between gap-2">
             <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400/90">
               Live preview (updates with spot)
@@ -2225,17 +2294,9 @@ export default function AutoTrade() {
             <p className="text-sm text-gray-500">Loading preview…</p>
           )}
         </div>
-      </section>
+          </SectionCard>
 
-      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">
-          SHORT STRIKE SELECTION
-        </h2>
-        <p className="text-xs text-gray-500">
-          How daily short strikes are chosen when hedge mode is on. Theta-based
-          preview uses a hypothetical ATM hedge from the settings above — no
-          live hedge required.
-        </p>
+          <SectionCard id="strike-selection" icon="🎯" title="Strike Selection">
         <div className="space-y-2">
           <label className="flex cursor-pointer items-start gap-3">
             <input
@@ -2452,242 +2513,27 @@ export default function AutoTrade() {
             <p className="text-sm text-gray-500">Loading preview…</p>
           )}
         </div>
-      </section>
+          </SectionCard>
 
-      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">BASKET PROFIT TARGET</h2>
-        <p className="text-xs text-gray-500">
-          The basket must cover the hedge&apos;s daily theta bleed plus a
-          margin. Theta mode locks target at entry from hedge total straddle
-          theta × multiple × qty × 0.001.
-        </p>
-        <div className="space-y-2">
-          <label className="flex cursor-pointer items-start gap-3">
-            <input
-              type="radio"
-              name="basket_target_mode"
-              checked={basketTargetMode === 'THETA'}
-              onChange={() => setBasketTargetMode('THETA')}
-              className="mt-1"
-            />
-            <span className="text-sm text-gray-300">
-              Theta — multiple of hedge daily total theta
-            </span>
-          </label>
-          <label className="flex cursor-pointer items-start gap-3">
-            <input
-              type="radio"
-              name="basket_target_mode"
-              checked={basketTargetMode === 'PCT'}
-              onChange={() => setBasketTargetMode('PCT')}
-              className="mt-1"
-            />
-            <span className="text-sm text-gray-300">
-              Percent — % of basket credit (legacy)
-            </span>
-          </label>
-        </div>
-        {basketTargetMode === 'THETA' ? (
-          <label className="block text-sm text-gray-300">
-            Basket target multiple
-            <input
-              type="number"
-              min={0.1}
-              max={10}
-              step={0.1}
-              value={basketTargetMultiple}
-              onChange={(e) => setBasketTargetMultiple(e.target.value)}
-              className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-            />
-            <span className="mt-1 block text-xs text-gray-500">
-              target_usd = multiple × hedge_total_theta × qty × 0.001. Default
-              1.5 covers daily hedge theta plus a 50% cushion. Strike selection
-              still uses CALL-leg theta × strike multiplier (separate).
-            </span>
-          </label>
-        ) : (
-          <p className="text-xs text-gray-500">
-            Uses Profit Target % of max premium (above) when Percent mode is
-            selected.
-          </p>
-        )}
-      </section>
+          <SectionCard id="advanced" icon="⚙️" title="Advanced">
+            <label className="block text-sm text-gray-300 sm:max-w-xs">
+              <FieldLabel tooltip="After a basket stop-loss, wait this long before auto re-entry. 0 = no extra cooldown. Hedge stays open during cooldown">
+                Cooldown after loss (min)
+              </FieldLabel>
+              <input
+                type="number"
+                min={0}
+                max={1440}
+                step={1}
+                value={cooldownAfterLossMinutes}
+                onChange={(e) => setCooldownAfterLossMinutes(e.target.value)}
+                className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+              />
+            </label>
 
-      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">TARGET</h2>
-        <p className="text-xs text-gray-500">
-          Basket profit target source. Theta-multiplier preview uses
-          hypothetical hedge theta — no live hedge required to preview.
-        </p>
-        <div className="space-y-2">
-          <label className="flex cursor-pointer items-start gap-3">
-            <input
-              type="radio"
-              name="target_mode"
-              checked={targetMode === 'payoff_pct'}
-              onChange={() => setTargetMode('payoff_pct')}
-              className="mt-1"
-            />
-            <span className="text-sm text-gray-300">
-              Payoff % of max premium (current behaviour)
-            </span>
-          </label>
-          <label
-            className={`flex items-start gap-3 ${
-              hedgeEnabled
-                ? 'cursor-pointer'
-                : 'cursor-not-allowed opacity-40'
-            }`}
-            title={
-              hedgeEnabled
-                ? undefined
-                : 'Enable Hedge Mode first — theta-multiplier target needs hedge mode'
-            }
-          >
-            <input
-              type="radio"
-              name="target_mode"
-              checked={targetMode === 'theta_multiplier'}
-              disabled={!hedgeEnabled}
-              onChange={() => setTargetMode('theta_multiplier')}
-              className="mt-1 disabled:cursor-not-allowed"
-            />
-            <span className="text-sm text-gray-300">
-              Theta multiplier target
-            </span>
-          </label>
-        </div>
-        <label
-          className={`block text-sm text-gray-300 ${
-            hedgeEnabled && targetMode === 'theta_multiplier' ? '' : 'opacity-40'
-          }`}
-          title={
-            !hedgeEnabled
-              ? 'Enable Hedge Mode first — target theta % needs hedge mode'
-              : undefined
-          }
-        >
-          Target theta %
-          <input
-            type="number"
-            min={10}
-            max={1000}
-            step={1}
-            value={targetThetaPct}
-            disabled={!hedgeEnabled || targetMode !== 'theta_multiplier'}
-            onChange={(e) => setTargetThetaPct(e.target.value)}
-            className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed"
-          />
-          <span className="mt-1 block text-xs text-gray-500">
-            Exit when basket P&amp;L reaches this % of daily hedge theta income.
-          </span>
-        </label>
-
-        <div className="rounded-lg border border-gray-700/80 bg-gray-900/50 p-3">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-400/90">
-              Live preview
-            </p>
-            {previewLoading ? (
-              <span className="text-[10px] text-gray-500">Refreshing…</span>
-            ) : null}
-          </div>
-          {targetPreview?.unavailable || targetPreview?.success === false ? (
-            <p className="text-sm text-amber-400">
-              {targetPreview?.message || 'unavailable - chain fetch failed'}
-            </p>
-          ) : targetPreview?.success ? (
-            <div className="space-y-1.5 font-mono text-xs text-gray-300">
-              <p className="text-gray-500">
-                Short {formatExpiryShort(targetPreview.short_expiry)} · CALL{' '}
-                {Math.round(Number(targetPreview.call_strike))} @{' '}
-                {formatMoney(targetPreview.call_premium)} · PUT{' '}
-                {Math.round(Number(targetPreview.put_strike))} @{' '}
-                {formatMoney(targetPreview.put_premium)}
-              </p>
-              <p className="text-sm text-white">
-                = {formatMoney(targetPreview.target_usd)} ={' '}
-                {Number(targetPreview.pct_of_max).toFixed(0)}% of max profit
-                <span className="text-gray-500">
-                  {' '}
-                  ({formatMoney(targetPreview.max_profit_usd)})
-                </span>
-              </p>
-              {targetPreview.premium_fallback_used ? (
-                <p className="rounded border border-rose-600/50 bg-rose-950/40 px-2 py-2 text-xs font-semibold text-amber-300">
-                  PREMIUM TARGET UNREACHABLE - required{' '}
-                  {Number(
-                    targetPreview.required_call_premium ??
-                      targetPreview.required_theta,
-                  ).toFixed(2)}
-                  . Nearest OTM call used for max-profit estimate.
-                </p>
-              ) : null}
-              {targetPreview.fallback_used ? (
-                <p className="rounded border border-rose-600/50 bg-rose-950/40 px-2 py-2 text-xs font-semibold text-amber-300">
-                  THETA TARGET UNREACHABLE - required{' '}
-                  {Number(targetPreview.required_theta).toFixed(2)}, chain max{' '}
-                  {Number(targetPreview.max_available_theta ?? 0).toFixed(2)}.
-                  Max usable multiplier right now:{' '}
-                  {Number(targetPreview.max_usable_multiplier ?? 0).toFixed(2)}
-                </p>
-              ) : (
-                <p
-                  className={
-                    (targetPreview.reachability || targetPreview.band) ===
-                    'reachable'
-                      ? 'text-emerald-400'
-                      : (targetPreview.reachability || targetPreview.band) ===
-                          'tight'
-                        ? 'text-amber-400'
-                        : 'text-rose-400'
-                  }
-                >
-                  [
-                  {(targetPreview.reachability || targetPreview.band) ===
-                  'reachable'
-                    ? 'ok'
-                    : '!'}
-                  ] {targetPreview.band_label || targetPreview.reachability}
-                </p>
-              )}
-            </div>
-          ) : (
-            <p className="text-sm text-gray-500">Loading preview…</p>
-          )}
-        </div>
-      </section>
-
-      <section className="space-y-3 rounded-xl border border-emerald-700/40 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">COOLDOWN</h2>
-        <label className="block text-sm text-gray-300">
-          Cooldown after loss (minutes)
-          <input
-            type="number"
-            min={0}
-            max={1440}
-            step={1}
-            value={cooldownAfterLossMinutes}
-            onChange={(e) => setCooldownAfterLossMinutes(e.target.value)}
-            className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-          />
-          <span className="mt-1 block text-xs text-gray-500">
-            After a basket stop-loss, wait this long before auto re-entry.
-            0 = no extra cooldown. Independent of the hedge — the hedge stays
-            open during cooldown.
-          </span>
-        </label>
-      </section>
-
-      <section className="space-y-3 rounded-xl border border-amber-700/40 bg-gray-800/60 p-4">
-        <h2 className="text-sm font-semibold text-white">Spread Estimation</h2>
-        <p className="text-xs text-gray-500">
-          Used when estimating exit spread for short-basket net MTM and hedge
-          structure P&amp;L. Manual is the recommended default. Auto measures
-          live from the L2 book. Cap always applies.
-        </p>
-        <fieldset className="space-y-2">
-          <legend className="text-sm text-gray-300">Mode</legend>
+            <SectionDivider>Spread Estimation</SectionDivider>
+            <fieldset className="space-y-2">
+              <legend className="sr-only">Spread mode</legend>
           <label className="flex items-start gap-2 text-sm text-gray-200">
             <input
               type="radio"
@@ -2796,40 +2642,8 @@ export default function AutoTrade() {
             )}
           </label>
         </div>
-      </section>
-
-      {/* Actions */}
-      <div className="flex flex-wrap gap-3">
-        <button
-          type="button"
-          disabled={saving || toggling}
-          onClick={handleSave}
-          className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
-        >
-          {saving ? <LoadingSpinner size="sm" /> : null}
-          💾 Save Settings
-        </button>
-
-        {!isEnabled ? (
-          <button
-            type="button"
-            disabled={saving || toggling}
-            onClick={handleEnable}
-            className="inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-green-500 disabled:opacity-50"
-          >
-            {toggling ? <LoadingSpinner size="sm" /> : null}
-            🔄 Enable Auto Trade
-          </button>
-        ) : (
-          <button
-            type="button"
-            disabled={saving || toggling}
-            onClick={() => setDisableOpen(true)}
-            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-50"
-          >
-            ⏹ Disable Auto Trade
-          </button>
-        )}
+          </SectionCard>
+        </div>
       </div>
 
       <ConfirmDialog
