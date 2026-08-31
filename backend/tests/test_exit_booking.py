@@ -18,6 +18,14 @@ from backend.core.realized_booking import (
     pnl_sanity_check,
     recompute_trade_realized_from_legs,
 )
+from backend.core.backfill_realized import (
+    analyze_trade,
+    bucket_trade_ids,
+    classify_unresolved_bucket,
+    repair_b1_leg,
+    sum_closed_leg_realized,
+)
+from backend.core.delta_client import short_leg_realized_pnl
 
 
 def _leg(**kwargs: object) -> SimpleNamespace:
@@ -167,6 +175,125 @@ def test_pnl_sanity_fail_on_sign_mismatch() -> None:
         legs=[],
     )
     assert ok2 is True
+
+
+def test_backfill_class_a_b1_b2_classification() -> None:
+    trade = SimpleNamespace(
+        id=121,
+        realized_pnl=-0.047,
+        hedge_position_id=5,
+        status="emergency_closed",
+    )
+    legs = [
+        _leg(id=1, status="closed", realized_pnl=-0.429),
+        _leg(id=2, leg_type="put", status="closed", realized_pnl=0.339),
+        _leg(
+            id=3,
+            leg_type="hedge_call",
+            status="closed",
+            realized_pnl=0.043,
+        ),
+        _leg(
+            id=4,
+            leg_type="put",
+            status="closed",
+            initial_premium=214.0,
+            exit_premium=44.0,
+            quantity=1,
+            realized_pnl=None,
+        ),
+        _leg(
+            id=5,
+            leg_type="call",
+            status="closed",
+            initial_premium=100.0,
+            exit_premium=None,
+            exit_order_id="999",
+            quantity=1,
+            realized_pnl=None,
+        ),
+    ]
+    analysis = analyze_trade(trade, legs)
+    assert analysis.false_healthy is True
+    assert analysis.class_a is False
+    assert len(analysis.b1_legs) == 1
+    assert len(analysis.b2_legs) == 1
+    assert classify_unresolved_bucket(analysis.b1_legs[0]) == "B1"
+    assert classify_unresolved_bucket(analysis.b2_legs[0]) == "B2"
+    buckets = bucket_trade_ids([analysis])
+    assert 121 in buckets["CLASS_B1"]
+    assert 121 in buckets["CLASS_B2"]
+    assert 121 in buckets["FALSE_HEALTHY"]
+    assert 121 not in buckets["CLASS_A"]
+
+
+def test_backfill_class_a_detects_stale_trade_total() -> None:
+    trade = SimpleNamespace(id=50, realized_pnl=0.10, status="closed")
+    legs = [
+        _leg(id=1, status="closed", realized_pnl=0.05),
+        _leg(id=2, leg_type="put", status="closed", realized_pnl=0.02),
+    ]
+    analysis = analyze_trade(trade, legs)
+    assert analysis.class_a is True
+    resolved, unresolved = sum_closed_leg_realized(legs)
+    assert resolved == 0.07
+    assert unresolved == []
+
+
+def test_repair_b1_sets_realized_skips_b2() -> None:
+    b1 = _leg(
+        id=10,
+        leg_type="put",
+        status="closed",
+        initial_premium=214.0,
+        exit_premium=44.0,
+        quantity=1,
+        realized_pnl=None,
+    )
+    b2 = _leg(
+        id=11,
+        status="closed",
+        initial_premium=100.0,
+        exit_premium=None,
+        quantity=1,
+        realized_pnl=None,
+    )
+    expected = short_leg_realized_pnl(214.0, 44.0, 1)
+    out_b1 = repair_b1_leg(b1, dry_run=False)
+    out_b2 = repair_b1_leg(b2, dry_run=False)
+    assert out_b2 is None
+    assert b2.realized_pnl is None
+    assert round(float(out_b1), 6) == round(float(expected), 6)
+    assert round(float(b1.realized_pnl), 6) == round(float(expected), 6)
+
+
+def test_repair_b1_dry_run_does_not_mutate() -> None:
+    leg = _leg(
+        id=12,
+        status="closed",
+        initial_premium=200.0,
+        exit_premium=90.0,
+        quantity=1,
+        realized_pnl=None,
+    )
+    computed = repair_b1_leg(leg, dry_run=True)
+    assert computed is not None
+    assert leg.realized_pnl is None
+
+
+def test_repair_b1_idempotent_second_apply() -> None:
+    leg = _leg(
+        id=13,
+        status="closed",
+        initial_premium=200.0,
+        exit_premium=90.0,
+        quantity=1,
+        realized_pnl=None,
+    )
+    first = repair_b1_leg(leg, dry_run=False)
+    second = repair_b1_leg(leg, dry_run=False)
+    assert first == second
+    assert leg.realized_pnl == first
 
 
 if __name__ == "__main__":

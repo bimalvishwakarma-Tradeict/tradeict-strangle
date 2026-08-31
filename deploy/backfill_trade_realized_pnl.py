@@ -1,72 +1,356 @@
 #!/usr/bin/env python3
 """
-Backfill trade.realized_pnl from sum of closed bot-managed leg realized_pnl.
+Backfill / repair trade.realized_pnl from closed bot-managed legs.
 
-Does NOT auto-run. Invoke explicitly after deploy:
+Classifies issues into:
+  CLASS A  — trade total stale (stored != sum of legs with realized)
+  CLASS B1 — leg realized NULL but entry+exit premium present (arithmetic repair)
+  CLASS B2 — exit premium missing (needs Delta fills)
 
-  cd /path/to/trading-bot
-  python deploy/backfill_trade_realized_pnl.py --dry-run
-  python deploy/backfill_trade_realized_pnl.py --apply
+Does NOT auto-run. Examples:
 
-Optional: --trade-id 121 to limit to one trade.
+  python deploy/backfill_trade_realized_pnl.py
+  python deploy/backfill_trade_realized_pnl.py --apply --yes
+  python deploy/backfill_trade_realized_pnl.py --apply --repair-legs --yes
+  python deploy/backfill_trade_realized_pnl.py --apply --from-delta --yes
+  python deploy/backfill_trade_realized_pnl.py --trade-id 121 --apply --repair-legs --yes
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.config import TradeStatus
+from backend.core.backfill_realized import (
+    TradeBackfillAnalysis,
+    analyze_all_trades,
+    append_pnl_unresolved_note,
+    bucket_trade_ids,
+    classify_unresolved_bucket,
+    compute_leg_realized_from_premiums,
+    repair_b1_leg,
+    sum_closed_leg_realized,
+)
+from backend.core.delta_client import DeltaClient, short_leg_realized_pnl
+from backend.core.encryption import decrypt
 from backend.database import SessionLocal, init_db
-from backend.engine.trade_reconcile import recompute_trade_realized_pnl
-from backend.models import Leg, Trade
+from backend.engine.trade_reconcile import (
+    recompute_trade_realized_pnl,
+    resolve_external_exit_fill,
+)
+from backend.models import Account, HedgePosition, Leg, Trade
 
 _CLOSED_STATUSES = {
     TradeStatus.CLOSED.value,
     TradeStatus.EMERGENCY_CLOSED.value,
 }
 
+_DELTA_SLEEP_SEC = 0.35
 
-def _sum_closed_leg_realized(db, trade_id: int) -> float:
-    legs = (
+
+def _build_delta_client(account: Account) -> DeltaClient:
+    return DeltaClient(
+        api_key=decrypt(account.api_key_encrypted),
+        api_secret=decrypt(account.api_secret_encrypted),
+    )
+
+
+def _load_legs_by_trade(db: Any, trade_ids: list[int]) -> dict[int, list[Any]]:
+    if not trade_ids:
+        return {}
+    rows = (
         db.query(Leg)
-        .filter(Leg.trade_id == int(trade_id), Leg.is_bot_managed.is_(True))
+        .filter(Leg.trade_id.in_(trade_ids), Leg.is_bot_managed.is_(True))
         .all()
     )
-    total = 0.0
-    for leg in legs:
-        if str(getattr(leg, "status", "") or "").lower() != "closed":
-            continue
-        rp = getattr(leg, "realized_pnl", None)
-        if rp is None:
-            continue
-        total += float(rp)
-    return round(total, 6)
+    out: dict[int, list[Any]] = {tid: [] for tid in trade_ids}
+    for leg in rows:
+        out[int(leg.trade_id)].append(leg)
+    return out
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=True,
-        help="Print mismatches only (default)",
+def _print_bucket(title: str, trade_ids: list[int], detail_fn: Any | None = None) -> None:
+    print(f"\n{title} — count={len(trade_ids)}")
+    if not trade_ids:
+        print("  (none)")
+        return
+    print(f"  trade_ids: {trade_ids}")
+    if detail_fn is not None:
+        for tid in trade_ids:
+            detail_fn(tid)
+
+
+def _collect_hedge_ids(analyses: list[TradeBackfillAnalysis]) -> set[int]:
+    ids: set[int] = set()
+    for row in analyses:
+        if row.hedge_position_id is not None and (
+            row.class_a or row.b1_legs or row.b2_legs
+        ):
+            ids.add(int(row.hedge_position_id))
+    return ids
+
+
+def _print_hedge_safety(db: Any, hedge_ids: set[int]) -> list[int]:
+    active: list[int] = []
+    if not hedge_ids:
+        print("\nHedge structures affected: (none)")
+        return active
+    print(f"\nHedge structures affected: {sorted(hedge_ids)}")
+    for hid in sorted(hedge_ids):
+        hedge = db.query(HedgePosition).filter(HedgePosition.id == hid).first()
+        status = str(getattr(hedge, "status", "") or "").lower() if hedge else "?"
+        marker = "ACTIVE" if status == "active" else status
+        print(f"  hedge_position_id={hid} status={marker}")
+        if status == "active":
+            active.append(hid)
+    if active:
+        for hid in active:
+            print(
+                f"⚠ ACTIVE hedge #{hid} affected — live SL budget will shift. "
+                "Verify [SL_BASIS] logs after apply."
+            )
+    return active
+
+
+def _count_pending_writes(
+    analyses: list[TradeBackfillAnalysis],
+    *,
+    do_apply: bool,
+    repair_legs: bool,
+    from_delta: bool,
+) -> tuple[int, int, int]:
+    class_a_n = sum(1 for a in analyses if a.class_a) if do_apply else 0
+    b1_n = sum(len(a.b1_legs) for a in analyses) if repair_legs and do_apply else 0
+    b2_n = 0
+    if from_delta and do_apply:
+        for a in analyses:
+            for snap in a.b2_legs:
+                if snap.get("exit_order_id"):
+                    b2_n += 1
+    return class_a_n, b1_n, b2_n
+
+
+def _confirm_apply(
+    *,
+    class_a_n: int,
+    b1_n: int,
+    b2_n: int,
+    skip_confirm: bool,
+) -> bool:
+    total = class_a_n + b1_n + b2_n
+    print(
+        f"\nApply will modify up to {total} row(s): "
+        f"CLASS_A trades={class_a_n}, B1 legs={b1_n}, B2 delta legs={b2_n}"
     )
-    parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Write corrected trade.realized_pnl values",
+    if total == 0:
+        print("Nothing to write.")
+        return False
+    if skip_confirm:
+        return True
+    resp = input("Type YES to continue: ").strip()
+    return resp == "YES"
+
+
+async def _repair_b2_from_delta(
+    db: Any,
+    client: DeltaClient,
+    analyses: list[TradeBackfillAnalysis],
+    *,
+    dry_run: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Fetch exit fills for B2 legs with exit_order_id.
+
+    Returns (repaired_rows, unrecoverable_rows).
+    """
+    repaired: list[dict[str, Any]] = []
+    unrecoverable: list[dict[str, Any]] = []
+    trade_map = {
+        int(a.trade_id): a
+        for a in analyses
+    }
+
+    for analysis in analyses:
+        tid = int(analysis.trade_id)
+        trade = db.query(Trade).filter(Trade.id == tid).first()
+        if trade is None:
+            continue
+        legs = (
+            db.query(Leg)
+            .filter(Leg.trade_id == tid, Leg.is_bot_managed.is_(True))
+            .all()
+        )
+        leg_by_id = {int(lg.id): lg for lg in legs}
+
+        for snap in analysis.b2_legs:
+            if classify_unresolved_bucket(snap) != "B2":
+                continue
+            leg = leg_by_id.get(int(snap["leg_id"]))
+            if leg is None:
+                continue
+            if getattr(leg, "realized_pnl", None) is not None:
+                continue
+            oid = getattr(leg, "exit_order_id", None)
+            if not oid:
+                unrecoverable.append(
+                    {
+                        "trade_id": tid,
+                        "leg_id": int(leg.id),
+                        "symbol": getattr(leg, "symbol", None),
+                        "exit_order_id": None,
+                        "reason": "no_exit_order_id",
+                    }
+                )
+                continue
+
+            await asyncio.sleep(_DELTA_SLEEP_SEC)
+            exit_px = await resolve_external_exit_fill(client, leg)
+            if exit_px is None or float(exit_px) <= 0:
+                if not dry_run:
+                    append_pnl_unresolved_note(trade, str(leg.leg_type or "leg"))
+                unrecoverable.append(
+                    {
+                        "trade_id": tid,
+                        "leg_id": int(leg.id),
+                        "symbol": getattr(leg, "symbol", None),
+                        "exit_order_id": str(oid),
+                        "reason": "delta_fill_not_found",
+                    }
+                )
+                continue
+
+            computed = compute_leg_realized_from_premiums(
+                leg if not dry_run else _with_exit_premium(leg, float(exit_px))
+            )
+            if computed is None:
+                entry = float(getattr(leg, "initial_premium", 0) or 0)
+                qty = abs(int(getattr(leg, "quantity", 0) or 0))
+                computed = short_leg_realized_pnl(entry, float(exit_px), qty)
+
+            row = {
+                "trade_id": tid,
+                "leg_id": int(leg.id),
+                "entry": float(getattr(leg, "initial_premium", 0) or 0),
+                "exit": float(exit_px),
+                "qty": int(getattr(leg, "quantity", 0) or 0),
+                "realized": round(float(computed), 6),
+            }
+            if dry_run:
+                print(
+                    f"  [DRY-RUN B2] trade={tid} leg={leg.id} "
+                    f"exit={exit_px} realized={row['realized']}"
+                )
+            else:
+                leg.exit_premium = float(exit_px)
+                leg.realized_pnl = float(computed)
+                print(
+                    f"  [B2 DELTA] trade={tid} leg={leg.id} "
+                    f"entry={row['entry']} exit={exit_px} qty={row['qty']} "
+                    f"realized={row['realized']}"
+                )
+            repaired.append(row)
+            trade_map[tid] = analysis
+
+    affected_trades = sorted({int(r["trade_id"]) for r in repaired})
+    if not dry_run:
+        for tid in affected_trades:
+            trade = db.query(Trade).filter(Trade.id == tid).first()
+            if trade is not None:
+                recompute_trade_realized_pnl(db, trade)
+
+    return repaired, unrecoverable
+
+
+def _with_exit_premium(leg: Any, exit_px: float) -> Any:
+    """Preview object for dry-run B2 realized computation."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        initial_premium=getattr(leg, "initial_premium", None),
+        exit_premium=exit_px,
+        quantity=getattr(leg, "quantity", None),
+        is_long=bool(getattr(leg, "is_long", False)),
+        realized_pnl=None,
     )
-    parser.add_argument("--trade-id", type=int, default=None)
-    args = parser.parse_args()
+
+
+def _print_report(analyses: list[TradeBackfillAnalysis]) -> dict[str, list[int]]:
+    buckets = bucket_trade_ids(analyses)
+    analysis_by_id = {a.trade_id: a for a in analyses}
+
+    def _a_detail(tid: int) -> None:
+        a = analysis_by_id[tid]
+        print(
+            f"    trade={tid} stored={a.stored} "
+            f"resolved_sum={a.resolved_total} diff="
+            f"{round((a.resolved_total - (a.stored or 0.0)), 6)}"
+        )
+
+    def _b1_detail(tid: int) -> None:
+        a = analysis_by_id[tid]
+        for snap in a.b1_legs:
+            print(
+                f"    trade={tid} leg={snap['leg_id']} type={snap['leg_type']} "
+                f"entry={snap['initial_premium']} exit={snap['exit_premium']} "
+                f"qty={snap['quantity']}"
+            )
+
+    def _b2_detail(tid: int) -> None:
+        a = analysis_by_id[tid]
+        for snap in a.b2_legs:
+            print(
+                f"    trade={tid} leg={snap['leg_id']} type={snap['leg_type']} "
+                f"exit_order_id={snap.get('exit_order_id')} "
+                f"exit_premium={snap.get('exit_premium')}"
+            )
+
+    _print_bucket("CLASS A — trade total stale (recompute fixable)", buckets["CLASS_A"], _a_detail)
+    _print_bucket(
+        "CLASS B1 — realized NULL, entry+exit present (arithmetic repair)",
+        buckets["CLASS_B1"],
+        _b1_detail,
+    )
+    _print_bucket(
+        "CLASS B2 — exit premium missing (needs Delta / manual)",
+        buckets["CLASS_B2"],
+        _b2_detail,
+    )
+    if buckets["FALSE_HEALTHY"]:
+        print(
+            f"\nFALSE HEALTHY — stored matches resolved sum but unresolved legs "
+            f"exist: count={len(buckets['FALSE_HEALTHY'])} "
+            f"trade_ids={buckets['FALSE_HEALTHY']}"
+        )
+
+    print(
+        f"\nSUMMARY: CLASS_A={len(buckets['CLASS_A'])} "
+        f"CLASS_B1={len(buckets['CLASS_B1'])} "
+        f"CLASS_B2={len(buckets['CLASS_B2'])} "
+        f"FALSE_HEALTHY={len(buckets['FALSE_HEALTHY'])} "
+        f"trades_scanned={len(analyses)}"
+    )
+    return buckets
+
+
+async def _async_main(args: argparse.Namespace) -> int:
     do_apply = bool(args.apply)
-    if do_apply:
-        args.dry_run = False
+    repair_legs = bool(args.repair_legs)
+    from_delta = bool(args.from_delta)
+
+    if from_delta and not do_apply:
+        print("ERROR: --from-delta requires --apply")
+        return 1
+    if repair_legs and not do_apply:
+        print("NOTE: --repair-legs without --apply is preview-only (dry-run).")
 
     init_db()
 
@@ -75,69 +359,191 @@ def main() -> int:
         if args.trade_id is not None:
             q = q.filter(Trade.id == int(args.trade_id))
         trades = q.order_by(Trade.id.asc()).all()
+        trade_ids = [int(t.id) for t in trades]
+        legs_by_trade = _load_legs_by_trade(db, trade_ids)
+        analyses = analyze_all_trades(trades, legs_by_trade)
 
-        mismatches: list[dict[str, object]] = []
-        fixed_hedge_ids: set[int] = set()
+        print(f"Scanned {len(analyses)} closed trade(s).")
+        buckets = _print_report(analyses)
 
-        for trade in trades:
-            tid = int(trade.id)
-            stored = (
-                round(float(trade.realized_pnl), 6)
-                if trade.realized_pnl is not None
-                else None
+        has_work = any(
+            buckets[k]
+            for k in ("CLASS_A", "CLASS_B1", "CLASS_B2")
+        )
+        if not has_work:
+            print("\nNo issues found in any bucket.")
+            return 0
+
+        hedge_ids = _collect_hedge_ids(analyses)
+        _print_hedge_safety(db, hedge_ids)
+
+        class_a_n, b1_n, b2_n = _count_pending_writes(
+            analyses,
+            do_apply=do_apply,
+            repair_legs=repair_legs,
+            from_delta=from_delta,
+        )
+
+        if do_apply:
+            if not _confirm_apply(
+                class_a_n=class_a_n,
+                b1_n=b1_n,
+                b2_n=b2_n,
+                skip_confirm=bool(args.yes),
+            ):
+                print("Aborted.")
+                return 1
+
+        unrecoverable: list[dict[str, Any]] = []
+        trades_touched: set[int] = set()
+
+        # B1 arithmetic repair
+        if repair_legs:
+            for analysis in analyses:
+                if not analysis.b1_legs:
+                    continue
+                trade = db.query(Trade).filter(Trade.id == analysis.trade_id).first()
+                if trade is None:
+                    continue
+                legs = legs_by_trade.get(analysis.trade_id, [])
+                leg_by_id = {int(lg.id): lg for lg in legs}
+                for snap in analysis.b1_legs:
+                    leg = leg_by_id.get(int(snap["leg_id"]))
+                    if leg is None:
+                        continue
+                    computed = repair_b1_leg(leg, dry_run=not do_apply)
+                    if computed is None:
+                        continue
+                    print(
+                        f"  [{'DRY-RUN ' if not do_apply else ''}B1 REPAIR] "
+                        f"trade={analysis.trade_id} leg={leg.id} "
+                        f"entry={snap.get('initial_premium')} "
+                        f"exit={snap.get('exit_premium')} qty={snap.get('quantity')} "
+                        f"realized={round(float(computed), 6)}"
+                    )
+                    if do_apply:
+                        trades_touched.add(int(analysis.trade_id))
+
+        # B2 Delta fills
+        if from_delta and do_apply:
+            account = (
+                db.query(Account)
+                .filter(Account.is_active.is_(True))
+                .order_by(Account.id.asc())
+                .first()
             )
-            recomputed = _sum_closed_leg_realized(db, tid)
-            if stored is None and recomputed == 0.0:
-                continue
-            if stored is not None and abs(stored - recomputed) < 1e-6:
-                continue
-            diff = (
-                round(recomputed - (stored or 0.0), 6)
-                if stored is not None
-                else recomputed
-            )
-            hid = getattr(trade, "hedge_position_id", None)
-            row = {
-                "trade_id": tid,
-                "stored": stored,
-                "recomputed": recomputed,
-                "diff": diff,
-                "hedge_position_id": int(hid) if hid is not None else None,
-                "status": trade.status,
-            }
-            mismatches.append(row)
-            print(
-                f"  MISMATCH trade={tid} stored={stored} "
-                f"recomputed={recomputed} diff={diff}"
-                + (
-                    f" hedge={hid}"
-                    if hid is not None
-                    else ""
+            if account is None:
+                print("ERROR: no active account for Delta client")
+                return 1
+            client = _build_delta_client(account)
+            try:
+                _repaired, unrecoverable = await _repair_b2_from_delta(
+                    db, client, analyses, dry_run=False
                 )
-            )
-            if do_apply:
-                recompute_trade_realized_pnl(db, trade)
-                if hid is not None:
-                    fixed_hedge_ids.add(int(hid))
+                trades_touched.update(int(r["trade_id"]) for r in _repaired)
+            finally:
+                await client.close()
+        elif from_delta and not do_apply:
+            for analysis in analyses:
+                for snap in analysis.b2_legs:
+                    if snap.get("exit_order_id"):
+                        print(
+                            f"  [DRY-RUN B2] would fetch Delta fill trade={snap['trade_id']} "
+                            f"leg={snap['leg_id']} order={snap.get('exit_order_id')}"
+                        )
+                    else:
+                        unrecoverable.append(
+                            {
+                                "trade_id": snap.get("trade_id"),
+                                "leg_id": snap.get("leg_id"),
+                                "symbol": snap.get("symbol"),
+                                "exit_order_id": None,
+                                "reason": "no_exit_order_id",
+                            }
+                        )
 
-        if do_apply and mismatches:
+        # Class A trade total recompute (and post-repair refresh)
+        if do_apply:
+            for analysis in analyses:
+                tid = int(analysis.trade_id)
+                if analysis.class_a or tid in trades_touched:
+                    trade = db.query(Trade).filter(Trade.id == tid).first()
+                    if trade is None:
+                        continue
+                    before = getattr(trade, "realized_pnl", None)
+                    total = recompute_trade_realized_pnl(db, trade)
+                    if analysis.class_a or tid in trades_touched:
+                        print(
+                            f"  [CLASS A RECOMPUTE] trade={tid} "
+                            f"stored={before} -> {total}"
+                        )
+                    trades_touched.add(tid)
+
             db.commit()
-            print(f"\nApplied fixes for {len(mismatches)} trade(s).")
-            if fixed_hedge_ids:
-                print(
-                    "Hedge structures affected (cum_closed_basket_pnl derives "
-                    "from these trades):"
-                )
-                for hid in sorted(fixed_hedge_ids):
+            print(f"\nApplied changes to {len(trades_touched)} trade(s).")
+            if hedge_ids:
+                print("Hedge structures to verify:")
+                for hid in sorted(hedge_ids):
                     print(f"  hedge_position_id={hid}")
-        elif not mismatches:
-            print("No mismatches found.")
         else:
-            print(
-                f"\nDry-run: {len(mismatches)} mismatch(es). "
-                "Re-run with --apply to write."
-            )
+            print("\nDry-run complete — no DB writes.")
+
+        # Remaining B2 without repair
+        for analysis in analyses:
+            for snap in analysis.b2_legs:
+                if not do_apply or not from_delta:
+                    if not snap.get("exit_order_id"):
+                        unrecoverable.append(
+                            {
+                                "trade_id": analysis.trade_id,
+                                "leg_id": snap["leg_id"],
+                                "symbol": snap.get("symbol"),
+                                "exit_order_id": None,
+                                "reason": "no_exit_order_id",
+                            }
+                        )
+
+        if unrecoverable:
+            print(f"\nUNRECOVERABLE — count={len(unrecoverable)}")
+            for row in unrecoverable:
+                print(
+                    f"  trade={row.get('trade_id')} symbol={row.get('symbol')} "
+                    f"exit_order_id={row.get('exit_order_id')} "
+                    f"reason={row.get('reason')}"
+                )
+
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=True,
+        help="Preview only (default)",
+    )
+    parser.add_argument("--apply", action="store_true", help="Write DB changes")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt when using --apply",
+    )
+    parser.add_argument(
+        "--repair-legs",
+        action="store_true",
+        help="Repair CLASS B1 legs via entry/exit arithmetic",
+    )
+    parser.add_argument(
+        "--from-delta",
+        action="store_true",
+        help="Fetch B2 exit fills from Delta (requires --apply)",
+    )
+    parser.add_argument("--trade-id", type=int, default=None)
+    args = parser.parse_args()
+    if args.apply:
+        args.dry_run = False
+    return asyncio.run(_async_main(args))
 
 
 if __name__ == "__main__":
