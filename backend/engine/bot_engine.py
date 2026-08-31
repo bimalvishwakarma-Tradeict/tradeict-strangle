@@ -1340,13 +1340,13 @@ class BotEngine:
                 missing_px = await resolve_external_exit_fill(
                     self.delta_client, missing_leg
                 )
-                        book_leg_close(
-                            leg=missing_leg,
-                            trade=trade,
-                            exit_premium=missing_px,
-                            exit_time=now_utc,
-                            db=db,
-                        )
+                book_leg_close(
+                    leg=missing_leg,
+                    trade=trade,
+                    exit_premium=missing_px,
+                    exit_time=now_utc,
+                    db=db,
+                )
 
             if remaining_leg is not None:
                 await cancel_leg_sl_order(
