@@ -1,6 +1,6 @@
 # Session Record — 29 August 2026
 ## Delta Exchange India Short Strangle Bot (Tradeict)
-### B1–B21. Read this BEFORE `docs/HEDGE_MODE_SPEC.md` — hedge SL basis and basket sizing sections there are stale.
+### B1–B25. Read this BEFORE `docs/HEDGE_MODE_SPEC.md` — hedge SL basis and basket sizing sections there are stale.
 
 ---
 
@@ -31,6 +31,10 @@
 | B19 | `ff8e937`+`3d1cf06`+`3bd80a6`+`270f0fc` | ✅ | Delta WebSocket margins channel: IPv4 forced, bot startup feed, REST seed after subscribe. Cache TTL 60s |
 | B20 | `46aedf5` | ✅ | AVAIL BAL column removed — Delta API does not expose mark-price unrealised cashflow |
 | B21 | `ac556e1` | ✅ | PnlSlider bar widths fixed: proportional to max absolute value across all bars in slider |
+| B22 | `f126217` | ✅ | Frontend gross_mtm uses calculated_pnl (mark-based) not offer-based recompute |
+| B23 | `e230f11` | ✅ | Basket per-structure numbering, basket story below card + collapsible, payoff collapsible, structure history pagination (20/page) |
+| B24 | `(deploy pending)` | ✅ | Gross MTM = delta_upnl only (Delta UI match), Realized P&L shown separately, Net = UPNL+realized-all_deductions |
+| B25 | `26b7050` | ✅ | Dynamic qty at adjustment: re-calculates basket qty using B7 formula at adjustment time, untested leg topped up, 50% hedge cap, OFF by default |
 | Fix | `c2ba4fc`, `95c6265` | Auto Trade crash: `fmtLotsCount is not defined` (stale frontend bundle) |
 
 ---
@@ -92,6 +96,7 @@ basket_qty     = ceil(hedge_qty × basket_qty_pct / 100)
 | `hedge_qty_lots` | int \| null | null | Fixed hedge straddle lots in pct mode |
 | `basket_qty_dynamic` | bool | false | Theta-derived pct at entry |
 | `basket_qty_theta_mult` | float | 2.0 | Multiplier in dynamic formula |
+| `use_dynamic_qty_on_adjustment` | bool | false | Recompute basket qty at each adjustment (B25; requires `basket_qty_dynamic`) |
 
 ## 3.5 UI (B5, B8)
 
@@ -234,7 +239,26 @@ Stale bundle (`index-CwamrdqJ.js`) caused `fmtLotsCount is not defined` even aft
 ### Immediate
 - **B7 dynamic qty:** `basket_qty_dynamic = TRUE`, live since 30 Aug
 - **Next verification:** BASKET_SIZING log mein `dynamic=True` dikhna chahiye
-- **B11–B21:** UI + balance + WS margins complete
+- **B11–B25:** UI + balance + WS margins + P&L display + dashboard UX + dynamic adj qty complete
+
+### P&L Display — Confirmed Design (B22-B24)
+
+Gross MTM (display) = delta_upnl (mark-price based, matches Delta UI)
+Realized P&L        = shown as separate line (booked losses/gains)
+Net MTM             = delta_upnl + realized_pnl - entry_fees - exit_fees - exit_spread
+Target basis        = Net MTM vs profit_target_usd (unchanged)
+SL basis            = gross_mtm_for_sl = gross_mtm + entry_spread (unchanged)
+
+### B25 — Dynamic Adj Qty Design
+
+Setting: `use_dynamic_qty_on_adjustment` (bool, default False)
+Only active when `basket_qty_dynamic=True` also
+Formula: `raw_pct = (hedge_theta × mult × 100) / new_strike_ask`
+         `new_qty = max(1, min(ceil(hedge_qty × raw_pct/100), floor(hedge_qty×0.5)))`
+Cap: max 50% of hedge qty (e.g. hedge=5 → max_qty=2)
+Triggered leg: uses new_qty lots at new strike
+Untested leg: topped up by (new_qty - current_qty) extra lots
+Fail-safe: untested top-up failure does NOT abort adjustment — logged as WARNING
 
 ### SL/Target/Balance — Confirmed Design (B17-B21)
 
@@ -256,4 +280,4 @@ Dashboard columns (B20 final):
 
 ---
 
-*End of session record — 30 August 2026*
+*End of session record — 31 August 2026*
