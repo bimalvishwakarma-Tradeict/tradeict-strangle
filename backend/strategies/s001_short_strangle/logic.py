@@ -25,6 +25,9 @@ from backend.core.time_utils import (
 from backend.core.delta_client import compute_signed_upnl
 from backend.models import Setting
 from backend.strategies.base_strategy import AdjustmentPlan, BaseStrategy, TradeAction
+from backend.strategies.s001_short_strangle.premium_decay import (
+    evaluate_premium_decay_exit,
+)
 from backend.strategies.s001_short_strangle.config import (
     DEFAULT_PREMIUM_SLAB_100,
     DEFAULT_PREMIUM_SLAB_200,
@@ -346,6 +349,7 @@ class ShortStrangleStrategy(BaseStrategy):
         b. settling → skip PROFIT_TARGET and adjustment only
         c. Net MTM >= profit_target → PROFIT_TARGET
         d. pre-expiry window → PRE_EXPIRY
+        d2. premium decay remaining <= threshold → PREMIUM_DECAY
         e. adjustment trigger + decision (Net MTM > 0 → close, else adjust)
         f. HOLD
 
@@ -523,6 +527,75 @@ class ShortStrangleStrategy(BaseStrategy):
             return TradeAction(
                 should_exit=True,
                 exit_reason="PRE_EXPIRY",
+                current_pnl=decision_pnl,
+            )
+
+        # d2. Premium decay exit (B26) — after TP/pre-expiry, before adjustment
+        decay_enabled = False
+        decay_pct = 50.0
+        decay_mode = "both_legs"
+        try:
+            from backend.database import get_or_create_auto_settings
+
+            decay_settings = get_or_create_auto_settings(db_session)
+            decay_enabled = bool(
+                getattr(decay_settings, "basket_decay_exit_enabled", False)
+            )
+            decay_pct = float(
+                getattr(decay_settings, "basket_decay_exit_pct", None) or 50.0
+            )
+            decay_mode = str(
+                getattr(decay_settings, "basket_decay_exit_mode", None)
+                or "both_legs"
+            ).lower().strip()
+        except Exception as exc:
+            logger.warning(
+                "Premium decay settings load failed trade=%s: %s",
+                trade_id,
+                exc,
+            )
+
+        should_decay, decay_detail = evaluate_premium_decay_exit(
+            call_leg=call_leg,
+            put_leg=put_leg,
+            call_premium=float(call_premium),
+            put_premium=float(put_premium),
+            enabled=decay_enabled,
+            decay_pct=decay_pct,
+            mode=decay_mode,
+            trade_id=trade_id,
+        )
+        if decay_enabled:
+            logger.info(
+                "[DECAY_EXIT] trade=%s enabled=%s mode=%s threshold=%.2f "
+                "should_exit=%s block=%s detail=%s",
+                trade_id,
+                decay_enabled,
+                decay_detail.get("mode"),
+                float(decay_detail.get("threshold_pct") or 0),
+                should_decay,
+                decay_detail.get("block_reason"),
+                decay_detail.get("legs"),
+            )
+            try:
+                from backend.core.bot_logger import log_and_buffer
+
+                log_and_buffer(
+                    "DECAY_EXIT",
+                    trade_id,
+                    {
+                        **decay_detail,
+                        "combined_remaining_pct": decay_detail.get(
+                            "combined_remaining_pct"
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+        if should_decay:
+            return TradeAction(
+                should_exit=True,
+                exit_reason="PREMIUM_DECAY",
                 current_pnl=decision_pnl,
             )
 

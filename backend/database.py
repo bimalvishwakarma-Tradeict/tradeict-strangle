@@ -899,6 +899,9 @@ def _migrate_schema() -> None:
             ("basket_qty_dynamic", "BOOLEAN NOT NULL DEFAULT 0"),
             ("basket_qty_theta_mult", "FLOAT NOT NULL DEFAULT 2.0"),
             ("use_dynamic_qty_on_adjustment", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("basket_decay_exit_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("basket_decay_exit_pct", "FLOAT NOT NULL DEFAULT 50.0"),
+            ("basket_decay_exit_mode", "VARCHAR(20) NOT NULL DEFAULT 'both_legs'"),
             ("cooldown_after_loss_minutes", "INTEGER NOT NULL DEFAULT 120"),
             (
                 "adjustment_premium_tolerance_pct",

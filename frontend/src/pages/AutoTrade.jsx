@@ -81,6 +81,11 @@ function applyStatusToForm(data, setters) {
   )
   setters.setBasketQtyDynamic(!!data.basket_qty_dynamic)
   setters.setUseDynamicQtyOnAdj(!!data.use_dynamic_qty_on_adjustment)
+  setters.setBasketDecayExitEnabled(!!data.basket_decay_exit_enabled)
+  setters.setBasketDecayExitPct(String(data.basket_decay_exit_pct ?? 50))
+  setters.setBasketDecayExitMode(
+    data.basket_decay_exit_mode === 'combined' ? 'combined' : 'both_legs',
+  )
   setters.setBasketQtyThetaMult(String(data.basket_qty_theta_mult ?? 2.0))
   setters.setReEntryDelay(Number(data.re_entry_delay_minutes ?? 1))
   setters.setEntrySettlingSeconds(String(data.entry_settling_seconds ?? 60))
@@ -226,6 +231,9 @@ export default function AutoTrade() {
   const [hedgeQtyLots, setHedgeQtyLots] = useState('')
   const [basketQtyDynamic, setBasketQtyDynamic] = useState(false)
   const [useDynamicQtyOnAdj, setUseDynamicQtyOnAdj] = useState(false)
+  const [basketDecayExitEnabled, setBasketDecayExitEnabled] = useState(false)
+  const [basketDecayExitPct, setBasketDecayExitPct] = useState('50')
+  const [basketDecayExitMode, setBasketDecayExitMode] = useState('both_legs')
   const [basketQtyThetaMult, setBasketQtyThetaMult] = useState('2.0')
   const [reEntryDelay, setReEntryDelay] = useState(1)
   const [entrySettlingSeconds, setEntrySettlingSeconds] = useState('60')
@@ -300,6 +308,9 @@ export default function AutoTrade() {
       setHedgeQtyLots,
       setBasketQtyDynamic,
       setUseDynamicQtyOnAdj,
+      setBasketDecayExitEnabled,
+      setBasketDecayExitPct,
+      setBasketDecayExitMode,
       setBasketQtyThetaMult,
       setReEntryDelay,
       setEntrySettlingSeconds,
@@ -690,6 +701,13 @@ export default function AutoTrade() {
         10,
         Math.max(0.1, Number(basketQtyThetaMult) || 2.0),
       ),
+      basket_decay_exit_enabled: Boolean(basketDecayExitEnabled),
+      basket_decay_exit_pct: Math.min(
+        99,
+        Math.max(1, Number(basketDecayExitPct) || 50),
+      ),
+      basket_decay_exit_mode:
+        basketDecayExitMode === 'combined' ? 'combined' : 'both_legs',
     }
   }
 
@@ -1744,6 +1762,66 @@ export default function AutoTrade() {
                   className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
                 />
               </label>
+            </div>
+            <SectionDivider>Premium Decay Exit</SectionDivider>
+            <div className="space-y-3">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={basketDecayExitEnabled}
+                  onChange={(e) => setBasketDecayExitEnabled(e.target.checked)}
+                  className="mt-1"
+                />
+                <span className="text-sm text-gray-300">
+                  Exit basket on premium decay
+                </span>
+              </label>
+              {basketDecayExitEnabled && (
+                <>
+                  <label className="block text-sm text-gray-300">
+                    <FieldLabel tooltip="Books the theta already collected instead of holding the gamma-heavy tail. Basis is each leg's entry price, or its blended price after an adjustment top-up.">
+                      Exit when premium falls to (% of entry)
+                    </FieldLabel>
+                    <input
+                      type="number"
+                      min={1}
+                      max={99}
+                      step={1}
+                      value={basketDecayExitPct}
+                      onChange={(e) => setBasketDecayExitPct(e.target.value)}
+                      className="mt-2 w-full max-w-xs rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      Remaining premium % — e.g. 50 means exit when premium is
+                      at or below 50% of entry.
+                    </p>
+                  </label>
+                  <div className="space-y-2">
+                    <label className="flex cursor-pointer items-start gap-3">
+                      <input
+                        type="radio"
+                        name="basket_decay_exit_mode"
+                        checked={basketDecayExitMode === 'both_legs'}
+                        onChange={() => setBasketDecayExitMode('both_legs')}
+                        className="mt-1"
+                      />
+                      <span className="text-sm text-gray-300">Both legs</span>
+                    </label>
+                    <label className="flex cursor-pointer items-start gap-3">
+                      <input
+                        type="radio"
+                        name="basket_decay_exit_mode"
+                        checked={basketDecayExitMode === 'combined'}
+                        onChange={() => setBasketDecayExitMode('combined')}
+                        className="mt-1"
+                      />
+                      <span className="text-sm text-gray-300">
+                        Combined premium
+                      </span>
+                    </label>
+                  </div>
+                </>
+              )}
             </div>
             <SectionDivider>Basket Profit Target Mode</SectionDivider>
             <div className="space-y-2">

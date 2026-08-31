@@ -449,6 +449,15 @@ class AutoTradeSettings(Base):
     use_dynamic_qty_on_adjustment: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0", default=False
     )
+    basket_decay_exit_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False
+    )
+    basket_decay_exit_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="50.0", default=50.0
+    )
+    basket_decay_exit_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="both_legs", default="both_legs"
+    )
     cooldown_after_loss_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=120
     )

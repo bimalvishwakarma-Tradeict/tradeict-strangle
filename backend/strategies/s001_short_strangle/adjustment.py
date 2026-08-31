@@ -1141,6 +1141,7 @@ class AdjustmentExecutor:
             trade_is_demo = bool(getattr(trade, "is_demo", False))
 
             from backend.database import get_or_create_auto_settings
+            from backend.core.entry_basis import blend_entry_premium
             from backend.engine.auto_trade_engine import resolve_adjustment_basket_qty
             from backend.models import HedgePosition
 
@@ -1457,15 +1458,53 @@ class AdjustmentExecutor:
                             ),
                         )
                     if extra_result.success:
-                        other_leg.quantity = current_untested_qty + extra_qty
+                        blended_qty = current_untested_qty + extra_qty
+                        old_entry = float(other_leg.initial_premium or 0.0)
+                        extra_fill = float(
+                            extra_result.filled_price
+                            if extra_result.filled_price is not None
+                            else untested_offer
+                        )
+                        prior_entry_fee = float(other_leg.entry_fee_usd or 0.0)
+                        extra_commission = (
+                            abs(float(extra_result.commission))
+                            if extra_result.commission is not None
+                            else 0.0
+                        )
+                        blended_entry = blend_entry_premium(
+                            old_entry=old_entry,
+                            old_qty=current_untested_qty,
+                            extra_fill=extra_fill,
+                            extra_qty=extra_qty,
+                        )
+                        if extra_fill <= 0 or old_entry <= 0:
+                            logger.warning(
+                                "[ADJ_UNTESTED_QTY_BLEND_SKIP] trade=%s | side=%s | "
+                                "old_entry=%.4f extra_fill=%.4f extra_qty=%d — "
+                                "entry basis unchanged",
+                                trade.id,
+                                untested_side,
+                                old_entry,
+                                extra_fill,
+                                extra_qty,
+                            )
+                        else:
+                            other_leg.initial_premium = blended_entry
+                        other_leg.quantity = blended_qty
+                        other_leg.entry_fee_usd = prior_entry_fee + extra_commission
                         logger.info(
                             "[ADJ_UNTESTED_QTY] trade=%s | side=%s | old_qty=%d | "
-                            "extra=%d | new_qty=%d",
+                            "extra=%d | new_qty=%d | old_entry=%.4f | extra_fill=%.4f | "
+                            "blended_entry=%.4f | entry_fee=%.4f",
                             trade.id,
                             untested_side,
                             current_untested_qty,
                             extra_qty,
-                            other_leg.quantity,
+                            blended_qty,
+                            old_entry,
+                            extra_fill,
+                            blended_entry if extra_fill > 0 and old_entry > 0 else old_entry,
+                            float(other_leg.entry_fee_usd or 0.0),
                         )
                     else:
                         logger.warning(

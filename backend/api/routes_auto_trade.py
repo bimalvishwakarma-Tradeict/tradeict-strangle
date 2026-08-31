@@ -105,6 +105,9 @@ class AutoTradeSettingsSchema(BaseModel):
     basket_qty_dynamic: bool = False
     basket_qty_theta_mult: float = Field(default=2.0, ge=0.1, le=10.0)
     use_dynamic_qty_on_adjustment: bool = False
+    basket_decay_exit_enabled: bool = False
+    basket_decay_exit_pct: float = Field(default=50.0, gt=0, lt=100)
+    basket_decay_exit_mode: str = "both_legs"
     cooldown_after_loss_minutes: int = Field(default=120, ge=0, le=1440)
     adjustment_premium_tolerance_pct: float = Field(
         default=40.0, ge=5, le=200
@@ -184,6 +187,14 @@ class AutoTradeSettingsSchema(BaseModel):
             raise ValueError(
                 "basket_qty_mode must be 'fixed' or 'pct_of_hedge'"
             )
+        return normalized
+
+    @field_validator("basket_decay_exit_mode")
+    @classmethod
+    def validate_basket_decay_exit_mode(cls, v: str) -> str:
+        normalized = str(v or "both_legs").lower().strip()
+        if normalized not in {"both_legs", "combined"}:
+            return "both_legs"
         return normalized
 
     @field_validator("spread_mode")
@@ -504,6 +515,17 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "use_dynamic_qty_on_adjustment": bool(
             getattr(s, "use_dynamic_qty_on_adjustment", False)
         ),
+        "basket_decay_exit_enabled": bool(
+            getattr(s, "basket_decay_exit_enabled", False)
+        ),
+        "basket_decay_exit_pct": float(
+            getattr(s, "basket_decay_exit_pct", None)
+            if getattr(s, "basket_decay_exit_pct", None) is not None
+            else 50.0
+        ),
+        "basket_decay_exit_mode": str(
+            getattr(s, "basket_decay_exit_mode", None) or "both_legs"
+        ).lower(),
         "cooldown_after_loss_minutes": int(
             getattr(s, "cooldown_after_loss_minutes", None)
             if getattr(s, "cooldown_after_loss_minutes", None) is not None
@@ -806,6 +828,12 @@ async def update_auto_trade_settings(
     settings.basket_qty_theta_mult = float(payload.basket_qty_theta_mult)
     settings.use_dynamic_qty_on_adjustment = bool(
         payload.use_dynamic_qty_on_adjustment and payload.basket_qty_dynamic
+    )
+    settings.basket_decay_exit_enabled = bool(payload.basket_decay_exit_enabled)
+    settings.basket_decay_exit_pct = float(payload.basket_decay_exit_pct)
+    decay_mode = str(payload.basket_decay_exit_mode or "both_legs").lower().strip()
+    settings.basket_decay_exit_mode = (
+        decay_mode if decay_mode in {"both_legs", "combined"} else "both_legs"
     )
     settings.cooldown_after_loss_minutes = int(
         payload.cooldown_after_loss_minutes

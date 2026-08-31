@@ -24,6 +24,7 @@ from backend.core.time_utils import (
     to_utc_for_db,
 )
 from backend.core.ws_manager import ws_manager
+from backend.core.entry_basis import blend_entry_premium
 from backend.engine.trade_reconcile import next_basket_number, next_basket_seq_in_structure
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,17 @@ def resolve_adjustment_basket_qty(
         new_qty,
     )
     return new_qty
+
+
+# Re-export for adjustment path and tests
+__all__ = [
+    "blend_entry_premium",
+    "compute_dynamic_basket_qty_pct",
+    "resolve_adjustment_basket_qty",
+    "resolve_basket_qty_from_hedge",
+    "resolve_entry_basket_pct",
+    "resolve_sizing_mode",
+]
 
 
 def resolve_sizing_mode(settings: Any) -> str:
