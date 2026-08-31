@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import socket
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -103,6 +104,11 @@ def _ws_key_auth_signature(api_secret: str, timestamp: str) -> str:
         message.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+
+
+def _delta_ws_ipv4_kwargs(**extra: Any) -> dict[str, Any]:
+    """Force IPv4 — Delta India API key whitelist is IPv4-only (matches REST client)."""
+    return {"family": socket.AF_INET, **extra}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -319,6 +325,7 @@ class DeltaMarginsWebSocket:
             ping_timeout=20,
             max_size=2 * 1024 * 1024,
             open_timeout=CONNECT_TIMEOUT_SECONDS,
+            **_delta_ws_ipv4_kwargs(),
         ) as ws:
             self._ws = ws
             await self._authenticate()
