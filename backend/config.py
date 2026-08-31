@@ -71,6 +71,14 @@ class TradeStatus(str, Enum):
     EMERGENCY_CLOSED = "emergency_closed"
 
 
+# Baskets in any terminal state — used for cum_closed / backfill / accounting.
+TERMINAL_TRADE_STATUSES: tuple[str, ...] = (
+    TradeStatus.CLOSED.value,
+    TradeStatus.EMERGENCY_CLOSED.value,
+    TradeStatus.EXPIRED.value,
+)
+
+
 class LegType(str, Enum):
     CALL = "call"
     PUT = "put"

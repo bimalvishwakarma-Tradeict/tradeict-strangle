@@ -1861,18 +1861,19 @@ def compute_long_hedge_pnl(
 
 def _cum_closed_basket_pnl(db: Session, hedge_id: int) -> float:
     """
-    Sum realized_pnl of closed baskets stamped to this hedge.
+    Sum realized_pnl of terminal baskets (closed / emergency_closed / expired)
+    stamped to this hedge.
 
     ALREADY REALIZED — do not apply spread, fee, or slippage adjustments.
     """
-    from backend.config import TradeStatus
+    from backend.config import TERMINAL_TRADE_STATUSES
     from sqlalchemy import func
 
     raw = (
         db.query(func.coalesce(func.sum(Trade.realized_pnl), 0.0))
         .filter(
             Trade.hedge_position_id == int(hedge_id),
-            Trade.status == TradeStatus.CLOSED.value,
+            Trade.status.in_(TERMINAL_TRADE_STATUSES),
         )
         .scalar()
     )

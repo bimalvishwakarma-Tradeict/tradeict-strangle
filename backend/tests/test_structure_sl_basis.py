@@ -6,17 +6,23 @@
 from __future__ import annotations
 
 import sys
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from backend.config import TERMINAL_TRADE_STATUSES, TradeStatus
+from backend.database import Base
 from backend.engine.hedge_lifecycle import (
+    _cum_closed_basket_pnl,
     _live_sl_budget_fields,
     _open_basket_gross_mtm,
     _open_basket_net_mtm,
@@ -25,6 +31,7 @@ from backend.engine.hedge_lifecycle import (
     hedge_sl_room,
     hedge_sl_should_fire,
 )
+from backend.models import Account, HedgePosition, Trade
 
 
 def test_structure_gross_for_sl_live_example() -> None:
@@ -176,3 +183,146 @@ def test_live_sl_budget_fields_zero_budget_pct_to_stop_safe() -> None:
     assert fields["pct_to_stop"] == 0.0
     assert fields["sl_basis_usd"] == -0.8
     assert fields["hedge_only_for_sl"] == -1.0
+
+
+@pytest.fixture
+def cum_pnl_db():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    acc = Account(
+        name="test-acct",
+        api_key_encrypted="enc",
+        api_secret_encrypted="enc",
+    )
+    db.add(acc)
+    db.flush()
+    hedge = HedgePosition(
+        account_id=acc.id,
+        underlying="BTC",
+        expiry_date=date(2026, 12, 26),
+        strike=100000.0,
+        quantity=1,
+        status="active",
+    )
+    db.add(hedge)
+    db.commit()
+    yield db, hedge
+    db.close()
+
+
+def _add_basket_trade(
+    db,
+    hedge: HedgePosition,
+    acc: Account,
+    *,
+    status: str,
+    realized_pnl: float | None,
+) -> Trade:
+    trade = Trade(
+        account_id=acc.id,
+        underlying="BTC",
+        expiry_date=date(2026, 9, 1),
+        status=status,
+        entry_time=datetime.now(timezone.utc),
+        total_premium_collected=300.0,
+        profit_target_usd=50.0,
+        stoploss_usd=100.0,
+        trigger_mode="flat",
+        hedge_position_id=hedge.id,
+        realized_pnl=realized_pnl,
+    )
+    db.add(trade)
+    db.commit()
+    return trade
+
+
+def test_terminal_trade_statuses_include_all_exit_paths() -> None:
+    assert TradeStatus.CLOSED.value in TERMINAL_TRADE_STATUSES
+    assert TradeStatus.EMERGENCY_CLOSED.value in TERMINAL_TRADE_STATUSES
+    assert TradeStatus.EXPIRED.value in TERMINAL_TRADE_STATUSES
+    assert TradeStatus.ACTIVE.value not in TERMINAL_TRADE_STATUSES
+
+
+def test_cum_closed_basket_pnl_sums_all_terminal_statuses(cum_pnl_db) -> None:
+    db, hedge = cum_pnl_db
+    acc = db.query(Account).one()
+    _add_basket_trade(
+        db, hedge, acc, status=TradeStatus.CLOSED.value, realized_pnl=-0.25
+    )
+    _add_basket_trade(
+        db, hedge, acc, status=TradeStatus.CLOSED.value, realized_pnl=-0.25
+    )
+    _add_basket_trade(
+        db,
+        hedge,
+        acc,
+        status=TradeStatus.EMERGENCY_CLOSED.value,
+        realized_pnl=0.135,
+    )
+    _add_basket_trade(
+        db, hedge, acc, status=TradeStatus.EXPIRED.value, realized_pnl=0.10
+    )
+
+    cum = _cum_closed_basket_pnl(db, int(hedge.id))
+    assert cum == pytest.approx(-0.265)
+
+
+def test_cum_closed_basket_pnl_excludes_active_basket(cum_pnl_db) -> None:
+    db, hedge = cum_pnl_db
+    acc = db.query(Account).one()
+    _add_basket_trade(
+        db, hedge, acc, status=TradeStatus.CLOSED.value, realized_pnl=-0.5
+    )
+    _add_basket_trade(
+        db, hedge, acc, status=TradeStatus.ACTIVE.value, realized_pnl=999.0
+    )
+
+    cum = _cum_closed_basket_pnl(db, int(hedge.id))
+    assert cum == pytest.approx(-0.5)
+
+
+def test_cum_closed_basket_pnl_null_realized_contributes_zero(cum_pnl_db) -> None:
+    db, hedge = cum_pnl_db
+    acc = db.query(Account).one()
+    _add_basket_trade(
+        db, hedge, acc, status=TradeStatus.CLOSED.value, realized_pnl=0.5
+    )
+    _add_basket_trade(
+        db,
+        hedge,
+        acc,
+        status=TradeStatus.EMERGENCY_CLOSED.value,
+        realized_pnl=None,
+    )
+
+    cum = _cum_closed_basket_pnl(db, int(hedge.id))
+    assert cum == pytest.approx(0.5)
+
+
+def test_sl_budget_reflects_emergency_and_expired_cum(cum_pnl_db) -> None:
+    """Hedge #22 shape: baskets 119+120 closed (-0.5) + 121 emergency (+0.135)."""
+    db, hedge = cum_pnl_db
+    acc = db.query(Account).one()
+    _add_basket_trade(
+        db, hedge, acc, status=TradeStatus.CLOSED.value, realized_pnl=-0.25
+    )
+    _add_basket_trade(
+        db, hedge, acc, status=TradeStatus.CLOSED.value, realized_pnl=-0.25
+    )
+    _add_basket_trade(
+        db,
+        hedge,
+        acc,
+        status=TradeStatus.EMERGENCY_CLOSED.value,
+        realized_pnl=0.135,
+    )
+
+    cum = _cum_closed_basket_pnl(db, int(hedge.id))
+    assert cum == pytest.approx(-0.365)
+
+    fixed_sl = 2.0
+    budget_parts = compute_hedge_sl_budget(fixed_sl, 25.0, cum)
+    assert budget_parts["cum_closed"] == pytest.approx(-0.365)
+    assert budget_parts["budget"] == pytest.approx(max(0.5, fixed_sl + cum))

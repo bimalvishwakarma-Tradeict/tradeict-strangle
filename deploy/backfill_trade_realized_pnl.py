@@ -33,7 +33,7 @@ if str(_ROOT) not in sys.path:
 
 _DEPLOY_DIR = Path(__file__).resolve().parent
 
-from backend.config import TradeStatus
+from backend.config import TERMINAL_TRADE_STATUSES
 from backend.core.backfill_realized import (
     BackfillAuditTrail,
     LegChangeRecord,
@@ -65,10 +65,7 @@ from backend.engine.trade_reconcile import (
 )
 from backend.models import Account, HedgePosition, Leg, Trade
 
-_CLOSED_STATUSES = {
-    TradeStatus.CLOSED.value,
-    TradeStatus.EMERGENCY_CLOSED.value,
-}
+_CLOSED_STATUSES = set(TERMINAL_TRADE_STATUSES)
 
 _DELTA_SLEEP_SEC = 0.35
 
