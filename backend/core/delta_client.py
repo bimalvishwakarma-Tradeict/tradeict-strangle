@@ -56,7 +56,17 @@ def _parse_wallet_asset(asset: dict[str, Any]) -> dict[str, float]:
         "available_balance": _safe_float(
             asset.get("available_balance") or asset.get("available")
         ),
-        "position_margin": _safe_float(asset.get("position_margin")),
+        # Delta reports blocked funds in `blocked_margin`. In cross-margin mode
+        # `position_margin` is always 0 and the real figure lives in
+        # cross_position_margin + cross_commission, which blocked_margin sums.
+        "position_margin": _safe_float(
+            asset.get("blocked_margin")
+            or (
+                _safe_float(asset.get("cross_position_margin"))
+                + _safe_float(asset.get("cross_commission"))
+            )
+            or asset.get("position_margin")
+        ),
         "order_margin": _safe_float(asset.get("order_margin")),
     }
 
