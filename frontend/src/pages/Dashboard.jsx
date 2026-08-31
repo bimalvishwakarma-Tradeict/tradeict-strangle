@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useTrades } from '../hooks/useTrades'
 import HedgePanel from '../components/HedgePanel'
 import StructurePnlBar from '../components/StructurePnlBar'
-import PositionCard from '../components/PositionCard'
+import PositionCard, { BasketStorySection } from '../components/PositionCard'
 import PayoffGraph from '../components/PayoffGraph'
 import InfoTooltip from '../components/InfoTooltip'
 import {
@@ -20,6 +20,7 @@ import { formatNextEntryWait } from '../utils/nextEntryLabel'
 
 const AUTO_STATUS_POLL_MS = 5000
 const SLAVE_OVERVIEW_POLL_MS = 30000
+const STRUCTURES_PER_PAGE = 20
 
 function formatIstTime(date = new Date()) {
   return (
@@ -1238,6 +1239,9 @@ export default function Dashboard() {
   const [ledgerByHedgeId, setLedgerByHedgeId] = useState({})
   const [autoStatus, setAutoStatus] = useState(null)
   const [slaveOverview, setSlaveOverview] = useState(null)
+  const [basketStoryOpen, setBasketStoryOpen] = useState(false)
+  const [payoffOpen, setPayoffOpen] = useState(false)
+  const [structurePage, setStructurePage] = useState(0)
 
   useEffect(() => {
     document.title = 'Delta Bot — Dashboard'
@@ -1369,7 +1373,7 @@ export default function Dashboard() {
     async function loadStructures() {
       try {
         const [histData, ledgerData] = await Promise.all([
-          getHedgeStructures(40),
+          getHedgeStructures(200),
           getStructureLedger({ account_kind: 'MASTER', limit: 200 }),
         ])
         if (cancelled) return
@@ -1405,6 +1409,29 @@ export default function Dashboard() {
     }
     return { text: 'disconnected', className: 'text-yellow-400' }
   }, [wsStatus])
+
+  const structurePageCount = Math.max(
+    1,
+    Math.ceil(structures.length / STRUCTURES_PER_PAGE),
+  )
+
+  useEffect(() => {
+    if (structurePage > 0 && structurePage >= structurePageCount) {
+      setStructurePage(Math.max(0, structurePageCount - 1))
+    }
+  }, [structurePage, structurePageCount])
+
+  const paginatedStructures = useMemo(() => {
+    const start = structurePage * STRUCTURES_PER_PAGE
+    return structures.slice(start, start + STRUCTURES_PER_PAGE)
+  }, [structures, structurePage])
+
+  const structureRangeStart =
+    structures.length === 0 ? 0 : structurePage * STRUCTURES_PER_PAGE + 1
+  const structureRangeEnd = Math.min(
+    (structurePage + 1) * STRUCTURES_PER_PAGE,
+    structures.length,
+  )
 
   const showOffline =
     !backendOnline ||
@@ -1498,6 +1525,15 @@ export default function Dashboard() {
           </div>
 
           {trades.length > 0 && (
+            <BasketStorySection
+              trade={trades[0]}
+              recentAdjustments={adjustments}
+              isOpen={basketStoryOpen}
+              onToggle={() => setBasketStoryOpen((v) => !v)}
+            />
+          )}
+
+          {trades.length > 0 && (
             <div className="mb-4">
               <PositionCard
                 trade={trades[0]}
@@ -1573,23 +1609,32 @@ export default function Dashboard() {
         )
         const currentPrice = Number(activeTrade.underlying_price)
         return (
-          <div className="mt-4 rounded-xl border border-gray-700 bg-gray-800 p-4">
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-300">
-              Payoff Graph
-            </h2>
-            <PayoffGraph
-              callStrike={callStrike}
-              putStrike={putStrike}
-              callPremium={callPremium}
-              putPremium={putPremium}
-              quantity={quantity}
-              currentPrice={currentPrice > 0 ? currentPrice : undefined}
-              expiryDate={activeTrade.expiry_date || undefined}
-              initialHoursRemaining={
-                Number(activeTrade.hours_to_expiry) || undefined
-              }
-              emptyMessage="Waiting for BTC price…"
-            />
+          <div className="mt-4 overflow-hidden rounded-xl border border-gray-700 bg-gray-800">
+            <button
+              type="button"
+              onClick={() => setPayoffOpen((v) => !v)}
+              className="flex w-full items-center justify-between bg-gray-800 px-4 py-3 text-sm font-semibold text-gray-300 hover:bg-gray-700"
+            >
+              <span>📈 Payoff Graph</span>
+              <span className="text-gray-400">{payoffOpen ? '▲' : '▼'}</span>
+            </button>
+            {payoffOpen && (
+              <div className="border-t border-gray-700 p-4">
+                <PayoffGraph
+                  callStrike={callStrike}
+                  putStrike={putStrike}
+                  callPremium={callPremium}
+                  putPremium={putPremium}
+                  quantity={quantity}
+                  currentPrice={currentPrice > 0 ? currentPrice : undefined}
+                  expiryDate={activeTrade.expiry_date || undefined}
+                  initialHoursRemaining={
+                    Number(activeTrade.hours_to_expiry) || undefined
+                  }
+                  emptyMessage="Waiting for BTC price…"
+                />
+              </div>
+            )}
           </div>
         )
       })()}
@@ -1608,15 +1653,50 @@ export default function Dashboard() {
             No structures yet
           </div>
         ) : (
-          <div className="space-y-3">
-            {structures.map((s) => (
-              <StructureHistoryCard
-                key={s.hedge?.id}
-                structure={s}
-                ledger={ledgerByHedgeId[Number(s.hedge?.id)]}
-              />
-            ))}
-          </div>
+          <>
+            <div className="space-y-3">
+              {paginatedStructures.map((s) => (
+                <StructureHistoryCard
+                  key={s.hedge?.id}
+                  structure={s}
+                  ledger={ledgerByHedgeId[Number(s.hedge?.id)]}
+                />
+              ))}
+            </div>
+            {structures.length > STRUCTURES_PER_PAGE && (
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-700 bg-gray-800/60 px-4 py-3 text-sm text-gray-400">
+                <span>
+                  Showing {structureRangeStart}–{structureRangeEnd} of{' '}
+                  {structures.length}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={structurePage === 0}
+                    onClick={() => setStructurePage((p) => Math.max(0, p - 1))}
+                    className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    ← Prev
+                  </button>
+                  <span className="text-xs text-gray-500">
+                    Page {structurePage + 1} of {structurePageCount}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={structurePage >= structurePageCount - 1}
+                    onClick={() =>
+                      setStructurePage((p) =>
+                        Math.min(structurePageCount - 1, p + 1),
+                      )
+                    }
+                    className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Next →
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </section>
     </main>

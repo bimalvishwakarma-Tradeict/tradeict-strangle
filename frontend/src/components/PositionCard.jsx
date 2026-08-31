@@ -389,9 +389,43 @@ const NEXT_ACTION_BADGE = {
 }
 
 
-function BasketStory({ trade, call, put, mergedAdj }) {
+function buildMergedAdj(trade, recentAdjustments, adjHistory) {
+  const fromWs = (recentAdjustments || [])
+    .filter((a) => a.trade_id === trade.trade_id)
+    .map((a) => ({
+      timestamp: a.timestamp,
+      leg_type: a.leg_type,
+      old_strike: a.old_strike,
+      new_strike: a.new_strike,
+      trigger_pct_reached: a.trigger_pct,
+    }))
+  const combined = [...fromWs, ...(adjHistory || [])]
+  const seen = new Set()
+  const unique = []
+  for (const row of combined) {
+    const key = `${row.timestamp}-${row.leg_type}-${row.old_strike}-${row.new_strike}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(row)
+  }
+  return unique
+}
+
+function BasketStory({
+  trade,
+  call,
+  put,
+  mergedAdj,
+  hideToggle = false,
+  expanded: controlledExpanded,
+}) {
   const isClosed = String(trade.status || '').toLowerCase() !== 'active'
-  const [expanded, setExpanded] = useState(isClosed)
+  const [internalExpanded, setInternalExpanded] = useState(isClosed)
+  const expanded = hideToggle ? Boolean(controlledExpanded) : internalExpanded
+
+  if (hideToggle && !expanded) {
+    return null
+  }
   const legHistory = Array.isArray(trade.leg_history) ? trade.leg_history : []
 
   const events = useMemo(() => {
@@ -491,19 +525,27 @@ function BasketStory({ trade, call, put, mergedAdj }) {
   }, [trade, call, put, mergedAdj, legHistory, isClosed])
 
   return (
-    <div className="border-t border-gray-700 px-4 py-2 text-xs text-gray-400">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center justify-between text-left"
-      >
-        <div className="text-sm font-semibold text-white">📋 Basket Story</div>
-        <span className="text-xs text-gray-400">
-          {expanded ? 'Collapse ▲' : 'Expand ▼'}
-        </span>
-      </button>
+    <div
+      className={
+        hideToggle
+          ? 'px-4 py-2 text-xs text-gray-400'
+          : 'border-t border-gray-700 px-4 py-2 text-xs text-gray-400'
+      }
+    >
+      {!hideToggle && (
+        <button
+          type="button"
+          onClick={() => setInternalExpanded((v) => !v)}
+          className="flex w-full items-center justify-between text-left"
+        >
+          <div className="text-sm font-semibold text-white">📋 Basket Story</div>
+          <span className="text-xs text-gray-400">
+            {expanded ? 'Collapse ▲' : 'Expand ▼'}
+          </span>
+        </button>
+      )}
       {expanded && (
-        <div className="mt-2 max-h-64 space-y-2 overflow-y-auto">
+        <div className={`${hideToggle ? '' : 'mt-2'} max-h-64 space-y-2 overflow-y-auto`}>
           {events.length === 0 && (
             <div className="text-gray-500">— no events yet —</div>
           )}
@@ -536,9 +578,71 @@ function BasketStory({ trade, call, put, mergedAdj }) {
 }
 
 /**
+ * Collapsible basket timeline for Dashboard (below basket card).
+ */
+export function BasketStorySection({
+  trade,
+  recentAdjustments = [],
+  isOpen,
+  onToggle,
+}) {
+  const call = normalizeLeg(trade, 'call')
+  const put = normalizeLeg(trade, 'put')
+  const [adjHistory, setAdjHistory] = useState([])
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadAdj() {
+      try {
+        const rows = await getAdjustments(trade.trade_id)
+        if (cancelled) return
+        const list = Array.isArray(rows) ? rows : rows?.adjustments || []
+        setAdjHistory(list)
+      } catch {
+        if (!cancelled) setAdjHistory([])
+      }
+    }
+    loadAdj()
+    return () => {
+      cancelled = true
+    }
+  }, [trade.trade_id, trade.adjustment_count, trade.last_adjustment])
+
+  const mergedAdj = useMemo(
+    () => buildMergedAdj(trade, recentAdjustments, adjHistory),
+    [recentAdjustments, adjHistory, trade],
+  )
+
+  return (
+    <div className="mb-4 overflow-hidden rounded-xl border border-gray-700 bg-gray-800">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between bg-gray-800 px-4 py-3 text-sm font-semibold text-gray-300 hover:bg-gray-700"
+      >
+        <span>📖 Basket Story</span>
+        <span className="text-xs font-normal text-gray-400">
+          {isOpen ? '▲ Collapse' : '▼ Expand'}
+        </span>
+      </button>
+      {isOpen && (
+        <BasketStory
+          trade={trade}
+          call={call}
+          put={put}
+          mergedAdj={mergedAdj}
+          hideToggle
+          expanded
+        />
+      )}
+    </div>
+  )
+}
+
+/**
  * Props: { trade, recentAdjustments?, compact?, monitoringOnly? }
  * compact — dashboard side-by-side basket panel (B13)
- * monitoringOnly — bot monitoring + story below the grid
+ * monitoringOnly — bot monitoring below the grid
  */
 export default function PositionCard({
   trade,
@@ -749,27 +853,10 @@ export default function PositionCard({
     }
   }, [trade.trade_id, trade.adjustment_count, trade.last_adjustment])
 
-  const mergedAdj = useMemo(() => {
-    const fromWs = (recentAdjustments || [])
-      .filter((a) => a.trade_id === trade.trade_id)
-      .map((a) => ({
-        timestamp: a.timestamp,
-        leg_type: a.leg_type,
-        old_strike: a.old_strike,
-        new_strike: a.new_strike,
-        trigger_pct_reached: a.trigger_pct,
-      }))
-    const combined = [...fromWs, ...adjHistory]
-    const seen = new Set()
-    const unique = []
-    for (const row of combined) {
-      const key = `${row.timestamp}-${row.leg_type}-${row.old_strike}-${row.new_strike}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      unique.push(row)
-    }
-    return unique
-  }, [recentAdjustments, adjHistory, trade.trade_id])
+  const mergedAdj = useMemo(
+    () => buildMergedAdj(trade, recentAdjustments, adjHistory),
+    [recentAdjustments, adjHistory, trade],
+  )
 
   const expiryLabel = trade.expiry_label
     ? `${trade.expiry_date || ''} (${trade.expiry_label})`.replace(/^\s/, '')
@@ -890,7 +977,10 @@ export default function PositionCard({
   }
 
   const anyOpen = !call.closed || !put.closed
-  const basketNo = trade.basket_number ?? trade.trade_id
+  const basketNo =
+    trade.basket_number != null && trade.basket_number !== ''
+      ? trade.basket_number
+      : null
   const legHistory = Array.isArray(trade.leg_history) ? trade.leg_history : []
   const closedHistory = legHistory.filter(
     (row) => String(row.status || '').toLowerCase() === 'closed',
@@ -1009,12 +1099,6 @@ export default function PositionCard({
             </div>
           )}
         </div>
-        <BasketStory
-          trade={trade}
-          call={call}
-          put={put}
-          mergedAdj={mergedAdj}
-        />
       </article>
     )
   }
@@ -1026,8 +1110,10 @@ export default function PositionCard({
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
               <h2 className="font-bold text-white">
-                🟠 Basket #{basketNo} · {trade.underlying || 'BTC'} Short Strangle
+                🟠 Basket {basketNo ?? '—'} · {trade.underlying || 'BTC'} Short
+                Strangle
               </h2>
+              <p className="text-[11px] text-gray-500">trade #{trade.trade_id}</p>
               {adjMax != null && (
                 <span className="mt-1 inline-block rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">
                   Adjustments {adjCount}/{adjMax}
@@ -1225,7 +1311,12 @@ export default function PositionCard({
       {/* Header */}
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-700 bg-gray-900/60 px-4 py-3 text-sm">
         <div className="font-semibold text-white">
-          🟠 Basket #{basketNo} · {trade.underlying || '—'} Short Strangle
+          <div>
+            🟠 Basket {basketNo ?? '—'} · {trade.underlying || '—'} Short Strangle
+          </div>
+          <div className="text-[11px] font-normal text-gray-500">
+            trade #{trade.trade_id}
+          </div>
           {trade.open_leg_count === 1 && (
             <span className="ml-2 rounded bg-amber-900/60 px-2 py-0.5 text-xs font-normal text-amber-200">
               1 leg open
@@ -1912,14 +2003,6 @@ export default function PositionCard({
           </div>
         )}
       </div>
-
-      {/* Basket Story timeline */}
-      <BasketStory
-        trade={trade}
-        call={call}
-        put={put}
-        mergedAdj={mergedAdj}
-      />
 
       {/* Controls */}
       <div className="space-y-2 border-t border-gray-700 px-4 py-3">
