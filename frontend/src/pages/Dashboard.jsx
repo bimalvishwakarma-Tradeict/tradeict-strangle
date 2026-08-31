@@ -398,10 +398,6 @@ function AccountOverviewRow({
   actualBalanceInr,
   blockedAmount,
   blockedAmountInr,
-  availableMargin,
-  availableMarginInr,
-  unrealisedPnl,
-  balanceSource,
   freeCash,
   freeCashInr,
   dailyGrowthPct,
@@ -480,22 +476,6 @@ function AccountOverviewRow({
           />
         </td>
         <td className="px-2 py-2.5 text-xs">
-          <BalanceCell
-            usd={availableMargin}
-            inr={availableMarginInr}
-          />
-          {balanceSource !== 'websocket' ? (
-            <div className="text-[10px] text-gray-500">(estimated)</div>
-          ) : null}
-          {unrealisedPnl != null &&
-          Number.isFinite(Number(unrealisedPnl)) &&
-          Math.abs(Number(unrealisedPnl)) > 0.001 ? (
-            <div className="text-[10px] text-gray-500">
-              incl. {formatSignedMoney(unrealisedPnl)} unrealised
-            </div>
-          ) : null}
-        </td>
-        <td className="px-2 py-2.5 text-xs">
           <BalanceCell usd={freeCash} inr={freeCashInr} />
         </td>
         <td
@@ -540,7 +520,7 @@ function AccountOverviewRow({
       </tr>
       {isExpanded && (
         <tr className="border-b border-gray-800 bg-gray-800/40">
-          <td colSpan={10} className="px-4 py-3 text-xs text-gray-300">
+          <td colSpan={9} className="px-4 py-3 text-xs text-gray-300">
             {expandContent}
           </td>
         </tr>
@@ -658,11 +638,6 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                 Blocked
               </HeaderCell>
               <HeaderCell
-                tooltip="Wallet balance plus unrealised P&L, minus blocked margin. Matches Available Margin on Delta. Includes profit that is only realised when positions close."
-              >
-                Avail Bal
-              </HeaderCell>
-              <HeaderCell
                 tooltip="Settled cash the bot can size new trades against. Excludes unrealised P&L, so it is lower than Available Margin — this is deliberate."
               >
                 Free Cash
@@ -684,10 +659,6 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
               actualBalanceInr={master.actual_balance_inr ?? master.balance_inr}
               blockedAmount={master.blocked_amount ?? master.blocked_usd}
               blockedAmountInr={master.blocked_amount_inr ?? master.blocked_inr}
-              availableMargin={master.available_margin}
-              availableMarginInr={master.available_margin_inr}
-              unrealisedPnl={master.unrealised_pnl}
-              balanceSource={master.balance_source}
               freeCash={master.free_cash ?? master.available_balance ?? master.available_usd}
               freeCashInr={
                 master.free_cash_inr ??
@@ -809,26 +780,6 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                       ? null
                       : slave.blocked_amount_inr ?? slave.blocked_inr
                   }
-                  availableMargin={
-                    statusKind === 'error' || !slave.is_active
-                      ? null
-                      : slave.available_margin
-                  }
-                  availableMarginInr={
-                    statusKind === 'error' || !slave.is_active
-                      ? null
-                      : slave.available_margin_inr
-                  }
-                  unrealisedPnl={
-                    statusKind === 'error' || !slave.is_active
-                      ? null
-                      : slave.unrealised_pnl
-                  }
-                  balanceSource={
-                    statusKind === 'error' || !slave.is_active
-                      ? null
-                      : slave.balance_source
-                  }
                   freeCash={
                     statusKind === 'error' || !slave.is_active
                       ? null
@@ -865,7 +816,7 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
           <tfoot>
             <tr className="border-t border-gray-600 bg-gray-800/60">
               <td
-                colSpan={8}
+                colSpan={7}
                 className="px-2 py-2.5 text-right text-xs font-semibold text-gray-300"
               >
                 Combined Structure MTM:
