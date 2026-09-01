@@ -382,6 +382,18 @@ class AutoTradeSettings(Base):
     hedge_roll_hard_dte: Mapped[int] = mapped_column(
         Integer, nullable=False, default=5
     )
+    min_hedge_dte_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    hedge_roll_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    hedge_force_roll_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    hedge_close_at_expiry_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
     # After HEDGE_ROLL close, open the next monthly automatically
     hedge_auto_reopen_after_roll: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True

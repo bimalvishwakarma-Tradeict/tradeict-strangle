@@ -30,6 +30,24 @@ from backend.models import Account, AutoTradeSettings, HedgePosition, HedgeTheta
 
 logger = logging.getLogger(__name__)
 
+_hedge_guard_disabled_logged: set[str] = set()
+
+
+def _log_guard_disabled_once(guard: str) -> None:
+    """Log once per process when a hedge DTE guard is disabled."""
+    key = str(guard or "").strip()
+    if not key or key in _hedge_guard_disabled_logged:
+        return
+    _hedge_guard_disabled_logged.add(key)
+    summary = f"[HEDGE_GUARD_DISABLED] guard={key}"
+    logger.info(summary)
+    log_and_buffer(
+        "HEDGE_GUARD_DISABLED",
+        0,
+        {"guard": key, "summary": summary},
+    )
+
+
 CONTRACT_SIZE = float(OPTIONS_CONTRACT_VALUE)
 VERIFY_PAUSE_SECONDS = 0.5
 UNWIND_VERIFY_ATTEMPTS = 3
@@ -663,15 +681,20 @@ async def open_hedge(
                 ),
                 expiry_dte=dte,
             )
-            min_dte = int(getattr(settings, "min_hedge_dte", None) or 15)
-            expiry = await enforce_min_hedge_dte(
-                client,
-                und,
-                expiry,
-                min_dte,
-                opened_via=str(opened_via or "auto"),
-                log_hedge_id=0,
-            )
+            min_dte_enabled = bool(getattr(settings, "min_hedge_dte_enabled", True))
+            if min_dte_enabled:
+                min_dte = int(getattr(settings, "min_hedge_dte", None) or 15)
+                min_dte = max(0, min(60, min_dte))
+                expiry = await enforce_min_hedge_dte(
+                    client,
+                    und,
+                    expiry,
+                    min_dte,
+                    opened_via=str(opened_via or "auto"),
+                    log_hedge_id=0,
+                )
+            else:
+                _log_guard_disabled_once("min_hedge_dte")
         except ExpiryNotAvailableError as exc:
             raise HedgeOpenError("resolve_expiry", str(exc)) from exc
         except HedgeThetaError as exc:
@@ -2310,16 +2333,21 @@ async def evaluate_and_maybe_close_hedge(
     hours_left = (
         get_hours_to_expiry(hedge.expiry_date) if hedge.expiry_date else 0.0
     )
+
+    from backend.database import get_or_create_auto_settings
+
+    settings = get_or_create_auto_settings(db)
+    close_at_expiry_enabled = bool(
+        getattr(settings, "hedge_close_at_expiry_enabled", True)
+    )
     # Same pre-expiry window as short basket (never allow settlement)
     will_close_expiry = bool(
         hedge.expiry_date
+        and close_at_expiry_enabled
         and (hours_left == 0 or is_pre_expiry_window(hedge.expiry_date))
     )
 
     # --- Settings: structure target + hedge SL budget ---
-    from backend.database import get_or_create_auto_settings
-
-    settings = get_or_create_auto_settings(db)
     entry_cost = _hedge_entry_cost_usd(hedge)
     monthly_pct = float(
         getattr(settings, "hedge_expected_monthly_pct", None)
@@ -2624,6 +2652,22 @@ async def evaluate_and_maybe_close_hedge(
         )
     elif will_close_expiry:
         close_reason = "HEDGE_EXPIRY"
+        open_n_expiry = len(_active_baskets_under_hedge(db, hid))
+        _hedge_log(
+            "HEDGE_PRE_EXPIRY_CLOSE",
+            hid,
+            {
+                "hedge": hid,
+                "hours_left": round(hours_left, 4),
+                "baskets_open": open_n_expiry,
+                "summary": (
+                    f"[HEDGE_PRE_EXPIRY_CLOSE] hedge={hid} | "
+                    f"hours_left={round(hours_left, 4)} | "
+                    f"baskets_open={open_n_expiry}"
+                ),
+            },
+            warning=True,
+        )
 
     async def _close_with_reason(reason: str) -> HedgePosition | None:
         try:
@@ -2679,7 +2723,12 @@ async def evaluate_and_maybe_close_hedge(
     open_baskets = _active_baskets_under_hedge(db, hid)
     open_n = len(open_baskets)
 
-    if status_now == "active" and calendar_dte <= roll_dte:
+    roll_enabled = bool(getattr(settings, "hedge_roll_enabled", True))
+    force_roll_enabled = bool(getattr(settings, "hedge_force_roll_enabled", True))
+
+    if not roll_enabled:
+        _log_guard_disabled_once("roll")
+    elif status_now == "active" and calendar_dte <= roll_dte:
         hedge.status = "pending_close"
         db.commit()
         db.refresh(hedge)
@@ -2700,23 +2749,26 @@ async def evaluate_and_maybe_close_hedge(
         return None
 
     if status_now == "pending_close":
-        if calendar_dte <= hard_dte:
-            _hedge_log(
-                "HEDGE_ROLL_FORCED",
-                hid,
-                {
-                    "hedge": hid,
-                    "dte": calendar_dte,
-                    "open_baskets": open_n,
-                    "hard_dte": hard_dte,
-                    "summary": (
-                        f"[HEDGE_ROLL_FORCED] hedge={hid} | dte={calendar_dte} | "
-                        f"open_baskets={open_n}"
-                    ),
-                },
-                critical=True,
-            )
-            return await _close_with_reason("HEDGE_ROLL")
+        if force_roll_enabled:
+            if calendar_dte <= hard_dte:
+                _hedge_log(
+                    "HEDGE_ROLL_FORCED",
+                    hid,
+                    {
+                        "hedge": hid,
+                        "dte": calendar_dte,
+                        "open_baskets": open_n,
+                        "hard_dte": hard_dte,
+                        "summary": (
+                            f"[HEDGE_ROLL_FORCED] hedge={hid} | dte={calendar_dte} | "
+                            f"open_baskets={open_n}"
+                        ),
+                    },
+                    critical=True,
+                )
+                return await _close_with_reason("HEDGE_ROLL")
+        else:
+            _log_guard_disabled_once("force_roll")
 
         if open_n == 0:
             _hedge_log(
@@ -3354,7 +3406,8 @@ def _roll_banner_fields(db: Session, hedge: HedgePosition) -> dict[str, Any]:
         else 5
     )
     hard_dte = max(1, min(60, hard_dte))
-    if status != "pending_close":
+    roll_enabled = bool(getattr(settings, "hedge_roll_enabled", True))
+    if status != "pending_close" or not roll_enabled:
         return {
             "roll_pending": False,
             "roll_waiting_trade_id": None,

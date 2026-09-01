@@ -219,7 +219,7 @@ async def enforce_min_hedge_dte(
     from backend.core.bot_logger import log_and_buffer
 
     min_dte = int(min_hedge_dte if min_hedge_dte is not None else 15)
-    min_dte = max(5, min(60, min_dte))
+    min_dte = max(0, min(60, min_dte))
     today = get_ist_now().date()
     req = _as_date(requested)
     dte = (req - today).days

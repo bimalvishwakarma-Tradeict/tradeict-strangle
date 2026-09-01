@@ -76,7 +76,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 if getattr(settings, "hedge_roll_hard_dte", None) is not None
                 else 5
             )
-            if not (hard_dte < roll_dte < min_dte):
+            if (
+                getattr(settings, "min_hedge_dte_enabled", True)
+                and getattr(settings, "hedge_roll_enabled", True)
+                and getattr(settings, "hedge_force_roll_enabled", True)
+                and not (hard_dte < roll_dte < min_dte)
+            ):
                 log_and_buffer(
                     "HEDGE_DTE_CONFIG_INVALID",
                     0,

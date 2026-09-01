@@ -131,8 +131,26 @@ function applyStatusToForm(data, setters) {
     data.hedge_expiry_dte == null ? '' : String(data.hedge_expiry_dte),
   )
   setters.setMinHedgeDte(String(data.min_hedge_dte ?? 15))
+  setters.setMinHedgeDteEnabled(
+    data.min_hedge_dte_enabled == null
+      ? true
+      : Boolean(data.min_hedge_dte_enabled),
+  )
   setters.setHedgeRollDte(String(data.hedge_roll_dte ?? 10))
+  setters.setHedgeRollEnabled(
+    data.hedge_roll_enabled == null ? true : Boolean(data.hedge_roll_enabled),
+  )
   setters.setHedgeRollHardDte(String(data.hedge_roll_hard_dte ?? 5))
+  setters.setHedgeForceRollEnabled(
+    data.hedge_force_roll_enabled == null
+      ? true
+      : Boolean(data.hedge_force_roll_enabled),
+  )
+  setters.setHedgeCloseAtExpiryEnabled(
+    data.hedge_close_at_expiry_enabled == null
+      ? true
+      : Boolean(data.hedge_close_at_expiry_enabled),
+  )
   setters.setHedgeAutoReopenAfterRoll(
     data.hedge_auto_reopen_after_roll == null
       ? true
@@ -265,8 +283,13 @@ export default function AutoTrade() {
   const [hedgeExpiryNeedsRepick, setHedgeExpiryNeedsRepick] = useState(false)
   const [hedgeExpiryDte, setHedgeExpiryDte] = useState('')
   const [minHedgeDte, setMinHedgeDte] = useState('15')
+  const [minHedgeDteEnabled, setMinHedgeDteEnabled] = useState(true)
   const [hedgeRollDte, setHedgeRollDte] = useState('10')
+  const [hedgeRollEnabled, setHedgeRollEnabled] = useState(true)
   const [hedgeRollHardDte, setHedgeRollHardDte] = useState('5')
+  const [hedgeForceRollEnabled, setHedgeForceRollEnabled] = useState(true)
+  const [hedgeCloseAtExpiryEnabled, setHedgeCloseAtExpiryEnabled] =
+    useState(true)
   const [hedgeAutoReopenAfterRoll, setHedgeAutoReopenAfterRoll] = useState(true)
   const [hedgeTargetUsd, setHedgeTargetUsd] = useState('')
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
@@ -343,8 +366,12 @@ export default function AutoTrade() {
       setHedgeExpiryNeedsRepick,
       setHedgeExpiryDte,
       setMinHedgeDte,
+      setMinHedgeDteEnabled,
       setHedgeRollDte,
+      setHedgeRollEnabled,
       setHedgeRollHardDte,
+      setHedgeForceRollEnabled,
+      setHedgeCloseAtExpiryEnabled,
       setHedgeAutoReopenAfterRoll,
       setHedgeTargetUsd,
       setHedgeStoplossUsd,
@@ -632,12 +659,16 @@ export default function AutoTrade() {
         hedgeExpiryDateOverride ||
         null,
       hedge_expiry_dte: null,
-      min_hedge_dte: Math.min(60, Math.max(5, Number(minHedgeDte) || 15)),
+      min_hedge_dte: Math.min(60, Math.max(0, Number(minHedgeDte) || 15)),
+      min_hedge_dte_enabled: Boolean(minHedgeDteEnabled),
       hedge_roll_dte: Math.min(60, Math.max(1, Number(hedgeRollDte) || 10)),
+      hedge_roll_enabled: Boolean(hedgeRollEnabled),
       hedge_roll_hard_dte: Math.min(
         60,
         Math.max(1, Number(hedgeRollHardDte) || 5),
       ),
+      hedge_force_roll_enabled: Boolean(hedgeForceRollEnabled),
+      hedge_close_at_expiry_enabled: Boolean(hedgeCloseAtExpiryEnabled),
       hedge_auto_reopen_after_roll: Boolean(hedgeAutoReopenAfterRoll),
       hedge_target_usd:
         hedgeTargetUsd === '' || hedgeTargetUsd == null
@@ -787,33 +818,43 @@ export default function AutoTrade() {
   }, [hedgeMinHoldDays])
 
   const minHedgeDteError = useMemo(() => {
+    if (!minHedgeDteEnabled) return null
     const n = Number(minHedgeDte)
     if (minHedgeDte === '' || Number.isNaN(n)) {
-      return 'Must be between 5 and 60'
+      return 'Must be between 0 and 60'
     }
-    if (n < 5 || n > 60) return 'Must be between 5 and 60'
+    if (n < 0 || n > 60) return 'Must be between 0 and 60'
     return null
-  }, [minHedgeDte])
+  }, [minHedgeDte, minHedgeDteEnabled])
 
   const hedgeRollDteError = useMemo(() => {
+    if (!hedgeRollEnabled) return null
     const n = Number(hedgeRollDte)
     if (hedgeRollDte === '' || Number.isNaN(n)) {
       return 'Must be between 1 and 60'
     }
     if (n < 1 || n > 60) return 'Must be between 1 and 60'
     return null
-  }, [hedgeRollDte])
+  }, [hedgeRollDte, hedgeRollEnabled])
 
   const hedgeRollHardDteError = useMemo(() => {
+    if (!hedgeForceRollEnabled) return null
     const n = Number(hedgeRollHardDte)
     if (hedgeRollHardDte === '' || Number.isNaN(n)) {
       return 'Must be between 1 and 60'
     }
     if (n < 1 || n > 60) return 'Must be between 1 and 60'
     return null
-  }, [hedgeRollHardDte])
+  }, [hedgeRollHardDte, hedgeForceRollEnabled])
 
   const hedgeDteOrderingError = useMemo(() => {
+    if (
+      !minHedgeDteEnabled ||
+      !hedgeRollEnabled ||
+      !hedgeForceRollEnabled
+    ) {
+      return null
+    }
     if (minHedgeDteError || hedgeRollDteError || hedgeRollHardDteError) {
       return null
     }
@@ -832,10 +873,21 @@ export default function AutoTrade() {
     minHedgeDte,
     hedgeRollDte,
     hedgeRollHardDte,
+    minHedgeDteEnabled,
+    hedgeRollEnabled,
+    hedgeForceRollEnabled,
     minHedgeDteError,
     hedgeRollDteError,
     hedgeRollHardDteError,
   ])
+
+  const allHedgeDteGuardsOff = useMemo(
+    () =>
+      !minHedgeDteEnabled &&
+      !hedgeRollEnabled &&
+      !hedgeForceRollEnabled,
+    [minHedgeDteEnabled, hedgeRollEnabled, hedgeForceRollEnabled],
+  )
 
   const basketExitSpreadPctError = useMemo(() => {
     const n = Number(basketExitSpreadPct)
@@ -2178,16 +2230,25 @@ export default function AutoTrade() {
             ) : null}
           </label>
           <label className="block text-sm text-gray-300">
-            Minimum hedge DTE
+            <span className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={minHedgeDteEnabled}
+                onChange={(e) => setMinHedgeDteEnabled(e.target.checked)}
+                disabled={!hedgeEnabled}
+                className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500 disabled:cursor-not-allowed"
+              />
+              Minimum hedge DTE
+            </span>
             <input
               type="number"
-              min={5}
+              min={0}
               max={60}
               step={1}
               value={minHedgeDte}
               onChange={(e) => setMinHedgeDte(e.target.value)}
-              disabled={!hedgeEnabled}
-              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+              disabled={!hedgeEnabled || !minHedgeDteEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50 ${
                 minHedgeDteError || hedgeDteOrderingError
                   ? 'border-red-500'
                   : 'border-gray-600'
@@ -2199,15 +2260,23 @@ export default function AutoTrade() {
               </span>
             ) : (
               <span className="mt-1 block text-xs text-gray-500">
-                If the selected monthly expiry is closer than this, the next
-                monthly is used instead. A short-dated hedge has inflated
-                theta, which pushes the basket&apos;s theta requirement beyond
-                what the daily chain can offer and forces near-ATM strikes.
+                If the selected expiry is closer than this, the next monthly is
+                used instead. Disable to allow hedge and basket on the same
+                expiry (0DTE / 2DTE).
               </span>
             )}
           </label>
           <label className="block text-sm text-gray-300">
-            Roll at DTE
+            <span className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={hedgeRollEnabled}
+                onChange={(e) => setHedgeRollEnabled(e.target.checked)}
+                disabled={!hedgeEnabled}
+                className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500 disabled:cursor-not-allowed"
+              />
+              Roll at DTE
+            </span>
             <input
               type="number"
               min={1}
@@ -2215,8 +2284,8 @@ export default function AutoTrade() {
               step={1}
               value={hedgeRollDte}
               onChange={(e) => setHedgeRollDte(e.target.value)}
-              disabled={!hedgeEnabled}
-              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+              disabled={!hedgeEnabled || !hedgeRollEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50 ${
                 hedgeRollDteError || hedgeDteOrderingError
                   ? 'border-red-500'
                   : 'border-gray-600'
@@ -2234,7 +2303,16 @@ export default function AutoTrade() {
             )}
           </label>
           <label className="block text-sm text-gray-300">
-            Force roll at DTE
+            <span className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={hedgeForceRollEnabled}
+                onChange={(e) => setHedgeForceRollEnabled(e.target.checked)}
+                disabled={!hedgeEnabled}
+                className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500 disabled:cursor-not-allowed"
+              />
+              Force roll at DTE
+            </span>
             <input
               type="number"
               min={1}
@@ -2242,8 +2320,8 @@ export default function AutoTrade() {
               step={1}
               value={hedgeRollHardDte}
               onChange={(e) => setHedgeRollHardDte(e.target.value)}
-              disabled={!hedgeEnabled}
-              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed ${
+              disabled={!hedgeEnabled || !hedgeForceRollEnabled}
+              className={`mt-1 w-full rounded-md border bg-gray-900 px-3 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50 ${
                 hedgeRollHardDteError || hedgeDteOrderingError
                   ? 'border-red-500'
                   : 'border-gray-600'
@@ -2256,17 +2334,57 @@ export default function AutoTrade() {
             ) : (
               <span className="mt-1 block text-xs text-gray-500">
                 Hard deadline. At this DTE the hedge closes even if a basket is
-                still open - the cascade closes the basket first.
+                still open — the cascade closes the basket first.
               </span>
             )}
           </label>
+          <label className="flex cursor-pointer items-start gap-3 sm:col-span-2">
+            <input
+              type="checkbox"
+              checked={hedgeCloseAtExpiryEnabled}
+              onChange={(e) =>
+                setHedgeCloseAtExpiryEnabled(e.target.checked)
+              }
+              disabled={!hedgeEnabled}
+              className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500 disabled:cursor-not-allowed"
+            />
+            <span className="text-sm text-gray-300">
+              Close hedge before expiry (pre-expiry window)
+              <span className="mt-1 block text-xs text-gray-500">
+                Closes the hedge in the same 15-minute pre-expiry window as
+                baskets — baskets first, then hedge. Prevents unsettled long
+                options and missing exit P&amp;L.
+              </span>
+              {!hedgeCloseAtExpiryEnabled ? (
+                <span className="mt-2 block text-xs text-red-400">
+                  ⚠ Hedge will settle on the exchange without a recorded exit.
+                  P&amp;L for this structure will be incomplete.
+                </span>
+              ) : null}
+            </span>
+          </label>
           <div className="sm:col-span-2 rounded-md border border-gray-700/80 bg-gray-950/40 px-3 py-2 text-xs text-gray-400">
-            Opens at &gt;= {Number(minHedgeDte) || '—'} DTE &nbsp;→&nbsp; rolls
-            at {Number(hedgeRollDte) || '—'} DTE &nbsp;→&nbsp; forced at{' '}
-            {Number(hedgeRollHardDte) || '—'} DTE
+            Opens at{' '}
+            {minHedgeDteEnabled
+              ? `>= ${Number(minHedgeDte) || '—'} DTE`
+              : 'off'}{' '}
+            &nbsp;→&nbsp; rolls at{' '}
+            {hedgeRollEnabled
+              ? `${Number(hedgeRollDte) || '—'} DTE`
+              : 'off'}{' '}
+            &nbsp;→&nbsp; forced at{' '}
+            {hedgeForceRollEnabled
+              ? `${Number(hedgeRollHardDte) || '—'} DTE`
+              : 'off'}
             {hedgeDteOrderingError ? (
               <span className="mt-1 block text-red-400">
                 {hedgeDteOrderingError}
+              </span>
+            ) : null}
+            {allHedgeDteGuardsOff ? (
+              <span className="mt-2 block text-amber-400">
+                ⚠ Hedge can now share the basket&apos;s expiry. Net structure
+                theta may turn negative — check theta preview before entry.
               </span>
             ) : null}
           </div>

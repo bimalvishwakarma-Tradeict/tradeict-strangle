@@ -143,7 +143,7 @@ class AutoTradeHedgeBudgetSettings(BaseModel):
     hedge_target_multiple: float = Field(default=3.0, ge=0.5, le=20)
     hedge_expected_monthly_pct: float = Field(default=30.0, ge=1, le=200)
     hedge_min_hold_days: int = Field(default=10, ge=0, le=60)
-    min_hedge_dte: int = Field(default=15, ge=5, le=60)
+    min_hedge_dte: int = Field(default=15, ge=0, le=60)
     hedge_roll_dte: int = Field(default=10, ge=1, le=60)
     hedge_roll_hard_dte: int = Field(default=5, ge=1, le=60)
 

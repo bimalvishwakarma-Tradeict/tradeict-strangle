@@ -78,7 +78,11 @@ class AutoTradeSettingsSchema(BaseModel):
     hedge_expiry_mode: str = "month_1"
     hedge_expiry_date_override: str | None = None  # resolved date display only
     hedge_expiry_dte: int | None = Field(default=None, ge=0, le=365)
-    min_hedge_dte: int = Field(default=15, ge=5, le=60)
+    min_hedge_dte: int = Field(default=15, ge=0, le=60)
+    min_hedge_dte_enabled: bool = True
+    hedge_roll_enabled: bool = True
+    hedge_force_roll_enabled: bool = True
+    hedge_close_at_expiry_enabled: bool = True
     hedge_target_usd: float | None = Field(default=None, gt=0)
     hedge_stoploss_usd: float | None = Field(default=None, gt=0)
     hedge_fixed_sl_usd: float = Field(default=2.0, ge=0.1, le=1000)
@@ -217,16 +221,21 @@ class AutoTradeSettingsSchema(BaseModel):
 
     @model_validator(mode="after")
     def validate_hedge_money_when_enabled(self) -> AutoTradeSettingsSchema:
-        hard = int(self.hedge_roll_hard_dte)
-        roll = int(self.hedge_roll_dte)
-        min_dte = int(self.min_hedge_dte)
-        if not (hard < roll < min_dte):
-            raise ValueError(
-                "Require hedge_roll_hard_dte < hedge_roll_dte < min_hedge_dte "
-                f"(got hard={hard}, roll={roll}, min={min_dte}). "
-                "Roll DTE must be below Minimum hedge DTE, otherwise a newly "
-                "opened hedge would immediately start rolling."
-            )
+        if (
+            self.min_hedge_dte_enabled
+            and self.hedge_roll_enabled
+            and self.hedge_force_roll_enabled
+        ):
+            hard = int(self.hedge_roll_hard_dte)
+            roll = int(self.hedge_roll_dte)
+            min_dte = int(self.min_hedge_dte)
+            if not (hard < roll < min_dte):
+                raise ValueError(
+                    "Require hedge_roll_hard_dte < hedge_roll_dte < min_hedge_dte "
+                    f"(got hard={hard}, roll={roll}, min={min_dte}). "
+                    "Roll DTE must be below Minimum hedge DTE, otherwise a newly "
+                    "opened hedge would immediately start rolling."
+                )
         if not self.hedge_enabled:
             return self
         # hedge_target_usd / hedge_stoploss_usd are legacy display defaults only —
@@ -417,6 +426,16 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "min_hedge_dte", None)
             if getattr(s, "min_hedge_dte", None) is not None
             else 15
+        ),
+        "min_hedge_dte_enabled": bool(
+            getattr(s, "min_hedge_dte_enabled", True)
+        ),
+        "hedge_roll_enabled": bool(getattr(s, "hedge_roll_enabled", True)),
+        "hedge_force_roll_enabled": bool(
+            getattr(s, "hedge_force_roll_enabled", True)
+        ),
+        "hedge_close_at_expiry_enabled": bool(
+            getattr(s, "hedge_close_at_expiry_enabled", True)
         ),
         "hedge_target_usd": (
             float(s.hedge_target_usd)
@@ -723,7 +742,13 @@ async def update_auto_trade_settings(
 
     settings.hedge_expiry_mode = migrated_mode
     settings.hedge_expiry_dte = None  # relative keys replace fixed DTE
-    settings.min_hedge_dte = max(5, min(60, int(payload.min_hedge_dte)))
+    settings.min_hedge_dte = max(0, min(60, int(payload.min_hedge_dte)))
+    settings.min_hedge_dte_enabled = bool(payload.min_hedge_dte_enabled)
+    settings.hedge_roll_enabled = bool(payload.hedge_roll_enabled)
+    settings.hedge_force_roll_enabled = bool(payload.hedge_force_roll_enabled)
+    settings.hedge_close_at_expiry_enabled = bool(
+        payload.hedge_close_at_expiry_enabled
+    )
 
     # Resolve live dates and enforce hedge expiry > short basket expiry
     resolved_hedge_date: str | None = None
@@ -768,7 +793,7 @@ async def update_auto_trade_settings(
                         expiry_date_override=None,
                         expiry_dte=None,
                     )
-                    if hedge_exp <= short_exp:
+                    if hedge_exp <= short_exp and bool(payload.min_hedge_dte_enabled):
                         raise HTTPException(
                             status_code=400,
                             detail=(
