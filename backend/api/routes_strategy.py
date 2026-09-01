@@ -320,6 +320,8 @@ async def hedge_preview(
             "put_theta": theta["put_theta"],
             "call_iv": theta["call_iv"],
             "put_iv": theta["put_iv"],
+            "call_mark_price": float(theta.get("call_ask") or 0),
+            "put_mark_price": float(theta.get("put_ask") or 0),
             "mid_iv": round(mid_iv, 4),
             "iv_percentile": iv_pct,
             "iv_ok": iv_ok,

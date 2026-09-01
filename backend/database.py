@@ -846,6 +846,7 @@ def _migrate_schema() -> None:
             ("target_source", "VARCHAR(10)"),
             ("hedge_theta_at_entry", "FLOAT"),
             ("basket_qty_computed_pct", "FLOAT"),
+            ("strangle_premium_computed_usd", "FLOAT"),
         ):
             if col_name not in trade_cols:
                 with engine.begin() as conn:
@@ -912,6 +913,11 @@ def _migrate_schema() -> None:
                 "FLOAT NOT NULL DEFAULT 25.0",
             ),
             ("next_entry_source", "VARCHAR(40)"),
+            ("strangle_premium_mode", "VARCHAR(20) NOT NULL DEFAULT 'fixed'"),
+            (
+                "strangle_premium_pct_of_hedge",
+                "FLOAT NOT NULL DEFAULT 3.0",
+            ),
         ]
         for col_name, col_type in hedge_setting_cols:
             if col_name not in at_cols:

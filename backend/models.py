@@ -150,6 +150,10 @@ class Trade(Base):
     basket_qty_computed_pct: Mapped[float | None] = mapped_column(
         Float, nullable=True, default=None
     )
+    # strangle pct_of_hedge mode: computed target $/side at entry (audit)
+    strangle_premium_computed_usd: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
 
     account: Mapped[Account] = relationship("Account", back_populates="trades")
     hedge_position: Mapped[HedgePosition | None] = relationship(
@@ -313,6 +317,13 @@ class AutoTradeSettings(Base):
     # Used only when trade_type = 'strangle'
     target_premium_per_side: Mapped[float] = mapped_column(
         Float, nullable=False, default=150.0
+    )
+    # strangle: fixed $ per side vs % of live hedge premium (mark, not entry fill)
+    strangle_premium_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="fixed"
+    )
+    strangle_premium_pct_of_hedge: Mapped[float] = mapped_column(
+        Float, nullable=False, default=3.0
     )
 
     # Conversion Mode settings (low replacement premium → hedge instead of close)

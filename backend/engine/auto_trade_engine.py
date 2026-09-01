@@ -157,6 +157,86 @@ def resolve_adjustment_basket_qty(
     return new_qty
 
 
+def resolve_strangle_target_premium(
+    *,
+    settings: Any,
+    hedge_call_mark: float | None,
+    hedge_put_mark: float | None,
+) -> tuple[float, bool]:
+    """
+    Resolve strangle target premium per side.
+
+    fixed mode → settings.target_premium_per_side
+    pct_of_hedge → ceil(avg(call_mark, put_mark) × pct / 100), marks required
+
+    Returns (target_premium_per_side, used_dynamic).
+    """
+    fixed = float(getattr(settings, "target_premium_per_side", None) or 150.0)
+    mode = str(
+        getattr(settings, "strangle_premium_mode", None) or "fixed"
+    ).lower().strip()
+    if mode != "pct_of_hedge":
+        return fixed, False
+
+    from backend.core.bot_logger import log_and_buffer
+
+    def _fallback(reason: str, **extra: Any) -> tuple[float, bool]:
+        payload: dict[str, Any] = {
+            "level": "WARNING",
+            "reason": reason,
+            "using_fixed": round(fixed, 4),
+            "summary": (
+                f"[STRANGLE_PREMIUM_FALLBACK] reason={reason} "
+                f"using_fixed={round(fixed, 4)}"
+            ),
+        }
+        payload.update(extra)
+        log_and_buffer("STRANGLE_PREMIUM_FALLBACK", 0, payload)
+        logger.warning(payload["summary"])
+        return fixed, False
+
+    if not bool(getattr(settings, "hedge_enabled", False)):
+        return _fallback("hedge_disabled")
+
+    try:
+        call_m = float(hedge_call_mark) if hedge_call_mark is not None else 0.0
+        put_m = float(hedge_put_mark) if hedge_put_mark is not None else 0.0
+    except (TypeError, ValueError):
+        call_m = 0.0
+        put_m = 0.0
+
+    if call_m <= 0 or put_m <= 0:
+        return _fallback(
+            "marks_unavailable",
+            call_mark=call_m if call_m > 0 else None,
+            put_mark=put_m if put_m > 0 else None,
+        )
+
+    pct = float(getattr(settings, "strangle_premium_pct_of_hedge", None) or 3.0)
+    avg = (call_m + put_m) / 2.0
+    computed = int(math.ceil(avg * pct / 100.0))
+    if computed <= 0:
+        return _fallback(
+            "computed_non_positive",
+            call_mark=round(call_m, 4),
+            put_mark=round(put_m, 4),
+            avg=round(avg, 4),
+            pct=round(pct, 4),
+            computed=computed,
+        )
+
+    logger.info(
+        "[STRANGLE_PREMIUM_DYNAMIC] call_mark=%.2f put_mark=%.2f "
+        "avg=%.2f pct=%.2f target=%d",
+        call_m,
+        put_m,
+        avg,
+        pct,
+        computed,
+    )
+    return float(computed), True
+
+
 # Re-export for adjustment path and tests
 __all__ = [
     "blend_entry_premium",
@@ -165,6 +245,7 @@ __all__ = [
     "resolve_basket_qty_from_hedge",
     "resolve_entry_basket_pct",
     "resolve_sizing_mode",
+    "resolve_strangle_target_premium",
 ]
 
 
@@ -810,6 +891,7 @@ class AutoTradeEngine:
 
         entry_basket_qty: int | None = None
         entry_computed_pct: float | None = None
+        strangle_premium_computed: float | None = None
         sizing_mode_for_entry = resolve_sizing_mode(settings)
         theta_info: dict[str, Any] | None = None
         try:
@@ -959,12 +1041,45 @@ class AutoTradeEngine:
                     float(picks.get("premium_deviation_pct") or 0),
                 )
             elif trade_type == "strangle":
-                target_prem = float(
-                    getattr(settings, "target_premium_per_side", None) or 150.0
+                hedge_call_mark: float | None = None
+                hedge_put_mark: float | None = None
+                if hedge_on:
+                    from backend.core.hedge_theta import get_hedge_theta
+                    from backend.engine.hedge_lifecycle import get_active_hedge
+
+                    hedge_for_prem = get_active_hedge(
+                        db,
+                        account_id=int(account.id),
+                        underlying=str(settings.underlying),
+                    )
+                    if hedge_for_prem is not None:
+                        try:
+                            theta_prem = await get_hedge_theta(
+                                client, hedge_for_prem
+                            )
+                            hedge_call_mark = float(
+                                theta_prem.get("call_ask") or 0
+                            )
+                            hedge_put_mark = float(
+                                theta_prem.get("put_ask") or 0
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "strangle premium: get_hedge_theta failed: %s",
+                                exc,
+                            )
+
+                target_prem, used_dynamic_prem = resolve_strangle_target_premium(
+                    settings=settings,
+                    hedge_call_mark=hedge_call_mark,
+                    hedge_put_mark=hedge_put_mark,
                 )
+                if used_dynamic_prem:
+                    strangle_premium_computed = float(target_prem)
                 logger.info(
-                    "Auto trade: STRANGLE mode target_premium=$%.2f",
+                    "Auto trade: STRANGLE mode target_premium=$%.2f dynamic=%s",
                     target_prem,
+                    used_dynamic_prem,
                 )
                 straddle = await client.find_strangle_by_premium(
                     underlying=str(settings.underlying),
@@ -1382,6 +1497,11 @@ class AutoTradeEngine:
                 basket_qty_computed_pct=(
                     float(entry_computed_pct)
                     if entry_computed_pct is not None
+                    else None
+                ),
+                strangle_premium_computed_usd=(
+                    float(strangle_premium_computed)
+                    if strangle_premium_computed is not None
                     else None
                 ),
             )

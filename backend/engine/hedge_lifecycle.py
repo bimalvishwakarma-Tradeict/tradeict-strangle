@@ -3134,6 +3134,8 @@ async def build_active_hedge_live(
     today_theta_usd: float | None = None
     current_call_iv: float | None = None
     current_put_iv: float | None = None
+    call_mark_price: float | None = None
+    put_mark_price: float | None = None
     try:
         theta = await get_hedge_theta(client, hedge)
         today_theta = float(theta.get("total_theta") or 0)
@@ -3142,6 +3144,10 @@ async def build_active_hedge_live(
         piv = float(theta.get("put_iv") or 0)
         current_call_iv = civ if civ > 0 else None
         current_put_iv = piv if piv > 0 else None
+        cm = float(theta.get("call_ask") or 0)
+        pm = float(theta.get("put_ask") or 0)
+        call_mark_price = cm if cm > 0 else None
+        put_mark_price = pm if pm > 0 else None
     except Exception as exc:
         logger.warning(
             "build_active_hedge_live theta fetch failed hedge=%s: %s",
@@ -3322,6 +3328,8 @@ async def build_active_hedge_live(
         "entry_put_iv": hedge.entry_put_iv,
         "current_call_iv": current_call_iv,
         "current_put_iv": current_put_iv,
+        "call_mark_price": call_mark_price,
+        "put_mark_price": put_mark_price,
         "open_basket_count": count_active_baskets_for_hedge(db, hid),
         "open_basket_net_mtm": round(float(open_basket_net_live), 6),
         "cum_closed_basket_pnl": float(cum_closed_live),

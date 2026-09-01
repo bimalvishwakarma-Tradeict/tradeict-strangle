@@ -15,6 +15,7 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import {
   disableAutoTrade,
   enableAutoTrade,
+  getActiveHedge,
   getActiveTrades,
   getAutoTradeSettings,
   getAutoTradeStatus,
@@ -98,6 +99,10 @@ function applyStatusToForm(data, setters) {
   setters.setSlippagePct(String(data.slippage_pct ?? 2))
   setters.setTradeType(data.trade_type || 'straddle')
   setters.setTargetPremium(Number(data.target_premium_per_side ?? 150))
+  setters.setStranglePremiumMode(data.strangle_premium_mode || 'fixed')
+  setters.setStranglePremiumPct(
+    String(data.strangle_premium_pct_of_hedge ?? 3),
+  )
   setters.setAdjLowPremiumExitEnabled(
     Boolean(data.adj_low_premium_exit_enabled),
   )
@@ -245,6 +250,8 @@ export default function AutoTrade() {
   const [slippagePct, setSlippagePct] = useState('2')
   const [tradeType, setTradeType] = useState('straddle')
   const [targetPremium, setTargetPremium] = useState(150)
+  const [stranglePremiumMode, setStranglePremiumMode] = useState('fixed')
+  const [stranglePremiumPct, setStranglePremiumPct] = useState('3')
   const [adjLowPremiumExitEnabled, setAdjLowPremiumExitEnabled] =
     useState(false)
   const [adjLowPremiumMinUsd, setAdjLowPremiumMinUsd] = useState(150)
@@ -286,6 +293,7 @@ export default function AutoTrade() {
     useState('120')
   const [orderMarginPerLot, setOrderMarginPerLot] = useState(null)
   const [hedgePreview, setHedgePreview] = useState(null)
+  const [activeHedgePanel, setActiveHedgePanel] = useState(null)
   const [thetaPreview, setThetaPreview] = useState(null)
   const [targetPreview, setTargetPreview] = useState(null)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -321,6 +329,8 @@ export default function AutoTrade() {
       setSlippagePct,
       setTradeType,
       setTargetPremium,
+      setStranglePremiumMode,
+      setStranglePremiumPct,
       setAdjLowPremiumExitEnabled,
       setAdjLowPremiumMinUsd,
       setConversionModeEnabled,
@@ -595,6 +605,12 @@ export default function AutoTrade() {
       trade_type: tradeType,
       target_premium_per_side:
         tradeType === 'strangle' ? Number(targetPremium) || 150 : 150.0,
+      strangle_premium_mode:
+        tradeType === 'strangle' ? stranglePremiumMode || 'fixed' : 'fixed',
+      strangle_premium_pct_of_hedge: Math.min(
+        100,
+        Math.max(0.01, Number(stranglePremiumPct) || 3),
+      ),
       adj_low_premium_exit_enabled: Boolean(adjLowPremiumExitEnabled),
       adj_low_premium_min_usd: Math.min(
         500,
@@ -851,21 +867,6 @@ export default function AutoTrade() {
   const spreadSettingsError =
     spreadCapPctError || basketExitSpreadPctError || hedgeExitSpreadPctError
 
-  const basketSizingPreview = useMemo(() => {
-    if (basketQtyMode !== 'pct_of_hedge' || !hedgeEnabled) return null
-    if (basketQtyDynamic) return null
-    const hedgeLots = Math.max(1, Number(hedgeQtyLots) || 1)
-    const pct = Math.min(100, Math.max(1, Number(basketQtyPctOfHedge) || 20))
-    const basketLots = Math.ceil((hedgeLots * pct) / 100)
-    return { hedgeLots, pct, basketLots }
-  }, [
-    basketQtyMode,
-    hedgeEnabled,
-    hedgeQtyLots,
-    basketQtyPctOfHedge,
-    basketQtyDynamic,
-  ])
-
   const basketQtyThetaMultError = useMemo(() => {
     const n = Number(basketQtyThetaMult)
     if (basketQtyThetaMult === '' || Number.isNaN(n)) {
@@ -880,8 +881,73 @@ export default function AutoTrade() {
   const pctOfHedgeSizingActive =
     hedgeEnabled && basketQtyMode === 'pct_of_hedge'
 
+  const basketSizingChoice =
+    basketQtyMode !== 'pct_of_hedge'
+      ? 'fixed'
+      : basketQtyDynamic
+        ? 'dynamic_pct'
+        : 'manual_pct'
+
+  const setBasketSizingChoice = (choice) => {
+    if (choice === 'fixed') {
+      setBasketQtyMode('fixed')
+      setBasketQtyDynamic(false)
+    } else if (choice === 'manual_pct') {
+      setBasketQtyMode('pct_of_hedge')
+      setBasketQtyDynamic(false)
+    } else {
+      setBasketQtyMode('pct_of_hedge')
+      setBasketQtyDynamic(true)
+    }
+  }
+
   const dynamicBasketSizingActive =
     pctOfHedgeSizingActive && basketQtyDynamic
+
+  const basketSizingPreview = useMemo(() => {
+    if (basketSizingChoice !== 'manual_pct' || !hedgeEnabled) return null
+    const hedgeLots = Math.max(1, Number(hedgeQtyLots) || 1)
+    const pct = Math.min(100, Math.max(1, Number(basketQtyPctOfHedge) || 20))
+    const basketLots = Math.ceil((hedgeLots * pct) / 100)
+    return { hedgeLots, pct, basketLots }
+  }, [basketSizingChoice, hedgeEnabled, hedgeQtyLots, basketQtyPctOfHedge])
+
+  const hedgeMarksForPreview = useMemo(() => {
+    if (
+      activeHedgePanel?.call_mark_price > 0 &&
+      activeHedgePanel?.put_mark_price > 0
+    ) {
+      return {
+        call: Number(activeHedgePanel.call_mark_price),
+        put: Number(activeHedgePanel.put_mark_price),
+      }
+    }
+    if (
+      hedgePreview?.call_mark_price > 0 &&
+      hedgePreview?.put_mark_price > 0
+    ) {
+      return {
+        call: Number(hedgePreview.call_mark_price),
+        put: Number(hedgePreview.put_mark_price),
+      }
+    }
+    return null
+  }, [activeHedgePanel, hedgePreview])
+
+  const stranglePremiumPreview = useMemo(() => {
+    if (stranglePremiumMode !== 'pct_of_hedge' || !hedgeMarksForPreview) {
+      return null
+    }
+    const pct = Math.min(100, Math.max(0.01, Number(stranglePremiumPct) || 3))
+    const avg =
+      (hedgeMarksForPreview.call + hedgeMarksForPreview.put) / 2
+    return Math.ceil(avg * (pct / 100))
+  }, [stranglePremiumMode, stranglePremiumPct, hedgeMarksForPreview])
+
+  const stranglePremiumHighPctWarning =
+    stranglePremiumMode === 'pct_of_hedge' &&
+    Number(stranglePremiumPct) > 10 &&
+    stranglePremiumPreview != null
 
   const buildPreviewParams = useCallback(() => {
     const dte = Math.max(0, Number(expiryDte) || 1)
@@ -937,10 +1003,13 @@ export default function AutoTrade() {
     setPreviewLoading(true)
     try {
       const params = buildPreviewParams()
-      const [hp, tp, tgp] = await Promise.all([
+      const [hp, tp, tgp, activeHedgeRes] = await Promise.all([
         getHedgePreview(params),
         getThetaPreview(params),
         getTargetPreview(params),
+        hedgeEnabled
+          ? getActiveHedge().catch(() => ({ hedge: null }))
+          : Promise.resolve({ hedge: null }),
       ])
       // Never keep stale success data — replace with unavailable on failure
       setHedgePreview(hp?.unavailable || hp?.success === false ? { ...PREVIEW_FAIL, ...hp } : hp)
@@ -948,6 +1017,7 @@ export default function AutoTrade() {
       setTargetPreview(
         tgp?.unavailable || tgp?.success === false ? { ...PREVIEW_FAIL, ...tgp } : tgp,
       )
+      setActiveHedgePanel(activeHedgeRes?.hedge ?? null)
       if (hp?.order_margin_per_lot != null && !hp?.unavailable) {
         setOrderMarginPerLot(Number(hp.order_margin_per_lot))
       } else {
@@ -961,7 +1031,7 @@ export default function AutoTrade() {
     } finally {
       setPreviewLoading(false)
     }
-  }, [buildPreviewParams])
+  }, [buildPreviewParams, hedgeEnabled])
 
   useEffect(() => {
     if (loading) return undefined
@@ -1100,7 +1170,9 @@ export default function AutoTrade() {
 
   const tradeTypeLabel =
     tradeType === 'strangle'
-      ? `STRANGLE $${Number(targetPremium) || 150}/side`
+      ? stranglePremiumMode === 'pct_of_hedge' && stranglePremiumPreview != null
+        ? `STRANGLE ≈$${stranglePremiumPreview}/side (${stranglePremiumPct}% hedge)`
+        : `STRANGLE $${Number(targetPremium) || 150}/side`
       : 'STRADDLE ATM'
 
   const statusView = useMemo(() => {
@@ -1323,22 +1395,106 @@ export default function AutoTrade() {
             </label>
 
             {tradeType === 'strangle' && (
-              <div className="rounded-lg border border-purple-500/30 bg-gray-700/40 p-4">
-                <FieldLabel>Target Premium per Side ($)</FieldLabel>
-                <input
-                  type="number"
-                  value={targetPremium}
-                  onChange={(e) =>
-                    setTargetPremium(parseFloat(e.target.value) || 0)
-                  }
-                  className="mt-2 w-full rounded-md bg-gray-700 px-3 py-2 text-white"
-                  placeholder="e.g. 150"
-                  min={1}
-                  max={10000}
-                />
-                <p className="mt-2 text-xs text-gray-500">
-                  Bot finds OTM Call & Put where premium ≈ ${targetPremium}
-                </p>
+              <div className="rounded-lg border border-purple-500/30 bg-gray-700/40 p-4 space-y-3">
+                <FieldLabel>Target Premium per Side</FieldLabel>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setStranglePremiumMode('fixed')}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                      stranglePremiumMode === 'fixed'
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    }`}
+                  >
+                    Fixed $
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      hedgeEnabled && setStranglePremiumMode('pct_of_hedge')
+                    }
+                    disabled={!hedgeEnabled}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                      stranglePremiumMode === 'pct_of_hedge'
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    } disabled:cursor-not-allowed disabled:opacity-40`}
+                  >
+                    % of hedge
+                  </button>
+                </div>
+                {!hedgeEnabled && stranglePremiumMode === 'pct_of_hedge' && (
+                  <p className="text-xs text-amber-400/90">
+                    Requires Hedge Mode — falls back to fixed $ on entry.
+                  </p>
+                )}
+                {stranglePremiumMode === 'fixed' ? (
+                  <>
+                    <input
+                      type="number"
+                      value={targetPremium}
+                      onChange={(e) =>
+                        setTargetPremium(parseFloat(e.target.value) || 0)
+                      }
+                      className="w-full max-w-xs rounded-md bg-gray-700 px-3 py-2 text-white"
+                      placeholder="e.g. 150"
+                      min={1}
+                      max={10000}
+                    />
+                    <p className="text-xs text-gray-500">
+                      Bot finds OTM Call & Put where premium ≈ ${targetPremium}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <label className="block text-sm text-gray-300">
+                      % of live hedge premium (mark, per side)
+                      <input
+                        type="number"
+                        min={0.01}
+                        max={100}
+                        step={0.1}
+                        value={stranglePremiumPct}
+                        onChange={(e) =>
+                          setStranglePremiumPct(
+                            String(
+                              Math.min(
+                                100,
+                                Math.max(0.01, Number(e.target.value) || 3),
+                              ),
+                            ),
+                          )
+                        }
+                        className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+                      />
+                    </label>
+                    {stranglePremiumPreview != null ? (
+                      <p className="text-xs text-gray-400">
+                        ≈ ${stranglePremiumPreview} per side
+                        {hedgeMarksForPreview && (
+                          <>
+                            {' '}
+                            (call ${Math.round(hedgeMarksForPreview.call)} /
+                            put ${Math.round(hedgeMarksForPreview.put)} marks)
+                          </>
+                        )}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-gray-500">
+                        Live hedge marks unavailable — preview will appear when
+                        hedge data loads.
+                      </p>
+                    )}
+                    {stranglePremiumHighPctWarning && (
+                      <p className="text-xs text-amber-400">
+                        ⚠ At current hedge premium this is ~$
+                        {stranglePremiumPreview} per side vs $
+                        {Number(targetPremium) || 150} fixed today
+                      </p>
+                    )}
+                  </>
+                )}
               </div>
             )}
           </SectionCard>
@@ -1348,9 +1504,9 @@ export default function AutoTrade() {
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => setBasketQtyMode('fixed')}
+              onClick={() => setBasketSizingChoice('fixed')}
               className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                basketQtyMode === 'fixed'
+                basketSizingChoice === 'fixed'
                   ? 'bg-blue-500 text-white'
                   : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
               }`}
@@ -1359,15 +1515,31 @@ export default function AutoTrade() {
             </button>
             <button
               type="button"
-              onClick={() => hedgeEnabled && setBasketQtyMode('pct_of_hedge')}
+              onClick={() =>
+                hedgeEnabled && setBasketSizingChoice('manual_pct')
+              }
               disabled={!hedgeEnabled}
               className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                basketQtyMode === 'pct_of_hedge'
+                basketSizingChoice === 'manual_pct'
                   ? 'bg-blue-500 text-white'
                   : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
               } disabled:cursor-not-allowed disabled:opacity-40`}
             >
-              % of hedge
+              % of hedge — manual
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                hedgeEnabled && setBasketSizingChoice('dynamic_pct')
+              }
+              disabled={!hedgeEnabled}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                basketSizingChoice === 'dynamic_pct'
+                  ? 'bg-blue-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              } disabled:cursor-not-allowed disabled:opacity-40`}
+            >
+              % of hedge — dynamic (theta)
             </button>
           </div>
           {!hedgeEnabled && (
@@ -1395,54 +1567,65 @@ export default function AutoTrade() {
                   className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
                 />
               </label>
-              <label
-                className={`block text-sm text-gray-300 ${
-                  dynamicBasketSizingActive ? 'opacity-40' : ''
-                }`}
-              >
-                Short basket % of hedge
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  step={1}
-                  value={basketQtyPctOfHedge}
-                  onChange={(e) =>
-                    setBasketQtyPctOfHedge(
-                      String(
-                        Math.min(
-                          100,
-                          Math.max(1, Number(e.target.value) || 1),
-                        ),
-                      ),
-                    )
-                  }
-                  className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-                />
-                {dynamicBasketSizingActive && (
-                  <p className="mt-1 text-xs text-gray-500">
-                    Not used when dynamic is on — % is computed at entry from
-                    live theta.
-                  </p>
-                )}
-              </label>
-              <div className="space-y-2 rounded-lg border border-gray-700/60 bg-gray-900/40 p-3">
-                <label className="flex cursor-pointer items-start gap-3">
-                  <input
-                    type="checkbox"
-                    checked={basketQtyDynamic}
-                    onChange={(e) => setBasketQtyDynamic(e.target.checked)}
-                    className="mt-1"
-                  />
-                  <span className="text-sm text-gray-300">
+              {basketSizingChoice === 'manual_pct' && (
+                <>
+                  <label className="block text-sm text-gray-300">
+                    Short basket % of hedge
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={basketQtyPctOfHedge}
+                      onChange={(e) =>
+                        setBasketQtyPctOfHedge(
+                          String(
+                            Math.min(
+                              100,
+                              Math.max(1, Number(e.target.value) || 1),
+                            ),
+                          ),
+                        )
+                      }
+                      className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+                    />
+                  </label>
+                  {basketSizingPreview && (
+                    <p
+                      className={`text-xs ${
+                        basketSizingPreview.basketLots === 0
+                          ? 'text-red-400'
+                          : 'text-gray-400'
+                      }`}
+                    >
+                      {basketSizingPreview.basketLots === 0 ? (
+                        <>
+                          Short basket would be 0 lots — entry will be skipped.
+                        </>
+                      ) : (
+                        <>
+                          {basketSizingPreview.hedgeLots} lots ×{' '}
+                          {basketSizingPreview.pct}% →{' '}
+                          {basketSizingPreview.basketLots} lot
+                          {Number(basketSizingPreview.basketLots) === 1
+                            ? ''
+                            : 's'}{' '}
+                          (round up)
+                        </>
+                      )}
+                    </p>
+                  )}
+                </>
+              )}
+              {basketSizingChoice === 'dynamic_pct' && (
+                <div className="space-y-2 rounded-lg border border-gray-700/60 bg-gray-900/40 p-3">
+                  <p className="text-sm text-gray-300">
                     Dynamic % (theta-based)
                     <span className="mt-0.5 block text-xs text-gray-500">
                       Formula: (hedge_call_theta × mult × 100) /
                       call_ask_at_entry
                     </span>
-                  </span>
-                </label>
-                {basketQtyDynamic && (
+                  </p>
                   <label className="block text-sm text-gray-300">
                     Multiplier
                     <input
@@ -1460,9 +1643,7 @@ export default function AutoTrade() {
                       </p>
                     )}
                   </label>
-                )}
-                {basketQtyDynamic && (
-                  <div className="ml-6 mt-2">
+                  <div className="mt-2">
                     <label className="flex cursor-pointer items-center gap-2">
                       <input
                         type="checkbox"
@@ -1477,53 +1658,16 @@ export default function AutoTrade() {
                       <InfoTooltip text="At adjustment, bot recalculates basket qty using live hedge theta and new strike ask price. Untested leg qty increases to match. Hard cap: max 50% of hedge qty (e.g. max 2 for 5-lot hedge). Entry target ($) stays unchanged — higher qty helps reach it faster." />
                     </label>
                     <p className="ml-6 mt-1 text-xs text-gray-400">
-                      Uses dynamic % formula at adjustment time. Untested leg
-                      qty also increases to match. Max qty: 50% of hedge qty.
+                      Uses dynamic % formula at adjustment time. Max qty: 50%
+                      of hedge qty.
                     </p>
                   </div>
-                )}
-              </div>
-              {dynamicBasketSizingActive ? (
-                <p className="text-xs text-gray-400">
-                  Dynamic: (hedge_theta ×{' '}
-                  {Number(basketQtyThetaMult) || 2.0} × 100) / call_ask →
-                  computed at entry
-                </p>
-              ) : (
-                basketSizingPreview && (
-                  <p
-                    className={`text-xs ${
-                      basketSizingPreview.basketLots === 0
-                        ? 'text-red-400'
-                        : 'text-gray-400'
-                    }`}
-                  >
-                    {basketSizingPreview.basketLots === 0 ? (
-                      <>
-                        Short basket would be 0 lots — entry will be skipped.
-                      </>
-                    ) : (
-                      <>
-                        Hedge{' '}
-                        {basketSizingPreview.hedgeLots} lot
-                        {Number(basketSizingPreview.hedgeLots) === 1
-                          ? ''
-                          : 's'}{' '}
-                        → Short basket {basketSizingPreview.basketLots} lot
-                        {Number(basketSizingPreview.basketLots) === 1
-                          ? ''
-                          : 's'}{' '}
-                        (ceil of {basketSizingPreview.pct}% ={' '}
-                        {(
-                          (basketSizingPreview.hedgeLots *
-                            basketSizingPreview.pct) /
-                          100
-                        ).toFixed(1)}
-                        )
-                      </>
-                    )}
+                  <p className="text-xs text-gray-400">
+                    Dynamic: (hedge_theta ×{' '}
+                    {Number(basketQtyThetaMult) || 2.0} × 100) / call_ask →
+                    computed at entry
                   </p>
-                )
+                </div>
               )}
             </div>
           )}

@@ -60,6 +60,8 @@ class AutoTradeSettingsSchema(BaseModel):
     # Trade structure
     trade_type: str = "straddle"  # 'straddle' or 'strangle'
     target_premium_per_side: float = Field(default=150.0, gt=0, le=10000)
+    strangle_premium_mode: str = "fixed"  # fixed | pct_of_hedge
+    strangle_premium_pct_of_hedge: float = Field(default=3.0, gt=0, le=100)
 
     # Low-premium adjustment exit
     adj_low_premium_exit_enabled: bool = False
@@ -130,6 +132,14 @@ class AutoTradeSettingsSchema(BaseModel):
         if v <= 0 or v > 10000:
             raise ValueError("target_premium must be between 1 and 10000")
         return float(v)
+
+    @field_validator("strangle_premium_mode")
+    @classmethod
+    def validate_strangle_premium_mode(cls, v: str) -> str:
+        normalized = str(v or "fixed").lower().strip()
+        if normalized not in {"fixed", "pct_of_hedge"}:
+            return "fixed"
+        return normalized
 
     @field_validator("hedge_expiry_mode")
     @classmethod
@@ -374,6 +384,14 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         "trade_type": getattr(s, "trade_type", None) or "straddle",
         "target_premium_per_side": float(
             getattr(s, "target_premium_per_side", None) or 150.0
+        ),
+        "strangle_premium_mode": str(
+            getattr(s, "strangle_premium_mode", None) or "fixed"
+        ).lower(),
+        "strangle_premium_pct_of_hedge": float(
+            getattr(s, "strangle_premium_pct_of_hedge", None)
+            if getattr(s, "strangle_premium_pct_of_hedge", None) is not None
+            else 3.0
         ),
         "adj_low_premium_exit_enabled": bool(
             getattr(s, "adj_low_premium_exit_enabled", False)
@@ -639,6 +657,14 @@ async def update_auto_trade_settings(
     settings.premium_slab_lt100 = float(payload.premium_slab_lt100)
     settings.trade_type = payload.trade_type.lower().strip()
     settings.target_premium_per_side = float(payload.target_premium_per_side)
+    settings.strangle_premium_mode = str(
+        payload.strangle_premium_mode or "fixed"
+    ).lower().strip()
+    if settings.strangle_premium_mode not in {"fixed", "pct_of_hedge"}:
+        settings.strangle_premium_mode = "fixed"
+    settings.strangle_premium_pct_of_hedge = float(
+        payload.strangle_premium_pct_of_hedge
+    )
     settings.adj_low_premium_exit_enabled = bool(
         payload.adj_low_premium_exit_enabled
     )
