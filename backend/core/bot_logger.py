@@ -153,6 +153,18 @@ _IMPORTANT_EVENTS = frozenset(
         "PREMIUM_TARGET_UNREACHABLE",
         "NO_STRIKE_AVAILABLE",
         "NO_HEDGE_STRIKE_AVAILABLE",
+        "MIDPRICE_ATTEMPT",
+        "MIDPRICE_FILL",
+        "MIDPRICE_CHASE",
+        "MIDPRICE_CHASE_TIMEOUT",
+        "MIDPRICE_POSTONLY_REJECT",
+        "MIDPRICE_SIZE_MISMATCH",
+        "PREPLACE_CHECK",
+        "PARTNER_FINAL_ATTEMPT_ARMED",
+        "PARTNER_MARKET_FALLBACK_TRIGGERED",
+        "ORDER_RESTING",
+        "ORDER_RESTING_CLEARED",
+        "ORDER_ID_LOST",
     }
 )
 
@@ -262,6 +274,11 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
     msg = f"[{event_type}] {entity} @ {now} | {detail_str}"
 
     if event_type in (
+        "ORDER_ID_LOST",
+        "MIDPRICE_SIZE_MISMATCH",
+    ):
+        bot_log.critical(msg)
+    elif event_type in (
         "ERROR",
         "ADJUSTMENT_FAIL",
         "EXIT_FAIL",
@@ -311,6 +328,8 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_AUTO_REOPEN",
         "HEDGE_TARGET_FIRE",
         "SL_FALSE_TRIGGER_BLOCKED",
+        "MIDPRICE_CHASE_TIMEOUT",
+        "MIDPRICE_POSTONLY_REJECT",
         "MAX_ADJUSTMENTS_REACHED",
         "ADJUSTMENT_LIMIT_UNSET",
     ):
@@ -393,6 +412,14 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "NO_STRIKE_AVAILABLE",
         "NO_HEDGE_STRIKE_AVAILABLE",
         "LEDGER_RECONCILE",
+        "MIDPRICE_ATTEMPT",
+        "MIDPRICE_FILL",
+        "MIDPRICE_CHASE",
+        "PREPLACE_CHECK",
+        "PARTNER_FINAL_ATTEMPT_ARMED",
+        "PARTNER_MARKET_FALLBACK_TRIGGERED",
+        "ORDER_RESTING",
+        "ORDER_RESTING_CLEARED",
     ):
         bot_log.info(msg)
     elif event_type in (

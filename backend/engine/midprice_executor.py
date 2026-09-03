@@ -65,6 +65,25 @@ def is_placing_order() -> bool:
     return _IN_FLIGHT_ORDER_COUNT > 0
 
 
+def _safe_dump(obj: Any) -> Any:
+    """JSON-ish dump of a Delta payload for audit logs."""
+    if isinstance(obj, dict):
+        return {str(k): _safe_dump(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_safe_dump(x) for x in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return str(obj)
+
+
+def _mid_log(
+    event_type: str,
+    trade_id: int | None,
+    details: dict[str, Any],
+) -> None:
+    log_and_buffer(event_type, int(trade_id or 0), details)
+
+
 @asynccontextmanager
 async def order_placement_guard(
     *,
@@ -243,6 +262,8 @@ async def _poll_order_until_hold(
     *,
     hold_seconds: float = HOLD_SECONDS,
     poll_every: float = 0.5,
+    trade_id: int | None = None,
+    leg_label: str = "",
 ) -> dict[str, Any]:
     """Hold up to hold_seconds, polling Delta order status (source of truth)."""
     deadline = time.monotonic() + float(hold_seconds)
@@ -251,10 +272,15 @@ async def _poll_order_until_hold(
         try:
             last = await delta_client.get_order(order_id)
         except Exception as exc:
-            logger.warning(
-                "[MIDPRICE_ATTEMPT] get_order failed id=%s: %s",
-                order_id,
-                exc,
+            _mid_log(
+                "MIDPRICE_ATTEMPT",
+                trade_id,
+                {
+                    "phase": "get_order_failed",
+                    "order_id": order_id,
+                    "leg": leg_label,
+                    "error": str(exc),
+                },
             )
             last = last or {}
         state = _order_state(last)
@@ -270,6 +296,9 @@ async def _poll_order_until_hold(
 async def _cancel_confirm(
     delta_client: Any,
     order_id: int | str,
+    *,
+    trade_id: int | None = None,
+    leg_label: str = "",
 ) -> tuple[str, dict[str, Any] | None]:
     """
     Cancel and verify. Returns (outcome, order_after):
@@ -284,25 +313,63 @@ async def _cancel_confirm(
                 od = await delta_client.get_order(order_id)
             except Exception:
                 od = None
+            _mid_log(
+                "ORDER_RESTING_CLEARED",
+                trade_id,
+                {
+                    "order_id": order_id,
+                    "leg": leg_label,
+                    "outcome": "filled",
+                    "note": "cancel_already_filled",
+                },
+            )
             return "filled", od
-        logger.warning(
-            "[MIDPRICE_ATTEMPT] cancel failed id=%s: %s — re-checking status",
-            order_id,
-            exc,
+        _mid_log(
+            "MIDPRICE_ATTEMPT",
+            trade_id,
+            {
+                "phase": "cancel_failed",
+                "order_id": order_id,
+                "leg": leg_label,
+                "error": str(exc),
+                "action": "recheck_status",
+            },
         )
 
     try:
         od = await delta_client.get_order(order_id)
     except Exception:
+        _mid_log(
+            "ORDER_RESTING_CLEARED",
+            trade_id,
+            {
+                "order_id": order_id,
+                "leg": leg_label,
+                "outcome": "unknown",
+            },
+        )
         return "unknown", None
 
     state = _order_state(od)
     if state in _FILLED_STATES:
-        return "filled", od
-    filled = _filled_size_from_order(od, requested=0)
-    if filled > 0 and state not in _OPEN_STATES:
-        return "filled", od
-    return "cancelled", od
+        outcome = "filled"
+    else:
+        filled = _filled_size_from_order(od, requested=0)
+        if filled > 0 and state not in _OPEN_STATES:
+            outcome = "filled"
+        else:
+            outcome = "cancelled"
+    _mid_log(
+        "ORDER_RESTING_CLEARED",
+        trade_id,
+        {
+            "order_id": order_id,
+            "leg": leg_label,
+            "outcome": outcome,
+            "state": state,
+        },
+    )
+    return outcome, od
 
 
 async def _place_market(
@@ -314,6 +381,8 @@ async def _place_market(
     reduce_only: bool,
     bracket_sl_price: float | None = None,
     bracket_sl_limit: float | None = None,
+    trade_id: int | None = None,
+    leg_label: str = "",
 ) -> OrderResult:
     try:
         raw = await delta_client.place_order(
@@ -337,6 +406,22 @@ async def _place_market(
                 filled = int(float(r["filled_size"]))
         except (TypeError, ValueError):
             pass
+        _mid_log(
+            "ORDER_RESTING",
+            trade_id,
+            {
+                "order_id": oid,
+                "leg": leg_label,
+                "product_id": int(product_id),
+                "side": str(side),
+                "size": int(quantity),
+                "order_type": "market_order",
+                "time_in_force": "ioc",
+                "limit_price": None,
+                "post_only": False,
+                "reduce_only": bool(reduce_only),
+            },
+        )
         return OrderResult(
             success=True,
             order_id=int(oid) if oid is not None else None,
@@ -371,13 +456,17 @@ def log_size_mismatch(
     intended: int,
     actual: float,
     attempts: int,
+    trade_id: int | None = None,
 ) -> None:
-    logger.critical(
-        "[MIDPRICE_SIZE_MISMATCH] leg=%s intended=%s actual=%s attempts=%s",
-        leg_label,
-        intended,
-        actual,
-        attempts,
+    _mid_log(
+        "MIDPRICE_SIZE_MISMATCH",
+        trade_id,
+        {
+            "leg": leg_label,
+            "intended": intended,
+            "actual": actual,
+            "attempts": attempts,
+        },
     )
 
 
@@ -518,11 +607,15 @@ async def _pre_place_position_check(
             },
         )
     except Exception as exc:
-        logger.warning(
-            "[PREPLACE_CHECK] failed leg=%s attempt=%s: %s",
-            leg_label,
-            attempt,
-            exc,
+        _mid_log(
+            "PREPLACE_CHECK",
+            trade_id,
+            {
+                "leg": leg_label,
+                "attempt": attempt,
+                "error": str(exc),
+                "phase": "failed",
+            },
         )
     return False
 
@@ -581,6 +674,8 @@ async def execute_with_midprice(
                 reduce_only=reduce_only,
                 bracket_sl_price=bracket_sl_price,
                 bracket_sl_limit=bracket_sl_limit,
+                trade_id=trade_id,
+                leg_label=leg_label,
             )
             res.fill_type = "market"
             return res
@@ -642,12 +737,15 @@ async def execute_with_midprice(
                 and elapsed >= chase_max
                 and partner_mode_started_at is None
             ):
-                logger.warning(
-                    "[MIDPRICE_CHASE_TIMEOUT] leg=%s elapsed=%.1f attempts=%s "
-                    "action=market",
-                    leg_label,
-                    elapsed,
-                    attempt,
+                _mid_log(
+                    "MIDPRICE_CHASE_TIMEOUT",
+                    trade_id,
+                    {
+                        "leg": leg_label,
+                        "elapsed": round(float(elapsed), 1),
+                        "attempts": attempt,
+                        "action": "market",
+                    },
                 )
                 order_kind = "market"
                 if await _pre_place_position_check(
@@ -689,6 +787,8 @@ async def execute_with_midprice(
                     reduce_only=reduce_only,
                     bracket_sl_price=bracket_sl_price,
                     bracket_sl_limit=bracket_sl_limit,
+                    trade_id=trade_id,
+                    leg_label=leg_label,
                 )
                 if mkt.success:
                     fsz = int(mkt.filled_size or remaining)
@@ -716,10 +816,14 @@ async def execute_with_midprice(
             try:
                 bid, ask = await _fetch_book(delta_client, symbol)
             except Exception as exc:
-                logger.warning(
-                    "[MIDPRICE_ATTEMPT] book fetch failed leg=%s: %s",
-                    leg_label,
-                    exc,
+                _mid_log(
+                    "MIDPRICE_ATTEMPT",
+                    trade_id,
+                    {
+                        "phase": "book_fetch_failed",
+                        "leg": leg_label,
+                        "error": str(exc),
+                    },
                 )
                 bid, ask = 0.0, 0.0
 
@@ -749,16 +853,21 @@ async def execute_with_midprice(
                     filled_total = qty_total
                     fill_type_used = "position_already_filled"
                     break
-                logger.info(
-                    "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=market "
-                    "bid=%s ask=%s mid=%s limit=.. qty=%s filled=0",
-                    leg_label,
-                    prof,
-                    attempt,
-                    bid,
-                    ask,
-                    mid,
-                    remaining,
+                _mid_log(
+                    "MIDPRICE_ATTEMPT",
+                    trade_id,
+                    {
+                        "leg": leg_label,
+                        "profile": prof,
+                        "attempt": attempt,
+                        "type": "market",
+                        "bid": bid,
+                        "ask": ask,
+                        "mid": mid,
+                        "limit": None,
+                        "qty": remaining,
+                        "filled": 0,
+                    },
                 )
                 mkt = await _place_market(
                     delta_client,
@@ -768,6 +877,8 @@ async def execute_with_midprice(
                     reduce_only=reduce_only,
                     bracket_sl_price=bracket_sl_price,
                     bracket_sl_limit=bracket_sl_limit,
+                    trade_id=trade_id,
+                    leg_label=leg_label,
                 )
                 if mkt.success:
                     fsz = int(mkt.filled_size or remaining)
@@ -802,29 +913,34 @@ async def execute_with_midprice(
                 await sleep(0)
                 continue
 
-            logger.info(
-                "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=%s "
-                "bid=%s ask=%s mid=%s limit=%s qty=%s filled=0",
-                leg_label,
-                prof,
-                attempt,
-                order_kind,
-                bid,
-                ask,
-                mid,
-                round(float(limit), 4),
-                remaining,
+            _mid_log(
+                "MIDPRICE_ATTEMPT",
+                trade_id,
+                {
+                    "leg": leg_label,
+                    "profile": prof,
+                    "attempt": attempt,
+                    "type": order_kind,
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": mid,
+                    "limit": round(float(limit), 4),
+                    "qty": remaining,
+                    "filled": 0,
+                },
             )
             if prof == "chase" and attempt % 5 == 0:
-                logger.info(
-                    "[MIDPRICE_CHASE] leg=%s attempt=%s elapsed=%.1f mid=%s "
-                    "bid=%s ask=%s",
-                    leg_label,
-                    attempt,
-                    elapsed,
-                    mid,
-                    bid,
-                    ask,
+                _mid_log(
+                    "MIDPRICE_CHASE",
+                    trade_id,
+                    {
+                        "leg": leg_label,
+                        "attempt": attempt,
+                        "elapsed": round(float(elapsed), 1),
+                        "mid": mid,
+                        "bid": bid,
+                        "ask": ask,
+                    },
                 )
 
             if await _pre_place_position_check(
@@ -877,20 +993,26 @@ async def execute_with_midprice(
                 )
             except Exception as exc:
                 if use_post_only and is_post_only_reject(exc):
-                    logger.warning(
-                        "[MIDPRICE_POSTONLY_REJECT] leg=%s attempt=%s mid=%s "
-                        "bid=%s ask=%s",
-                        leg_label,
-                        attempt,
-                        mid,
-                        bid,
-                        ask,
+                    _mid_log(
+                        "MIDPRICE_POSTONLY_REJECT",
+                        trade_id,
+                        {
+                            "leg": leg_label,
+                            "attempt": attempt,
+                            "mid": mid,
+                            "bid": bid,
+                            "ask": ask,
+                        },
                     )
                     continue
-                logger.warning(
-                    "[MIDPRICE_ATTEMPT] place failed leg=%s: %s",
-                    leg_label,
-                    exc,
+                _mid_log(
+                    "MIDPRICE_ATTEMPT",
+                    trade_id,
+                    {
+                        "phase": "place_failed",
+                        "leg": leg_label,
+                        "error": str(exc),
+                    },
                 )
                 if prof == "urgent" and attempt >= 3:
                     continue
@@ -899,13 +1021,47 @@ async def execute_with_midprice(
 
             oid = placed.get("order_id") or placed.get("id")
             if oid is None:
+                _mid_log(
+                    "ORDER_ID_LOST",
+                    trade_id,
+                    {
+                        "leg": leg_label,
+                        "product_id": int(product_id),
+                        "side": side_l,
+                        "size": remaining,
+                        "order_type": "limit_order",
+                        "time_in_force": "gtc",
+                        "limit_price": float(limit),
+                        "post_only": bool(use_post_only),
+                        "reduce_only": bool(reduce_only),
+                        "delta_response": _safe_dump(placed),
+                    },
+                )
                 continue
             last_oid = int(oid)
+            _mid_log(
+                "ORDER_RESTING",
+                trade_id,
+                {
+                    "order_id": last_oid,
+                    "leg": leg_label,
+                    "product_id": int(product_id),
+                    "side": side_l,
+                    "size": remaining,
+                    "order_type": "limit_order",
+                    "time_in_force": "gtc",
+                    "limit_price": float(limit),
+                    "post_only": bool(use_post_only),
+                    "reduce_only": bool(reduce_only),
+                },
+            )
 
             after = await _poll_order_until_hold(
                 delta_client,
                 last_oid,
                 hold_seconds=float(hold_seconds),
+                trade_id=trade_id,
+                leg_label=leg_label,
             )
             got = _filled_size_from_order(after, requested=remaining)
             state = _order_state(after)
@@ -915,15 +1071,19 @@ async def execute_with_midprice(
                 filled_total += remaining
                 fill_price_sum += px * remaining
                 fill_type_used = order_kind
-                logger.info(
-                    "[MIDPRICE_FILL] leg=%s attempt=%s fill=%s mid_at_start=%s "
-                    "market_would_be=%s saved_usd=%s",
-                    leg_label,
-                    attempt,
-                    px,
-                    mid_at_start,
-                    mkt_ref,
-                    _saved_usd(side_l, px, mkt_ref, remaining),
+                _mid_log(
+                    "MIDPRICE_FILL",
+                    trade_id,
+                    {
+                        "leg": leg_label,
+                        "attempt": attempt,
+                        "fill": px,
+                        "mid_at_start": mid_at_start,
+                        "market_would_be": mkt_ref,
+                        "saved_usd": _saved_usd(
+                            side_l, px, mkt_ref, remaining
+                        ),
+                    },
                 )
                 _fire_exec_event(
                     trade_id=trade_id,
@@ -951,22 +1111,30 @@ async def execute_with_midprice(
                 fill_price_sum += px * got
                 remaining = max(0, remaining - got)
                 fill_type_used = order_kind
-                logger.info(
-                    "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=%s "
-                    "bid=%s ask=%s mid=%s limit=%s qty=%s filled=%s (partial)",
-                    leg_label,
-                    prof,
-                    attempt,
-                    order_kind,
-                    bid,
-                    ask,
-                    mid,
-                    round(float(limit), 4),
-                    remaining + got,
-                    got,
+                _mid_log(
+                    "MIDPRICE_ATTEMPT",
+                    trade_id,
+                    {
+                        "leg": leg_label,
+                        "profile": prof,
+                        "attempt": attempt,
+                        "type": order_kind,
+                        "bid": bid,
+                        "ask": ask,
+                        "mid": mid,
+                        "limit": round(float(limit), 4),
+                        "qty": remaining + got,
+                        "filled": got,
+                        "partial": True,
+                    },
                 )
 
-            outcome, after_cancel = await _cancel_confirm(delta_client, last_oid)
+            outcome, after_cancel = await _cancel_confirm(
+                delta_client,
+                last_oid,
+                trade_id=trade_id,
+                leg_label=leg_label,
+            )
             if outcome == "filled":
                 extra = _filled_size_from_order(after_cancel, requested=remaining)
                 if remaining > 0 and extra >= remaining:
@@ -975,16 +1143,20 @@ async def execute_with_midprice(
                     fill_price_sum += px * remaining
                     remaining = 0
                     fill_type_used = order_kind
-                    logger.info(
-                        "[MIDPRICE_FILL] leg=%s attempt=%s fill=%s "
-                        "(cancel-already-filled) mid_at_start=%s "
-                        "market_would_be=%s saved_usd=%s",
-                        leg_label,
-                        attempt,
-                        px,
-                        mid_at_start,
-                        mkt_ref,
-                        _saved_usd(side_l, px, mkt_ref, qty_total),
+                    _mid_log(
+                        "MIDPRICE_FILL",
+                        trade_id,
+                        {
+                            "leg": leg_label,
+                            "attempt": attempt,
+                            "fill": px,
+                            "note": "cancel_already_filled",
+                            "mid_at_start": mid_at_start,
+                            "market_would_be": mkt_ref,
+                            "saved_usd": _saved_usd(
+                                side_l, px, mkt_ref, qty_total
+                            ),
+                        },
                     )
                     break
                 if remaining > 0 and extra > 0:
@@ -1043,6 +1215,8 @@ async def execute_with_midprice(
                     reduce_only=reduce_only,
                     bracket_sl_price=bracket_sl_price,
                     bracket_sl_limit=bracket_sl_limit,
+                    trade_id=trade_id,
+                    leg_label=leg_label,
                 )
                 if mkt.success:
                     fsz = int(mkt.filled_size or remaining)
@@ -1122,12 +1296,17 @@ async def execute_with_midprice(
                         intended=qty_total,
                         actual=actual,
                         attempts=attempt,
+                        trade_id=trade_id,
                     )
             except Exception as exc:
-                logger.warning(
-                    "[MIDPRICE_SIZE_MISMATCH] verify failed leg=%s: %s",
-                    leg_label,
-                    exc,
+                _mid_log(
+                    "MIDPRICE_SIZE_MISMATCH",
+                    trade_id,
+                    {
+                        "phase": "verify_failed",
+                        "leg": leg_label,
+                        "error": str(exc),
+                    },
                 )
 
         return result
