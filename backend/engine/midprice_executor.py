@@ -507,6 +507,7 @@ async def execute_with_midprice(
     hedge_position_id: int | None = None,
     phase: str = "",
     leg_type: str = "",
+    partner_filled_event: asyncio.Event | None = None,
 ) -> OrderResult:
     """
     Place one leg via chase or urgent ladder. Falls back to market when
@@ -545,12 +546,52 @@ async def execute_with_midprice(
 
     # urgent: attempt types cycle mid → best → best → market
     urgent_types = ("mid", "best", "best", "market")
+    # Partner-signal mode state (used by parallel call+put execution).
+    partner_mode_started_at: float | None = None
+    partner_final_mid_attempt_armed = False
+    partner_market_fallback_done = False
+    last_order_was_partner_final_attempt = False
 
     while remaining > 0:
         elapsed = now() - started
         attempt += 1
+        last_order_was_partner_final_attempt = False
 
-        if prof == "chase" and elapsed >= chase_max:
+        # Partner filled signal: other leg should shorten to a 5s mid window
+        # and then do exactly one final mid attempt before market fallback.
+        if (
+            partner_filled_event is not None
+            and partner_mode_started_at is None
+            and partner_filled_event.is_set()
+        ):
+            partner_mode_started_at = float(now())
+            log_and_buffer(
+                "PARTNER_SIGNAL_RECEIVED",
+                trade_id or 0,
+                {
+                    "leg": leg_label,
+                    "attempt": attempt,
+                },
+            )
+            partner_final_mid_attempt_armed = False
+
+        if partner_mode_started_at is not None and not partner_final_mid_attempt_armed:
+            if (now() - partner_mode_started_at) >= float(HOLD_SECONDS):
+                partner_final_mid_attempt_armed = True
+                log_and_buffer(
+                    "PARTNER_FINAL_ATTEMPT_ARMED",
+                    trade_id or 0,
+                    {
+                        "leg": leg_label,
+                        "attempt": attempt,
+                        "window_elapsed": round(
+                            float(now() - partner_mode_started_at),
+                            3,
+                        ),
+                    },
+                )
+
+        if prof == "chase" and elapsed >= chase_max and partner_mode_started_at is None:
             logger.warning(
                 "[MIDPRICE_CHASE_TIMEOUT] leg=%s elapsed=%.1f attempts=%s "
                 "action=market",
@@ -753,6 +794,11 @@ async def execute_with_midprice(
             filled_total = qty_total
             fill_type_used = "position_already_filled"
             break
+
+        # Mark whether this placed order is the partner-final attempt.
+        last_order_was_partner_final_attempt = (
+            partner_final_mid_attempt_armed is True
+        )
         _fire_exec_event(
             trade_id=trade_id,
             hedge_position_id=hedge_position_id,
@@ -917,6 +963,68 @@ async def execute_with_midprice(
         )
         await sleep(POST_CANCEL_SETTLE_SECONDS)
 
+        # Partner market fallback: after exactly one final mid attempt fails,
+        # place market for the remaining quantity.
+        if (
+            partner_mode_started_at is not None
+            and last_order_was_partner_final_attempt
+            and remaining > 0
+            and not partner_market_fallback_done
+        ):
+            partner_market_fallback_done = True
+            log_and_buffer(
+                "PARTNER_MARKET_FALLBACK_TRIGGERED",
+                trade_id or 0,
+                {
+                    "leg": leg_label,
+                    "attempt": attempt,
+                    "remaining": remaining,
+                },
+            )
+            if await _pre_place_position_check(
+                delta_client,
+                product_id=product_id,
+                qty_intended=qty_total,
+                leg_label=leg_label,
+                attempt=attempt,
+                reduce_only=reduce_only,
+                trade_id=trade_id,
+                check_position_size=check_position_size,
+            ):
+                remaining = 0
+                filled_total = qty_total
+                fill_type_used = "position_already_filled"
+                break
+
+            mkt = await _place_market(
+                delta_client,
+                product_id=product_id,
+                side=side_l,
+                quantity=remaining,
+                reduce_only=reduce_only,
+                bracket_sl_price=bracket_sl_price,
+                bracket_sl_limit=bracket_sl_limit,
+            )
+            if mkt.success:
+                fsz = int(mkt.filled_size or remaining)
+                filled_total += fsz
+                if mkt.filled_price:
+                    fill_price_sum += float(mkt.filled_price) * fsz
+                last_oid = mkt.order_id
+                fill_type_used = "market"
+                remaining = 0
+                break
+
+            return OrderResult(
+                success=False,
+                error=mkt.error or "partner_final_market_failed",
+                order_id=last_oid,
+                filled_size=filled_total if filled_total else None,
+                fill_attempt=attempt,
+                fill_type="market",
+                mid_at_start=mid_at_start,
+            )
+
         # chase continues with FRESH mid; urgent next type
         if prof == "urgent" and attempt >= 4:
             break
@@ -1029,33 +1137,111 @@ async def execute_paired_legs(
     Each leg dict: product_id, side, quantity, symbol, leg_label,
                    reduce_only?, bracket_sl_price?, selected_premium?
     """
-    results: list[OrderResult] = []
-    profiles = profiles_for_paired_sequence(len(legs))
     ts = selection_ts if selection_ts is not None else time.monotonic()
-    for i, leg in enumerate(legs):
-        res = await execute_with_midprice(
-            product_id=int(leg["product_id"]),
-            side=str(leg["side"]),
-            quantity=int(leg["quantity"]),
-            profile=profiles[i],
+    if len(legs) != 2:
+        # Safety fallback: keep existing sequential behavior for non-2-leg inputs.
+        results: list[OrderResult] = []
+        profiles = profiles_for_paired_sequence(len(legs))
+        for i, leg in enumerate(legs):
+            res = await execute_with_midprice(
+                product_id=int(leg["product_id"]),
+                side=str(leg["side"]),
+                quantity=int(leg["quantity"]),
+                profile=profiles[i],
+                delta_client=delta_client,
+                reason=reason,
+                leg_label=str(leg.get("leg_label") or f"leg{i}"),
+                symbol=str(leg.get("symbol") or ""),
+                max_chase_seconds=max_chase_seconds,
+                reduce_only=bool(leg.get("reduce_only", False)),
+                midprice_enabled=midprice_enabled,
+                bracket_sl_price=leg.get("bracket_sl_price"),
+                bracket_sl_limit=leg.get("bracket_sl_limit"),
+                selected_premium=leg.get("selected_premium"),
+                selection_ts=ts,
+                entry_premium_match_tolerance_pct=entry_premium_match_tolerance_pct,
+                trade_id=trade_id,
+                hedge_position_id=hedge_position_id,
+                phase=phase,
+                leg_type=leg_type,
+            )
+            results.append(res)
+            if not res.success:
+                break
+        return results
+
+    is_stoploss = "STOPLOSS" in str(reason or "").upper()
+
+    async def _exec_one(
+        *,
+        _leg: dict[str, Any],
+        _idx: int,
+        partner_event: asyncio.Event | None,
+    ) -> OrderResult:
+        return await execute_with_midprice(
+            product_id=int(_leg["product_id"]),
+            side=str(_leg["side"]),
+            quantity=int(_leg["quantity"]),
+            # Parallel system: both legs start mid-price chase together.
+            profile="chase",
             delta_client=delta_client,
             reason=reason,
-            leg_label=str(leg.get("leg_label") or f"leg{i}"),
-            symbol=str(leg.get("symbol") or ""),
+            leg_label=str(_leg.get("leg_label") or f"leg{_idx}"),
+            symbol=str(_leg.get("symbol") or ""),
             max_chase_seconds=max_chase_seconds,
-            reduce_only=bool(leg.get("reduce_only", False)),
-            midprice_enabled=midprice_enabled,
-            bracket_sl_price=leg.get("bracket_sl_price"),
-            bracket_sl_limit=leg.get("bracket_sl_limit"),
-            selected_premium=leg.get("selected_premium"),
+            reduce_only=bool(_leg.get("reduce_only", False)),
+            midprice_enabled=False if is_stoploss else midprice_enabled,
+            bracket_sl_price=_leg.get("bracket_sl_price"),
+            bracket_sl_limit=_leg.get("bracket_sl_limit"),
+            selected_premium=_leg.get("selected_premium"),
             selection_ts=ts,
             entry_premium_match_tolerance_pct=entry_premium_match_tolerance_pct,
             trade_id=trade_id,
             hedge_position_id=hedge_position_id,
             phase=phase,
             leg_type=leg_type,
+            partner_filled_event=partner_event,
         )
-        results.append(res)
-        if not res.success:
-            break
-    return results
+
+    # STOP-LOSS: no partner-signal logic; place both market orders concurrently.
+    if is_stoploss:
+        results = await asyncio.gather(
+            _exec_one(_leg=legs[0], _idx=0, partner_event=None),
+            _exec_one(_leg=legs[1], _idx=1, partner_event=None),
+        )
+        return list(results)
+
+    partner_event = asyncio.Event()
+
+    async def _exec_and_signal(
+        *,
+        _leg: dict[str, Any],
+        _idx: int,
+    ) -> OrderResult:
+        res = await _exec_one(
+            _leg=_leg,
+            _idx=_idx,
+            partner_event=partner_event,
+        )
+        if res.success and not partner_event.is_set():
+            # Signal other leg to enter partner-shortened mode.
+            partner_event.set()
+        return res
+
+    res0, res1 = await asyncio.gather(
+        _exec_and_signal(_leg=legs[0], _idx=0),
+        _exec_and_signal(_leg=legs[1], _idx=1),
+    )
+
+    log_and_buffer(
+        "PARALLEL_PAIR_COMPLETED",
+        trade_id or 0,
+        {
+            "leg0": str(legs[0].get("leg_label") or "leg0"),
+            "leg1": str(legs[1].get("leg_label") or "leg1"),
+            "success0": bool(res0.success),
+            "success1": bool(res1.success),
+        },
+    )
+
+    return [res0, res1]
