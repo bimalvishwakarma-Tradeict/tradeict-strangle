@@ -126,6 +126,8 @@ class BotEngine:
                     state.put_leg.symbol,
                 )
         self._last_trade_count = len(self.position_tracker.get_all_active())
+        # Leftover GTC limit orders from a killed chase — before any trading loop.
+        await self._sweep_orphan_working_limit_orders()
         self._ws_feed_task = asyncio.create_task(
             self._start_price_feed(), name="delta-price-feed"
         )
@@ -476,6 +478,352 @@ class BotEngine:
         if s in {"active", "pending_close"}:
             return False
         return True
+
+    @staticmethod
+    def _order_is_bracket_or_stop(order: dict[str, Any]) -> bool:
+        """True for protective stop / standalone SL — never cancel those.
+
+        Do NOT treat a working GTC limit_order as a stop just because
+        bracket_stop_loss_* was attached at place time (chase leftover).
+        Those unfilled limits are exactly what this sweep must cancel.
+        Resting protection is stop_order_type / untriggered / stop_price.
+        """
+        stop_type = str(
+            order.get("stop_order_type")
+            or order.get("stop_order_kind")
+            or ""
+        ).lower().strip()
+        if stop_type:
+            return True
+        otype = str(order.get("order_type") or order.get("type") or "").lower()
+        if "stop" in otype:
+            return True
+        state = str(order.get("state") or order.get("status") or "").lower()
+        if "untriggered" in state:
+            return True
+        for key in ("stop_price", "stop_trigger_price"):
+            val = order.get(key)
+            if val not in (None, "", 0, "0", "0.0"):
+                try:
+                    if float(val) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    return True
+        return False
+
+    @staticmethod
+    def _order_product_id(order: dict[str, Any]) -> int:
+        raw = order.get("product_id")
+        if raw in (None, ""):
+            product = order.get("product")
+            if isinstance(product, dict):
+                raw = product.get("id") or product.get("product_id")
+        try:
+            return int(raw or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def _sweep_orphan_working_limit_orders(self) -> None:
+        """
+        Startup-only: cancel leftover GTC limit orders from a killed midprice chase.
+
+        Never cancels bracket / stop-loss orders. Never cancel-all.
+        If type or purpose is unclear, skip with a warning.
+        """
+        try:
+            if self.delta_client is None:
+                self._refresh_delta_client()
+            if self.delta_client is None:
+                log_and_buffer(
+                    "ORPHAN_ORDER_SWEEP",
+                    0,
+                    {
+                        "phase": "skip",
+                        "reason": "delta_client_unavailable",
+                    },
+                )
+                return
+
+            active_pids: set[int] = set()
+            with self.db_factory() as db:
+                active_trades = (
+                    db.query(Trade)
+                    .filter(Trade.status == TradeStatus.ACTIVE.value)
+                    .all()
+                )
+                trade_ids = [int(t.id) for t in active_trades]
+                if trade_ids:
+                    legs = (
+                        db.query(Leg)
+                        .filter(
+                            Leg.trade_id.in_(trade_ids),
+                            Leg.is_bot_managed.is_(True),
+                            Leg.status == "open",
+                        )
+                        .all()
+                    )
+                    for leg in legs:
+                        try:
+                            pid = int(getattr(leg, "product_id", 0) or 0)
+                        except (TypeError, ValueError):
+                            pid = 0
+                        if pid > 0:
+                            active_pids.add(pid)
+
+            try:
+                orders = await self.delta_client.get_open_orders()
+            except Exception as list_exc:
+                log_and_buffer(
+                    "ORPHAN_ORDER_SWEEP",
+                    0,
+                    {
+                        "phase": "list_failed",
+                        "error": str(list_exc),
+                    },
+                )
+                logger.error(
+                    "ORPHAN_ORDER_SWEEP: list open orders failed: %s",
+                    list_exc,
+                    exc_info=True,
+                )
+                return
+
+            working_states = {
+                "open",
+                "pending",
+                "pending_open",
+                "resting",
+                "live",
+                "unfilled",
+                "accepted",
+                "partially_filled",
+                "partial_fill",
+            }
+            cancelled = 0
+            skipped = 0
+            candidates = 0
+
+            for order in orders or []:
+                if not isinstance(order, dict):
+                    skipped += 1
+                    continue
+                oid_raw = order.get("id") or order.get("order_id")
+                otype = str(
+                    order.get("order_type") or order.get("type") or ""
+                ).lower().strip()
+                state = str(
+                    order.get("state") or order.get("status") or ""
+                ).lower().strip()
+                pid = self._order_product_id(order)
+                symbol = str(
+                    order.get("product_symbol")
+                    or order.get("symbol")
+                    or ""
+                )
+                side = str(order.get("side") or "")
+                size = order.get("unfilled_size") or order.get("size")
+                price = (
+                    order.get("limit_price")
+                    or order.get("price")
+                    or order.get("average_fill_price")
+                )
+
+                if self._order_is_bracket_or_stop(order):
+                    skipped += 1
+                    log_and_buffer(
+                        "ORPHAN_ORDER_SWEEP",
+                        0,
+                        {
+                            "phase": "skip",
+                            "reason": "bracket_or_stop_loss",
+                            "order_id": oid_raw,
+                            "symbol": symbol,
+                            "order_type": otype,
+                            "state": state,
+                            "product_id": pid,
+                        },
+                    )
+                    continue
+
+                if not otype:
+                    skipped += 1
+                    log_and_buffer(
+                        "ORPHAN_ORDER_SWEEP",
+                        0,
+                        {
+                            "phase": "skip",
+                            "reason": "unknown_order_type",
+                            "order_id": oid_raw,
+                            "symbol": symbol,
+                            "state": state,
+                            "product_id": pid,
+                        },
+                    )
+                    continue
+                if otype not in {"limit_order", "limit"}:
+                    skipped += 1
+                    continue
+
+                if not state or state not in working_states:
+                    skipped += 1
+                    if state and state not in {
+                        "closed",
+                        "cancelled",
+                        "canceled",
+                        "filled",
+                        "rejected",
+                        "expired",
+                    }:
+                        log_and_buffer(
+                            "ORPHAN_ORDER_SWEEP",
+                            0,
+                            {
+                                "phase": "skip",
+                                "reason": "unknown_or_non_working_state",
+                                "order_id": oid_raw,
+                                "symbol": symbol,
+                                "order_type": otype,
+                                "state": state,
+                                "product_id": pid,
+                            },
+                        )
+                    continue
+
+                if pid <= 0:
+                    skipped += 1
+                    log_and_buffer(
+                        "ORPHAN_ORDER_SWEEP",
+                        0,
+                        {
+                            "phase": "skip",
+                            "reason": "unknown_product_id",
+                            "order_id": oid_raw,
+                            "symbol": symbol,
+                            "order_type": otype,
+                            "state": state,
+                        },
+                    )
+                    continue
+
+                if pid not in active_pids:
+                    skipped += 1
+                    continue
+
+                try:
+                    oid = int(oid_raw)
+                except (TypeError, ValueError):
+                    skipped += 1
+                    log_and_buffer(
+                        "ORPHAN_ORDER_SWEEP",
+                        0,
+                        {
+                            "phase": "skip",
+                            "reason": "invalid_order_id",
+                            "order_id": oid_raw,
+                            "symbol": symbol,
+                            "product_id": pid,
+                        },
+                    )
+                    continue
+
+                candidates += 1
+                log_and_buffer(
+                    "ORPHAN_ORDER_SWEEP",
+                    0,
+                    {
+                        "phase": "cancel_before",
+                        "order_id": oid,
+                        "symbol": symbol,
+                        "side": side,
+                        "size": size,
+                        "price": price,
+                        "product_id": pid,
+                        "order_type": otype,
+                        "state": state,
+                    },
+                )
+                try:
+                    result = await self.delta_client.cancel_order(oid)
+                    cancelled += 1
+                    log_and_buffer(
+                        "ORPHAN_ORDER_SWEEP",
+                        0,
+                        {
+                            "phase": "cancel_after",
+                            "order_id": oid,
+                            "symbol": symbol,
+                            "side": side,
+                            "size": size,
+                            "price": price,
+                            "product_id": pid,
+                            "result": "cancelled",
+                            "exchange": (
+                                str(result.get("state") or result.get("status") or "")
+                                if isinstance(result, dict)
+                                else str(result)
+                            ),
+                        },
+                    )
+                except Exception as cancel_exc:
+                    log_and_buffer(
+                        "ORPHAN_ORDER_SWEEP",
+                        0,
+                        {
+                            "phase": "cancel_after",
+                            "order_id": oid,
+                            "symbol": symbol,
+                            "side": side,
+                            "size": size,
+                            "price": price,
+                            "product_id": pid,
+                            "result": "failed",
+                            "error": str(cancel_exc),
+                        },
+                    )
+
+            if candidates > 0:
+                log_and_buffer(
+                    "ORPHAN_ORDER_SWEEP",
+                    0,
+                    {
+                        "phase": "found_orphans",
+                        "candidates": candidates,
+                        "cancelled": cancelled,
+                        "skipped": skipped,
+                        "open_listed": len(orders or []),
+                        "active_leg_products": len(active_pids),
+                        "note": "previous_run_likely_killed_mid_chase",
+                    },
+                )
+            else:
+                log_and_buffer(
+                    "ORPHAN_ORDER_SWEEP",
+                    0,
+                    {
+                        "phase": "done",
+                        "candidates": 0,
+                        "cancelled": 0,
+                        "skipped": skipped,
+                        "open_listed": len(orders or []),
+                    },
+                )
+        except Exception as exc:
+            logger.error(
+                "ORPHAN_ORDER_SWEEP failed (boot continues): %s",
+                exc,
+                exc_info=True,
+            )
+            try:
+                log_and_buffer(
+                    "ORPHAN_ORDER_SWEEP",
+                    0,
+                    {
+                        "phase": "sweep_failed",
+                        "error": str(exc),
+                    },
+                )
+            except Exception:
+                pass
 
     async def _sweep_orphan_baskets(self) -> None:
         """

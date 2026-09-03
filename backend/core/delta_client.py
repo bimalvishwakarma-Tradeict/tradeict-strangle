@@ -1113,6 +1113,28 @@ class DeltaClient:
                 return [r for r in maybe if isinstance(r, dict)]
         return []
 
+    async def get_open_orders(self) -> list[dict[str, Any]]:
+        """
+        Fetch open/working orders for this account (all types).
+
+        Caller must filter: never treat this list as cancel-all.
+        Stop-loss / bracket orders are included by the exchange — skip those
+        in the caller; this method does not cancel anything.
+        """
+        result = await self._request(
+            "GET",
+            "/v2/orders",
+            params={"state": "open"},
+            timeout=ORDER_TIMEOUT_SECONDS,
+        )
+        if isinstance(result, list):
+            return [r for r in result if isinstance(r, dict)]
+        if isinstance(result, dict):
+            maybe = result.get("orders") or result.get("result") or []
+            if isinstance(maybe, list):
+                return [r for r in maybe if isinstance(r, dict)]
+        return []
+
     async def get_order(self, order_id: int | str) -> dict[str, Any]:
         """
         GET /v2/orders/{order_id} — fetch order details including fill price.
