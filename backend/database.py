@@ -972,6 +972,8 @@ def _migrate_schema() -> None:
             ("wing_delta_min", "FLOAT NOT NULL DEFAULT 0.05"),
             ("wing_delta_max", "FLOAT NOT NULL DEFAULT 0.07"),
             ("wing_pct_of_premium", "FLOAT NOT NULL DEFAULT 20.0"),
+            ("midprice_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("midprice_chase_max_seconds", "INTEGER NOT NULL DEFAULT 120"),
         ]
         for col_name, col_type in hedge_setting_cols:
             if col_name not in at_cols:

@@ -163,6 +163,14 @@ function applyStatusToForm(data, setters) {
       : Boolean(data.hedge_close_at_expiry_enabled),
   )
   setters.setBasketWingsEnabled(Boolean(data.basket_wings_enabled))
+  setters.setMidpriceEnabled(Boolean(data.midprice_enabled))
+  setters.setMidpriceChaseMaxSeconds(
+    String(
+      data.midprice_chase_max_seconds != null
+        ? data.midprice_chase_max_seconds
+        : 120
+    )
+  )
   setters.setWingStrikeMode(data.wing_strike_mode || 'points')
   setters.setWingPointsAway(String(data.wing_points_away ?? 2000))
   setters.setWingDeltaMin(String(data.wing_delta_min ?? 0.05))
@@ -310,6 +318,9 @@ export default function AutoTrade() {
   const [hedgeCloseAtExpiryEnabled, setHedgeCloseAtExpiryEnabled] =
     useState(true)
   const [basketWingsEnabled, setBasketWingsEnabled] = useState(false)
+  const [midpriceEnabled, setMidpriceEnabled] = useState(false)
+  const [midpriceChaseMaxSeconds, setMidpriceChaseMaxSeconds] =
+    useState('120')
   const [wingStrikeMode, setWingStrikeMode] = useState('points')
   const [wingPointsAway, setWingPointsAway] = useState('2000')
   const [wingDeltaMin, setWingDeltaMin] = useState('0.05')
@@ -400,6 +411,8 @@ export default function AutoTrade() {
       setHedgeForceRollEnabled,
       setHedgeCloseAtExpiryEnabled,
       setBasketWingsEnabled,
+      setMidpriceEnabled,
+      setMidpriceChaseMaxSeconds,
       setWingStrikeMode,
       setWingPointsAway,
       setWingDeltaMin,
@@ -703,6 +716,11 @@ export default function AutoTrade() {
       hedge_force_roll_enabled: Boolean(hedgeForceRollEnabled),
       hedge_close_at_expiry_enabled: Boolean(hedgeCloseAtExpiryEnabled),
       basket_wings_enabled: Boolean(basketWingsEnabled),
+      midprice_enabled: Boolean(midpriceEnabled),
+      midprice_chase_max_seconds: Math.max(
+        10,
+        Math.min(600, Number(midpriceChaseMaxSeconds) || 120)
+      ),
       wing_strike_mode: wingStrikeMode || 'points',
       wing_points_away: Math.max(1, Number(wingPointsAway) || 2000),
       wing_delta_min: Math.min(
@@ -2350,6 +2368,48 @@ export default function AutoTrade() {
                 </span>
               </span>
             </label>
+
+            <div className="mt-6 border-t border-gray-800 pt-4">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={midpriceEnabled}
+                  onChange={(e) => setMidpriceEnabled(e.target.checked)}
+                  className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500"
+                />
+                <span className="text-sm text-gray-300">
+                  Mid-price execution
+                  <span className="mt-1 block text-xs text-gray-500">
+                    Chase mid (post-only) then urgent ladder for hedge /
+                    basket entry and hedge target/roll/manual exits. Off =
+                    market orders only (safe default). Stoploss and emergency
+                    exits always stay market.
+                  </span>
+                </span>
+              </label>
+              <label
+                className={`mt-3 block text-sm text-gray-300 ${
+                  midpriceEnabled ? '' : 'pointer-events-none opacity-40'
+                }`}
+              >
+                Chase max seconds
+                <input
+                  type="number"
+                  min={10}
+                  max={600}
+                  value={midpriceChaseMaxSeconds}
+                  onChange={(e) =>
+                    setMidpriceChaseMaxSeconds(e.target.value)
+                  }
+                  disabled={!midpriceEnabled}
+                  className="mt-1 w-full rounded border border-gray-700 bg-gray-900 px-3 py-2 text-white"
+                />
+                <span className="mt-1 block text-xs text-gray-500">
+                  First-leg chase ceiling (10–600). Then market fill — never
+                  abort.
+                </span>
+              </label>
+            </div>
 
             <div
               className={`mt-4 space-y-4 ${

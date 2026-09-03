@@ -995,14 +995,19 @@ class DeltaClient:
         bracket_stop_loss_price: float | None = None,
         bracket_stop_loss_limit_price: float | None = None,
         reduce_only: bool = False,
+        limit_price: float | None = None,
+        post_only: bool = False,
     ) -> dict[str, Any]:
         """
         POST /v2/orders — place an order (10s timeout).
 
-        Returns: { order_id, status, avg_fill_price, size }
+        Market: order_type=market_order, time_in_force=ioc (default).
+        Limit:  order_type=limit_order + limit_price; use gtc + post_only for mid chase.
+
+        Returns: { order_id, status, avg_fill_price, size, raw }
         Caller MUST store order_id on Leg.delta_order_id (isolation rule).
         """
-        body = {
+        body: dict[str, Any] = {
             "product_id": product_id,
             "size": size,
             "side": side,
@@ -1011,6 +1016,10 @@ class DeltaClient:
         }
         if reduce_only:
             body["reduce_only"] = True
+        if limit_price is not None:
+            body["limit_price"] = str(round(float(limit_price), 2))
+        if post_only:
+            body["post_only"] = True
 
         # Delta "bracket" stop-loss: attach stop-loss directly to entry order.
         # Bracket SL confirmed working on Delta Exchange India

@@ -535,6 +535,13 @@ class AutoTradeSettings(Base):
     wing_pct_of_premium: Mapped[float] = mapped_column(
         Float, nullable=False, default=20.0, server_default="20.0"
     )
+    # Mid-price chase / urgent ladder (default OFF — safe rollout)
+    midprice_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    midprice_chase_max_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=120, server_default="120"
+    )
 
     # Demo/virtual mode — places virtual trades without real Delta orders
     is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

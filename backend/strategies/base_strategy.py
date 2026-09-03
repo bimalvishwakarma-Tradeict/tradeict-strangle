@@ -48,6 +48,14 @@ class OrderResult:
     # Contracts filled this attempt (None = unknown / treat success as full)
     filled_size: int | None = None
     error: str | None = None
+    # Mid-price executor metadata (optional — market path leaves None)
+    fill_attempt: int | None = None
+    fill_type: str | None = None  # mid | best | market
+    mid_at_start: float | None = None
+    saved_usd: float | None = None
+    selected_premium: float | None = None
+    drift_pct: float | None = None
+    seconds_since_selection: float | None = None
 
 
 @dataclass

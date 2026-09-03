@@ -1454,11 +1454,58 @@ class AutoTradeEngine:
             put_sl_trigger_price = put_prov_sl
             put_sl_limit = put_prov_limit
 
-            for spec in plan:
+            from backend.engine.midprice_executor import (
+                clamp_chase_max_seconds,
+                execute_with_midprice,
+                profile_for_group_leg,
+                should_use_midprice,
+            )
+            import time as _time_mod
+
+            mp_on = bool(getattr(settings, "midprice_enabled", False))
+            chase_max = clamp_chase_max_seconds(
+                getattr(settings, "midprice_chase_max_seconds", None)
+            )
+            entry_tol = float(
+                getattr(settings, "entry_premium_match_tolerance_pct", None)
+                or 15.0
+            )
+            entry_reason = (
+                "CONDOR_ENTRY" if wings_enabled else "BASKET_ENTRY"
+            )
+            use_mp_entry = should_use_midprice(
+                enabled=mp_on, reason=entry_reason
+            )
+            selection_ts = _time_mod.monotonic()
+
+            for plan_idx, spec in enumerate(plan):
+                mp_profile = profile_for_group_leg(plan_idx)
 
                 async def _place_one(
                     _spec=spec,
+                    _profile=mp_profile,
                 ):
+                    if use_mp_entry:
+                        return await execute_with_midprice(
+                            product_id=int(_spec.product_id),
+                            side="buy" if _spec.is_long else "sell",
+                            quantity=int(_spec.quantity),
+                            profile=_profile,
+                            delta_client=client,
+                            reason=entry_reason,
+                            leg_label=str(_spec.role),
+                            symbol=str(_spec.symbol),
+                            max_chase_seconds=chase_max,
+                            midprice_enabled=True,
+                            bracket_sl_price=_spec.bracket_sl_price,
+                            bracket_sl_limit=_spec.bracket_sl_limit,
+                            selected_premium=float(
+                                _spec.mark_premium or 0
+                            )
+                            or None,
+                            selection_ts=selection_ts,
+                            entry_premium_match_tolerance_pct=entry_tol,
+                        )
                     if _spec.is_long:
                         return await self.order_executor.buy_option(
                             product_id=int(_spec.product_id),
@@ -1478,25 +1525,32 @@ class AutoTradeEngine:
                 open_ts = get_utc_now()
                 if not spec.is_long:
                     logger.info(
-                        "Placing %s: %s qty=%s bracket_sl=%s",
+                        "Placing %s: %s qty=%s bracket_sl=%s profile=%s",
                         spec.role.upper(),
                         spec.symbol,
                         spec.quantity,
                         spec.bracket_sl_price,
+                        mp_profile if use_mp_entry else "market",
                     )
                 else:
                     logger.info(
-                        "Placing WING %s BUY: %s qty=%s (no bracket SL)",
+                        "Placing WING %s BUY: %s qty=%s (no bracket SL) "
+                        "profile=%s",
                         spec.role,
                         spec.symbol,
                         spec.quantity,
+                        mp_profile if use_mp_entry else "market",
                     )
 
-                result = await place_leg_with_retries(
-                    role=spec.role,
-                    requested=int(spec.quantity),
-                    place_fn=_place_one,
-                )
+                # Mid-price path already retries internally — no outer retries
+                if use_mp_entry:
+                    result = await _place_one()
+                else:
+                    result = await place_leg_with_retries(
+                        role=spec.role,
+                        requested=int(spec.quantity),
+                        place_fn=_place_one,
+                    )
                 fill_ts = get_utc_now()
 
                 if not is_full_fill(result, int(spec.quantity)):

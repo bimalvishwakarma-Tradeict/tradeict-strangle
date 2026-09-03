@@ -824,14 +824,50 @@ async def open_hedge(
             },
         )
 
-        # --- BUY CALL ---
-        call_open_ts = _utc_now()
-        call_result = await executor.buy_option(
-            product_id=call_pid,
-            quantity=qty,
-            delta_client=client,
-            symbol_for_fallback=call_symbol,
+        # --- BUY CALL (chase) then PUT (urgent) when midprice allow-listed ---
+        from backend.engine.midprice_executor import (
+            clamp_chase_max_seconds,
+            execute_with_midprice,
+            should_use_midprice,
         )
+        import time as _time_mod
+
+        mp_on = bool(getattr(settings, "midprice_enabled", False))
+        chase_max = clamp_chase_max_seconds(
+            getattr(settings, "midprice_chase_max_seconds", None)
+        )
+        entry_tol = float(
+            getattr(settings, "entry_premium_match_tolerance_pct", None) or 15.0
+        )
+        selection_ts = _time_mod.monotonic()
+        use_mp_entry = should_use_midprice(
+            enabled=mp_on, reason="HEDGE_ENTRY"
+        )
+
+        call_open_ts = _utc_now()
+        if use_mp_entry:
+            call_result = await execute_with_midprice(
+                product_id=call_pid,
+                side="buy",
+                quantity=qty,
+                profile="chase",
+                delta_client=client,
+                reason="HEDGE_ENTRY",
+                leg_label="hedge_call",
+                symbol=call_symbol,
+                max_chase_seconds=chase_max,
+                midprice_enabled=True,
+                selected_premium=call_ask,
+                selection_ts=selection_ts,
+                entry_premium_match_tolerance_pct=entry_tol,
+            )
+        else:
+            call_result = await executor.buy_option(
+                product_id=call_pid,
+                quantity=qty,
+                delta_client=client,
+                symbol_for_fallback=call_symbol,
+            )
         call_fill_ts = _utc_now()
         if not call_result.success:
             _hedge_log(
@@ -873,12 +909,29 @@ async def open_hedge(
 
         # --- BUY PUT ---
         put_open_ts = _utc_now()
-        put_result = await executor.buy_option(
-            product_id=put_pid,
-            quantity=qty,
-            delta_client=client,
-            symbol_for_fallback=put_symbol,
-        )
+        if use_mp_entry:
+            put_result = await execute_with_midprice(
+                product_id=put_pid,
+                side="buy",
+                quantity=qty,
+                profile="urgent",
+                delta_client=client,
+                reason="HEDGE_ENTRY",
+                leg_label="hedge_put",
+                symbol=put_symbol,
+                max_chase_seconds=chase_max,
+                midprice_enabled=True,
+                selected_premium=put_ask,
+                selection_ts=selection_ts,
+                entry_premium_match_tolerance_pct=entry_tol,
+            )
+        else:
+            put_result = await executor.buy_option(
+                product_id=put_pid,
+                quantity=qty,
+                delta_client=client,
+                symbol_for_fallback=put_symbol,
+            )
         put_fill_ts = _utc_now()
         put_ok = False
         put_fill = 0.0
@@ -1362,78 +1415,122 @@ async def close_hedge(
         call_close_fill_ts: Any = None
         put_close_fill_ts: Any = None
 
-        if call_exists and abs(call_size) >= 1e-9:
-            close_size = max(1, int(round(abs(call_size)))) or qty
-            call_close_ts = _utc_now()
+        from backend.engine.midprice_executor import (
+            clamp_chase_max_seconds,
+            execute_with_midprice,
+            should_use_midprice,
+        )
+        from backend.models import AutoTradeSettings as _ATS
+
+        _ats = db.query(_ATS).order_by(_ATS.id.asc()).first()
+        mp_on_exit = bool(getattr(_ats, "midprice_enabled", False)) if _ats else False
+        chase_max_exit = clamp_chase_max_seconds(
+            getattr(_ats, "midprice_chase_max_seconds", None) if _ats else None
+        )
+        # Allow-list: target / roll / manual → both legs urgent; else market
+        use_mp_exit = should_use_midprice(
+            enabled=mp_on_exit, reason=reason_norm
+        )
+
+        async def _close_long_leg(
+            *,
+            product_id: int,
+            close_size: int,
+            symbol: str,
+            leg_label: str,
+        ) -> tuple[dict[str, Any] | None, float | None]:
+            fee: float | None = None
+            if use_mp_exit:
+                res = await execute_with_midprice(
+                    product_id=product_id,
+                    side="sell",
+                    quantity=close_size,
+                    profile="urgent",
+                    delta_client=client,
+                    reason=reason_norm,
+                    leg_label=leg_label,
+                    symbol=symbol,
+                    max_chase_seconds=chase_max_exit,
+                    reduce_only=True,
+                    midprice_enabled=True,
+                )
+                if res.success:
+                    return (
+                        {
+                            "order_id": res.order_id,
+                            "avg_fill_price": res.filled_price,
+                        },
+                        float(res.commission) if res.commission else None,
+                    )
+                _hedge_log(
+                    "HEDGE_CLOSE_FAIL",
+                    hid,
+                    {
+                        "stage": f"close_{leg_label}",
+                        "reason": res.error or "midprice_exit_failed",
+                    },
+                    critical=True,
+                )
+                return None, None
             try:
-                call_order = await client.close_position(
-                    product_id=call_pid,
+                od = await client.close_position(
+                    product_id=product_id,
                     size=close_size,
                     is_long=True,
                 )
+                return od, None
             except Exception as exc:
                 logger.warning(
-                    "close_position call failed hedge=%s: %s — OrderExecutor",
+                    "close_position %s failed hedge=%s: %s — OrderExecutor",
+                    leg_label,
                     hid,
                     exc,
                 )
                 res = await executor.close_long_position(
-                    product_id=call_pid,
+                    product_id=product_id,
                     quantity=close_size,
                     delta_client=client,
-                    symbol_for_fallback=call_symbol,
+                    symbol_for_fallback=symbol,
                 )
                 if res.success:
-                    call_order = {
-                        "order_id": res.order_id,
-                        "avg_fill_price": res.filled_price,
-                    }
-                    if res.commission:
-                        call_exit_fee = float(res.commission)
-                else:
-                    _hedge_log(
-                        "HEDGE_CLOSE_FAIL",
-                        hid,
-                        {"stage": "close_call", "reason": res.error or str(exc)},
-                        critical=True,
+                    return (
+                        {
+                            "order_id": res.order_id,
+                            "avg_fill_price": res.filled_price,
+                        },
+                        float(res.commission) if res.commission else None,
                     )
+                _hedge_log(
+                    "HEDGE_CLOSE_FAIL",
+                    hid,
+                    {
+                        "stage": f"close_{leg_label}",
+                        "reason": res.error or str(exc),
+                    },
+                    critical=True,
+                )
+                return None, None
+
+        if call_exists and abs(call_size) >= 1e-9:
+            close_size = max(1, int(round(abs(call_size)))) or qty
+            call_close_ts = _utc_now()
+            call_order, call_exit_fee = await _close_long_leg(
+                product_id=call_pid,
+                close_size=close_size,
+                symbol=call_symbol,
+                leg_label="hedge_exit_call",
+            )
             call_close_fill_ts = _utc_now()
 
         if put_exists and abs(put_size) >= 1e-9:
             close_size = max(1, int(round(abs(put_size)))) or qty
             put_close_ts = _utc_now()
-            try:
-                put_order = await client.close_position(
-                    product_id=put_pid,
-                    size=close_size,
-                    is_long=True,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "close_position put failed hedge=%s: %s — OrderExecutor",
-                    hid,
-                    exc,
-                )
-                res = await executor.close_long_position(
-                    product_id=put_pid,
-                    quantity=close_size,
-                    delta_client=client,
-                    symbol_for_fallback=put_symbol,
-                )
-                if res.success:
-                    put_order = {
-                        "order_id": res.order_id,
-                        "avg_fill_price": res.filled_price,
-                    }
-                    if res.commission:
-                        put_exit_fee = float(res.commission)
-                else:
-                    _hedge_log(
-                        "HEDGE_CLOSE_FAIL",
-                        hid,
-                        {"stage": "close_put", "reason": res.error or str(exc)},
-                        critical=True,
-                    )
+            put_order, put_exit_fee = await _close_long_leg(
+                product_id=put_pid,
+                close_size=close_size,
+                symbol=put_symbol,
+                leg_label="hedge_exit_put",
+            )
             put_close_fill_ts = _utc_now()
 
         await asyncio.sleep(VERIFY_PAUSE_SECONDS)
