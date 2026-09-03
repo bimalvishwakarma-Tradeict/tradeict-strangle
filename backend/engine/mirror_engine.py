@@ -403,6 +403,39 @@ class MirrorEngine:
         slave_trade.status = "closed"
         return True
 
+    def _log_slave_sizing_zero(
+        self,
+        *,
+        reason: str,
+        slave: SlaveAccount | None = None,
+        master_trade_id: int = 0,
+        master_qty: int = 0,
+        computed_slave_qty: int = 0,
+        live_balance: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Loud WARNING when slave sizing resolves to 0 (RULE 10 — never silent)."""
+        details: dict[str, Any] = {
+            "slave_account_id": int(getattr(slave, "id", 0) or 0)
+            if slave is not None
+            else 0,
+            "slave_name": str(getattr(slave, "name", "") or "")
+            if slave is not None
+            else "",
+            "master_trade_id": int(master_trade_id or 0),
+            "master_qty": int(master_qty or 0),
+            "computed_slave_qty": int(computed_slave_qty or 0),
+            "live_balance": live_balance,
+            "reason": str(reason),
+        }
+        if extra:
+            details.update(extra)
+        log_and_buffer(
+            "SLAVE_SIZING_ZERO",
+            int(master_trade_id or 0),
+            details,
+        )
+
     def _calc_qty(
         self,
         master_qty: int,
@@ -412,6 +445,7 @@ class MirrorEngine:
         master_total_capital_usd: float | None = None,
         slave_available_usd: float | None = None,
         master_capital_fetch_failed: bool = False,
+        master_trade_id: int = 0,
     ) -> int:
         """
         Calculate slave qty.
@@ -435,6 +469,11 @@ class MirrorEngine:
         capital_based = slave is not None and bool(
             getattr(slave, "capital_based_qty", False)
         )
+        live = (
+            float(slave_available_usd)
+            if slave_available_usd is not None
+            else 0.0
+        )
 
         if capital_based:
             capital_readable = (
@@ -455,11 +494,14 @@ class MirrorEngine:
                         f"total={master_total_capital_usd!r} mq={mq})"
                     )
                 )
-                logger.warning(
-                    "[SLAVE_SIZING] account_id=%s capital_based=True — "
-                    "skip (qty=0); never fall through to multiplier. reason=%s",
-                    getattr(slave, "id", None),
-                    reason,
+                self._log_slave_sizing_zero(
+                    reason=reason,
+                    slave=slave,
+                    master_trade_id=master_trade_id,
+                    master_qty=mq,
+                    computed_slave_qty=0,
+                    live_balance=live,
+                    extra={"mode": "capital_based"},
                 )
                 return 0
 
@@ -467,20 +509,20 @@ class MirrorEngine:
                 getattr(slave, "user_allocated_capital", None) or 0
             )
             is_virtual = bool(getattr(slave, "is_virtual", False))
-            live = (
-                float(slave_available_usd)
-                if slave_available_usd is not None
-                else 0.0
-            )
 
             # Real slaves: refuse allocated-only sizing when live balance missing
             if not is_virtual and live <= 0:
-                logger.warning(
-                    "[SLAVE_SIZING] account_id=%s allocated=%.2f "
-                    "live_balance=%.2f — refuse sizing without live balance",
-                    getattr(slave, "id", None),
-                    user_allocated,
-                    live,
+                self._log_slave_sizing_zero(
+                    reason="balance_zero",
+                    slave=slave,
+                    master_trade_id=master_trade_id,
+                    master_qty=mq,
+                    computed_slave_qty=0,
+                    live_balance=live,
+                    extra={
+                        "mode": "capital_based",
+                        "user_allocated": user_allocated,
+                    },
                 )
                 return 0
 
@@ -495,12 +537,18 @@ class MirrorEngine:
                 effective_capital = live
 
             if effective_capital <= 0:
-                logger.info(
-                    "[SLAVE_SIZING] account_id=%s allocated=%.2f "
-                    "live_balance=%.2f effective=0 → qty=0",
-                    getattr(slave, "id", None),
-                    user_allocated,
-                    live,
+                self._log_slave_sizing_zero(
+                    reason="effective_capital_zero",
+                    slave=slave,
+                    master_trade_id=master_trade_id,
+                    master_qty=mq,
+                    computed_slave_qty=0,
+                    live_balance=live,
+                    extra={
+                        "mode": "capital_based",
+                        "user_allocated": user_allocated,
+                        "effective_capital": effective_capital,
+                    },
                 )
                 return 0
 
@@ -531,10 +579,35 @@ class MirrorEngine:
                 calculated_qty,
                 max_qty,
             )
+            if final_qty <= 0:
+                self._log_slave_sizing_zero(
+                    reason="capital_based_qty_zero",
+                    slave=slave,
+                    master_trade_id=master_trade_id,
+                    master_qty=mq,
+                    computed_slave_qty=0,
+                    live_balance=live,
+                    extra={
+                        "mode": "capital_based",
+                        "user_allocated": user_allocated,
+                        "effective_capital": effective_capital,
+                        "per_lot_cost_usd": per_lot_cost_usd,
+                        "raw_qty": calculated_qty,
+                    },
+                )
             return int(final_qty)
 
         # Fixed multiplier only — capital-based never reaches here
         if mq <= 0:
+            self._log_slave_sizing_zero(
+                reason="input_qty_zero",
+                slave=slave,
+                master_trade_id=master_trade_id,
+                master_qty=mq,
+                computed_slave_qty=0,
+                live_balance=live if slave_available_usd is not None else None,
+                extra={"mode": "multiplier"},
+            )
             return 0
         calculated_qty = max(1, int(round(float(mq) * float(multiplier or 1.0))))
         final_qty = min(calculated_qty, max_qty)
@@ -559,6 +632,8 @@ class MirrorEngine:
         master_qty: int,
         call_fill: float = 0.0,
         put_fill: float = 0.0,
+        slave: SlaveAccount | None = None,
+        master_trade_id: int = 0,
     ) -> int:
         """
         Reduce qty until estimated margin ≤ 90% of live balance.
@@ -567,10 +642,31 @@ class MirrorEngine:
         from backend.config import OPTIONS_CONTRACT_VALUE
 
         qty = max(0, int(slave_qty or 0))
-        if qty <= 0:
-            return 0
         balance = float(live_balance or 0.0)
+        if qty <= 0:
+            self._log_slave_sizing_zero(
+                reason="input_qty_zero",
+                slave=slave,
+                master_trade_id=master_trade_id,
+                master_qty=int(master_qty or 0),
+                computed_slave_qty=0,
+                live_balance=balance,
+                extra={"phase": "fit_qty_to_margin"},
+            )
+            return 0
         if balance <= 0:
+            self._log_slave_sizing_zero(
+                reason="balance_zero",
+                slave=slave,
+                master_trade_id=master_trade_id,
+                master_qty=int(master_qty or 0),
+                computed_slave_qty=0,
+                live_balance=balance,
+                extra={
+                    "phase": "fit_qty_to_margin",
+                    "input_slave_qty": int(slave_qty or 0),
+                },
+            )
             return 0
 
         mq = max(1, int(master_qty or 1))
@@ -600,6 +696,21 @@ class MirrorEngine:
                 per_lot,
                 headroom,
                 balance,
+            )
+        if qty <= 0:
+            self._log_slave_sizing_zero(
+                reason="margin_fit_zero",
+                slave=slave,
+                master_trade_id=master_trade_id,
+                master_qty=int(master_qty or 0),
+                computed_slave_qty=0,
+                live_balance=balance,
+                extra={
+                    "phase": "fit_qty_to_margin",
+                    "input_slave_qty": int(slave_qty or 0),
+                    "per_lot": per_lot,
+                    "headroom": headroom,
+                },
             )
         return max(0, qty)
 
@@ -1089,6 +1200,7 @@ class MirrorEngine:
             master_total_capital_usd=master_total_capital,
             slave_available_usd=slave_fresh_available,
             master_capital_fetch_failed=master_capital_fetch_failed,
+            master_trade_id=int(master_trade_id),
         )
 
         # Margin headroom: never let Delta be the first insufficient_margin gate
@@ -1105,19 +1217,30 @@ class MirrorEngine:
                 master_qty=int(master_call_qty),
                 call_fill=float(master_call_fill or 0),
                 put_fill=float(master_put_fill or 0),
+                slave=slave,
+                master_trade_id=int(master_trade_id),
             )
 
         if slave_qty < 1:
             msg = (
-                f"skipped_low_capital: live=${live_for_margin:.2f} "
-                f"allocated=${float(getattr(slave, 'user_allocated_capital', 0) or 0):.2f}"
+                f"skipped_low_capital: qty=0 live=${live_for_margin:.2f} "
+                f"allocated=${float(getattr(slave, 'user_allocated_capital', 0) or 0):.2f} "
+                f"master_qty={int(master_call_qty)} "
+                f"(entry not mirrored — under-funded or zero sizing)"
             )
-            logger.warning(
-                "[SLAVE_SIZING] slave='%s' master_trade=%s — %s "
-                "(no order placed)",
-                slave.name,
-                master_trade_id,
-                msg,
+            log_and_buffer(
+                "SLAVE_SIZING_ZERO",
+                int(master_trade_id),
+                {
+                    "slave_account_id": int(slave.id),
+                    "slave_name": str(slave.name or ""),
+                    "master_trade_id": int(master_trade_id),
+                    "master_qty": int(master_call_qty),
+                    "computed_slave_qty": 0,
+                    "live_balance": live_for_margin,
+                    "reason": "entry_skip_qty_zero",
+                    "last_error": msg[:500],
+                },
             )
             skip_trade = SlaveTrade(
                 slave_account_id=int(slave.id),
@@ -2316,7 +2439,12 @@ class MirrorEngine:
     def _position_size_for_product(
         positions: list[dict[str, Any]], product_id: int
     ) -> float | None:
-        """Return live signed size for product_id, or None if absent."""
+        """
+        Return live signed size for product_id, or None if absent.
+
+        Not a sizing gate — lookup only. Zero/None here means book state,
+        not a slave entry skip (those use SLAVE_SIZING_ZERO).
+        """
         wanted = int(product_id)
         for pos in positions or []:
             try:
@@ -4214,6 +4342,7 @@ class MirrorEngine:
             master_total_capital_usd=master_total_capital,
             slave_available_usd=available_before,
             master_capital_fetch_failed=master_capital_fetch_failed,
+            master_trade_id=int(master_hedge_id or 0),
         )
 
         # Same margin headroom path as baskets (ratio consistency)
@@ -4225,6 +4354,8 @@ class MirrorEngine:
                 master_qty=int(master_qty),
                 call_fill=float(master_call_fill or 0),
                 put_fill=float(master_put_fill or 0),
+                slave=slave,
+                master_trade_id=int(master_hedge_id or 0),
             )
 
         # Hedge is a debit — must fit after buffer
@@ -6687,8 +6818,54 @@ class MirrorEngine:
             self._apply_slave_realized_pnl(slave_trade)
             return
 
+        # qty=0 rows (skipped_low_capital / never filled) — never send close orders
+        stored_qty_raw = abs(int(slave_trade.actual_quantity or 0))
+        if stored_qty_raw <= 0:
+            skip_msg = (
+                str(slave_trade.last_error or "").strip()
+                or (
+                    "entry_skipped_qty_0: no position opened "
+                    f"(status={slave_trade.status})"
+                )
+            )
+            log_and_buffer(
+                "SLAVE_CLOSE_SKIP_ZERO_QTY",
+                int(slave_trade.master_trade_id or 0),
+                {
+                    "slave_account_id": int(slave.id),
+                    "slave_name": str(slave.name or ""),
+                    "slave_trade_id": int(getattr(slave_trade, "id", 0) or 0),
+                    "master_trade_id": int(slave_trade.master_trade_id or 0),
+                    "actual_quantity": stored_qty_raw,
+                    "status": str(slave_trade.status or ""),
+                    "reason": str(reason or ""),
+                    "last_error": skip_msg[:500],
+                },
+            )
+            if not str(slave_trade.last_error or "").strip():
+                slave_trade.last_error = skip_msg[:500]
+            self._close_slave_trade(
+                slave,
+                slave_trade,
+                reason=f"zero_qty_skip:{reason}",
+                allow_virtual=False,
+            )
+            slave_trade.exit_time = get_utc_now()
+            slave_trade.exit_reason = str(reason or "")[:50]
+            slave_trade.last_updated = get_utc_now()
+            try:
+                db.commit()
+            except Exception as commit_exc:
+                logger.warning(
+                    "[SLAVE_CLOSE_SKIP_ZERO_QTY] commit failed slave=%s: %s",
+                    slave.id,
+                    commit_exc,
+                )
+            return
+
         client = self._get_slave_client(slave)
-        stored_qty = max(1, int(slave_trade.actual_quantity or 1))
+        # Guaranteed >= 1 here — zero-qty rows returned above (RULE 10)
+        stored_qty = abs(int(slave_trade.actual_quantity or 0))
         # Structure long straddle must survive normal basket exits
         protected_hedge_pids = self._structure_hedge_pids_for_slave(
             db, int(slave.id)

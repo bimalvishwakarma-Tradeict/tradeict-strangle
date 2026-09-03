@@ -129,6 +129,8 @@ _IMPORTANT_EVENTS = frozenset(
         "SLAVE_HEDGE_OPEN",
         "SLAVE_HEDGE_OPEN_SUMMARY",
         "SLAVE_ENTRY_BLOCK",
+        "SLAVE_SIZING_ZERO",
+        "SLAVE_CLOSE_SKIP_ZERO_QTY",
         "SLAVE_HEDGE_SKIP",
         "SLAVE_HEDGE_CLOSE_BLOCKED",
         "SLAVE_HEDGE_DUPLICATE_SKIP",
@@ -327,6 +329,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "PARTIAL_ENTRY_CLEANUP_FAILED",
         "DB_AUDIT_SKIP",
         "SLAVE_MTM_FALLBACK",
+        "SLAVE_SIZING_ZERO",
         "HEDGE_ROLL_PENDING",
         "HEDGE_ROLL_EXECUTE",
         "HEDGE_DTE_CONFIG_INVALID",
@@ -425,6 +428,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "PARTNER_MARKET_FALLBACK_TRIGGERED",
         "ORDER_RESTING",
         "ORDER_RESTING_CLEARED",
+        "SLAVE_CLOSE_SKIP_ZERO_QTY",
     ):
         bot_log.info(msg)
     elif event_type in (
