@@ -101,24 +101,38 @@ def _upsert_setting(db: Session, trade_id: int, key: str, value: Any) -> None:
 
 
 def _leg_snapshot(leg: Any, current_premium: float) -> dict[str, Any]:
+    from backend.config import OPTIONS_CONTRACT_VALUE
+    from backend.core.delta_client import compute_signed_upnl
+
     initial = float(leg.initial_premium)
     is_closed = str(getattr(leg, "status", "") or "").lower() == "closed"
+    is_long = bool(getattr(leg, "is_long", False))
+    side = str(getattr(leg, "side", None) or ("BUY" if is_long else "SELL")).upper()
+    qty = abs(int(leg.quantity or 0))
     display_prem = (
         float(leg.exit_premium)
         if is_closed and leg.exit_premium is not None
         else float(current_premium)
     )
     change_pct = ((display_prem / initial) - 1.0) * 100.0 if initial else 0.0
-    leg_pnl = float(getattr(leg, "realized_pnl", None) or 0.0) if is_closed else (
-        (initial - display_prem) * int(leg.quantity)
-    )
+    if is_closed:
+        leg_pnl = float(getattr(leg, "realized_pnl", None) or 0.0)
+    else:
+        size = float(qty) if is_long else -float(qty)
+        leg_pnl = compute_signed_upnl(
+            initial,
+            display_prem,
+            size=size,
+            contract_value=OPTIONS_CONTRACT_VALUE,
+        )
     entry_fee = getattr(leg, "entry_fee_usd", None)
     exit_fee = getattr(leg, "exit_fee_usd", None)
     return {
         "id": int(leg.id),
+        "leg_type": str(getattr(leg, "leg_type", "") or ""),
         "strike": float(leg.strike),
         "symbol": leg.symbol,
-        "quantity": int(leg.quantity),
+        "quantity": qty,
         "initial_premium": initial,
         "trigger_baseline_premium": float(
             getattr(leg, "trigger_baseline_premium", None)
@@ -139,6 +153,8 @@ def _leg_snapshot(leg: Any, current_premium: float) -> dict[str, Any]:
         "entry_fee_usd": round(float(entry_fee), 6) if entry_fee is not None else None,
         "exit_fee_usd": round(float(exit_fee), 6) if exit_fee is not None else None,
         "status": str(leg.status or "open"),
+        "side": side,
+        "is_long": is_long,
     }
 
 
@@ -1628,6 +1644,28 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
         delta_mtm = float(state.last_delta_mtm)
         call_mtm = 0.0
         put_mtm = 0.0
+        wing_call_mtm = 0.0
+        wing_put_mtm = 0.0
+        wing_call_prem = 0.0
+        wing_put_prem = 0.0
+
+        from backend.core.basket_legs import basket_legs as _basket_legs
+
+        bl = _basket_legs(state.trade, db)
+        wing_call_leg = bl.get("wing_call")
+        wing_put_leg = bl.get("wing_put")
+        wing_call_open = (
+            wing_call_leg is not None
+            and str(getattr(wing_call_leg, "status", "")).lower() == "open"
+        )
+        wing_put_open = (
+            wing_put_leg is not None
+            and str(getattr(wing_put_leg, "status", "")).lower() == "open"
+        )
+        if wing_call_leg is not None:
+            wing_call_prem = float(wing_call_leg.initial_premium or 0)
+        if wing_put_leg is not None:
+            wing_put_prem = float(wing_put_leg.initial_premium or 0)
 
         if client is not None:
             try:
@@ -1636,6 +1674,10 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                     pids.append(int(state.call_leg.product_id))
                 if put_open and int(state.put_leg.product_id) > 0:
                     pids.append(int(state.put_leg.product_id))
+                if wing_call_open and int(wing_call_leg.product_id) > 0:
+                    pids.append(int(wing_call_leg.product_id))
+                if wing_put_open and int(wing_put_leg.product_id) > 0:
+                    pids.append(int(wing_put_leg.product_id))
                 if pids:
                     upnl_data = await client.get_positions_upnl(pids)
                     call_pid = int(state.call_leg.product_id)
@@ -1674,7 +1716,43 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                             or state.put_leg.initial_premium
                             or 0.0
                         )
-                    delta_mtm = call_mtm + put_mtm
+                    if wing_call_open:
+                        wc_pid = int(wing_call_leg.product_id)
+                        wc_row = upnl_data.get(wc_pid) or {}
+                        if wc_row:
+                            wing_call_mtm = float(wc_row.get("upnl") or 0.0)
+                            best = float(wc_row.get("best_bid") or wc_row.get("best_offer") or 0)
+                            if best > 0:
+                                wing_call_prem = best
+                        else:
+                            try:
+                                wing_call_prem = float(
+                                    await client.get_long_exit_price(
+                                        str(wing_call_leg.symbol)
+                                    )
+                                    or wing_call_prem
+                                )
+                            except Exception:
+                                pass
+                    if wing_put_open:
+                        wp_pid = int(wing_put_leg.product_id)
+                        wp_row = upnl_data.get(wp_pid) or {}
+                        if wp_row:
+                            wing_put_mtm = float(wp_row.get("upnl") or 0.0)
+                            best = float(wp_row.get("best_bid") or wp_row.get("best_offer") or 0)
+                            if best > 0:
+                                wing_put_prem = best
+                        else:
+                            try:
+                                wing_put_prem = float(
+                                    await client.get_long_exit_price(
+                                        str(wing_put_leg.symbol)
+                                    )
+                                    or wing_put_prem
+                                )
+                            except Exception:
+                                pass
+                    delta_mtm = call_mtm + put_mtm + wing_call_mtm + wing_put_mtm
                     bot_engine.position_tracker.update_premiums(
                         state.trade_id, call_prem, put_prem, calculated
                     )
@@ -1751,7 +1829,6 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             call_offer=call_prem,
             put_offer=put_prem,
         )
-        # Refresh snapshots after possible fee backfill
         call_snap = _leg_snapshot(state.call_leg, call_prem)
         put_snap = _leg_snapshot(state.put_leg, put_prem)
         if call_open:
@@ -1764,6 +1841,31 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             put_snap["est_exit_fee_usd"] = round(float(fee_fields["put_est_exit_fee"]), 6)
         else:
             put_snap["est_exit_fee_usd"] = 0.0
+
+        wing_call_snap = None
+        wing_put_snap = None
+        if wing_call_leg is not None:
+            wing_call_snap = _leg_snapshot(wing_call_leg, wing_call_prem)
+            if wing_call_open:
+                wing_call_snap["leg_pnl"] = round(wing_call_mtm, 4)
+        if wing_put_leg is not None:
+            wing_put_snap = _leg_snapshot(wing_put_leg, wing_put_prem)
+            if wing_put_open:
+                wing_put_snap["leg_pnl"] = round(wing_put_mtm, 4)
+
+        from backend.core.basket_legs import build_wing_credit_fields
+
+        wing_fields = build_wing_credit_fields(
+            trade=state.trade,
+            short_call=state.call_leg,
+            short_put=state.put_leg,
+            wing_call=wing_call_leg,
+            wing_put=wing_put_leg,
+            call_premium=call_prem,
+            put_premium=put_prem,
+            wing_call_premium=wing_call_prem if wing_call_leg else None,
+            wing_put_premium=wing_put_prem if wing_put_leg else None,
+        )
 
         # Gross MTM = realized + Delta UPNL (premium-only; fees NOT included)
         gross_mtm = display_total
@@ -1785,6 +1887,10 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 offer = float(call_prem)
             elif lt == "put":
                 offer = float(put_prem)
+            elif lt == "wing_call":
+                offer = float(wing_call_prem or getattr(leg, "initial_premium", 0) or 0)
+            elif lt == "wing_put":
+                offer = float(wing_put_prem or getattr(leg, "initial_premium", 0) or 0)
             else:
                 offer = float(getattr(leg, "initial_premium", 0) or 0)
             if offer > 0:
@@ -1835,9 +1941,17 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "open_leg_count": open_count,
             "call_leg": call_snap,
             "put_leg": put_snap,
+            "wing_call": wing_call_snap,
+            "wing_put": wing_put_snap,
+            "net_credit_entry": wing_fields["net_credit_entry"],
+            "net_credit_now": wing_fields["net_credit_now"],
+            "wing_premium_paid_usd": wing_fields["wing_premium_paid_usd"],
+            "max_loss_usd": wing_fields["max_loss_usd"],
             "leg_history": leg_history,
             "call_premium": call_prem,
             "put_premium": put_prem,
+            "wing_call_premium": wing_call_prem if wing_call_leg else None,
+            "wing_put_premium": wing_put_prem if wing_put_leg else None,
             "call_offer": call_prem,
             "put_offer": put_prem,
             "call_change_pct": call_snap["change_pct"],
@@ -1847,6 +1961,8 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "delta_upnl": round(float(delta_mtm), 4),
             "call_delta_mtm": round(float(call_mtm), 4),
             "put_delta_mtm": round(float(put_mtm), 4),
+            "wing_call_upnl": round(float(wing_call_mtm), 4),
+            "wing_put_upnl": round(float(wing_put_mtm), 4),
             "call_upnl": round(float(call_mtm), 4),
             "put_upnl": round(float(put_mtm), 4),
             "realized_pnl": round(float(realized), 4),

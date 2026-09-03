@@ -184,6 +184,16 @@ class BotEngine:
                         symbols.append(str(state.call_leg.symbol))
                     if str(getattr(state.put_leg, "status", "open")).lower() == "open":
                         symbols.append(str(state.put_leg.symbol))
+                    # Wing marks for net-credit / PositionCard (BUY → bid preferred
+                    # later; feed still uses ask channel — exit path uses bid)
+                    for attr in ("wing_call_leg", "wing_put_leg"):
+                        wleg = getattr(state, attr, None)
+                        if wleg is not None and str(
+                            getattr(wleg, "status", "open")
+                        ).lower() == "open":
+                            symbols.append(str(wleg.symbol))
+                # Fallback: open wing symbols from live prices already cached
+                # (populated by monitor loop) — ensure subscription covers them
                 symbols = list(dict.fromkeys(symbols))
                 if not symbols:
                     await asyncio.sleep(5)
@@ -324,7 +334,11 @@ class BotEngine:
         for state in self.position_tracker.get_all_active():
             call_sym = str(state.call_leg.symbol)
             put_sym = str(state.put_leg.symbol)
-            if symbol not in {call_sym, put_sym}:
+            wc = getattr(state, "wing_call_leg", None)
+            wp = getattr(state, "wing_put_leg", None)
+            wc_sym = str(wc.symbol) if wc is not None else ""
+            wp_sym = str(wp.symbol) if wp is not None else ""
+            if symbol not in {call_sym, put_sym, wc_sym, wp_sym}:
                 continue
             last = self._last_price_tick_at.get(state.trade_id, 0.0)
             if now - last < _PRICE_TICK_MIN_INTERVAL_SECONDS:
@@ -332,6 +346,16 @@ class BotEngine:
             self._last_price_tick_at[state.trade_id] = now
             call_p = self._live_prices.get(call_sym, float(state.last_call_premium or 0))
             put_p = self._live_prices.get(put_sym, float(state.last_put_premium or 0))
+            wc_p = (
+                self._live_prices.get(wc_sym, float(getattr(wc, "initial_premium", 0) or 0))
+                if wc is not None
+                else None
+            )
+            wp_p = (
+                self._live_prices.get(wp_sym, float(getattr(wp, "initial_premium", 0) or 0))
+                if wp is not None
+                else None
+            )
             # Keep tracker premiums fresh for /active between full cycles
             self.position_tracker.update_premiums(
                 state.trade_id,
@@ -345,6 +369,8 @@ class BotEngine:
                     "trade_id": state.trade_id,
                     "call_premium": call_p,
                     "put_premium": put_p,
+                    "wing_call_premium": wc_p,
+                    "wing_put_premium": wp_p,
                     "symbol": symbol,
                     "price": price,
                     "price_type": "ask",  # frontend must ignore non-ask ticks for PnL
@@ -5680,6 +5706,120 @@ class BotEngine:
                 else None
             ),
         }
+
+        # Wing legs + net-credit aggregates (same shape as /api/trade/active)
+        try:
+            from backend.core.basket_legs import (
+                basket_legs as _basket_legs,
+                build_wing_credit_fields,
+            )
+            from backend.core.delta_client import compute_signed_upnl
+            from backend.core.time_utils import _as_ist
+
+            def _iso(dt: Any) -> str | None:
+                ist = _as_ist(dt) if dt is not None else None
+                return ist.isoformat() if ist is not None else None
+
+            bl = _basket_legs(trade_state.trade, legs=legs)
+            wc_leg = bl.get("wing_call")
+            wp_leg = bl.get("wing_put")
+            wc_prem = None
+            wp_prem = None
+            wing_call_snap = None
+            wing_put_snap = None
+
+            def _ws_leg_snap(leg: Any, prem: float) -> dict[str, Any]:
+                initial = float(leg.initial_premium or 0)
+                is_long = bool(getattr(leg, "is_long", False))
+                qty = abs(int(leg.quantity or 0))
+                size = float(qty) if is_long else -float(qty)
+                change = ((prem / initial) - 1.0) * 100.0 if initial else 0.0
+                pnl = compute_signed_upnl(
+                    initial,
+                    float(prem),
+                    size=size,
+                    contract_value=OPTIONS_CONTRACT_VALUE,
+                )
+                return {
+                    "id": int(getattr(leg, "id", 0) or 0),
+                    "leg_type": str(getattr(leg, "leg_type", "") or ""),
+                    "strike": float(leg.strike),
+                    "symbol": str(leg.symbol),
+                    "quantity": qty,
+                    "initial_premium": initial,
+                    "trigger_baseline_premium": float(
+                        getattr(leg, "trigger_baseline_premium", None)
+                        or getattr(leg, "trigger_premium", None)
+                        or initial
+                    ),
+                    "current_premium": float(prem),
+                    "change_pct": round(change, 2),
+                    "leg_pnl": round(pnl, 4),
+                    "entry_fee_usd": (
+                        round(float(leg.entry_fee_usd), 6)
+                        if getattr(leg, "entry_fee_usd", None) is not None
+                        else None
+                    ),
+                    "exit_fee_usd": (
+                        round(float(leg.exit_fee_usd), 6)
+                        if getattr(leg, "exit_fee_usd", None) is not None
+                        else None
+                    ),
+                    "status": str(getattr(leg, "status", "open") or "open"),
+                    "side": str(
+                        getattr(leg, "side", None)
+                        or ("BUY" if is_long else "SELL")
+                    ).upper(),
+                    "is_long": is_long,
+                    "entry_time": _iso(getattr(leg, "entry_time", None)),
+                    "exit_time": _iso(getattr(leg, "exit_time", None)),
+                }
+
+            if wc_leg is not None:
+                wc_prem = float(
+                    self._live_prices.get(str(wc_leg.symbol), 0)
+                    or wc_leg.initial_premium
+                    or 0
+                )
+                wing_call_snap = _ws_leg_snap(wc_leg, wc_prem)
+            if wp_leg is not None:
+                wp_prem = float(
+                    self._live_prices.get(str(wp_leg.symbol), 0)
+                    or wp_leg.initial_premium
+                    or 0
+                )
+                wing_put_snap = _ws_leg_snap(wp_leg, wp_prem)
+
+            # Short leg snapshots for consumers that only read TRADE_UPDATE
+            payload["call_leg"] = _ws_leg_snap(trade_state.call_leg, float(call_prem))
+            payload["put_leg"] = _ws_leg_snap(trade_state.put_leg, float(put_prem))
+            payload["call_leg"]["leg_pnl"] = round(float(call_delta_mtm), 4)
+            payload["put_leg"]["leg_pnl"] = round(float(put_delta_mtm), 4)
+            payload["wing_call"] = wing_call_snap
+            payload["wing_put"] = wing_put_snap
+            payload["wing_call_premium"] = wc_prem
+            payload["wing_put_premium"] = wp_prem
+            credit = build_wing_credit_fields(
+                trade=trade_state.trade,
+                short_call=trade_state.call_leg,
+                short_put=trade_state.put_leg,
+                wing_call=wc_leg,
+                wing_put=wp_leg,
+                call_premium=float(call_prem),
+                put_premium=float(put_prem),
+                wing_call_premium=wc_prem,
+                wing_put_premium=wp_prem,
+            )
+            payload["net_credit_entry"] = credit["net_credit_entry"]
+            payload["net_credit_now"] = credit["net_credit_now"]
+            payload["wing_premium_paid_usd"] = credit["wing_premium_paid_usd"]
+            payload["max_loss_usd"] = credit["max_loss_usd"]
+        except Exception as wing_exc:
+            logger.warning(
+                "TRADE_UPDATE wing fields failed trade=%s: %s",
+                trade_state.trade_id,
+                wing_exc,
+            )
         if bool(getattr(trade_state.trade, "in_conversion_mode", False)):
             # Hedge UPNL if available on trade_state
             hedge_leg = getattr(trade_state, "hedge_leg", None)

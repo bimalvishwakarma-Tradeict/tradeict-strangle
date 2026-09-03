@@ -33,6 +33,8 @@ class TradeState:
     call_leg: Any  # Leg ORM model (open preferred; may be closed)
     put_leg: Any  # Leg ORM model (open preferred; may be closed)
     hedge_leg: Any | None = None  # Long hedge leg when in conversion mode
+    wing_call_leg: Any | None = None  # Long far-OTM call wing (iron condor)
+    wing_put_leg: Any | None = None  # Long far-OTM put wing
     last_call_premium: float = 0.0
     last_put_premium: float = 0.0
     last_pnl: float = 0.0  # calculated PnL / gross MTM (logic only)
@@ -90,12 +92,24 @@ class PositionTracker:
                 )
                 continue
 
+            from backend.core.basket_legs import classify_legs
+
+            bl = classify_legs(legs)
+            wing_call_leg = bl.get("wing_call")
+            wing_put_leg = bl.get("wing_put")
+
             hedge_leg = next(
                 (
                     leg
                     for leg in open_legs
-                    if bool(getattr(leg, "is_long", False))
-                    or str(getattr(leg, "leg_type", "")).startswith("hedge")
+                    if str(getattr(leg, "leg_type", "") or "")
+                    .lower()
+                    .startswith("hedge")
+                    or (
+                        bool(getattr(leg, "is_long", False))
+                        and str(getattr(leg, "leg_type", "") or "").lower()
+                        not in ("wing_call", "wing_put", "call", "put")
+                    )
                 ),
                 None,
             )
@@ -106,6 +120,8 @@ class PositionTracker:
                 call_leg=call_leg,
                 put_leg=put_leg,
                 hedge_leg=hedge_leg,
+                wing_call_leg=wing_call_leg,
+                wing_put_leg=wing_put_leg,
                 last_call_premium=float(
                     getattr(call_leg, "exit_premium", None)
                     or call_leg.initial_premium

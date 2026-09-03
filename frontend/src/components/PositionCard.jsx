@@ -129,38 +129,71 @@ function useCountdown(hoursToExpiry) {
 }
 
 function normalizeLeg(trade, side) {
-  const nested = side === 'call' ? trade.call_leg : trade.put_leg
+  const nested =
+    side === 'call'
+      ? trade.call_leg
+      : side === 'put'
+        ? trade.put_leg
+        : side === 'wing_call'
+          ? trade.wing_call
+          : side === 'wing_put'
+            ? trade.wing_put
+            : null
+  const isWing = side === 'wing_call' || side === 'wing_put'
   const current =
     nested?.current_premium ??
-    (side === 'call' ? trade.call_premium : trade.put_premium)
+    (side === 'call'
+      ? trade.call_premium
+      : side === 'put'
+        ? trade.put_premium
+        : side === 'wing_call'
+          ? trade.wing_call_premium
+          : side === 'wing_put'
+            ? trade.wing_put_premium
+            : null)
   const initial =
-    (side === 'call' ? trade.call_entry_premium : trade.put_entry_premium) ??
-    nested?.initial_premium
+    (side === 'call'
+      ? trade.call_entry_premium
+      : side === 'put'
+        ? trade.put_entry_premium
+        : null) ?? nested?.initial_premium
   const change =
     nested?.change_pct ??
-    (side === 'call' ? trade.call_change_pct : trade.put_change_pct)
+    (side === 'call'
+      ? trade.call_change_pct
+      : side === 'put'
+        ? trade.put_change_pct
+        : null)
   // Legs-table only — NEVER fall back to call_upnl / Delta MTM (those are NET MTM)
   const legPnl = nested?.leg_pnl
   const status = (nested?.status || 'open').toLowerCase()
   const entryFee =
     nested?.entry_fee_usd ??
-    (side === 'call' ? trade.call_entry_fee : trade.put_entry_fee)
+    (side === 'call'
+      ? trade.call_entry_fee
+      : side === 'put'
+        ? trade.put_entry_fee
+        : null)
   const estExitFee =
     nested?.est_exit_fee_usd ??
-    (side === 'call' ? trade.call_est_exit_fee : trade.put_est_exit_fee)
+    (side === 'call'
+      ? trade.call_est_exit_fee
+      : side === 'put'
+        ? trade.put_est_exit_fee
+        : null)
 
   return {
     strike:
       nested?.strike ??
-      trade[`${side}_strike`] ??
+      (side === 'call' || side === 'put' ? trade[`${side}_strike`] : null) ??
       null,
     symbol:
       nested?.symbol ??
-      trade[`${side}_symbol`] ??
+      (side === 'call' || side === 'put' ? trade[`${side}_symbol`] : '') ??
       '',
     quantity:
       nested?.quantity ??
-      trade[`${side}_quantity`] ??
+      (side === 'call' || side === 'put' ? trade[`${side}_quantity`] : null) ??
       trade.quantity ??
       null,
     initial_premium: initial,
@@ -168,7 +201,9 @@ function normalizeLeg(trade, side) {
       nested?.trigger_baseline_premium ??
       (side === 'call'
         ? trade.call_trigger_baseline
-        : trade.put_trigger_baseline) ??
+        : side === 'put'
+          ? trade.put_trigger_baseline
+          : null) ??
       initial,
     current_premium: current,
     change_pct: change,
@@ -179,6 +214,9 @@ function normalizeLeg(trade, side) {
     closed: status === 'closed',
     entry_time: nested?.entry_time ?? null,
     exit_time: nested?.exit_time ?? null,
+    side: nested?.side ?? (isWing ? 'BUY' : 'SELL'),
+    is_long: nested?.is_long ?? isWing,
+    is_wing: isWing,
   }
 }
 
@@ -197,10 +235,21 @@ function formatAdjTime(iso) {
   }
 }
 
-function LegRow({ label, leg, compact = false }) {
+function LegRow({ label, leg, compact = false, accent = false }) {
+  if (!leg || leg.strike == null) return null
   return (
-    <tr className={leg.closed ? 'opacity-50' : ''}>
-      <td className="px-2 py-2 font-medium text-white">{label}</td>
+    <tr
+      className={`${leg.closed ? 'opacity-50' : ''} ${
+        accent ? 'bg-sky-950/30' : ''
+      }`}
+    >
+      <td
+        className={`px-2 py-2 font-medium ${
+          accent ? 'text-sky-200' : 'text-white'
+        }`}
+      >
+        {label}
+      </td>
       <td className="px-2 py-2">${fmtStrike(leg.strike)}</td>
       <td className="px-2 py-2">${fmtMoney(leg.initial_premium)}</td>
       <td className="px-2 py-2">${fmtMoney(leg.current_premium)}</td>
@@ -652,6 +701,22 @@ export default function PositionCard({
 }) {
   const call = normalizeLeg(trade, 'call')
   const put = normalizeLeg(trade, 'put')
+  const wingCall = normalizeLeg(trade, 'wing_call')
+  const wingPut = normalizeLeg(trade, 'wing_put')
+  const hasWings = Boolean(
+    (wingCall && wingCall.strike != null) ||
+      (wingPut && wingPut.strike != null),
+  )
+  const netCreditEntry =
+    trade.net_credit_entry != null ? Number(trade.net_credit_entry) : null
+  const netCreditNow =
+    trade.net_credit_now != null ? Number(trade.net_credit_now) : null
+  const wingPremiumPaid =
+    trade.wing_premium_paid_usd != null
+      ? Number(trade.wing_premium_paid_usd)
+      : null
+  const maxLossUsd =
+    trade.max_loss_usd != null ? Number(trade.max_loss_usd) : null
   const countdown = useCountdown(trade.hours_to_expiry)
   const settling = useSettlingCountdown(
     trade.settling_ends_at,
@@ -1159,8 +1224,19 @@ export default function PositionCard({
                 </tr>
               </thead>
               <tbody>
-                <LegRow label="CALL" leg={call} compact />
-                <LegRow label="PUT" leg={put} compact />
+                <LegRow label="SHORT CALL" leg={call} compact />
+                <LegRow label="SHORT PUT" leg={put} compact />
+                {hasWings && (
+                  <>
+                    <LegRow
+                      label="WING CALL"
+                      leg={wingCall}
+                      compact
+                      accent
+                    />
+                    <LegRow label="WING PUT" leg={wingPut} compact accent />
+                  </>
+                )}
               </tbody>
             </table>
             <div className="px-2 pb-1 text-[10px] text-gray-500">
@@ -1400,8 +1476,14 @@ export default function PositionCard({
             </tr>
           </thead>
           <tbody>
-            <LegRow label="📞 CALL" leg={call} />
-            <LegRow label="📉 PUT" leg={put} />
+            <LegRow label="SHORT CALL" leg={call} />
+            <LegRow label="SHORT PUT" leg={put} />
+            {hasWings && (
+              <>
+                <LegRow label="WING CALL" leg={wingCall} accent />
+                <LegRow label="WING PUT" leg={wingPut} accent />
+              </>
+            )}
           </tbody>
         </table>
         <div className="px-2 pb-1 text-[10px] text-gray-500">
@@ -1483,6 +1565,50 @@ export default function PositionCard({
             <span>PUT UPL</span>
             <span className={pnlColor(putUpnl)}>{fmtSignedMoney(putUpnl)}</span>
           </div>
+          {hasWings && (
+            <>
+              <div className="flex justify-between text-sky-200/90">
+                <span>Wing Call UPL</span>
+                <span className={pnlColor(wingCall?.leg_pnl)}>
+                  {fmtSignedMoney(wingCall?.leg_pnl)}
+                </span>
+              </div>
+              <div className="flex justify-between text-sky-200/90">
+                <span>Wing Put UPL</span>
+                <span className={pnlColor(wingPut?.leg_pnl)}>
+                  {fmtSignedMoney(wingPut?.leg_pnl)}
+                </span>
+              </div>
+              <div className="flex justify-between text-sky-200/90">
+                <span>Net credit (entry)</span>
+                <span>
+                  {netCreditEntry == null
+                    ? '--'
+                    : `$${fmtMoney(netCreditEntry)}`}
+                </span>
+              </div>
+              <div className="flex justify-between text-sky-200/90">
+                <span>Net credit (now)</span>
+                <span>
+                  {netCreditNow == null ? '--' : `$${fmtMoney(netCreditNow)}`}
+                </span>
+              </div>
+              <div className="flex justify-between text-sky-200/90">
+                <span>Wings paid</span>
+                <span>
+                  {wingPremiumPaid == null
+                    ? '--'
+                    : `$${fmtMoney(wingPremiumPaid)}`}
+                </span>
+              </div>
+              <div className="flex justify-between text-sky-200/90">
+                <span>Max loss (defined)</span>
+                <span>
+                  {maxLossUsd == null ? '--' : `$${fmtMoney(maxLossUsd)}`}
+                </span>
+              </div>
+            </>
+          )}
           {trade.in_conversion_mode && (
             <div className="flex justify-between">
               <span>Hedge UPL</span>

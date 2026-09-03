@@ -15,6 +15,39 @@ function shortLegUpnl(entry, offer, qty) {
   return (o - e) * -q * OPTIONS_CONTRACT_VALUE
 }
 
+/** Long wing UPNL — (mark − entry) × qty × CV */
+function longLegUpnl(entry, mark, qty) {
+  const e = Number(entry) || 0
+  const m = Number(mark) || 0
+  const q = Math.abs(Number(qty) || 0)
+  if (e <= 0 || m <= 0 || q <= 0) return 0
+  return (m - e) * q * OPTIONS_CONTRACT_VALUE
+}
+
+function mergeWingLeg(existing, msgLeg, msgPrem) {
+  if (!msgLeg && !existing) return existing || null
+  if (!msgLeg) {
+    if (!existing) return null
+    if (msgPrem == null) return existing
+    const entry = Number(existing.initial_premium || 0)
+    const qty = Math.abs(Number(existing.quantity || 0))
+    const px = Number(msgPrem)
+    return {
+      ...existing,
+      current_premium: px,
+      change_pct: entry > 0 ? (px / entry - 1) * 100 : existing.change_pct,
+      leg_pnl: longLegUpnl(entry, px, qty),
+    }
+  }
+  return {
+    ...(existing || {}),
+    ...msgLeg,
+    current_premium:
+      existing?.current_premium ?? msgPrem ?? msgLeg.current_premium,
+    leg_pnl: existing?.leg_pnl ?? msgLeg.leg_pnl,
+  }
+}
+
 /** Live mark-based UPNL only — matches Delta UI gross display (B24). */
 function resolveDisplayGrossUpnl(trade) {
   const upnl = Number(
@@ -287,6 +320,32 @@ export function useTrades() {
           ...msg,
           call_leg: mergedCallLeg,
           put_leg: mergedPutLeg,
+          wing_call: mergeWingLeg(
+            existing.wing_call,
+            msg.wing_call,
+            msg.wing_call_premium,
+          ),
+          wing_put: mergeWingLeg(
+            existing.wing_put,
+            msg.wing_put,
+            msg.wing_put_premium,
+          ),
+          net_credit_entry:
+            msg.net_credit_entry != null
+              ? Number(msg.net_credit_entry)
+              : existing.net_credit_entry,
+          net_credit_now:
+            msg.net_credit_now != null
+              ? Number(msg.net_credit_now)
+              : existing.net_credit_now,
+          wing_premium_paid_usd:
+            msg.wing_premium_paid_usd != null
+              ? Number(msg.wing_premium_paid_usd)
+              : existing.wing_premium_paid_usd,
+          max_loss_usd:
+            msg.max_loss_usd != null
+              ? Number(msg.max_loss_usd)
+              : existing.max_loss_usd,
           call_entry_premium:
             callEntry != null ? callEntry : existing.call_entry_premium,
           put_entry_premium:
@@ -486,30 +545,47 @@ export function useTrades() {
 
         const isCall = trade.call_leg?.symbol === msg.symbol
         const isPut = trade.put_leg?.symbol === msg.symbol
-        if (!isCall && !isPut) return prev
+        const isWingCall = trade.wing_call?.symbol === msg.symbol
+        const isWingPut = trade.wing_put?.symbol === msg.symbol
+        if (!isCall && !isPut && !isWingCall && !isWingPut) return prev
 
-        const patchLeg = (leg) => {
+        const patchShort = (leg) => {
           if (!leg) return leg
-          const entry = Number(
-            leg.initial_premium ??
-              (isCall ? trade.call_entry_premium : trade.put_entry_premium) ??
-              0,
-          )
+          const entry = Number(leg.initial_premium ?? 0)
           const qty = Math.abs(Number(leg.quantity ?? 0))
           const changePct = entry > 0 ? (tickPx / entry - 1) * 100 : 0
           return {
             ...leg,
             current_premium: tickPx,
             change_pct: changePct,
-            // Legs-table display only — must never feed NET MTM
             leg_pnl: shortLegUpnl(entry, tickPx, qty),
+          }
+        }
+        const patchLong = (leg) => {
+          if (!leg) return leg
+          const entry = Number(leg.initial_premium ?? 0)
+          const qty = Math.abs(Number(leg.quantity ?? 0))
+          const changePct = entry > 0 ? (tickPx / entry - 1) * 100 : 0
+          return {
+            ...leg,
+            current_premium: tickPx,
+            change_pct: changePct,
+            leg_pnl: longLegUpnl(entry, tickPx, qty),
           }
         }
 
         next.set(msg.trade_id, {
           ...trade,
-          call_leg: isCall ? patchLeg(trade.call_leg) : trade.call_leg,
-          put_leg: isPut ? patchLeg(trade.put_leg) : trade.put_leg,
+          call_leg: isCall ? patchShort(trade.call_leg) : trade.call_leg,
+          put_leg: isPut ? patchShort(trade.put_leg) : trade.put_leg,
+          wing_call: isWingCall
+            ? patchLong(trade.wing_call)
+            : trade.wing_call,
+          wing_put: isWingPut ? patchLong(trade.wing_put) : trade.wing_put,
+          wing_call_premium: isWingCall
+            ? tickPx
+            : trade.wing_call_premium,
+          wing_put_premium: isWingPut ? tickPx : trade.wing_put_premium,
           // Pin server MTM — PRICE_TICK must never alter these
           call_upnl: trade.call_upnl,
           put_upnl: trade.put_upnl,

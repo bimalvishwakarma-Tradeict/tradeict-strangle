@@ -672,7 +672,11 @@ class ShortStrangleStrategy(BaseStrategy):
                 current_pnl=decision_pnl,
             )
 
-        # e. Adjustment trigger + decision (Net MTM > 0 → close basket)
+        # ── Adjustment trigger (SHORT legs only — intentional) ──────────────
+        # Wings (long OTM) never enter trigger/baseline math. Wing premium
+        # growth is a loss on the long side; adjusting on it would fire in the
+        # wrong direction. Triggers use call_leg / put_leg (shorts) only.
+        # Locked by backend/tests/test_wing_trigger_shorts_only.py.
         call_trigger_pct = self.get_trigger_for_leg(
             call_premium, trade, db_session
         )

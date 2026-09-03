@@ -208,3 +208,138 @@ def compute_net_credit_usd(
         wing_put_premium=wing_put_premium,
         wing_qty=wing_qty,
     ) * cv
+
+
+def compute_max_loss_usd(
+    *,
+    short_call_strike: float,
+    short_put_strike: float,
+    wing_call_strike: float | None,
+    wing_put_strike: float | None,
+    net_credit_usd: float,
+    quantity: int,
+    contract_value: float | None = None,
+) -> float | None:
+    """
+    Iron-condor defined max loss (USD).
+
+    width_call = wing_call − short_call
+    width_put  = short_put − wing_put
+    max_loss   = max(width_call, width_put) × qty × CV − net_credit
+
+    Returns None when either wing strike is missing (naked short → unlimited).
+    """
+    from backend.config import OPTIONS_CONTRACT_VALUE
+
+    if wing_call_strike is None or wing_put_strike is None:
+        return None
+    cv = float(
+        OPTIONS_CONTRACT_VALUE if contract_value is None else contract_value
+    )
+    qty = abs(int(quantity or 0))
+    if qty <= 0 or cv <= 0:
+        return None
+    width_call = float(wing_call_strike) - float(short_call_strike)
+    width_put = float(short_put_strike) - float(wing_put_strike)
+    if width_call <= 0 or width_put <= 0:
+        return None
+    width = max(width_call, width_put)
+    return round(width * qty * cv - float(net_credit_usd or 0.0), 6)
+
+
+def build_wing_credit_fields(
+    *,
+    trade: Any,
+    short_call: Any | None,
+    short_put: Any | None,
+    wing_call: Any | None,
+    wing_put: Any | None,
+    call_premium: float | None = None,
+    put_premium: float | None = None,
+    wing_call_premium: float | None = None,
+    wing_put_premium: float | None = None,
+) -> dict[str, Any]:
+    """
+    Aggregate credit / max-loss fields for /active and TRADE_UPDATE.
+
+    net_credit_entry: locked Trade.initial_max_profit when set, else recomputed
+    net_credit_now: live short marks − wing marks (USD)
+    """
+    sc = short_call
+    sp = short_put
+    wc = wing_call
+    wp = wing_put
+    qty = 0
+    if sc is not None:
+        qty = abs(int(getattr(sc, "quantity", 0) or 0))
+    elif sp is not None:
+        qty = abs(int(getattr(sp, "quantity", 0) or 0))
+
+    sc_entry = float(getattr(sc, "initial_premium", 0) or 0) if sc else 0.0
+    sp_entry = float(getattr(sp, "initial_premium", 0) or 0) if sp else 0.0
+    wc_entry = float(getattr(wc, "initial_premium", 0) or 0) if wc else 0.0
+    wp_entry = float(getattr(wp, "initial_premium", 0) or 0) if wp else 0.0
+
+    wings_present = wc is not None and wp is not None
+    paid = getattr(trade, "wing_premium_paid_usd", None)
+    if paid is not None:
+        wing_premium_paid = float(paid or 0.0)
+    elif wings_present:
+        from backend.config import OPTIONS_CONTRACT_VALUE
+
+        wing_premium_paid = (wc_entry + wp_entry) * qty * float(
+            OPTIONS_CONTRACT_VALUE
+        )
+    else:
+        wing_premium_paid = 0.0
+
+    locked = getattr(trade, "initial_max_profit", None)
+    if locked is not None and float(locked) > 0:
+        net_credit_entry = float(locked)
+    else:
+        net_credit_entry = compute_net_credit_usd(
+            short_call_premium=sc_entry,
+            short_put_premium=sp_entry,
+            short_qty=qty,
+            wing_call_premium=wc_entry if wings_present else 0.0,
+            wing_put_premium=wp_entry if wings_present else 0.0,
+            wing_qty=qty,
+        )
+
+    sc_now = float(call_premium if call_premium is not None else sc_entry)
+    sp_now = float(put_premium if put_premium is not None else sp_entry)
+    wc_now = float(
+        wing_call_premium if wing_call_premium is not None else wc_entry
+    )
+    wp_now = float(
+        wing_put_premium if wing_put_premium is not None else wp_entry
+    )
+    net_credit_now = compute_net_credit_usd(
+        short_call_premium=sc_now,
+        short_put_premium=sp_now,
+        short_qty=qty,
+        wing_call_premium=wc_now if wings_present else 0.0,
+        wing_put_premium=wp_now if wings_present else 0.0,
+        wing_qty=qty,
+    )
+
+    max_loss = None
+    if wings_present and sc is not None and sp is not None:
+        max_loss = compute_max_loss_usd(
+            short_call_strike=float(getattr(sc, "strike", 0) or 0),
+            short_put_strike=float(getattr(sp, "strike", 0) or 0),
+            wing_call_strike=float(getattr(wc, "strike", 0) or 0),
+            wing_put_strike=float(getattr(wp, "strike", 0) or 0),
+            net_credit_usd=net_credit_entry,
+            quantity=qty,
+        )
+
+    return {
+        "net_credit_entry": round(float(net_credit_entry), 6),
+        "net_credit_now": round(float(net_credit_now), 6),
+        "wing_premium_paid_usd": (
+            round(float(wing_premium_paid), 6) if wings_present else None
+        ),
+        "max_loss_usd": max_loss,
+        "wings_present": wings_present,
+    }
