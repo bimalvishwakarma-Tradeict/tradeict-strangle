@@ -4040,16 +4040,18 @@ class BotEngine:
                     record_master_basket_exit,
                 )
 
-                call_close = basket_close_times.get("call", (None, None))
-                put_close = basket_close_times.get("put", (None, None))
+                # Timestamp pair (closed_at, fill_at) — never overwrite
+                # call_close / put_close OrderResult used for .success below.
+                call_ts = basket_close_times.get("call", (None, None))
+                put_ts = basket_close_times.get("put", (None, None))
                 record_master_basket_exit(
                     exit_db,
                     trade_row,
                     reason=str(reason or ""),
-                    call_closed_at=call_close[0],
-                    put_closed_at=put_close[0],
-                    call_fill_at=call_close[1],
-                    put_fill_at=put_close[1],
+                    call_closed_at=call_ts[0],
+                    put_closed_at=put_ts[0],
+                    call_fill_at=call_ts[1],
+                    put_fill_at=put_ts[1],
                 )
             except Exception as ledger_exc:
                 logger.error(
@@ -4147,8 +4149,16 @@ class BotEngine:
                 "trade_id": trade_id,
                 "reason": reason,
                 "final_pnl": final_pnl,
-                "call_closed_at": call_fill if call_close and call_close.success else None,
-                "put_closed_at": put_fill if put_close and put_close.success else None,
+                "call_closed_at": (
+                    call_fill
+                    if call_close is not None and getattr(call_close, "success", False)
+                    else None
+                ),
+                "put_closed_at": (
+                    put_fill
+                    if put_close is not None and getattr(put_close, "success", False)
+                    else None
+                ),
                 "timestamp": get_ist_now().isoformat(),
             }
         )

@@ -1194,6 +1194,7 @@ async def _cascade_close_baskets_under_hedge(
     )
 
     for tid in trade_ids:
+        basket_error: str | None = None
         try:
             await bot_engine.close_master_trade(
                 trade_id=tid,
@@ -1202,21 +1203,22 @@ async def _cascade_close_baskets_under_hedge(
                 trade_state=bot_engine.position_tracker.get(tid),
             )
         except Exception as exc:
+            basket_error = str(exc)
             _hedge_log(
                 "HEDGE_CASCADE",
                 hid,
                 {
                     "hedge": hid,
                     "trade_id": tid,
-                    "error": str(exc),
+                    "error": basket_error,
                     "phase": "basket_exception",
                 },
                 critical=True,
             )
-            failed_ids.append(tid)
-            continue
 
-        # close_master_trade uses its own sessions — re-query status
+        # Always re-query — close_master_trade uses its own sessions.
+        # An exception after DB commit must not skip remaining baskets
+        # or false-fail a basket that is already closed.
         db.expire_all()
         row = db.query(Trade).filter(Trade.id == tid).first()
         st = str(row.status or "").lower() if row is not None else "missing"
@@ -1229,12 +1231,24 @@ async def _cascade_close_baskets_under_hedge(
                     "hedge": hid,
                     "trade_id": tid,
                     "status": st,
+                    "error": basket_error,
                     "phase": "still_active",
                 },
                 critical=True,
             )
         else:
             closed_ids.append(tid)
+            _hedge_log(
+                "HEDGE_CASCADE",
+                hid,
+                {
+                    "hedge": hid,
+                    "trade_id": tid,
+                    "status": st,
+                    "error": basket_error,
+                    "phase": "basket_closed",
+                },
+            )
 
     result = {
         "hedge": hid,
