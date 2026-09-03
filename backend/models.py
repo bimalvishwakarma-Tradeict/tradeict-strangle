@@ -663,6 +663,24 @@ class SlaveTrade(Base):
     call_strike: Mapped[float | None] = mapped_column(Float, nullable=True)
     put_strike: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Iron-condor wings (mirrored from master strikes; qty = actual_quantity)
+    wing_call_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wing_put_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wing_call_symbol: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    wing_put_symbol: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    wing_call_strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wing_put_strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wing_call_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    wing_put_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    wing_call_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wing_put_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Deploy qty at first entry — fixed base for decrease_step on THIS slave
+    original_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # True when a wing close failed (CRITICAL — surface on frontend)
+    wing_close_failed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+
     call_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     put_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     call_entry_fee_usd: Mapped[float | None] = mapped_column(Float, nullable=True)

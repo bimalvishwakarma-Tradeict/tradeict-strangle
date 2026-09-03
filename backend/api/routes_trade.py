@@ -1215,6 +1215,17 @@ async def initiate_trade(
             import backend.engine.mirror_engine as mirror_module
 
             if mirror_module.mirror_engine is not None:
+                # Manual initiate may also have wings on the trade
+                _wc = None
+                _wp = None
+                try:
+                    from backend.core.basket_legs import basket_legs as _bl
+
+                    _legs = _bl(trade, db=db)
+                    _wc = _legs.get("wing_call")
+                    _wp = _legs.get("wing_put")
+                except Exception:
+                    _wc, _wp = None, None
                 asyncio.create_task(
                     mirror_module.mirror_engine.mirror_trade_entry(
                         master_trade_id=int(trade.id),
@@ -1238,6 +1249,38 @@ async def initiate_trade(
                         master_bracket_sl_put=(
                             float(put_sl_trigger_price)
                             if put_sl_trigger_price and put_sl_trigger_price > 0
+                            else None
+                        ),
+                        wing_call_product_id=(
+                            int(_wc.product_id)
+                            if _wc is not None
+                            else None
+                        ),
+                        wing_put_product_id=(
+                            int(_wp.product_id)
+                            if _wp is not None
+                            else None
+                        ),
+                        wing_call_strike=(
+                            float(_wc.strike) if _wc is not None else None
+                        ),
+                        wing_put_strike=(
+                            float(_wp.strike) if _wp is not None else None
+                        ),
+                        wing_call_symbol=(
+                            str(_wc.symbol) if _wc is not None else None
+                        ),
+                        wing_put_symbol=(
+                            str(_wp.symbol) if _wp is not None else None
+                        ),
+                        wing_call_fill=(
+                            float(_wc.initial_premium or 0)
+                            if _wc is not None
+                            else None
+                        ),
+                        wing_put_fill=(
+                            float(_wp.initial_premium or 0)
+                            if _wp is not None
                             else None
                         ),
                     )

@@ -287,7 +287,12 @@ class MirrorEngine:
             .all()
         )
         for st in trades:
-            for attr in ("call_product_id", "put_product_id"):
+            for attr in (
+                "call_product_id",
+                "put_product_id",
+                "wing_call_product_id",
+                "wing_put_product_id",
+            ):
                 try:
                     pid = int(getattr(st, attr, 0) or 0)
                 except (TypeError, ValueError):
@@ -846,6 +851,14 @@ class MirrorEngine:
         underlying: str,
         master_bracket_sl_call: float | None = None,
         master_bracket_sl_put: float | None = None,
+        wing_call_product_id: int | None = None,
+        wing_put_product_id: int | None = None,
+        wing_call_strike: float | None = None,
+        wing_put_strike: float | None = None,
+        wing_call_symbol: str | None = None,
+        wing_put_symbol: str | None = None,
+        wing_call_fill: float | None = None,
+        wing_put_fill: float | None = None,
     ) -> None:
         """
         Mirror a new trade entry on all active slave accounts.
@@ -854,6 +867,10 @@ class MirrorEngine:
 
         master_bracket_sl_* are ABSOLUTE stop prices from the master's fill —
         slaves must use them verbatim (never recompute from slave fill/mark).
+
+        When wing_* product ids are set, slave places wings BUY first then
+        shorts (same strikes as master, qty = slave sizing). Wing fail →
+        abort without shorts (NIYAM 0).
         """
         with self.db_factory() as db:
             slaves = get_active_slave_accounts(db)
@@ -890,6 +907,14 @@ class MirrorEngine:
                         db=db,
                         master_bracket_sl_call=master_bracket_sl_call,
                         master_bracket_sl_put=master_bracket_sl_put,
+                        wing_call_product_id=wing_call_product_id,
+                        wing_put_product_id=wing_put_product_id,
+                        wing_call_strike=wing_call_strike,
+                        wing_put_strike=wing_put_strike,
+                        wing_call_symbol=wing_call_symbol,
+                        wing_put_symbol=wing_put_symbol,
+                        wing_call_fill=wing_call_fill,
+                        wing_put_fill=wing_put_fill,
                     )
 
     async def _mirror_entry_to_slave(
@@ -911,6 +936,14 @@ class MirrorEngine:
         db: Any,
         master_bracket_sl_call: float | None = None,
         master_bracket_sl_put: float | None = None,
+        wing_call_product_id: int | None = None,
+        wing_put_product_id: int | None = None,
+        wing_call_strike: float | None = None,
+        wing_put_strike: float | None = None,
+        wing_call_symbol: str | None = None,
+        wing_put_symbol: str | None = None,
+        wing_call_fill: float | None = None,
+        wing_put_fill: float | None = None,
     ) -> None:
         # Caller MUST hold the per-slave lock.
         master_hedge_id = self._resolve_master_hedge_id_for_trade(
@@ -1143,6 +1176,7 @@ class MirrorEngine:
                 slave_account_id=int(slave.id),
                 master_trade_id=int(master_trade_id),
                 actual_quantity=slave_qty,
+                original_quantity=slave_qty,
                 call_fill_price=virt_call_fill,
                 put_fill_price=virt_put_fill,
                 call_order_id="VIRTUAL",
@@ -1153,6 +1187,52 @@ class MirrorEngine:
                 put_symbol=str(master_put_symbol or ""),
                 call_strike=float(master_call_strike or 0),
                 put_strike=float(master_put_strike or 0),
+                wing_call_product_id=(
+                    int(wing_call_product_id)
+                    if wing_call_product_id
+                    else None
+                ),
+                wing_put_product_id=(
+                    int(wing_put_product_id)
+                    if wing_put_product_id
+                    else None
+                ),
+                wing_call_symbol=(
+                    str(wing_call_symbol or "")
+                    if wing_call_product_id
+                    else None
+                ),
+                wing_put_symbol=(
+                    str(wing_put_symbol or "")
+                    if wing_put_product_id
+                    else None
+                ),
+                wing_call_strike=(
+                    float(wing_call_strike or 0)
+                    if wing_call_product_id
+                    else None
+                ),
+                wing_put_strike=(
+                    float(wing_put_strike or 0)
+                    if wing_put_product_id
+                    else None
+                ),
+                wing_call_order_id=(
+                    "VIRTUAL" if wing_call_product_id else None
+                ),
+                wing_put_order_id=(
+                    "VIRTUAL" if wing_put_product_id else None
+                ),
+                wing_call_fill_price=(
+                    float(wing_call_fill or 0)
+                    if wing_call_product_id
+                    else None
+                ),
+                wing_put_fill_price=(
+                    float(wing_put_fill or 0)
+                    if wing_put_product_id
+                    else None
+                ),
                 call_entry_fee_usd=0.0,
                 put_entry_fee_usd=0.0,
                 entry_spread_usd=float(virt_entry_spread or 0.0),
@@ -1294,6 +1374,16 @@ class MirrorEngine:
 
             # Canonical ABSOLUTE bracket SL from master fill — never slave fill/mark.
             from backend.core.delta_sl import compute_bracket_sl
+            from backend.engine.slave_wings import (
+                build_slave_entry_plan,
+                filled_leg_to_unwind_dict,
+                log_slave_wing_entry_abort,
+                place_slave_plan_legs,
+                sort_unwind_dicts,
+                wings_enabled_from_master_picks,
+            )
+            from backend.engine.wing_entry import EntryPartialUnwind
+            from backend.strategies.base_strategy import OrderResult
 
             uni_sl = self._master_universal_sl_pct(db, int(master_trade_id))
             if master_bracket_sl_call is not None and float(master_bracket_sl_call) > 0:
@@ -1323,87 +1413,265 @@ class MirrorEngine:
                     put_sl = None  # type: ignore[assignment]
                     put_sl_limit = None  # type: ignore[assignment]
 
-            # Place call order on slave (bracket SL attached)
-            # Captured BEFORE any order — this is an attribution window bound.
-            # See e3e6b7d: a post-fill timestamp silently drops the fill.
+            wing_call_pick = None
+            wing_put_pick = None
+            try:
+                wc_pid = int(wing_call_product_id or 0)
+                wp_pid = int(wing_put_product_id or 0)
+            except (TypeError, ValueError):
+                wc_pid, wp_pid = 0, 0
+            if wc_pid > 0 and wp_pid > 0:
+                wing_call_pick = {
+                    "product_id": wc_pid,
+                    "symbol": str(wing_call_symbol or ""),
+                    "strike": float(wing_call_strike or 0),
+                    "premium": float(wing_call_fill or 0),
+                }
+                wing_put_pick = {
+                    "product_id": wp_pid,
+                    "symbol": str(wing_put_symbol or ""),
+                    "strike": float(wing_put_strike or 0),
+                    "premium": float(wing_put_fill or 0),
+                }
+            wings_on = wings_enabled_from_master_picks(
+                wing_call_pick, wing_put_pick
+            )
+
+            plan = build_slave_entry_plan(
+                slave_qty=int(slave_qty),
+                call_product_id=int(call_product_id),
+                put_product_id=int(put_product_id),
+                call_symbol=str(master_call_symbol or ""),
+                put_symbol=str(master_put_symbol or ""),
+                call_strike=float(master_call_strike or 0),
+                put_strike=float(master_put_strike or 0),
+                call_premium=float(master_call_fill or 0),
+                put_premium=float(master_put_fill or 0),
+                wing_call=wing_call_pick,
+                wing_put=wing_put_pick,
+                call_bracket_sl=call_sl,
+                call_bracket_limit=call_sl_limit,
+                put_bracket_sl=put_sl,
+                put_bracket_limit=put_sl_limit,
+            )
+
             call_open_ts = get_utc_now()
-            call_order = await client.place_order(
-                product_id=int(call_product_id),
-                size=slave_qty,
-                side="sell",
-                bracket_stop_loss_price=call_sl,
-                bracket_stop_loss_limit_price=call_sl_limit,
-            )
-            call_fill = float(
-                await client.resolve_fill_price(
-                    call_order, symbol_for_fallback=master_call_symbol
+            put_open_ts = call_open_ts
+            call_fill_ts = call_open_ts
+            put_fill_ts = call_open_ts
+            call_order: dict[str, Any] | None = None
+            put_order: dict[str, Any] | None = None
+            call_fill = float(master_call_fill or 0.0)
+            put_fill = float(master_put_fill or 0.0)
+            call_order_id: str | None = None
+            put_order_id: str | None = None
+            wing_call_open_ts = None
+            wing_put_open_ts = None
+            wing_call_fill_ts = None
+            wing_put_fill_ts = None
+            wing_call_fill_px = float(wing_call_fill or 0.0)
+            wing_put_fill_px = float(wing_put_fill or 0.0)
+            wing_call_oid: str | None = None
+            wing_put_oid: str | None = None
+            filled_entry_legs: list[Any] = []
+
+            async def _place_raw(spec: Any) -> OrderResult:
+                side = "buy" if spec.is_long else "sell"
+                try:
+                    raw = await client.place_order(
+                        product_id=int(spec.product_id),
+                        size=int(spec.quantity),
+                        side=side,
+                        bracket_stop_loss_price=(
+                            None if spec.is_long else spec.bracket_sl_price
+                        ),
+                        bracket_stop_loss_limit_price=(
+                            None if spec.is_long else spec.bracket_sl_limit
+                        ),
+                    )
+                    fill_px = float(
+                        await client.resolve_fill_price(
+                            raw, symbol_for_fallback=str(spec.symbol)
+                        )
+                        or 0.0
+                    )
+                    oid = raw.get("order_id") or raw.get("id")
+                    filled_size = int(spec.quantity)
+                    try:
+                        if raw.get("size") is not None:
+                            filled_size = int(raw.get("size"))
+                    except (TypeError, ValueError):
+                        filled_size = int(spec.quantity)
+                    return OrderResult(
+                        success=True,
+                        order_id=int(oid) if oid is not None else None,
+                        filled_price=fill_px if fill_px > 0 else float(
+                            spec.mark_premium
+                        ),
+                        filled_size=filled_size,
+                        commission=None,
+                    )
+                except Exception as place_exc:
+                    return OrderResult(
+                        success=False,
+                        error=str(place_exc),
+                        filled_size=0,
+                    )
+
+            def _place_fn_for(spec: Any):
+                async def _inner() -> OrderResult:
+                    return await _place_raw(spec)
+
+                return _inner
+
+            try:
+                filled_entry_legs = await place_slave_plan_legs(
+                    plan=plan,
+                    place_fn_for_spec=_place_fn_for,
+                    slave_name=str(slave.name),
                 )
-                or 0.0
-            )
+            except EntryPartialUnwind as partial:
+                # NIYAM 0: if wings failed before shorts, or any leg incomplete —
+                # unwind filled legs (shorts first, then wings). Never leave
+                # naked shorts without wings when master was a condor.
+                filled_entry_legs = list(partial.filled_legs)
+                to_uw = sort_unwind_dicts(
+                    [filled_leg_to_unwind_dict(x) for x in filled_entry_legs]
+                )
+                for item in to_uw:
+                    item["opened_at"] = get_utc_now()
+                    item["fill_at"] = get_utc_now()
+                unwound = await self._unwind_slave_entry_legs(
+                    client=client,
+                    slave=slave,
+                    master_trade_id=int(master_trade_id),
+                    legs_to_unwind=to_uw,
+                )
+                wings_closed = sum(
+                    1
+                    for x in unwound
+                    if str(x.get("leg") or "").startswith("wing")
+                    and x.get("unwound")
+                )
+                wings_failed = sum(
+                    1
+                    for x in unwound
+                    if str(x.get("leg") or "").startswith("wing")
+                    and not x.get("unwound")
+                )
+                # If failure was on a wing role and no shorts filled → abort
+                failed_is_wing = str(partial.failed_role or "").startswith(
+                    "wing"
+                )
+                shorts_filled = any(
+                    not x.is_long for x in filled_entry_legs
+                )
+                if failed_is_wing and not shorts_filled:
+                    log_slave_wing_entry_abort(
+                        slave_name=str(slave.name),
+                        reason=str(partial),
+                        wings_closed=wings_closed,
+                        wings_failed=wings_failed,
+                    )
+                else:
+                    log_slave_wing_entry_abort(
+                        slave_name=str(slave.name),
+                        reason=f"partial_entry:{partial.failed_role}:{partial}",
+                        wings_closed=wings_closed,
+                        wings_failed=wings_failed,
+                    )
+                abort_msg = (
+                    f"SLAVE_WING_ENTRY_ABORT: {partial.failed_role}: {partial}"
+                )[:500]
+                slave_trade = SlaveTrade(
+                    slave_account_id=int(slave.id),
+                    master_trade_id=int(master_trade_id),
+                    actual_quantity=slave_qty,
+                    original_quantity=slave_qty,
+                    call_product_id=int(call_product_id),
+                    put_product_id=int(put_product_id),
+                    call_symbol=str(master_call_symbol or ""),
+                    put_symbol=str(master_put_symbol or ""),
+                    call_strike=float(master_call_strike or 0),
+                    put_strike=float(master_put_strike or 0),
+                    status="error",
+                    last_error=abort_msg,
+                    error_count=1,
+                )
+                db.add(slave_trade)
+                slave.connection_status = "error"
+                slave.last_error = abort_msg
+                slave.updated_at = get_utc_now()
+                db.commit()
+                return
+
+            # Map filled legs → call/put/wing locals (compat with verify/ledger)
+            for fl in filled_entry_legs:
+                if fl.role == "wing_call":
+                    wing_call_open_ts = get_utc_now()
+                    wing_call_fill_ts = wing_call_open_ts
+                    wing_call_fill_px = float(fl.fill_price)
+                    wing_call_oid = fl.order_id
+                elif fl.role == "wing_put":
+                    wing_put_open_ts = get_utc_now()
+                    wing_put_fill_ts = wing_put_open_ts
+                    wing_put_fill_px = float(fl.fill_price)
+                    wing_put_oid = fl.order_id
+                elif fl.role == "call":
+                    call_open_ts = get_utc_now()
+                    call_fill_ts = call_open_ts
+                    call_fill = float(fl.fill_price) or call_fill
+                    call_order_id = fl.order_id
+                    call_order = {"order_id": fl.order_id, "id": fl.order_id}
+                    logger.info(
+                        "Slave '%s' CALL placed: qty=%s fill=%s id=%s "
+                        "bracket_sl=%s",
+                        slave.name,
+                        slave_qty,
+                        call_fill,
+                        call_order_id,
+                        call_sl,
+                    )
+                    log_and_buffer(
+                        "BRACKET_SL",
+                        int(master_trade_id),
+                        {
+                            "leg": "call",
+                            "slave": slave.name,
+                            "stop_price": call_sl,
+                            "source": "master_absolute",
+                        },
+                    )
+                elif fl.role == "put":
+                    put_open_ts = get_utc_now()
+                    put_fill_ts = put_open_ts
+                    put_fill = float(fl.fill_price) or put_fill
+                    put_order_id = fl.order_id
+                    put_order = {"order_id": fl.order_id, "id": fl.order_id}
+                    logger.info(
+                        "Slave '%s' PUT placed: qty=%s fill=%s id=%s "
+                        "bracket_sl=%s",
+                        slave.name,
+                        slave_qty,
+                        put_fill,
+                        put_order_id,
+                        put_sl,
+                    )
+                    log_and_buffer(
+                        "BRACKET_SL",
+                        int(master_trade_id),
+                        {
+                            "leg": "put",
+                            "slave": slave.name,
+                            "stop_price": put_sl,
+                            "source": "master_absolute",
+                        },
+                    )
+
             if call_fill <= 0:
                 call_fill = float(master_call_fill or 0.0)
-            call_fill_ts = get_utc_now()
-            call_order_id = self._order_id(call_order)
-
-            logger.info(
-                "Slave '%s' CALL placed: qty=%s fill=%s id=%s bracket_sl=%s",
-                slave.name,
-                slave_qty,
-                call_fill,
-                call_order_id,
-                call_sl,
-            )
-            log_and_buffer(
-                "BRACKET_SL",
-                int(master_trade_id),
-                {
-                    "leg": "call",
-                    "slave": slave.name,
-                    "stop_price": call_sl,
-                    "source": "master_absolute",
-                },
-            )
-
-            # Place put order on slave (bracket SL attached)
-            # Captured BEFORE any order — this is an attribution window bound.
-            # See e3e6b7d: a post-fill timestamp silently drops the fill.
-            put_open_ts = get_utc_now()
-            put_order = await client.place_order(
-                product_id=int(put_product_id),
-                size=slave_qty,
-                side="sell",
-                bracket_stop_loss_price=put_sl,
-                bracket_stop_loss_limit_price=put_sl_limit,
-            )
-            put_fill = float(
-                await client.resolve_fill_price(
-                    put_order, symbol_for_fallback=master_put_symbol
-                )
-                or 0.0
-            )
             if put_fill <= 0:
                 put_fill = float(master_put_fill or 0.0)
-            put_fill_ts = get_utc_now()
-            put_order_id = self._order_id(put_order)
-
-            logger.info(
-                "Slave '%s' PUT placed: qty=%s fill=%s id=%s bracket_sl=%s",
-                slave.name,
-                slave_qty,
-                put_fill,
-                put_order_id,
-                put_sl,
-            )
-            log_and_buffer(
-                "BRACKET_SL",
-                int(master_trade_id),
-                {
-                    "leg": "put",
-                    "slave": slave.name,
-                    "stop_price": put_sl,
-                    "source": "master_absolute",
-                },
-            )
 
             # Verify positions landed on slave Delta
             await asyncio.sleep(2)
@@ -1426,6 +1694,8 @@ class MirrorEngine:
             # Live sizes — verify can miss; also drives partial unwind size
             call_live_size: float | None = None
             put_live_size: float | None = None
+            wing_call_live: float | None = None
+            wing_put_live: float | None = None
             try:
                 live_positions = await client.get_option_positions()
                 call_live_size = self._position_size_for_product(
@@ -1434,6 +1704,14 @@ class MirrorEngine:
                 put_live_size = self._position_size_for_product(
                     live_positions, int(put_product_id)
                 )
+                if wings_on and wc_pid > 0:
+                    wing_call_live = self._position_size_for_product(
+                        live_positions, wc_pid
+                    )
+                if wings_on and wp_pid > 0:
+                    wing_put_live = self._position_size_for_product(
+                        live_positions, wp_pid
+                    )
             except Exception as pos_exc:
                 logger.warning(
                     "Slave '%s' post-entry positions fetch failed: %s",
@@ -1447,20 +1725,41 @@ class MirrorEngine:
             put_on_exchange = put_verified or (
                 put_live_size is not None and abs(float(put_live_size)) > 1e-9
             )
+            wing_call_on = (not wings_on) or (
+                wing_call_live is not None
+                and abs(float(wing_call_live)) > 1e-9
+            )
+            wing_put_on = (not wings_on) or (
+                wing_put_live is not None and abs(float(wing_put_live)) > 1e-9
+            )
 
             ledger_legs: list[dict[str, Any]] = []
             status = "error"
             last_error: str | None = None
             err_count = 1
 
-            if call_on_exchange and put_on_exchange:
+            all_ok = (
+                call_on_exchange
+                and put_on_exchange
+                and wing_call_on
+                and wing_put_on
+            )
+            any_on = (
+                call_on_exchange
+                or put_on_exchange
+                or (wings_on and (wing_call_on or wing_put_on))
+            )
+
+            if all_ok:
                 status = "active"
                 last_error = None
                 err_count = 0
                 logger.info(
-                    "Slave '%s' both positions verified", slave.name
+                    "Slave '%s' both positions verified%s",
+                    slave.name,
+                    " (+wings)" if wings_on else "",
                 )
-            elif call_on_exchange or put_on_exchange:
+            elif any_on:
                 # Partial — unwind whatever landed (never leave naked short)
                 to_unwind: list[dict[str, Any]] = []
                 if call_on_exchange:
@@ -1503,6 +1802,49 @@ class MirrorEngine:
                             "quantity": int(slave_qty),
                         }
                     )
+                if wings_on and wing_call_on and wc_pid > 0:
+                    signed = (
+                        float(wing_call_live)
+                        if wing_call_live is not None
+                        and abs(float(wing_call_live)) > 1e-9
+                        else float(slave_qty)
+                    )
+                    to_unwind.append(
+                        {
+                            "leg": "wing_call",
+                            "product_id": wc_pid,
+                            "signed_size": signed,
+                            "opened_at": wing_call_open_ts or call_open_ts,
+                            "fill_at": wing_call_fill_ts,
+                            "order_id": wing_call_oid,
+                            "symbol": str(wing_call_symbol or ""),
+                            "strike": float(wing_call_strike or 0),
+                            "quantity": int(slave_qty),
+                        }
+                    )
+                if wings_on and wing_put_on and wp_pid > 0:
+                    signed = (
+                        float(wing_put_live)
+                        if wing_put_live is not None
+                        and abs(float(wing_put_live)) > 1e-9
+                        else float(slave_qty)
+                    )
+                    to_unwind.append(
+                        {
+                            "leg": "wing_put",
+                            "product_id": wp_pid,
+                            "signed_size": signed,
+                            "opened_at": wing_put_open_ts or put_open_ts,
+                            "fill_at": wing_put_fill_ts,
+                            "order_id": wing_put_oid,
+                            "symbol": str(wing_put_symbol or ""),
+                            "strike": float(wing_put_strike or 0),
+                            "quantity": int(slave_qty),
+                        }
+                    )
+                from backend.engine.slave_wings import sort_unwind_dicts
+
+                to_unwind = sort_unwind_dicts(to_unwind)
                 unwound_legs = await self._unwind_slave_entry_legs(
                     client=client,
                     slave=slave,
@@ -1541,10 +1883,11 @@ class MirrorEngine:
                     )[:500]
                 logger.error(
                     "Slave '%s' PARTIAL position: call=%s put=%s "
-                    "status=%s",
+                    "wings_ok=%s status=%s",
                     slave.name,
                     call_on_exchange,
                     put_on_exchange,
+                    wing_call_on and wing_put_on,
                     status,
                 )
             else:
@@ -1556,8 +1899,16 @@ class MirrorEngine:
                     slave.name,
                 )
 
-            call_entry_fee = await self._resolve_order_fee(client, call_order)
-            put_entry_fee = await self._resolve_order_fee(client, put_order)
+            call_entry_fee = (
+                await self._resolve_order_fee(client, call_order)
+                if call_order
+                else 0.0
+            )
+            put_entry_fee = (
+                await self._resolve_order_fee(client, put_order)
+                if put_order
+                else 0.0
+            )
             entry_spread = (
                 compute_entry_spread_usd(
                     sent_price=float(master_call_fill or 0),
@@ -1581,6 +1932,7 @@ class MirrorEngine:
                 call_sl_order_id=None,  # bracket — no separate stop order id
                 put_sl_order_id=None,
                 actual_quantity=slave_qty,
+                original_quantity=slave_qty,
                 call_fill_price=call_fill,
                 put_fill_price=put_fill,
                 call_product_id=int(call_product_id),
@@ -1589,6 +1941,28 @@ class MirrorEngine:
                 put_symbol=str(master_put_symbol or ""),
                 call_strike=float(master_call_strike or 0),
                 put_strike=float(master_put_strike or 0),
+                wing_call_product_id=wc_pid if wings_on else None,
+                wing_put_product_id=wp_pid if wings_on else None,
+                wing_call_symbol=(
+                    str(wing_call_symbol or "") if wings_on else None
+                ),
+                wing_put_symbol=(
+                    str(wing_put_symbol or "") if wings_on else None
+                ),
+                wing_call_strike=(
+                    float(wing_call_strike or 0) if wings_on else None
+                ),
+                wing_put_strike=(
+                    float(wing_put_strike or 0) if wings_on else None
+                ),
+                wing_call_order_id=wing_call_oid if wings_on else None,
+                wing_put_order_id=wing_put_oid if wings_on else None,
+                wing_call_fill_price=(
+                    wing_call_fill_px if wings_on else None
+                ),
+                wing_put_fill_price=(
+                    wing_put_fill_px if wings_on else None
+                ),
                 call_entry_fee_usd=float(call_entry_fee or 0.0),
                 put_entry_fee_usd=float(put_entry_fee or 0.0),
                 entry_spread_usd=float(entry_spread or 0.0),
@@ -1718,6 +2092,39 @@ class MirrorEngine:
                             "order_id": locals().get("put_order_id"),
                             "symbol": str(master_put_symbol or ""),
                             "strike": float(master_put_strike or 0),
+                            "quantity": int(slave_qty),
+                        }
+                    )
+            # Also unwind any filled wings (shorts-first sort inside unwind)
+            for wrole, wpid_key, wsym, wstrike in (
+                (
+                    "wing_call",
+                    "wc_pid",
+                    wing_call_symbol,
+                    wing_call_strike,
+                ),
+                (
+                    "wing_put",
+                    "wp_pid",
+                    wing_put_symbol,
+                    wing_put_strike,
+                ),
+            ):
+                wpid = int(locals().get(wpid_key) or 0)
+                if wpid <= 0:
+                    continue
+                wlive = self._position_size_for_product(positions, wpid)
+                if wlive is not None and abs(float(wlive)) > 1e-9:
+                    to_unwind_exc.append(
+                        {
+                            "leg": wrole,
+                            "product_id": wpid,
+                            "signed_size": float(wlive),
+                            "opened_at": get_utc_now(),
+                            "fill_at": get_utc_now(),
+                            "order_id": None,
+                            "symbol": str(wsym or ""),
+                            "strike": float(wstrike or 0),
                             "quantity": int(slave_qty),
                         }
                     )
@@ -2169,11 +2576,13 @@ class MirrorEngine:
             basket_seq = getattr(master_row, "basket_seq_in_structure", None)
             bs = int(basket_seq) if basket_seq is not None else None
             for item in legs:
-                role = (
-                    ROLE_BASKET_CALL
-                    if str(item.get("leg") or "").lower() == "call"
-                    else ROLE_BASKET_PUT
+                from backend.engine.slave_wings import ledger_role_for_slave_leg
+
+                role, side = ledger_role_for_slave_leg(
+                    str(item.get("leg") or "")
                 )
+                if not role:
+                    continue
                 pid = int(item.get("product_id") or 0)
                 opened_at = item.get("opened_at")
                 if pid <= 0 or opened_at is None:
@@ -2183,7 +2592,7 @@ class MirrorEngine:
                     structure=struct,
                     leg_role=role,
                     product_id=pid,
-                    side="SELL",
+                    side=side,
                     quantity=abs(int(item.get("quantity") or 1)),
                     symbol=item.get("symbol"),
                     strike=item.get("strike"),
@@ -2223,6 +2632,22 @@ class MirrorEngine:
                         slave_trade.put_symbol = str(item["symbol"])
                     if item.get("strike") is not None:
                         slave_trade.put_strike = float(item["strike"])
+                elif lt == "wing_call" and pid > 0:
+                    slave_trade.wing_call_product_id = pid
+                    if item.get("order_id"):
+                        slave_trade.wing_call_order_id = str(item["order_id"])
+                    if item.get("symbol"):
+                        slave_trade.wing_call_symbol = str(item["symbol"])
+                    if item.get("strike") is not None:
+                        slave_trade.wing_call_strike = float(item["strike"])
+                elif lt == "wing_put" and pid > 0:
+                    slave_trade.wing_put_product_id = pid
+                    if item.get("order_id"):
+                        slave_trade.wing_put_order_id = str(item["order_id"])
+                    if item.get("symbol"):
+                        slave_trade.wing_put_symbol = str(item["symbol"])
+                    if item.get("strike") is not None:
+                        slave_trade.wing_put_strike = float(item["strike"])
             db.flush()
         except Exception as ledger_exc:
             logger.error(
@@ -2248,8 +2673,10 @@ class MirrorEngine:
         Returns updated leg dicts with unwound=True/False and closed_at set
         when unwind succeeded.
         """
+        from backend.engine.slave_wings import sort_unwind_dicts
+
         results: list[dict[str, Any]] = []
-        for item in legs_to_unwind:
+        for item in sort_unwind_dicts(legs_to_unwind):
             pid = int(item.get("product_id") or 0)
             signed = float(item.get("signed_size") or 0)
             leg_name = str(item.get("leg") or "")
@@ -2451,22 +2878,24 @@ class MirrorEngine:
                 # Captured BEFORE any order — this is an attribution window bound.
                 # See e3e6b7d: a post-fill timestamp silently drops the fill.
                 old_leg_closed_ts = get_utc_now()
-                close_size = max(1, abs(int(live_size)))
-                is_long = float(live_size) > 0
-                close_order = await client.close_position(
+                ok_close, close_order, close_err = await self._close_with_reduce_only(
+                    client=client,
+                    slave=slave,
                     product_id=old_pid,
-                    size=close_size,
-                    is_long=is_long,
+                    signed_size=float(live_size),
+                    master_trade_id=int(slave_trade.master_trade_id or 0),
+                    path="mirror_adjustment_close_old",
                 )
                 old_leg_close_fill_ts = get_utc_now()
                 logger.info(
                     "[MIRROR_ADJ_VERIFY] slave='%s' stage=close_sent "
-                    "product_id=%s size=%s is_long=%s order_id=%s",
+                    "product_id=%s size=%s ok=%s order_id=%s err=%s",
                     slave.name,
                     old_pid,
-                    close_size,
-                    is_long,
-                    self._order_id(close_order),
+                    abs(int(live_size)),
+                    ok_close,
+                    self._order_id(close_order) if close_order else None,
+                    close_err,
                 )
 
                 await asyncio.sleep(2)
@@ -2489,10 +2918,13 @@ class MirrorEngine:
                         "actual_size": still,
                     },
                 )
-                if still is not None and abs(float(still)) > 0:
+                if (not ok_close) or (
+                    still is not None and abs(float(still)) > 0
+                ):
                     msg = (
                         f"adjust_close_failed: old product {old_pid} "
-                        f"still open size={still} after close"
+                        f"still open size={still} after close "
+                        f"err={close_err}"
                     )
                     logger.critical(
                         "[MIRROR_ADJ_VERIFY] slave='%s' %s — ABORT new leg",
@@ -2549,14 +2981,73 @@ class MirrorEngine:
             )
             db.commit()
 
-            # Close size for new entry: prefer live abs size, else stored
+            # Close size for new entry: prefer live abs size, else stored.
+            # decrease_step uses THIS slave's original_quantity (not master).
             entry_qty = (
                 max(1, abs(int(live_size)))
                 if live_size is not None and live_size != 0
                 else stored_qty
             )
+            try:
+                from backend.database import get_or_create_auto_settings
+                from backend.engine.wing_entry import (
+                    compute_decrease_step_qty,
+                    resolve_adjustment_qty_mode,
+                )
+                from backend.models import Adjustment
+
+                settings = get_or_create_auto_settings(db)
+                qty_mode = resolve_adjustment_qty_mode(settings)
+                if qty_mode == "decrease_step":
+                    orig = int(
+                        getattr(slave_trade, "original_quantity", None)
+                        or slave_trade.actual_quantity
+                        or stored_qty
+                        or 1
+                    )
+                    adj_n = (
+                        db.query(Adjustment)
+                        .filter(
+                            Adjustment.trade_id
+                            == int(slave_trade.master_trade_id or 0)
+                        )
+                        .count()
+                    )
+                    adj_n = max(1, int(adj_n))
+                    dec_pct = float(
+                        getattr(settings, "adjustment_qty_decrease_pct", None)
+                        or 10.0
+                    )
+                    new_q, close_basket = compute_decrease_step_qty(
+                        original_qty=orig,
+                        adjustment_number=adj_n,
+                        decrease_pct=dec_pct,
+                    )
+                    if close_basket:
+                        logger.warning(
+                            "[MIRROR_ADJ] slave='%s' decrease_step remaining<=0 "
+                            "— keeping entry_qty=%s (basket close is master-driven)",
+                            slave.name,
+                            entry_qty,
+                        )
+                    elif new_q is not None:
+                        entry_qty = max(1, int(new_q))
+                        logger.info(
+                            "[MIRROR_ADJ] slave='%s' decrease_step "
+                            "orig=%s adj_n=%s → entry_qty=%s (wings untouched)",
+                            slave.name,
+                            orig,
+                            adj_n,
+                            entry_qty,
+                        )
+            except Exception as qty_exc:
+                logger.warning(
+                    "[MIRROR_ADJ] decrease_step sizing skipped: %s",
+                    qty_exc,
+                )
 
             # --- d. Open new leg; bracket SL = master's absolute stop ---
+            # Wings are NEVER closed or resized on adjustment.
             new_sl = None
             new_sl_limit = None
             if master_bracket_sl is not None and float(master_bracket_sl) > 0:
@@ -6237,6 +6728,8 @@ class MirrorEngine:
                     call_product_id,
                     put_product_id,
                     hedge_product_id or 0,
+                    getattr(slave_trade, "wing_call_product_id", 0) or 0,
+                    getattr(slave_trade, "wing_put_product_id", 0) or 0,
                 )
                 if pid and int(pid) > 0
             }
@@ -6322,13 +6815,31 @@ class MirrorEngine:
                 for pid, side in (
                     (int(call_product_id or 0), "buy"),
                     (int(put_product_id or 0), "buy"),
+                    (
+                        int(
+                            getattr(slave_trade, "wing_call_product_id", 0)
+                            or 0
+                        ),
+                        "sell",
+                    ),
+                    (
+                        int(
+                            getattr(slave_trade, "wing_put_product_id", 0)
+                            or 0
+                        ),
+                        "sell",
+                    ),
                 ):
                     if pid <= 0 or pid not in bot_owned:
                         continue
                     targets.append(
                         {
                             "product_id": pid,
-                            "size": -float(stored_qty),
+                            "size": (
+                                -float(stored_qty)
+                                if side == "buy"
+                                else float(stored_qty)
+                            ),
                             "product_symbol": f"hint-{pid}",
                             "_fallback_side": side,
                         }
@@ -6397,6 +6908,24 @@ class MirrorEngine:
             # See e3e6b7d: a post-fill timestamp silently drops the fill.
             # Used for already-flat legs so ledger windows always end.
             exit_batch_ts = get_utc_now()
+
+            # Exit order: SHORTS first, then WINGS (never reverse — NIYAM 0)
+            from backend.engine.slave_wings import (
+                sort_exit_targets,
+                wing_dicts_from_slave_trade,
+            )
+
+            short_pids, wing_pids = wing_dicts_from_slave_trade(slave_trade)
+            short_pids |= {
+                pid
+                for pid in (call_pid_hint, put_pid_hint)
+                if pid > 0
+            }
+            targets = sort_exit_targets(
+                targets, short_pids=short_pids, wing_pids=wing_pids
+            )
+
+            wing_close_failed = False
             for pos in targets:
                 pid = int(pos.get("product_id") or 0)
                 size = float(pos.get("size") or 0)
@@ -6460,6 +6989,15 @@ class MirrorEngine:
                         side,
                         err,
                     )
+                    if pid in wing_pids:
+                        wing_close_failed = True
+                        logger.critical(
+                            "[WING_CLOSE_FAILED] slave=%s product_id=%s "
+                            "err=%s",
+                            slave.id,
+                            pid,
+                            err,
+                        )
                     continue
                 closed_count += 1
                 logger.info(
@@ -6572,6 +7110,12 @@ class MirrorEngine:
                 slave_trade.error_count = (
                     int(slave_trade.error_count or 0) + 1
                 )
+                if wing_close_failed or any(
+                    int(r.get("product_id") or 0) in wing_pids
+                    for r in remaining
+                    if isinstance(r, dict)
+                ):
+                    slave_trade.wing_close_failed = True
                 slave_trade.last_updated = get_utc_now()
                 slave.connection_status = "error"
                 slave.last_error = msg[:500]
@@ -6586,6 +7130,7 @@ class MirrorEngine:
                 allow_virtual=False,
             ):
                 return
+            slave_trade.wing_close_failed = False
             slave_trade.call_sl_order_id = None
             slave_trade.put_sl_order_id = None
             # Populate exit fills/fees from close orders (no P&L math yet)

@@ -2276,6 +2276,52 @@ class AutoTradeEngine:
                                 if put_sl_trigger_price > 0
                                 else None
                             ),
+                            wing_call_product_id=(
+                                int(wing_call_pick["product_id"])
+                                if wings_enabled
+                                and wing_call_pick is not None
+                                else None
+                            ),
+                            wing_put_product_id=(
+                                int(wing_put_pick["product_id"])
+                                if wings_enabled
+                                and wing_put_pick is not None
+                                else None
+                            ),
+                            wing_call_strike=(
+                                float(wing_call_pick["strike"])
+                                if wings_enabled
+                                and wing_call_pick is not None
+                                else None
+                            ),
+                            wing_put_strike=(
+                                float(wing_put_pick["strike"])
+                                if wings_enabled
+                                and wing_put_pick is not None
+                                else None
+                            ),
+                            wing_call_symbol=(
+                                str(wing_call_pick.get("symbol") or "")
+                                if wings_enabled
+                                and wing_call_pick is not None
+                                else None
+                            ),
+                            wing_put_symbol=(
+                                str(wing_put_pick.get("symbol") or "")
+                                if wings_enabled
+                                and wing_put_pick is not None
+                                else None
+                            ),
+                            wing_call_fill=(
+                                float(wing_call_fill)
+                                if wings_enabled and wing_call_fill
+                                else None
+                            ),
+                            wing_put_fill=(
+                                float(wing_put_fill)
+                                if wings_enabled and wing_put_fill
+                                else None
+                            ),
                         )
                     )
                     logger.info("Mirror task queued for auto trade %s", trade.id)

@@ -807,6 +807,10 @@ def record_slave_basket_entry(
     put_opened_at: Any,
     call_fill_at: Any = None,
     put_fill_at: Any = None,
+    wing_call_opened_at: Any = None,
+    wing_put_opened_at: Any = None,
+    wing_call_fill_at: Any = None,
+    wing_put_fill_at: Any = None,
 ) -> None:
     try:
         hid = getattr(master_trade, "hedge_position_id", None)
@@ -866,6 +870,40 @@ def record_slave_basket_entry(
             opened_at=put_opened_at,
             fill_at=put_fill_at,
         )
+        wc_pid = int(getattr(slave_trade, "wing_call_product_id", 0) or 0)
+        wp_pid = int(getattr(slave_trade, "wing_put_product_id", 0) or 0)
+        if wc_pid > 0:
+            open_leg(
+                db,
+                structure=struct,
+                leg_role=ROLE_BASKET_WING_CALL,
+                product_id=wc_pid,
+                side="BUY",
+                quantity=qty,
+                symbol=getattr(slave_trade, "wing_call_symbol", None),
+                strike=getattr(slave_trade, "wing_call_strike", None),
+                basket_seq=int(basket_seq) if basket_seq is not None else None,
+                adj_seq=0,
+                entry_order_id=getattr(slave_trade, "wing_call_order_id", None),
+                opened_at=wing_call_opened_at or call_opened_at,
+                fill_at=wing_call_fill_at,
+            )
+        if wp_pid > 0:
+            open_leg(
+                db,
+                structure=struct,
+                leg_role=ROLE_BASKET_WING_PUT,
+                product_id=wp_pid,
+                side="BUY",
+                quantity=qty,
+                symbol=getattr(slave_trade, "wing_put_symbol", None),
+                strike=getattr(slave_trade, "wing_put_strike", None),
+                basket_seq=int(basket_seq) if basket_seq is not None else None,
+                adj_seq=0,
+                entry_order_id=getattr(slave_trade, "wing_put_order_id", None),
+                opened_at=wing_put_opened_at or put_opened_at,
+                fill_at=wing_put_fill_at,
+            )
         db.flush()
     except Exception as exc:
         logger.error(

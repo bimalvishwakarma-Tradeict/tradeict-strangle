@@ -603,6 +603,18 @@ def _migrate_schema() -> None:
             ("exit_time", "DATETIME"),
             ("exit_reason", "VARCHAR(50)"),
             ("mtm_source", "VARCHAR(20) NOT NULL DEFAULT 'copied'"),
+            ("wing_call_product_id", "INTEGER"),
+            ("wing_put_product_id", "INTEGER"),
+            ("wing_call_symbol", "VARCHAR(100)"),
+            ("wing_put_symbol", "VARCHAR(100)"),
+            ("wing_call_strike", "FLOAT"),
+            ("wing_put_strike", "FLOAT"),
+            ("wing_call_order_id", "VARCHAR(100)"),
+            ("wing_put_order_id", "VARCHAR(100)"),
+            ("wing_call_fill_price", "FLOAT"),
+            ("wing_put_fill_price", "FLOAT"),
+            ("original_quantity", "INTEGER"),
+            ("wing_close_failed", "BOOLEAN NOT NULL DEFAULT 0"),
         ):
             if col_name not in st_cols:
                 with engine.begin() as conn:
