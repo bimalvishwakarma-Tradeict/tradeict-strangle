@@ -2472,6 +2472,17 @@ export default function AutoTrade() {
                   </p>
                 ) : wingPreview?.success ? (
                   <div className="space-y-1.5">
+                    {wingPreview.short_target_label ? (
+                      <p
+                        className={
+                          wingPreview.short_target_premium_fallback
+                            ? 'text-amber-400'
+                            : 'text-gray-400'
+                        }
+                      >
+                        {wingPreview.short_target_label}
+                      </p>
+                    ) : null}
                     <p>
                       Short C {Math.round(Number(wingPreview.short_call?.strike))}{' '}
                       @ {formatMoney(wingPreview.short_call?.premium)}

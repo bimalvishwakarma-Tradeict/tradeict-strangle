@@ -880,6 +880,95 @@ def _pick_short_legs_for_wing_preview(
     return best_call, best_put
 
 
+async def _hedge_marks_for_strangle_premium(
+    db: Session,
+    client: DeltaClient,
+    settings: Any,
+    underlying: str,
+    *,
+    quantity: int,
+    hedge_expiry_mode: str | None = None,
+    hedge_expiry_date_override: str | None = None,
+    hedge_expiry_dte: int | None = None,
+) -> tuple[float | None, float | None, str | None]:
+    """
+    Same mark sources as Trade Setup / entry strangle premium.
+
+    1) Active hedge via get_hedge_theta (entry path)
+    2) Else hypothetical hedge-preview marks
+
+    Returns (call_mark, put_mark, source) where source is
+    'active_hedge' | 'hedge_preview' | None.
+    """
+    from backend.core.hedge_theta import (
+        get_hedge_theta,
+        get_hypothetical_hedge_theta,
+        resolve_hedge_expiry_date,
+    )
+    from backend.engine.hedge_lifecycle import get_active_hedge
+
+    und = str(underlying or "BTC").upper()
+    account = (
+        db.query(Account)
+        .filter(Account.is_active.is_(True))
+        .order_by(Account.id.asc())
+        .first()
+    )
+    if account is not None:
+        hedge = get_active_hedge(
+            db,
+            account_id=int(account.id),
+            underlying=und,
+        )
+        if hedge is not None:
+            try:
+                theta = await get_hedge_theta(client, hedge)
+                call_m = float(theta.get("call_ask") or 0)
+                put_m = float(theta.get("put_ask") or 0)
+                if call_m > 0 and put_m > 0:
+                    return call_m, put_m, "active_hedge"
+            except Exception as exc:
+                logger.warning(
+                    "wing-preview: active hedge marks failed: %s",
+                    exc,
+                )
+
+    try:
+        hedge_exp = await resolve_hedge_expiry_date(
+            client,
+            und,
+            expiry_mode=str(
+                hedge_expiry_mode
+                or getattr(settings, "hedge_expiry_mode", None)
+                or "month_1"
+            ),
+            expiry_date_override=(
+                hedge_expiry_date_override
+                if hedge_expiry_date_override is not None
+                else getattr(settings, "hedge_expiry_date_override", None)
+            ),
+            expiry_dte=(
+                hedge_expiry_dte
+                if hedge_expiry_dte is not None
+                else getattr(settings, "hedge_expiry_dte", None)
+            ),
+        )
+        hypo = await get_hypothetical_hedge_theta(
+            client, und, hedge_exp, max(1, int(quantity))
+        )
+        call_m = float(hypo.get("call_ask") or 0)
+        put_m = float(hypo.get("put_ask") or 0)
+        if call_m > 0 and put_m > 0:
+            return call_m, put_m, "hedge_preview"
+    except Exception as exc:
+        logger.warning(
+            "wing-preview: hedge-preview marks failed: %s",
+            exc,
+        )
+
+    return None, None, None
+
+
 @router.get("/wing-preview")
 async def wing_preview(
     db: Session = Depends(get_db),
@@ -960,10 +1049,27 @@ async def wing_preview(
         if trade_type is not None
         else (getattr(settings, "trade_type", None) or "straddle")
     ).lower().strip()
-    target_prem = float(
-        target_premium_per_side
-        if target_premium_per_side is not None
-        else (getattr(settings, "target_premium_per_side", None) or 150.0)
+    # Resolve short target via the SAME helper as entry (never raw setting alone).
+    # Query target_premium_per_side only overlays the fixed fallback value.
+    from types import SimpleNamespace
+
+    from backend.engine.auto_trade_engine import resolve_strangle_target_premium
+
+    prem_settings = SimpleNamespace(
+        target_premium_per_side=float(
+            target_premium_per_side
+            if target_premium_per_side is not None
+            else (getattr(settings, "target_premium_per_side", None) or 150.0)
+        ),
+        strangle_premium_mode=str(
+            getattr(settings, "strangle_premium_mode", None) or "fixed"
+        )
+        .lower()
+        .strip(),
+        strangle_premium_pct_of_hedge=float(
+            getattr(settings, "strangle_premium_pct_of_hedge", None) or 3.0
+        ),
+        hedge_enabled=bool(getattr(settings, "hedge_enabled", False)),
     )
     sel_mode = str(
         strike_selection_mode
@@ -988,6 +1094,42 @@ async def wing_preview(
 
     client = _get_delta_client(db)
     try:
+        hedge_call_mark, hedge_put_mark, marks_source = (
+            await _hedge_marks_for_strangle_premium(
+                db,
+                client,
+                settings,
+                und,
+                quantity=qty,
+                hedge_expiry_mode=hedge_expiry_mode,
+                hedge_expiry_date_override=hedge_expiry_date_override,
+                hedge_expiry_dte=hedge_expiry_dte,
+            )
+        )
+        target_prem, used_dynamic = resolve_strangle_target_premium(
+            settings=prem_settings,
+            hedge_call_mark=hedge_call_mark,
+            hedge_put_mark=hedge_put_mark,
+        )
+        prem_mode = str(prem_settings.strangle_premium_mode or "fixed")
+        premium_fallback = prem_mode == "pct_of_hedge" and not used_dynamic
+        fixed_fallback = float(prem_settings.target_premium_per_side)
+        if used_dynamic:
+            pct_label = float(prem_settings.strangle_premium_pct_of_hedge)
+            short_target_label = (
+                f"Short target: ${int(target_prem)}/side "
+                f"({pct_label:g}% of hedge)"
+            )
+        elif premium_fallback:
+            short_target_label = (
+                f"⚠ Hedge marks unavailable — falling back to fixed "
+                f"${fixed_fallback:g}"
+            )
+        else:
+            short_target_label = (
+                f"Short target: ${fixed_fallback:g}/side (fixed)"
+            )
+
         try:
             if expiry_date is not None:
                 try:
@@ -1170,6 +1312,19 @@ async def wing_preview(
             "net_credit_after_cost_usd_per_lot": round(net_after, 6),
             "cost_consumed_pct": round(consumed_pct, 2),
             "contract_value": cv,
+            # Same-source short target as entry (resolve_strangle_target_premium)
+            "short_target_premium": float(target_prem),
+            "short_target_used_dynamic": bool(used_dynamic),
+            "short_target_premium_fallback": bool(premium_fallback),
+            "short_target_label": short_target_label,
+            "short_target_mode": prem_mode,
+            "hedge_marks_source": marks_source,
+            "hedge_call_mark": (
+                float(hedge_call_mark) if hedge_call_mark else None
+            ),
+            "hedge_put_mark": (
+                float(hedge_put_mark) if hedge_put_mark else None
+            ),
         }
     finally:
         await client.close()
