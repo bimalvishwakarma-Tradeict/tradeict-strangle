@@ -371,6 +371,59 @@ def log_entry_drift(
     return drift
 
 
+def _fire_exec_event(
+    *,
+    trade_id: int | None,
+    hedge_position_id: int | None,
+    phase: str,
+    leg: str,
+    side: str,
+    qty: int,
+    attempt: int,
+    profile: str,
+    order_kind: str,
+    bid: float,
+    ask: float,
+    mid: float | None,
+    limit: float | None,
+    status: str,
+    fill_price: float | None = None,
+) -> None:
+    """Fire-and-forget: schedule broadcast on the running event loop.
+    Never raises — errors are swallowed."""
+    from backend.core.ws_manager import ws_manager
+    from backend.core.time_utils import get_utc_now
+
+    if trade_id is None:
+        return  # no context — skip silently
+
+    try:
+        payload = {
+            "type": "EXEC_EVENT",
+            "ts": get_utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "trade_id": trade_id,
+            "hedge_position_id": hedge_position_id,
+            "phase": phase,
+            "leg": leg,
+            "side": side,
+            "qty": qty,
+            "attempt": attempt,
+            "profile": profile,
+            "order_kind": order_kind,
+            "bid": round(float(bid or 0), 2),
+            "ask": round(float(ask or 0), 2),
+            "mid": round(float(mid), 2) if mid else None,
+            "limit": round(float(limit), 2) if limit else None,
+            "status": status,
+            "fill_price": (
+                round(float(fill_price), 2) if fill_price else None
+            ),
+        }
+        asyncio.get_event_loop().create_task(ws_manager.broadcast(payload))
+    except Exception:
+        pass  # never disrupt order flow
+
+
 async def execute_with_midprice(
     *,
     product_id: int,
@@ -393,6 +446,10 @@ async def execute_with_midprice(
     sleep_fn: Any = None,
     monotonic_fn: Any = None,
     check_position_size: bool = True,
+    trade_id: int | None = None,
+    hedge_position_id: int | None = None,
+    phase: str = "",
+    leg_type: str = "",
 ) -> OrderResult:
     """
     Place one leg via chase or urgent ladder. Falls back to market when
@@ -443,6 +500,24 @@ async def execute_with_midprice(
                 leg_label,
                 elapsed,
                 attempt,
+            )
+            order_kind = "market"
+            _fire_exec_event(
+                trade_id=trade_id,
+                hedge_position_id=hedge_position_id,
+                phase=phase,
+                leg=leg_label,
+                side=side_l,
+                qty=remaining,
+                attempt=attempt,
+                profile=prof,
+                order_kind=order_kind,
+                bid=0.0,
+                ask=0.0,
+                mid=None,
+                limit=None,
+                status="timeout_market",
+                fill_price=None,
             )
             mkt = await _place_market(
                 delta_client,
@@ -579,6 +654,23 @@ async def execute_with_midprice(
                 ask,
             )
 
+        _fire_exec_event(
+            trade_id=trade_id,
+            hedge_position_id=hedge_position_id,
+            phase=phase,
+            leg=leg_label,
+            side=side_l,
+            qty=remaining,
+            attempt=attempt,
+            profile=prof,
+            order_kind=order_kind,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            limit=limit,
+            status="pending",
+            fill_price=None,
+        )
         try:
             placed = await delta_client.place_order(
                 product_id=int(product_id),
@@ -644,6 +736,23 @@ async def execute_with_midprice(
                 mid_at_start,
                 mkt_ref,
                 _saved_usd(side_l, px, mkt_ref, remaining),
+            )
+            _fire_exec_event(
+                trade_id=trade_id,
+                hedge_position_id=hedge_position_id,
+                phase=phase,
+                leg=leg_label,
+                side=side_l,
+                qty=remaining,
+                attempt=attempt,
+                profile=prof,
+                order_kind=order_kind,
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                limit=limit,
+                status="filled",
+                fill_price=px,
             )
             remaining = 0
             break
@@ -803,6 +912,10 @@ async def execute_paired_legs(
     max_chase_seconds: int | None = None,
     entry_premium_match_tolerance_pct: float = 15.0,
     selection_ts: float | None = None,
+    trade_id: int | None = None,
+    hedge_position_id: int | None = None,
+    phase: str = "",
+    leg_type: str = "",
 ) -> list[OrderResult]:
     """
     Execute legs in order with chase/urgent pairing.
@@ -830,6 +943,10 @@ async def execute_paired_legs(
             selected_premium=leg.get("selected_premium"),
             selection_ts=ts,
             entry_premium_match_tolerance_pct=entry_premium_match_tolerance_pct,
+            trade_id=trade_id,
+            hedge_position_id=hedge_position_id,
+            phase=phase,
+            leg_type=leg_type,
         )
         results.append(res)
         if not res.success:
