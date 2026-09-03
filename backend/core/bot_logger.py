@@ -97,6 +97,8 @@ _IMPORTANT_EVENTS = frozenset(
         "HEDGE_CLOSE_SKIP",
         "HEDGE_CLOSE_BLOCKED",
         "HEDGE_CASCADE",
+        "HEDGE_QTY_MISMATCH",
+        "HEDGE_LEGS_UNBALANCED",
         "HEDGE_PNL",
         "STRUCTURE_PNL",
         "STRUCTURE_LEG",
@@ -281,6 +283,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
     if event_type in (
         "ORDER_ID_LOST",
         "MIDPRICE_SIZE_MISMATCH",
+        "HEDGE_LEGS_UNBALANCED",
     ):
         bot_log.critical(msg)
     elif event_type == "ORPHAN_SL_SWEEP":
@@ -339,6 +342,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "DB_AUDIT_SKIP",
         "SLAVE_MTM_FALLBACK",
         "SLAVE_SIZING_ZERO",
+        "HEDGE_QTY_MISMATCH",
         "WING_SELECT_CHAIN_END",
         "WING_SELECT_PCT_MISS",
         "HEDGE_ROLL_PENDING",

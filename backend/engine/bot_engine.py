@@ -749,6 +749,315 @@ class BotEngine:
                     trade=trade,
                     delta_by_pid=delta_by_pid,
                 )
+            await self._reconcile_active_hedges(
+                db=db,
+                delta_by_pid=delta_by_pid,
+            )
+
+    async def _reconcile_active_hedges(
+        self,
+        *,
+        db: Any,
+        delta_by_pid: dict[int, dict[str, Any]],
+    ) -> None:
+        """Reconcile active HedgePosition qty vs Delta (same 30s tick as baskets)."""
+        from backend.models import HedgePosition
+
+        hedges = (
+            db.query(HedgePosition)
+            .filter(
+                HedgePosition.status == "active",
+                HedgePosition.is_bot_managed.is_(True),
+            )
+            .order_by(HedgePosition.id.asc())
+            .all()
+        )
+        for hedge in hedges:
+            await self._reconcile_one_hedge(
+                db=db,
+                hedge=hedge,
+                delta_by_pid=delta_by_pid,
+            )
+
+    def _delta_abs_qty_for_pid(
+        self,
+        delta_by_pid: dict[int, dict[str, Any]],
+        product_id: int,
+    ) -> tuple[int, float | None]:
+        """Return (abs_qty, entry_price_or_None) for a product from the Delta map."""
+        pid = int(product_id or 0)
+        if pid <= 0:
+            return 0, None
+        row = delta_by_pid.get(pid) or {}
+        try:
+            qty = abs(int(round(float(row.get("size") or 0))))
+        except (TypeError, ValueError):
+            qty = 0
+        entry: float | None
+        try:
+            raw_ep = row.get("entry_price")
+            entry = float(raw_ep) if raw_ep not in (None, "") else None
+            if entry is not None and entry <= 0:
+                entry = None
+        except (TypeError, ValueError):
+            entry = None
+        return qty, entry
+
+    async def _reconcile_one_hedge(
+        self,
+        *,
+        db: Any,
+        hedge: Any,
+        delta_by_pid: dict[int, dict[str, Any]],
+    ) -> None:
+        """
+        Match HedgePosition.quantity to Delta for call + put.
+
+        Hedge has no strategy_expected formula — Delta is truth for open size:
+          - balanced call==put and != DB → sync DB qty (+ fills/cost) to Delta
+          - unbalanced call!=put → CRITICAL + reduce_only heavy leg toward light
+            (restore straddle), then sync DB
+        """
+        from backend.engine.midprice_executor import (
+            execute_with_midprice,
+            get_live_position_size,
+            is_placing_order,
+        )
+
+        hedge_id = int(hedge.id)
+        db_qty_before = abs(int(getattr(hedge, "quantity", 0) or 0))
+        call_pid = int(getattr(hedge, "call_product_id", 0) or 0)
+        put_pid = int(getattr(hedge, "put_product_id", 0) or 0)
+        if call_pid <= 0 or put_pid <= 0:
+            return
+
+        call_delta, call_entry = self._delta_abs_qty_for_pid(
+            delta_by_pid, call_pid
+        )
+        put_delta, put_entry = self._delta_abs_qty_for_pid(
+            delta_by_pid, put_pid
+        )
+        call_sym = str(getattr(hedge, "call_symbol", "") or "")
+        put_sym = str(getattr(hedge, "put_symbol", "") or "")
+
+        if call_delta != put_delta:
+            log_and_buffer(
+                "HEDGE_LEGS_UNBALANCED",
+                hedge_id,
+                {
+                    "hedge_id": hedge_id,
+                    "call_product_id": call_pid,
+                    "put_product_id": put_pid,
+                    "call_symbol": call_sym,
+                    "put_symbol": put_sym,
+                    "call_delta_qty": call_delta,
+                    "put_delta_qty": put_delta,
+                    "db_qty": db_qty_before,
+                    "note": "straddle legs diverge — net delta exposure",
+                },
+            )
+            if call_delta > put_delta:
+                heavy_leg, heavy_pid, heavy_sym = "call", call_pid, call_sym
+                heavy_qty, light_qty = call_delta, put_delta
+            else:
+                heavy_leg, heavy_pid, heavy_sym = "put", put_pid, put_sym
+                heavy_qty, light_qty = put_delta, call_delta
+            excess = heavy_qty - light_qty
+            if excess <= 0:
+                return
+            log_and_buffer(
+                "HEDGE_QTY_MISMATCH",
+                hedge_id,
+                {
+                    "hedge_id": hedge_id,
+                    "leg": heavy_leg,
+                    "db_qty": db_qty_before,
+                    "delta_qty": heavy_qty,
+                    "product_id": heavy_pid,
+                    "symbol": heavy_sym,
+                    "target_qty": light_qty,
+                    "reason": "unbalanced_reduce_heavy",
+                    "correction_order": True,
+                },
+            )
+            key = (hedge_id, heavy_pid)
+            if key in self._reconcile_disabled:
+                return
+            if is_placing_order():
+                log_and_buffer(
+                    "QTY_RECONCILE_SKIP",
+                    hedge_id,
+                    {
+                        "reason": "is_placing_order_mid_tick",
+                        "product_id": heavy_pid,
+                        "scope": "hedge",
+                    },
+                )
+                return
+            result = await execute_with_midprice(
+                product_id=heavy_pid,
+                side="sell",
+                quantity=excess,
+                profile="chase",
+                delta_client=self.delta_client,
+                reason="HEDGE_MANUAL",
+                leg_label=f"hedge_reconcile_balance_{heavy_leg}",
+                symbol=heavy_sym,
+                max_chase_seconds=30,
+                reduce_only=True,
+                midprice_enabled=False,
+                check_position_size=False,
+                trade_id=None,
+                hedge_position_id=hedge_id,
+                phase="HEDGE_QTY_RECONCILE_BALANCE",
+                leg_type=f"hedge_{heavy_leg}",
+            )
+            if not result.success:
+                strikes = self._record_reconcile_failure(
+                    trade_id=hedge_id,
+                    product_id=heavy_pid,
+                    action="hedge_reduce_unbalanced",
+                    db_qty=db_qty_before,
+                    delta_qty=heavy_qty,
+                )
+                log_and_buffer(
+                    "QTY_RECONCILE_FAIL",
+                    hedge_id,
+                    {
+                        "hedge_id": hedge_id,
+                        "leg": heavy_leg,
+                        "product_id": heavy_pid,
+                        "action": "reduce_unbalanced",
+                        "scope": "hedge",
+                        "strikes": strikes,
+                        "error": str(result.error or "correction_failed"),
+                    },
+                )
+                return
+            self._clear_reconcile_failure(
+                trade_id=hedge_id, product_id=heavy_pid
+            )
+            log_and_buffer(
+                "QTY_RECONCILE_CORRECTED",
+                hedge_id,
+                {
+                    "hedge_id": hedge_id,
+                    "leg": heavy_leg,
+                    "product_id": heavy_pid,
+                    "symbol": heavy_sym,
+                    "action": "reduce_unbalanced",
+                    "scope": "hedge",
+                    "delta_qty": heavy_qty,
+                    "target_qty": light_qty,
+                    "corrected_qty": excess,
+                },
+            )
+            try:
+                call_delta = abs(
+                    int(
+                        round(
+                            float(
+                                await get_live_position_size(
+                                    self.delta_client, call_pid
+                                )
+                            )
+                        )
+                    )
+                )
+                put_delta = abs(
+                    int(
+                        round(
+                            float(
+                                await get_live_position_size(
+                                    self.delta_client, put_pid
+                                )
+                            )
+                        )
+                    )
+                )
+            except Exception as live_exc:
+                logger.warning(
+                    "Hedge #%s: live refresh after balance reduce failed: %s",
+                    hedge_id,
+                    live_exc,
+                )
+                return
+
+        if call_delta != put_delta:
+            return
+        delta_qty = int(call_delta)
+        if delta_qty <= 0:
+            return
+
+        qty_mismatched = delta_qty != db_qty_before
+        if qty_mismatched:
+            log_and_buffer(
+                "HEDGE_QTY_MISMATCH",
+                hedge_id,
+                {
+                    "hedge_id": hedge_id,
+                    "leg": "both",
+                    "db_qty": db_qty_before,
+                    "delta_qty": delta_qty,
+                    "product_id": call_pid,
+                    "put_product_id": put_pid,
+                    "symbol": call_sym,
+                    "put_symbol": put_sym,
+                    "action": "db_sync_to_delta",
+                    "correction_order": False,
+                },
+            )
+            hedge.quantity = delta_qty
+
+        fills_changed = False
+        if call_entry is not None and call_entry > 0:
+            prev = float(getattr(hedge, "call_fill_price", 0) or 0)
+            if abs(prev - call_entry) > 1e-6:
+                hedge.call_fill_price = float(call_entry)
+                fills_changed = True
+        if put_entry is not None and put_entry > 0:
+            prev = float(getattr(hedge, "put_fill_price", 0) or 0)
+            if abs(prev - put_entry) > 1e-6:
+                hedge.put_fill_price = float(put_entry)
+                fills_changed = True
+
+        if not (qty_mismatched or fills_changed):
+            self._clear_reconcile_failure(
+                trade_id=hedge_id, product_id=call_pid
+            )
+            self._clear_reconcile_failure(
+                trade_id=hedge_id, product_id=put_pid
+            )
+            return
+
+        db_qty = abs(int(getattr(hedge, "quantity", 0) or 0))
+        call_fill = float(getattr(hedge, "call_fill_price", 0) or 0)
+        put_fill = float(getattr(hedge, "put_fill_price", 0) or 0)
+        cost_usd = (
+            (call_fill + put_fill) * db_qty * float(OPTIONS_CONTRACT_VALUE)
+            if call_fill > 0 and put_fill > 0 and db_qty > 0
+            else 0.0
+        )
+        db.commit()
+        self._clear_reconcile_failure(trade_id=hedge_id, product_id=call_pid)
+        self._clear_reconcile_failure(trade_id=hedge_id, product_id=put_pid)
+        log_and_buffer(
+            "HEDGE_QTY_MISMATCH",
+            hedge_id,
+            {
+                "hedge_id": hedge_id,
+                "phase": "cost_sync",
+                "db_qty": db_qty,
+                "call_delta_qty": delta_qty,
+                "put_delta_qty": delta_qty,
+                "call_fill_price": call_fill if call_fill > 0 else None,
+                "put_fill_price": put_fill if put_fill > 0 else None,
+                "cost_usd": round(cost_usd, 4) if cost_usd > 0 else None,
+                "fills_updated": fills_changed,
+                "qty_synced": qty_mismatched,
+                "correction_order": False,
+            },
+        )
 
     async def _broadcast_qty_mismatch(
         self,
