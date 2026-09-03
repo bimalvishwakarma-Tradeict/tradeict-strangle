@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from backend.core.bot_logger import log_and_buffer
 
 VALID_WING_MODES = frozenset({"points", "delta", "pct_of_premium"})
+
+# Absolute |actual_pct − target_pct| above this → WING_SELECT_PCT_MISS / pct_nearest
+WING_PCT_MISS_TOLERANCE_PCT = 5.0
 
 
 def normalize_wing_mode(mode: str | None) -> str:
@@ -25,6 +27,15 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _wing_log(
+    event_type: str,
+    details: dict[str, Any],
+    *,
+    trade_id: int = 0,
+) -> None:
+    log_and_buffer(event_type, int(trade_id or 0), details)
 
 
 def _call_legs_beyond_short(
@@ -117,19 +128,19 @@ def _finish(
         "delta": float(cand.get("delta") or 0.0),
         "picked_by": picked_by,
     }
-    logger.info(
-        "[WING_SELECT] mode=%s leg=%s short_strike=%.2f wing_strike=%.2f "
-        "wing_prem=%.4f delta=%.4f gap_points=%.2f pct_of_short=%.2f "
-        "picked_by=%s",
-        mode,
-        leg,
-        float(short_strike),
-        result["strike"],
-        result["premium"],
-        result["delta"],
-        gap,
-        pct,
-        picked_by,
+    _wing_log(
+        "WING_SELECT",
+        {
+            "mode": mode,
+            "leg": leg,
+            "short_strike": round(float(short_strike), 2),
+            "wing_strike": round(result["strike"], 2),
+            "wing_prem": round(result["premium"], 4),
+            "delta": round(result["delta"], 4),
+            "gap_points": round(gap, 2),
+            "pct_of_short": round(pct, 2),
+            "picked_by": picked_by,
+        },
     )
     return result
 
@@ -149,10 +160,13 @@ def _pick_points_call(
         return pick, "points"
     # Chain exhausted before target — farthest OTM available
     pick = max(candidates, key=lambda c: c["strike"])
-    logger.warning(
-        "[WING_SELECT_CHAIN_END] leg=call requested=%.2f picked=%.2f",
-        target,
-        pick["strike"],
+    _wing_log(
+        "WING_SELECT_CHAIN_END",
+        {
+            "leg": "call",
+            "requested": round(target, 2),
+            "picked": round(float(pick["strike"]), 2),
+        },
     )
     return pick, "chain_end"
 
@@ -171,10 +185,13 @@ def _pick_points_put(
         pick = max(at_or_beyond, key=lambda c: c["strike"])
         return pick, "points"
     pick = min(candidates, key=lambda c: c["strike"])
-    logger.warning(
-        "[WING_SELECT_CHAIN_END] leg=put requested=%.2f picked=%.2f",
-        target,
-        pick["strike"],
+    _wing_log(
+        "WING_SELECT_CHAIN_END",
+        {
+            "leg": "put",
+            "requested": round(target, 2),
+            "picked": round(float(pick["strike"]), 2),
+        },
     )
     return pick, "chain_end"
 
@@ -206,14 +223,17 @@ def _pick_delta(
         candidates,
         key=lambda c: abs(abs(float(c.get("delta") or 0.0)) - mid),
     )
-    logger.warning(
-        "[WING_SELECT] delta band miss leg=%s band=[%.4f,%.4f] "
-        "picked_strike=%.2f picked_delta=%.4f — using nearest |delta|",
-        leg,
-        d_min,
-        d_max,
-        pick["strike"],
-        abs(float(pick.get("delta") or 0.0)),
+    _wing_log(
+        "WING_SELECT",
+        {
+            "delta_band_miss": True,
+            "leg": leg,
+            "band_min": round(d_min, 4),
+            "band_max": round(d_max, 4),
+            "picked_strike": round(float(pick["strike"]), 2),
+            "picked_delta": round(abs(float(pick.get("delta") or 0.0)), 4),
+            "note": "using_nearest_abs_delta",
+        },
     )
     return pick, "delta_nearest"
 
@@ -222,14 +242,35 @@ def _pick_pct(
     candidates: list[dict[str, Any]],
     short_premium: float,
     pct_of_premium: float,
+    *,
+    leg: str = "",
 ) -> tuple[dict[str, Any] | None, str]:
     if not candidates:
         return None, ""
-    target = float(short_premium) * max(0.0, float(pct_of_premium)) / 100.0
+    target_pct = max(0.0, float(pct_of_premium))
+    target = float(short_premium) * target_pct / 100.0
     pick = min(
         candidates,
         key=lambda c: abs(float(c.get("premium") or 0.0) - target),
     )
+    short_prem = float(short_premium or 0.0)
+    wing_prem = float(pick.get("premium") or 0.0)
+    actual_pct = (wing_prem / short_prem * 100.0) if short_prem > 0 else 0.0
+    if abs(actual_pct - target_pct) > WING_PCT_MISS_TOLERANCE_PCT:
+        _wing_log(
+            "WING_SELECT_PCT_MISS",
+            {
+                "leg": leg,
+                "target_pct": round(target_pct, 2),
+                "actual_pct": round(actual_pct, 2),
+                "target_premium": round(target, 4),
+                "picked_premium": round(wing_prem, 4),
+                "picked_strike": round(float(pick["strike"]), 2),
+                "candidates": len(candidates),
+                "tolerance_pct": WING_PCT_MISS_TOLERANCE_PCT,
+            },
+        )
+        return pick, "pct_nearest"
     return pick, "pct_of_premium"
 
 
@@ -274,10 +315,16 @@ def resolve_wing_strikes(
         )
     elif mode_n == "pct_of_premium":
         call_pick, call_by = _pick_pct(
-            call_cands, short_call_premium, pct_of_premium
+            call_cands,
+            short_call_premium,
+            pct_of_premium,
+            leg="call",
         )
         put_pick, put_by = _pick_pct(
-            put_cands, short_put_premium, pct_of_premium
+            put_cands,
+            short_put_premium,
+            pct_of_premium,
+            leg="put",
         )
     else:
         call_pick, call_by = _pick_points_call(

@@ -29,6 +29,9 @@ _IMPORTANT_EVENTS = frozenset(
         "BASKET_TARGET_SET",
         "TARGET_UNREACHABLE",
         "ENTRY_STRIKE_SELECT",
+        "WING_SELECT",
+        "WING_SELECT_CHAIN_END",
+        "WING_SELECT_PCT_MISS",
         "ENTRY_PREMIUM_MISS",
         "THETA_SELECT_SUBOPTIMAL",
         "NEW_STRIKE_SELECTED",
@@ -286,6 +289,12 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
             bot_log.warning(msg)
         else:
             bot_log.info(msg)
+    elif event_type == "WING_SELECT":
+        # Finish path = INFO; delta band miss = WARNING
+        if details.get("delta_band_miss"):
+            bot_log.warning(msg)
+        else:
+            bot_log.info(msg)
     elif event_type in (
         "ERROR",
         "ADJUSTMENT_FAIL",
@@ -330,6 +339,8 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "DB_AUDIT_SKIP",
         "SLAVE_MTM_FALLBACK",
         "SLAVE_SIZING_ZERO",
+        "WING_SELECT_CHAIN_END",
+        "WING_SELECT_PCT_MISS",
         "HEDGE_ROLL_PENDING",
         "HEDGE_ROLL_EXECUTE",
         "HEDGE_DTE_CONFIG_INVALID",
