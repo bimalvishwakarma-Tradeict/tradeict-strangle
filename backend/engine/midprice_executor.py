@@ -18,12 +18,14 @@ import time
 from typing import Any
 
 from backend.config import OPTIONS_CONTRACT_VALUE
+from backend.core.bot_logger import log_and_buffer
 from backend.core.delta_client import DeltaAPIError
 from backend.strategies.base_strategy import OrderResult
 
 logger = logging.getLogger(__name__)
 
-HOLD_SECONDS = 3.0
+HOLD_SECONDS = 5.0
+POST_CANCEL_SETTLE_SECONDS = 2.0
 DEFAULT_CHASE_MAX_SECONDS = 120
 CHASE_MAX_SECONDS_MIN = 10
 CHASE_MAX_SECONDS_MAX = 600
@@ -424,6 +426,61 @@ def _fire_exec_event(
         pass  # never disrupt order flow
 
 
+async def _pre_place_position_check(
+    delta_client: Any,
+    *,
+    product_id: int,
+    qty_intended: int,
+    leg_label: str,
+    attempt: int,
+    reduce_only: bool,
+    trade_id: int | None,
+    check_position_size: bool = True,
+) -> bool:
+    """Check live position BEFORE placing a new order.
+
+    Returns True if position is already filled (skip order).
+    For reduce_only (exits) or when check_position_size is False, this
+    check is skipped — only applies to opens.
+    Logs via log_and_buffer. Never raises.
+    """
+    if reduce_only or not check_position_size:
+        return False
+    try:
+        actual = abs(await get_live_position_size(delta_client, product_id))
+        if actual >= float(qty_intended):
+            log_and_buffer(
+                "PREPLACE_SKIP",
+                trade_id or 0,
+                {
+                    "leg": leg_label,
+                    "attempt": attempt,
+                    "intended": qty_intended,
+                    "actual_position": actual,
+                    "reason": "position_already_filled",
+                },
+            )
+            return True
+        log_and_buffer(
+            "PREPLACE_CHECK",
+            trade_id or 0,
+            {
+                "leg": leg_label,
+                "attempt": attempt,
+                "intended": qty_intended,
+                "actual_position": actual,
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "[PREPLACE_CHECK] failed leg=%s attempt=%s: %s",
+            leg_label,
+            attempt,
+            exc,
+        )
+    return False
+
+
 async def execute_with_midprice(
     *,
     product_id: int,
@@ -502,6 +559,20 @@ async def execute_with_midprice(
                 attempt,
             )
             order_kind = "market"
+            if await _pre_place_position_check(
+                delta_client,
+                product_id=product_id,
+                qty_intended=qty_total,
+                leg_label=leg_label,
+                attempt=attempt,
+                reduce_only=reduce_only,
+                trade_id=trade_id,
+                check_position_size=check_position_size,
+            ):
+                remaining = 0
+                filled_total = qty_total
+                fill_type_used = "position_already_filled"
+                break
             _fire_exec_event(
                 trade_id=trade_id,
                 hedge_position_id=hedge_position_id,
@@ -574,6 +645,20 @@ async def execute_with_midprice(
             order_kind = urgent_types[idx]
 
         if order_kind == "market":
+            if await _pre_place_position_check(
+                delta_client,
+                product_id=product_id,
+                qty_intended=qty_total,
+                leg_label=leg_label,
+                attempt=attempt,
+                reduce_only=reduce_only,
+                trade_id=trade_id,
+                check_position_size=check_position_size,
+            ):
+                remaining = 0
+                filled_total = qty_total
+                fill_type_used = "position_already_filled"
+                break
             logger.info(
                 "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=market "
                 "bid=%s ask=%s mid=%s limit=.. qty=%s filled=0",
@@ -654,6 +739,20 @@ async def execute_with_midprice(
                 ask,
             )
 
+        if await _pre_place_position_check(
+            delta_client,
+            product_id=product_id,
+            qty_intended=qty_total,
+            leg_label=leg_label,
+            attempt=attempt,
+            reduce_only=reduce_only,
+            trade_id=trade_id,
+            check_position_size=check_position_size,
+        ):
+            remaining = 0
+            filled_total = qty_total
+            fill_type_used = "position_already_filled"
+            break
         _fire_exec_event(
             trade_id=trade_id,
             hedge_position_id=hedge_position_id,
@@ -809,6 +908,14 @@ async def execute_with_midprice(
                 filled_total += extra
                 fill_price_sum += px * extra
                 remaining = max(0, remaining - extra)
+
+        # Post-cancel settle: let Delta matching engine finalise
+        log_and_buffer(
+            "POST_CANCEL_SETTLE",
+            trade_id or 0,
+            {"leg": leg_label, "attempt": attempt, "settle_seconds": POST_CANCEL_SETTLE_SECONDS},
+        )
+        await sleep(POST_CANCEL_SETTLE_SECONDS)
 
         # chase continues with FRESH mid; urgent next type
         if prof == "urgent" and attempt >= 4:
