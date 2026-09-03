@@ -1676,6 +1676,14 @@ export default function Dashboard() {
             1,
         )
         const currentPrice = Number(activeTrade.underlying_price)
+        const wingCall = activeTrade.wing_call
+        const wingPut = activeTrade.wing_put
+        const bothWings =
+          wingCall?.strike != null && wingPut?.strike != null
+        const maxLossUsd =
+          activeTrade.max_loss_usd != null
+            ? Number(activeTrade.max_loss_usd)
+            : null
         return (
           <div className="mt-4 overflow-hidden rounded-xl border border-gray-700 bg-gray-800">
             <button
@@ -1699,6 +1707,45 @@ export default function Dashboard() {
                   initialHoursRemaining={
                     Number(activeTrade.hours_to_expiry) || undefined
                   }
+                  wingCallStrike={
+                    bothWings ? Number(wingCall.strike) : null
+                  }
+                  wingPutStrike={bothWings ? Number(wingPut.strike) : null}
+                  wingCallPremium={
+                    bothWings && wingCall?.initial_premium != null
+                      ? Number(wingCall.initial_premium)
+                      : null
+                  }
+                  wingPutPremium={
+                    bothWings && wingPut?.initial_premium != null
+                      ? Number(wingPut.initial_premium)
+                      : null
+                  }
+                  callMarkPremium={
+                    activeTrade.call_leg?.current_premium != null
+                      ? Number(activeTrade.call_leg.current_premium)
+                      : activeTrade.call_premium != null
+                        ? Number(activeTrade.call_premium)
+                        : null
+                  }
+                  putMarkPremium={
+                    activeTrade.put_leg?.current_premium != null
+                      ? Number(activeTrade.put_leg.current_premium)
+                      : activeTrade.put_premium != null
+                        ? Number(activeTrade.put_premium)
+                        : null
+                  }
+                  wingCallMarkPremium={
+                    bothWings && wingCall?.current_premium != null
+                      ? Number(wingCall.current_premium)
+                      : null
+                  }
+                  wingPutMarkPremium={
+                    bothWings && wingPut?.current_premium != null
+                      ? Number(wingPut.current_premium)
+                      : null
+                  }
+                  maxLossUsd={maxLossUsd}
                   emptyMessage="Waiting for BTC price…"
                 />
               </div>

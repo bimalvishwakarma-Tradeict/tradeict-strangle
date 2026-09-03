@@ -146,49 +146,52 @@ async def get_payoff(
     put_premium: float = Query(...),
     quantity: float = Query(...),
     current_price: float = Query(...),
+    wing_call_strike: float | None = Query(default=None),
+    wing_put_strike: float | None = Query(default=None),
+    wing_call_premium: float | None = Query(default=None),
+    wing_put_premium: float | None = Query(default=None),
 ) -> PayoffResponse:
     """
-    Calculate short-strangle expiry payoff curve.
+    Expiry payoff curve: short strangle, or iron condor when wing strikes set.
 
+    USD = premium-point PnL × qty × OPTIONS_CONTRACT_VALUE.
     Does not require Delta account — pure math from query params.
     """
+    from backend.core.payoff import build_payoff_curve
+
     if current_price <= 0:
         raise HTTPException(status_code=400, detail="current_price must be > 0")
     if quantity <= 0:
         raise HTTPException(status_code=400, detail="quantity must be > 0")
 
-    # ±25% range, ~100 points
-    price_min = current_price * 0.75
-    price_max = current_price * 1.25
-    step = current_price / 100.0
-    if step <= 0:
-        raise HTTPException(status_code=400, detail="invalid step size")
-
-    premium_per_unit = call_premium + put_premium
-    total_premium = premium_per_unit * quantity
-
-    price_points: list[float] = []
-    expiry_pnl: list[float] = []
-
-    price = price_min
-    # Include upper bound with small epsilon tolerance
-    while price <= price_max + (step * 0.001):
-        p = float(price)
-        if put_strike <= p <= call_strike:
-            pnl = total_premium
-        elif p > call_strike:
-            pnl = total_premium - (p - call_strike) * quantity
-        else:
-            pnl = total_premium - (put_strike - p) * quantity
-        price_points.append(round(p, 4))
-        expiry_pnl.append(round(float(pnl), 4))
-        price += step
+    try:
+        curve = build_payoff_curve(
+            current_price=float(current_price),
+            short_call_strike=float(call_strike),
+            short_put_strike=float(put_strike),
+            short_call_premium=float(call_premium),
+            short_put_premium=float(put_premium),
+            quantity=int(quantity),
+            wing_call_strike=wing_call_strike,
+            wing_put_strike=wing_put_strike,
+            wing_call_premium=wing_call_premium,
+            wing_put_premium=wing_put_premium,
+            range_pct=0.20,
+            points=101,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return PayoffResponse(
-        price_points=price_points,
-        expiry_pnl=expiry_pnl,
-        breakeven_upper=call_strike + premium_per_unit,
-        breakeven_lower=put_strike - premium_per_unit,
+        price_points=curve["price_points"],
+        expiry_pnl=curve["expiry_pnl"],
+        breakeven_upper=curve["breakeven_upper"],
+        breakeven_lower=curve["breakeven_lower"],
+        max_profit_usd=curve["max_profit_usd"],
+        max_loss_usd=curve["max_loss_usd"],
+        risk_reward=curve["risk_reward"],
+        wings_on=curve["wings_on"],
+        net_credit_points=curve["net_credit_points"],
     )
 
 

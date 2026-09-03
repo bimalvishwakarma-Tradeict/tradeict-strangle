@@ -1818,6 +1818,55 @@ export default function PositionCard({
                 initialHoursRemaining={
                   Number(trade.hours_to_expiry) || undefined
                 }
+                wingCallStrike={
+                  wingCall?.strike != null && wingPut?.strike != null
+                    ? Number(wingCall.strike)
+                    : null
+                }
+                wingPutStrike={
+                  wingCall?.strike != null && wingPut?.strike != null
+                    ? Number(wingPut.strike)
+                    : null
+                }
+                wingCallPremium={
+                  wingCall?.strike != null &&
+                  wingPut?.strike != null &&
+                  wingCall?.initial_premium != null
+                    ? Number(wingCall.initial_premium)
+                    : null
+                }
+                wingPutPremium={
+                  wingCall?.strike != null &&
+                  wingPut?.strike != null &&
+                  wingPut?.initial_premium != null
+                    ? Number(wingPut.initial_premium)
+                    : null
+                }
+                callMarkPremium={
+                  call.current_premium != null
+                    ? Number(call.current_premium)
+                    : null
+                }
+                putMarkPremium={
+                  put.current_premium != null
+                    ? Number(put.current_premium)
+                    : null
+                }
+                wingCallMarkPremium={
+                  wingCall?.strike != null &&
+                  wingPut?.strike != null &&
+                  wingCall?.current_premium != null
+                    ? Number(wingCall.current_premium)
+                    : null
+                }
+                wingPutMarkPremium={
+                  wingCall?.strike != null &&
+                  wingPut?.strike != null &&
+                  wingPut?.current_premium != null
+                    ? Number(wingPut.current_premium)
+                    : null
+                }
+                maxLossUsd={maxLossUsd}
                 emptyMessage="Waiting for BTC price…"
                 compact
               />

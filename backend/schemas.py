@@ -58,6 +58,11 @@ class PayoffResponse(BaseModel):
     expiry_pnl: list[float]
     breakeven_upper: float
     breakeven_lower: float
+    max_profit_usd: float | None = None
+    max_loss_usd: float | None = None  # None = unlimited (wings off)
+    risk_reward: float | None = None
+    wings_on: bool = False
+    net_credit_points: float | None = None
 
 
 # --- Trade schemas ---
