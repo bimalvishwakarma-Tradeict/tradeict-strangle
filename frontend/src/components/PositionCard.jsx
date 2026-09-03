@@ -689,16 +689,60 @@ export function BasketStorySection({
 }
 
 /**
- * Props: { trade, recentAdjustments?, compact?, monitoringOnly? }
+ * Props: { trade, recentAdjustments?, compact?, monitoringOnly?, qtyMismatches? }
  * compact — dashboard side-by-side basket panel (B13)
  * monitoringOnly — bot monitoring below the grid
  */
+function QtyMismatchBanners({ mismatches }) {
+  if (!mismatches?.length) return null
+  return (
+    <div className="space-y-1 border-b border-gray-700">
+      {mismatches.map((row) => {
+        const key = `${row.trade_id}:${row.leg_symbol}:${row.at ?? ''}`
+        if (row.is_ghost_position) {
+          return (
+            <div
+              key={key}
+              data-alert="QTY_MISMATCH"
+              className="bg-red-900/80 px-3 py-2 text-xs font-semibold text-red-100"
+            >
+              GHOST POSITION — Manual Review Required
+              {row.leg_symbol ? (
+                <span className="ml-1 font-normal text-red-200/90">
+                  ({row.leg_symbol})
+                </span>
+              ) : null}
+            </div>
+          )
+        }
+        return (
+          <div
+            key={key}
+            data-alert="QTY_MISMATCH"
+            className="bg-amber-600/90 px-3 py-2 text-xs font-semibold text-amber-950"
+          >
+            QTY MISMATCH: {row.leg_symbol} DB=[{row.db_qty}] Delta=[{row.delta_qty}]
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export default function PositionCard({
   trade,
   recentAdjustments = [],
   compact = false,
   monitoringOnly = false,
+  qtyMismatches = [],
 }) {
+  const tradeMismatches = useMemo(() => {
+    const tid = Number(trade?.trade_id)
+    if (!Number.isFinite(tid)) return []
+    return (qtyMismatches || []).filter(
+      (row) => Number(row.trade_id) === tid,
+    )
+  }, [qtyMismatches, trade?.trade_id])
   const call = normalizeLeg(trade, 'call')
   const put = normalizeLeg(trade, 'put')
   const wingCall = normalizeLeg(trade, 'wing_call')
@@ -1101,6 +1145,7 @@ export default function PositionCard({
   if (monitoringOnly) {
     return (
       <article className="overflow-hidden rounded-xl border border-gray-700 bg-gray-800 shadow-lg">
+        <QtyMismatchBanners mismatches={tradeMismatches} />
         <div className="border-t border-gray-700 px-4 py-3">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-semibold text-white">
@@ -1174,6 +1219,7 @@ export default function PositionCard({
   if (compact) {
     return (
       <article className="flex h-full flex-col overflow-hidden rounded-xl border border-gray-700 bg-gray-800 shadow-lg">
+        <QtyMismatchBanners mismatches={tradeMismatches} />
         <header className="border-b border-gray-700 bg-gray-900/60 px-4 py-3 text-sm">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
@@ -1388,6 +1434,7 @@ export default function PositionCard({
 
   return (
     <article className="overflow-hidden rounded-xl border border-gray-700 bg-gray-800 shadow-lg">
+      <QtyMismatchBanners mismatches={tradeMismatches} />
       {/* Header */}
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-700 bg-gray-900/60 px-4 py-3 text-sm">
         <div className="font-semibold text-white">

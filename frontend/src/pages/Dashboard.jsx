@@ -233,6 +233,81 @@ function mtmClass(v) {
   return n > 0 ? 'text-green-400' : 'text-red-400'
 }
 
+function formatExecTs(ts) {
+  if (ts == null || ts === '') return '—'
+  try {
+    const raw = typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts
+    const d = new Date(raw)
+    if (Number.isNaN(d.getTime())) return String(ts)
+    return (
+      d.toLocaleTimeString('en-IN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+        timeZone: 'Asia/Kolkata',
+      }) + ' IST'
+    )
+  } catch {
+    return String(ts)
+  }
+}
+
+function execActionLabel(evt) {
+  const status = String(evt?.status || '').toLowerCase()
+  const kind = String(evt?.order_kind || '').toLowerCase()
+  if (status === 'filled') return 'filled'
+  if (status === 'timeout_market' || kind === 'market') return 'market fallback'
+  return 'attempting'
+}
+
+function execPriceLabel(evt) {
+  const px = evt?.fill_price ?? evt?.limit ?? evt?.mid
+  if (px == null || !Number.isFinite(Number(px))) return '—'
+  return `$${fmtMoney(px)}`
+}
+
+function LiveExecPanel({ execEvents }) {
+  const [open, setOpen] = useState(false)
+  if (!execEvents?.length) return null
+  return (
+    <section className="mb-4 overflow-hidden rounded-xl border border-cyan-800/50 bg-gray-900">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-800/50"
+      >
+        <h2 className="text-sm font-semibold text-white">
+          Live Execution
+          <span className="ml-2 text-xs font-normal text-gray-400">
+            ({execEvents.length})
+          </span>
+        </h2>
+        <span className="text-xs text-gray-400">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="max-h-64 overflow-y-auto border-t border-gray-800 px-4 py-2">
+          <ul className="space-y-1.5 font-mono text-[11px] text-gray-300">
+            {execEvents.map((evt, i) => (
+              <li
+                key={`${evt.ts ?? ''}-${evt.leg ?? ''}-${evt.attempt ?? ''}-${i}`}
+                className="flex flex-wrap gap-x-3 gap-y-0.5 border-b border-gray-800/80 pb-1.5 last:border-0"
+              >
+                <span className="text-gray-500">{formatExecTs(evt.ts)}</span>
+                <span className="uppercase text-cyan-300">
+                  {evt.leg || '—'}
+                </span>
+                <span className="text-amber-200">{execActionLabel(evt)}</span>
+                <span className="text-gray-200">{execPriceLabel(evt)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  )
+}
+
 function formatSignedMoney(v) {
   const n = Number(v)
   if (!Number.isFinite(n)) return '—'
@@ -1296,8 +1371,18 @@ function StructureHistoryCard({ structure, ledger }) {
 }
 
 export default function Dashboard() {
-  const { trades, activeHedge, wsStatus, loading, errors, adjustments, autoTradeStatus, refetch } =
-    useTrades()
+  const {
+    trades,
+    activeHedge,
+    wsStatus,
+    loading,
+    errors,
+    adjustments,
+    autoTradeStatus,
+    refetch,
+    execEvents,
+    qtyMismatches,
+  } = useTrades()
   const [updatedAt, setUpdatedAt] = useState(() => formatIstTime())
   const [backendOnline, setBackendOnline] = useState(true)
   const [accountName, setAccountName] = useState('')
@@ -1548,6 +1633,8 @@ export default function Dashboard() {
         onEnterNow={handleEnterNow}
       />
 
+      <LiveExecPanel execEvents={execEvents} />
+
       {!loading && activeHedge && (
         <StructurePnlBar
           hedgeNetPnl={
@@ -1583,6 +1670,7 @@ export default function Dashboard() {
               <PositionCard
                 trade={trades[0]}
                 recentAdjustments={adjustments}
+                qtyMismatches={qtyMismatches}
                 compact
               />
             ) : (
@@ -1606,6 +1694,7 @@ export default function Dashboard() {
               <PositionCard
                 trade={trades[0]}
                 recentAdjustments={adjustments}
+                qtyMismatches={qtyMismatches}
                 monitoringOnly
               />
             </div>
@@ -1618,6 +1707,7 @@ export default function Dashboard() {
                   key={trade.trade_id}
                   trade={trade}
                   recentAdjustments={adjustments}
+                  qtyMismatches={qtyMismatches}
                 />
               ))}
             </div>

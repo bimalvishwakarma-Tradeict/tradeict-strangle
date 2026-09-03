@@ -81,6 +81,12 @@ export function useTrades() {
   const [autoTradeStatus, setAutoTradeStatus] = useState(null)
   /** Live long hedge panel payload (null when none). */
   const [activeHedge, setActiveHedge] = useState(null)
+  /** Latest DB vs Delta qty mismatches (one row per trade_id + leg_symbol). */
+  const [qtyMismatches, setQtyMismatches] = useState([])
+  /** Midprice chase EXEC_EVENT feed — newest first, cap 20. */
+  const [execEvents, setExecEvents] = useState([])
+
+  const EXEC_EVENT_BUFFER = 20
 
   const applyTradesList = useCallback((list) => {
     const next = new Map()
@@ -721,6 +727,36 @@ export function useTrades() {
         next.delete(msg.trade_id)
         return next
       })
+      setQtyMismatches((prev) =>
+        prev.filter((row) => Number(row.trade_id) !== Number(msg.trade_id)),
+      )
+      return
+    }
+
+    if (msg.type === 'QTY_MISMATCH') {
+      const row = {
+        trade_id: msg.trade_id,
+        leg_symbol: msg.leg_symbol,
+        db_qty: msg.db_qty,
+        delta_qty: msg.delta_qty,
+        is_ghost_position: Boolean(msg.is_ghost_position),
+        leg_type: msg.leg_type,
+        product_id: msg.product_id,
+        reason: msg.reason,
+        at: Date.now(),
+      }
+      setQtyMismatches((prev) => {
+        const key = `${row.trade_id}:${row.leg_symbol}`
+        const next = prev.filter(
+          (item) => `${item.trade_id}:${item.leg_symbol}` !== key,
+        )
+        return [row, ...next]
+      })
+      return
+    }
+
+    if (msg.type === 'EXEC_EVENT') {
+      setExecEvents((prev) => [msg, ...prev].slice(0, EXEC_EVENT_BUFFER))
       return
     }
 
@@ -795,5 +831,7 @@ export function useTrades() {
     loading,
     refetch,
     autoTradeStatus,
+    qtyMismatches,
+    execEvents,
   }
 }
