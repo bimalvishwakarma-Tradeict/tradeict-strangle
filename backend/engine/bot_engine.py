@@ -3031,6 +3031,8 @@ class BotEngine:
 
         # Step 4: Close ALL open legs via centralised helper
         # SAFE ORDER: shorts → wings → conversion hedges (never reverse)
+        from backend.strategies.s001_short_strangle.logic import log_sequence_step
+
         close_results: dict[int, Any] = {}
         basket_close_times: dict[str, tuple[Any, Any]] = {}
         hard_fail = False
@@ -3108,18 +3110,23 @@ class BotEngine:
                     },
                 )
         else:
-            from backend.engine.wing_exit import close_basket_legs
             from backend.strategies.base_strategy import OrderResult
 
-            close_bundle = await close_basket_legs(
+            log_sequence_step(
+                trade_id=trade_id,
+                action="exit_sequence_start",
+                phase="basket",
+                position=0,
+                reason=reason,
+            )
+            close_bundle = await self.order_executor.close_basket_legs_phased(
                 trade=trade,
                 reason=reason,
                 db=None,
                 delta_client=self.delta_client,
-                order_executor=self.order_executor,
-                legs_to_close="all",
                 legs=all_open_legs,
                 verify_on_delta=True,
+                include_structure_hedge=False,
             )
             for row in close_bundle.legs:
                 if row.leg_id is None:

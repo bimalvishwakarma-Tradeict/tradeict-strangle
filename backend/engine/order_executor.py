@@ -317,3 +317,228 @@ class OrderExecutor:
                     await asyncio.sleep(self.RETRY_DELAY_SECONDS)
 
         return OrderResult(success=False, error=last_error)
+
+    async def close_basket_legs_phased(
+        self,
+        *,
+        trade: Any,
+        reason: str,
+        db: Any,
+        delta_client: Any,
+        legs: list[Any],
+        verify_on_delta: bool = True,
+        include_structure_hedge: bool = False,
+    ) -> Any:
+        """
+        Close basket legs in enforced phases: Shorts → Wings → Hedges.
+
+        Stop-loss exits skip mid-price sequencing — market close via wing_exit.
+        """
+        from backend.engine.wing_exit import (
+            CloseResult,
+            both_shorts_closed,
+            close_basket_legs,
+            is_conversion_hedge_leg,
+            is_short_basket_leg,
+            is_wing_leg,
+        )
+        from backend.strategies.s001_short_strangle.logic import (
+            exit_phases_for_trade,
+            is_stoploss_exit_reason,
+            log_sequence_step,
+        )
+
+        trade_id = int(getattr(trade, "id", 0) or 0)
+        has_wings = any(is_wing_leg(leg) for leg in legs)
+        phases = exit_phases_for_trade(
+            include_hedge=include_structure_hedge or any(
+                is_conversion_hedge_leg(leg) for leg in legs
+            ),
+            condor_only=has_wings and not include_structure_hedge,
+        )
+
+        if is_stoploss_exit_reason(reason):
+            log_sequence_step(
+                trade_id=trade_id,
+                action="exit_parallel_market",
+                phase="all",
+                position=0,
+                reason=reason,
+            )
+            return await close_basket_legs(
+                trade=trade,
+                reason=reason,
+                db=db,
+                delta_client=delta_client,
+                order_executor=self,
+                legs_to_close="all",
+                legs=legs,
+                verify_on_delta=verify_on_delta,
+            )
+
+        combined = CloseResult()
+        open_legs = list(legs)
+
+        for pos, phase in enumerate(phases, start=1):
+            log_sequence_step(
+                trade_id=trade_id,
+                action="exit_phase_start",
+                phase=phase,
+                position=pos,
+                reason=reason,
+            )
+
+            if phase == "short":
+                if not both_shorts_closed(open_legs):
+                    bundle = await close_basket_legs(
+                        trade=trade,
+                        reason=reason,
+                        db=db,
+                        delta_client=delta_client,
+                        order_executor=self,
+                        legs_to_close="shorts_only",
+                        legs=open_legs,
+                        verify_on_delta=verify_on_delta,
+                    )
+                else:
+                    bundle = CloseResult()
+            elif phase == "wing":
+                if not both_shorts_closed(open_legs):
+                    log_sequence_step(
+                        trade_id=trade_id,
+                        action="exit_phase_blocked",
+                        phase=phase,
+                        position=pos,
+                        reason="shorts_not_fully_closed",
+                    )
+                    continue
+                bundle = await close_basket_legs(
+                    trade=trade,
+                    reason=reason,
+                    db=db,
+                    delta_client=delta_client,
+                    order_executor=self,
+                    legs_to_close="wings_only",
+                    legs=open_legs,
+                    verify_on_delta=verify_on_delta,
+                )
+            else:
+                hedge_legs = [
+                    leg
+                    for leg in open_legs
+                    if is_conversion_hedge_leg(leg)
+                    and str(getattr(leg, "status", "open")).lower() == "open"
+                ]
+                if not hedge_legs:
+                    log_sequence_step(
+                        trade_id=trade_id,
+                        action="exit_phase_skip",
+                        phase=phase,
+                        position=pos,
+                        reason="no_conversion_hedges",
+                    )
+                    continue
+                if has_wings and not both_shorts_closed(open_legs):
+                    log_sequence_step(
+                        trade_id=trade_id,
+                        action="exit_phase_blocked",
+                        phase=phase,
+                        position=pos,
+                        reason="shorts_not_fully_closed",
+                    )
+                    continue
+                bundle = await close_basket_legs(
+                    trade=trade,
+                    reason=reason,
+                    db=db,
+                    delta_client=delta_client,
+                    order_executor=self,
+                    legs_to_close="all",
+                    legs=hedge_legs,
+                    verify_on_delta=verify_on_delta,
+                )
+
+            combined.legs.extend(bundle.legs)
+            combined.shorts_closed += bundle.shorts_closed
+            combined.wings_closed += bundle.wings_closed
+            combined.hedges_closed += bundle.hedges_closed
+            if bundle.any_wing_fail:
+                combined.any_wing_fail = True
+                combined.wings_failed.extend(bundle.wings_failed)
+
+            for leg in open_legs:
+                lid = getattr(leg, "id", None)
+                for row in bundle.legs:
+                    if row.success and row.leg_id is not None and int(row.leg_id) == int(lid):
+                        leg.status = "closed"
+
+            log_sequence_step(
+                trade_id=trade_id,
+                action="exit_phase_complete",
+                phase=phase,
+                position=pos,
+                shorts_closed=bundle.shorts_closed,
+                wings_closed=bundle.wings_closed,
+                hedges_closed=bundle.hedges_closed,
+            )
+
+        log_sequence_step(
+            trade_id=trade_id,
+            action="parallel_fill_completed",
+            phase="exit",
+            position=len(phases),
+            reason=reason,
+        )
+        return combined
+
+    async def execute_entry_phase(
+        self,
+        *,
+        trade_id: int,
+        phase: str,
+        position: int,
+        place_fn: Any,
+        roles: list[str],
+    ) -> list[Any]:
+        """
+        Execute one entry phase sequentially. One-way dependency: failure in
+        this phase does not unwind prior phases (caller handles retry).
+        """
+        from backend.strategies.s001_short_strangle.logic import log_sequence_step
+
+        log_sequence_step(
+            trade_id=trade_id,
+            action="entry_phase_start",
+            phase=phase,
+            position=position,
+            roles=roles,
+        )
+        results: list[Any] = []
+        for role in roles:
+            log_sequence_step(
+                trade_id=trade_id,
+                action="entry_leg_start",
+                phase=phase,
+                position=position,
+                leg_type=role,
+            )
+            result = await place_fn(role)
+            results.append(result)
+            if not getattr(result, "success", False):
+                log_sequence_step(
+                    trade_id=trade_id,
+                    action="entry_phase_failed",
+                    phase=phase,
+                    position=position,
+                    leg_type=role,
+                    error=str(getattr(result, "error", "") or "failed"),
+                )
+                return results
+        log_sequence_step(
+            trade_id=trade_id,
+            action="entry_phase_complete",
+            phase=phase,
+            position=position,
+            roles=roles,
+        )
+        return results

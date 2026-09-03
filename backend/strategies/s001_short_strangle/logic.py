@@ -1568,6 +1568,95 @@ class ShortStrangleStrategy(BaseStrategy):
         )
 
 
+# ─── Leg sequencing (Fix 5) ────────────────────────────────────────────────
+# Full structure: entry Wings → Shorts → Hedges; exit Shorts → Wings → Hedges.
+# Condor cycle (basket only): entry Wings → Shorts; exit Shorts → Wings.
+
+ENTRY_SEQUENCE: tuple[str, ...] = ("wing", "short", "hedge")
+EXIT_SEQUENCE: tuple[str, ...] = ("short", "wing", "hedge")
+CONDOR_ENTRY_SEQUENCE: tuple[str, ...] = ("wing", "short")
+CONDOR_EXIT_SEQUENCE: tuple[str, ...] = ("short", "wing")
+
+_STOPLOSS_REASON_MARKERS = frozenset(
+    {
+        "STOPLOSS",
+        "HEDGE_STOPLOSS",
+        "SL",
+        "STOP_LOSS",
+    }
+)
+
+
+def leg_entry_phase(leg_type: str) -> str:
+    """Map leg_type to entry phase: wing | short | hedge."""
+    lt = str(leg_type or "").lower().strip()
+    if lt.startswith("wing"):
+        return "wing"
+    if lt.startswith("hedge"):
+        return "hedge"
+    if lt in ("call", "put"):
+        return "short"
+    return "short"
+
+
+def leg_exit_phase(leg_type: str, *, is_long: bool = False) -> str:
+    """Map leg_type to exit phase: short | wing | hedge."""
+    lt = str(leg_type or "").lower().strip()
+    if lt.startswith("hedge"):
+        return "hedge"
+    if lt.startswith("wing") or (is_long and lt in ("call", "put")):
+        return "wing"
+    if lt in ("call", "put") and not is_long:
+        return "short"
+    if is_long:
+        return "wing"
+    return "short"
+
+
+def is_stoploss_exit_reason(reason: str) -> bool:
+    """True when exit should use parallel market orders (no mid-price sequencing)."""
+    upper = str(reason or "").upper().strip()
+    return any(marker in upper for marker in _STOPLOSS_REASON_MARKERS)
+
+
+def is_condor_trade(*, wings_enabled: bool = False, has_wing_legs: bool = False) -> bool:
+    return bool(wings_enabled or has_wing_legs)
+
+
+def entry_phases_for_trade(*, include_hedge: bool, condor_only: bool = False) -> tuple[str, ...]:
+    if condor_only or not include_hedge:
+        return CONDOR_ENTRY_SEQUENCE
+    return ENTRY_SEQUENCE
+
+
+def exit_phases_for_trade(*, include_hedge: bool, condor_only: bool = False) -> tuple[str, ...]:
+    if condor_only or not include_hedge:
+        return CONDOR_EXIT_SEQUENCE
+    return EXIT_SEQUENCE
+
+
+def log_sequence_step(
+    *,
+    trade_id: int,
+    action: str,
+    phase: str,
+    position: int,
+    leg_type: str = "",
+    **details: Any,
+) -> None:
+    """Log a sequencing step via log_and_buffer (never plain logger for new events)."""
+    from backend.core.bot_logger import log_and_buffer
+
+    payload: dict[str, Any] = {
+        "action": action,
+        "phase": phase,
+        "sequence_position": int(position),
+        "leg_type": leg_type,
+    }
+    payload.update(details)
+    log_and_buffer("LEG_SEQUENCE", trade_id, payload)
+
+
 if __name__ == "__main__":
     import asyncio
     from datetime import timedelta

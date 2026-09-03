@@ -880,14 +880,12 @@ class AutoTradeEngine:
             },
         )
 
-        # Hedge gate — only when hedge_enabled. When False, skip entirely
-        # (byte-identical to pre-hedge auto entry).
+        # Hedge gate deferred until AFTER wings+shorts (Fix 5 sequencing).
+        # pending_close check still blocks entry before any orders.
         hedge_position_id: int | None = None
-        if bool(getattr(settings, "hedge_enabled", False)):
-            from backend.engine.hedge_lifecycle import (
-                get_active_hedge,
-                get_pending_close_hedge,
-            )
+        hedge_enabled_for_entry = bool(getattr(settings, "hedge_enabled", False))
+        if hedge_enabled_for_entry:
+            from backend.engine.hedge_lifecycle import get_pending_close_hedge
 
             pending = get_pending_close_hedge(
                 db,
@@ -913,48 +911,6 @@ class AutoTradeEngine:
                     "[ENTRY_GUARD_BLOCK] guard=hedge_pending_close | "
                     "hedge=%s | underlying=%s",
                     int(pending.id),
-                    underlying,
-                )
-                return
-
-            hedge_position_id = await self._hedge_entry_gate(
-                settings=settings,
-                db=db,
-                account=account,
-                client=client,
-                underlying=underlying,
-            )
-            if hedge_position_id is None:
-                return
-
-            # Preventive: never place a basket without a live active hedge
-            active_hedge = get_active_hedge(
-                db,
-                account_id=int(account.id),
-                underlying=str(underlying),
-            )
-            if (
-                active_hedge is None
-                or int(active_hedge.id) != int(hedge_position_id)
-                or str(active_hedge.status or "").lower().strip() != "active"
-            ):
-                log_and_buffer(
-                    "ENTRY_GUARD_BLOCK",
-                    0,
-                    {
-                        "source": "auto",
-                        "guard": "no_active_hedge",
-                        "underlying": underlying,
-                        "hedge_position_id": hedge_position_id,
-                        "hedge_status": (
-                            None
-                            if active_hedge is None
-                            else str(active_hedge.status or "")
-                        ),
-                    },
-                )
-                logger.error(
-                    "[ENTRY_GUARD_BLOCK] guard=no_active_hedge | underlying=%s",
                     underlying,
                 )
                 return
@@ -1492,8 +1448,32 @@ class AutoTradeEngine:
             )
             selection_ts = _time_mod.monotonic()
 
+            from backend.strategies.s001_short_strangle.logic import (
+                log_sequence_step,
+            )
+
+            if wings_enabled:
+                log_sequence_step(
+                    trade_id=0,
+                    action="entry_phase_start",
+                    phase="wing",
+                    position=1,
+                    underlying=str(underlying),
+                )
+            short_phase_logged = False
+
             for plan_idx, spec in enumerate(plan):
                 mp_profile = profile_for_group_leg(plan_idx)
+
+                if spec.role in ("call", "put") and not short_phase_logged:
+                    short_phase_logged = True
+                    log_sequence_step(
+                        trade_id=0,
+                        action="entry_phase_start",
+                        phase="short",
+                        position=2,
+                        underlying=str(underlying),
+                    )
 
                 async def _place_one(
                     _spec=spec,
@@ -1730,6 +1710,50 @@ class AutoTradeEngine:
                         float(put_sl_trigger_price)
                         if put_sl_trigger_price
                         else None
+                    )
+
+            # Phase 3 (Fix 5): Structure hedge AFTER wings + shorts succeed.
+            # One-way dependency: hedge failure keeps basket; retry hedge only.
+            if hedge_enabled_for_entry:
+                from backend.strategies.s001_short_strangle.logic import (
+                    log_sequence_step,
+                )
+
+                log_sequence_step(
+                    trade_id=0,
+                    action="entry_phase_start",
+                    phase="hedge",
+                    position=3,
+                    underlying=str(underlying),
+                )
+                hedge_position_id = await self._hedge_entry_gate(
+                    settings=settings,
+                    db=db,
+                    account=account,
+                    client=client,
+                    underlying=underlying,
+                )
+                if hedge_position_id is None:
+                    log_sequence_step(
+                        trade_id=0,
+                        action="entry_phase_failed",
+                        phase="hedge",
+                        position=3,
+                        underlying=str(underlying),
+                        note="wings_and_shorts_kept",
+                    )
+                    logger.critical(
+                        "[ENTRY_SEQUENCE] hedge phase failed after wings+shorts "
+                        "placed for %s — basket kept (one-way dependency)",
+                        underlying,
+                    )
+                else:
+                    log_sequence_step(
+                        trade_id=0,
+                        action="entry_phase_complete",
+                        phase="hedge",
+                        position=3,
+                        hedge_position_id=int(hedge_position_id),
                     )
 
             # TP/SL locked to initial deployment premium (actual fills)
@@ -2799,10 +2823,11 @@ class AutoTradeEngine:
         underlying: str,
     ) -> int | None:
         """
-        Ensure an active long hedge exists before placing the short basket.
+        Ensure an active long hedge exists. Called AFTER wings+shorts in Fix 5
+        entry sequence (Wings → Shorts → Hedges).
 
-        Returns hedge_positions.id on success, or None if the basket must NOT
-        be placed (caller should return immediately).
+        Returns hedge_positions.id on success, or None if hedge open failed
+        (caller keeps basket — one-way dependency, no rollback).
         """
         from backend.core.bot_logger import log_and_buffer
         from backend.engine.hedge_lifecycle import (
@@ -2951,7 +2976,7 @@ class AutoTradeEngine:
                 },
             )
             logger.critical(
-                "[HEDGE_GATE_BLOCK] hedge open failed — NOT placing basket. %s",
+                "[HEDGE_GATE_BLOCK] hedge open failed after basket placed. %s",
                 reason,
             )
             await self._record_hedge_gate_failure(
@@ -2994,8 +3019,8 @@ class AutoTradeEngine:
                 },
             )
             logger.critical(
-                "[HEDGE_GATE_BLOCK] unexpected hedge open error — "
-                "NOT placing basket: %s",
+                "[HEDGE_GATE_BLOCK] unexpected hedge open error after basket "
+                "placed: %s",
                 exc,
                 exc_info=True,
             )

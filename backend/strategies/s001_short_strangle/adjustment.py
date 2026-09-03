@@ -1278,6 +1278,30 @@ class AdjustmentExecutor:
                     )
                 logger.info("[AUDIT] Triggered leg confirmed on Delta")
 
+            from backend.models import Leg as _LegModel
+            from backend.strategies.s001_short_strangle.logic import (
+                is_condor_trade,
+                log_sequence_step,
+            )
+
+            _open_wing_count = (
+                db_session.query(_LegModel)
+                .filter(
+                    _LegModel.trade_id == trade_id_lookup,
+                    _LegModel.leg_type.in_(("wing_call", "wing_put")),
+                    _LegModel.status == "open",
+                )
+                .count()
+            )
+            if is_condor_trade(has_wing_legs=_open_wing_count > 0):
+                log_sequence_step(
+                    trade_id=trade_id_lookup,
+                    action="condor_cycle_exit",
+                    phase="short",
+                    position=1,
+                    leg_type=triggered_leg_type,
+                )
+
             # Step 3→4: Close triggered leg
             # If this leg was protected by a legacy *separate* SL order
             # (delta_sl_order_id exists), cancel it before/around the close so
@@ -1355,6 +1379,15 @@ class AdjustmentExecutor:
                     )
                 else:
                     logger.info("[AUDIT] Triggered leg closed on Delta")
+
+            if is_condor_trade(has_wing_legs=_open_wing_count > 0):
+                log_sequence_step(
+                    trade_id=trade_id_lookup,
+                    action="condor_cycle_entry",
+                    phase="short",
+                    position=2,
+                    leg_type=triggered_leg_type,
+                )
 
             # Step 5: Enter new leg WITH inline bracket (mark/offer provisional).
             # Chicken-and-egg: attach expected × uni_sl now; after fill try amend
