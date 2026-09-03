@@ -192,7 +192,21 @@ def resolve_adjustment_basket_qty(
 
     raw_qty = int(math.ceil(hq * float(raw_pct) / 100.0))
     max_qty = max(1, int(math.floor(hq * 0.5)))
-    new_qty = max(1, min(raw_qty, max_qty))
+    capped = max(1, min(raw_qty, max_qty))
+    # Cap must never shrink below current leg qty — increase_dynamic only grows.
+    # Entry can already be above 50% of hedge; cutting on adjustment is wrong.
+    if capped < base_qty:
+        logger.info(
+            "[ADJ_QTY_CAP_SKIP] trade=%s current=%s raw=%s cap=%s "
+            "reason=cap_would_shrink",
+            trade_id if trade_id is not None else "?",
+            base_qty,
+            raw_qty,
+            max_qty,
+        )
+        new_qty = base_qty
+    else:
+        new_qty = capped
     logger.info(
         "[ADJ_QTY_DYNAMIC] trade=%s | hedge_theta=%.4f | mult=%.1f | "
         "call_ask=%.2f | raw_pct=%.2f | raw_qty=%d | cap=%d | new_qty=%d",

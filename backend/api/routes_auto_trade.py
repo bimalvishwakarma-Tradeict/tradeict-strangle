@@ -106,7 +106,7 @@ class AutoTradeSettingsSchema(BaseModel):
     basket_target_mode: str = "THETA"  # THETA | PCT
     basket_target_multiple: float = Field(default=1.5, ge=0.1, le=10)
     basket_qty_mode: str = "fixed"  # fixed | pct_of_hedge
-    basket_qty_pct_of_hedge: float = Field(default=20.0, gt=0, le=100)
+    basket_qty_pct_of_hedge: float = Field(default=20.0, gt=0, le=1000)
     hedge_qty_lots: int | None = Field(default=None, ge=1, le=10000)
     basket_qty_dynamic: bool = False
     basket_qty_theta_mult: float = Field(default=2.0, ge=0.1, le=10.0)

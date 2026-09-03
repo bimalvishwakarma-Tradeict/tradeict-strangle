@@ -798,7 +798,7 @@ export default function AutoTrade() {
           ? 'pct_of_hedge'
           : 'fixed',
       basket_qty_pct_of_hedge: Math.min(
-        100,
+        1000,
         Math.max(1, Number(basketQtyPctOfHedge) || 20),
       ),
       hedge_qty_lots:
@@ -1050,7 +1050,7 @@ export default function AutoTrade() {
   const basketSizingPreview = useMemo(() => {
     if (basketSizingChoice !== 'manual_pct' || !hedgeEnabled) return null
     const hedgeLots = Math.max(1, Number(hedgeQtyLots) || 1)
-    const pct = Math.min(100, Math.max(1, Number(basketQtyPctOfHedge) || 20))
+    const pct = Math.min(1000, Math.max(1, Number(basketQtyPctOfHedge) || 20))
     const basketLots = Math.ceil((hedgeLots * pct) / 100)
     return { hedgeLots, pct, basketLots }
   }, [basketSizingChoice, hedgeEnabled, hedgeQtyLots, basketQtyPctOfHedge])
@@ -1101,7 +1101,7 @@ export default function AutoTrade() {
       quantity: Math.max(1, Number(quantity) || 1),
       basket_qty_mode: effectiveBasketQtyMode,
       basket_qty_pct_of_hedge: Math.min(
-        100,
+        1000,
         Math.max(1, Number(basketQtyPctOfHedge) || 20),
       ),
       hedge_qty_lots:
@@ -1762,14 +1762,14 @@ export default function AutoTrade() {
                     <input
                       type="number"
                       min={1}
-                      max={100}
+                      max={1000}
                       step={1}
                       value={basketQtyPctOfHedge}
                       onChange={(e) =>
                         setBasketQtyPctOfHedge(
                           String(
                             Math.min(
-                              100,
+                              1000,
                               Math.max(1, Number(e.target.value) || 1),
                             ),
                           ),
@@ -1801,6 +1801,12 @@ export default function AutoTrade() {
                           (round up)
                         </>
                       )}
+                    </p>
+                  )}
+                  {Number(basketQtyPctOfHedge) > 100 && (
+                    <p className="text-xs text-amber-400/90">
+                      Basket ab hedge se bada hai — margin aur wings ka premium
+                      dono us hisaab se badhenge.
                     </p>
                   )}
                 </>
@@ -1872,6 +1878,11 @@ export default function AutoTrade() {
                   Increase — dynamic theta-based
                   <span className="mt-0.5 block text-xs text-gray-500">
                     Requires % of hedge — dynamic. Cap: 50% of hedge.
+                  </span>
+                  <span className="mt-0.5 block text-xs text-gray-500">
+                    Cap: 50% of hedge. Agar entry size cap se upar hai to
+                    adjustment par qty unchanged rahegi — cap kabhi qty
+                    ghatayega nahi.
                   </span>
                 </span>
               </label>

@@ -260,7 +260,104 @@ def test_all_modes_do_not_touch_wing_qty() -> None:
         assert qty >= 1
 
 
-def test_resolve_sizing_mode_fixed_when_hedge_off() -> None:
+def test_resolve_basket_qty_from_hedge_above_100_pct() -> None:
+    assert resolve_basket_qty_from_hedge(100, 250.0) == 250
+    assert resolve_basket_qty_from_hedge(100, 300.0) == 300
+
+
+def test_schema_basket_qty_pct_accepts_250_rejects_1001() -> None:
+    from pydantic import ValidationError
+
+    from backend.api.routes_auto_trade import AutoTradeSettingsSchema
+
+    ok = AutoTradeSettingsSchema(basket_qty_pct_of_hedge=250.0)
+    assert ok.basket_qty_pct_of_hedge == 250.0
+    with pytest.raises(ValidationError):
+        AutoTradeSettingsSchema(basket_qty_pct_of_hedge=1001.0)
+
+
+def test_increase_dynamic_cap_skip_when_would_shrink(caplog: pytest.LogCaptureFixture) -> None:
+    """
+    Entry already above 50% hedge cap: current=13, raw=13, cap=2 → stay 13.
+    """
+    import logging
+
+    # hq=5 → cap floor(2.5)=2; raw_pct=260 → ceil(5*2.6)=13
+    settings = _settings(
+        adjustment_qty_mode="increase_dynamic",
+        basket_qty_dynamic=True,
+        basket_qty_theta_mult=2.0,
+    )
+    with caplog.at_level(logging.INFO):
+        qty, close = resolve_adjustment_basket_qty(
+            settings=settings,
+            triggered_leg_qty=13,
+            hedge_qty=5,
+            hedge_call_theta=26.0,
+            new_strike_ask=20.0,
+            trade_id=42,
+        )
+    assert qty == 13
+    assert close is False
+    assert any("ADJ_QTY_CAP_SKIP" in r.message for r in caplog.records)
+    assert any("cap_would_shrink" in r.message for r in caplog.records)
+
+
+def test_increase_dynamic_cap_applies_when_growing() -> None:
+    """current=1, raw=5, cap=2 → new_qty=2 (cap grows, does not shrink)."""
+    settings = _settings(
+        adjustment_qty_mode="increase_dynamic",
+        basket_qty_dynamic=True,
+        basket_qty_theta_mult=2.0,
+    )
+    # raw_pct=100 → ceil(5*1)=5; cap=2; current=1 → capped=2 >= 1
+    qty, close = resolve_adjustment_basket_qty(
+        settings=settings,
+        triggered_leg_qty=1,
+        hedge_qty=5,
+        hedge_call_theta=20.0,
+        new_strike_ask=40.0,
+    )
+    assert qty == 2
+    assert close is False
+
+
+def test_decrease_step_unaffected_by_cap_skip() -> None:
+    """decrease_step still reduces — cap-skip only applies to increase_dynamic."""
+    settings = _settings(
+        adjustment_qty_mode="decrease_step",
+        adjustment_qty_decrease_pct=25.0,
+        basket_qty_dynamic=True,
+    )
+    qty, close = resolve_adjustment_basket_qty(
+        settings=settings,
+        triggered_leg_qty=100,
+        hedge_qty=5,
+        hedge_call_theta=57.0,
+        new_strike_ask=300.0,
+        original_qty=100,
+        adjustment_number=1,
+    )
+    assert qty == 75
+    assert close is False
+
+
+def test_unchanged_mode_unaffected_by_cap_skip() -> None:
+    settings = _settings(
+        adjustment_qty_mode="unchanged",
+        basket_qty_dynamic=True,
+        basket_qty_theta_mult=3.0,
+    )
+    qty, close = resolve_adjustment_basket_qty(
+        settings=settings,
+        triggered_leg_qty=13,
+        hedge_qty=5,
+        hedge_call_theta=57.0,
+        new_strike_ask=300.0,
+    )
+    assert qty == 13
+    assert close is False
+
     settings = _settings(basket_qty_mode="pct_of_hedge", hedge_enabled=False)
     with patch("backend.core.bot_logger.log_and_buffer") as log_mock:
         assert resolve_sizing_mode(settings) == "fixed"
