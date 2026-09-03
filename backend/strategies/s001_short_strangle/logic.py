@@ -86,8 +86,15 @@ def _trigger_baseline(leg: Any) -> float:
     return float(getattr(leg, "initial_premium", 0) or 0)
 
 
-def _fees_from_legs(call_leg: Any, put_leg: Any, trade: Any, db_session: Any) -> float:
-    """Sum actual fees paid on basket legs (DB when available)."""
+def _fees_from_legs(
+    call_leg: Any,
+    put_leg: Any,
+    trade: Any,
+    db_session: Any,
+    wing_call_leg: Any | None = None,
+    wing_put_leg: Any | None = None,
+) -> float:
+    """Sum actual fees paid on basket legs (DB when available — includes wings)."""
     from unittest.mock import Mock
 
     from backend.core.fees import basket_fees_paid_from_legs
@@ -113,13 +120,13 @@ def _fees_from_legs(call_leg: Any, put_leg: Any, trade: Any, db_session: Any) ->
 
     fallback = [
         x
-        for x in (call_leg, put_leg)
+        for x in (call_leg, put_leg, wing_call_leg, wing_put_leg)
         if x is not None and not isinstance(x, Mock)
     ]
     # MagicMock legs: only use explicit numeric fee attrs
     if not fallback:
         total = 0.0
-        for leg in (call_leg, put_leg):
+        for leg in (call_leg, put_leg, wing_call_leg, wing_put_leg):
             if leg is None:
                 continue
             try:
@@ -146,6 +153,8 @@ def _decision_net_mtm(
     db_session: Any,
     est_exit_fees: float = 0.0,
     slippage_pct: float | None = None,
+    wing_call_leg: Any | None = None,
+    wing_put_leg: Any | None = None,
 ) -> float:
     """
     Net MTM for exit/adjust decisions — same formula as frontend display.
@@ -154,7 +163,14 @@ def _decision_net_mtm(
     """
     from backend.core.fees import compute_net_mtm
 
-    fees_paid = _fees_from_legs(call_leg, put_leg, trade, db_session)
+    fees_paid = _fees_from_legs(
+        call_leg,
+        put_leg,
+        trade,
+        db_session,
+        wing_call_leg=wing_call_leg,
+        wing_put_leg=wing_put_leg,
+    )
     slip = (
         slippage_pct
         if slippage_pct is not None
@@ -180,15 +196,22 @@ class ShortStrangleStrategy(BaseStrategy):
         call_premium: float,
         put_premium: float,
         realized_pnl: float = 0.0,
+        *,
+        wing_call_leg: Any | None = None,
+        wing_put_leg: Any | None = None,
+        wing_call_premium: float | None = None,
+        wing_put_premium: float | None = None,
     ) -> float:
         """
-        Total P&L USD = realized (closed legs) + unrealized (open shorts).
+        Total P&L USD = realized (closed legs) + unrealized (open shorts + wings).
 
-        Unrealized uses Delta-matching formula:
-          (mark - entry) * size * contract_value  with size = -quantity
+        Uses compute_signed_upnl:
+          SHORT size = −qty  → (entry − mark) × qty × CV
+          WING  size = +qty  → (mark − entry) × qty × CV
         """
         call_upnl = 0.0
         put_upnl = 0.0
+        wing_upnl = 0.0
         if str(getattr(call_leg, "status", "open")).lower() == "open":
             call_upnl = compute_signed_upnl(
                 float(call_leg.initial_premium),
@@ -203,7 +226,29 @@ class ShortStrangleStrategy(BaseStrategy):
                 size=-abs(int(put_leg.quantity)),
                 contract_value=OPTIONS_CONTRACT_VALUE,
             )
-        return float(realized_pnl or 0.0) + call_upnl + put_upnl
+        if (
+            wing_call_leg is not None
+            and str(getattr(wing_call_leg, "status", "open")).lower() == "open"
+            and wing_call_premium is not None
+        ):
+            wing_upnl += compute_signed_upnl(
+                float(wing_call_leg.initial_premium),
+                float(wing_call_premium),
+                size=+abs(int(wing_call_leg.quantity)),
+                contract_value=OPTIONS_CONTRACT_VALUE,
+            )
+        if (
+            wing_put_leg is not None
+            and str(getattr(wing_put_leg, "status", "open")).lower() == "open"
+            and wing_put_premium is not None
+        ):
+            wing_upnl += compute_signed_upnl(
+                float(wing_put_leg.initial_premium),
+                float(wing_put_premium),
+                size=+abs(int(wing_put_leg.quantity)),
+                contract_value=OPTIONS_CONTRACT_VALUE,
+            )
+        return float(realized_pnl or 0.0) + call_upnl + put_upnl + wing_upnl
 
     def get_slabs(self, trade_id: int, db_session: Any) -> dict[str, float]:
         """
@@ -341,6 +386,10 @@ class ShortStrangleStrategy(BaseStrategy):
         net_mtm: float | None = None,
         slippage_pct: float | None = None,
         gross_mtm_for_sl: float | None = None,
+        wing_call_leg: Any | None = None,
+        wing_put_leg: Any | None = None,
+        wing_call_premium: float | None = None,
+        wing_put_premium: float | None = None,
     ) -> TradeAction:
         """
         Evaluate exits then adjustment triggers (exact priority):
@@ -356,6 +405,19 @@ class ShortStrangleStrategy(BaseStrategy):
         When ``net_mtm`` is provided (from bot_engine), use it for TP / adjust.
         Otherwise compute via compute_net_mtm (gross − fees − slip).
         """
+        # Resolve wings from DB when not passed (single source: basket_legs)
+        if wing_call_leg is None or wing_put_leg is None:
+            try:
+                from backend.core.basket_legs import basket_legs as _basket_legs
+
+                bl = _basket_legs(trade, db_session)
+                if wing_call_leg is None:
+                    wing_call_leg = bl.get("wing_call")
+                if wing_put_leg is None:
+                    wing_put_leg = bl.get("wing_put")
+            except Exception:
+                pass
+
         logger.info(
             "[ON_TICK_PARAMS] trade_id=%s combined_trigger_mode_trade=%s",
             getattr(trade, "id", "?"),
@@ -383,8 +445,12 @@ class ShortStrangleStrategy(BaseStrategy):
             call_premium,
             put_premium,
             realized_pnl=float(realized_pnl or 0.0),
+            wing_call_leg=wing_call_leg,
+            wing_put_leg=wing_put_leg,
+            wing_call_premium=wing_call_premium,
+            wing_put_premium=wing_put_premium,
         )
-        # Primary: realized + Delta UPNL. Fallback: calculated short-option PnL.
+        # Primary: realized + Delta UPNL. Fallback: calculated short+wing PnL.
         if delta_mtm is not None:
             total_pnl = float(realized_pnl or 0.0) + float(delta_mtm)
         else:
@@ -408,6 +474,8 @@ class ShortStrangleStrategy(BaseStrategy):
                 put_leg=put_leg,
                 db_session=db_session,
                 slippage_pct=slippage_pct,
+                wing_call_leg=wing_call_leg,
+                wing_put_leg=wing_put_leg,
             )
 
         # Gross MTM for SL: MUST use gross_mtm_for_sl from bot_engine
@@ -565,6 +633,10 @@ class ShortStrangleStrategy(BaseStrategy):
             decay_pct=decay_pct,
             mode=decay_mode,
             trade_id=trade_id,
+            wing_call_leg=wing_call_leg,
+            wing_put_leg=wing_put_leg,
+            wing_call_premium=wing_call_premium,
+            wing_put_premium=wing_put_premium,
         )
         if decay_enabled:
             logger.info(

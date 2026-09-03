@@ -167,6 +167,15 @@ def _migrate_schema() -> None:
                         "COALESCE(cumulative_entry_spread_usd, 0.0)"
                     )
                 )
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "wing_premium_paid_usd" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN "
+                        "wing_premium_paid_usd FLOAT"
+                    )
+                )
         # Preserve existing TP/SL $: backfill max from target / (tp_pct/100)
         with engine.begin() as conn:
             conn.execute(

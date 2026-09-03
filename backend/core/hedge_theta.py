@@ -461,18 +461,34 @@ async def compute_basket_profit_target_at_entry(
     put_symbol: str,
     tp_pct: float,
     btc_index: float,
+    wing_call_fill: float | None = None,
+    wing_put_fill: float | None = None,
+    wing_call_fee: float | None = None,
+    wing_put_fee: float | None = None,
+    wing_call_symbol: str | None = None,
+    wing_put_symbol: str | None = None,
 ) -> dict[str, Any]:
     """
     Lock basket profit_target_usd at entry.
 
-    THETA mode (and active hedge):
-      target = basket_target_multiple × hedge_total_theta × qty × CONTRACT_SIZE
-    PCT mode (or no hedge):
+    PCT mode:
       target = credit_usd × tp_pct / 100
+      (credit_usd must already be NET when wings are on)
+
+    THETA mode with wings:
+      prefer net option theta (shorts θ − wings θ) when greeks available;
+      else hedge total_theta when an active hedge exists.
+
+    THETA mode without wings (legacy):
+      target = basket_target_multiple × hedge_total_theta × qty × CONTRACT_SIZE
 
     Caps at 90% of max_achievable when the raw target is unreachable.
     """
-    from backend.core.fees import estimate_option_trading_fee
+    from backend.core.delta_client import _extract_greek
+    from backend.core.fees import (
+        abs_execution_cost_usd,
+        estimate_option_trading_fee,
+    )
     from backend.core.spread_utils import estimate_and_log_exit_spread_usd
 
     qty = max(1, int(quantity))
@@ -488,47 +504,54 @@ async def compute_basket_profit_target_at_entry(
     )
     multiple = max(0.1, min(10.0, multiple))
 
-    entry_fees = max(0.0, float(call_fee or 0.0)) + max(
-        0.0, float(put_fee or 0.0)
+    wings_on = (
+        wing_call_fill is not None
+        and wing_put_fill is not None
+        and float(wing_call_fill) > 0
+        and float(wing_put_fill) > 0
     )
+
+    entry_fees = abs_execution_cost_usd(call_fee) + abs_execution_cost_usd(put_fee)
+    if wings_on:
+        entry_fees += abs_execution_cost_usd(wing_call_fee) + abs_execution_cost_usd(
+            wing_put_fee
+        )
+
     est_exit_fees = 0.0
     btc = float(btc_index or 0.0)
+    fill_legs: list[tuple[float, str | None]] = [
+        (float(call_fill), call_symbol),
+        (float(put_fill), put_symbol),
+    ]
+    if wings_on:
+        fill_legs.extend(
+            [
+                (float(wing_call_fill or 0), wing_call_symbol),
+                (float(wing_put_fill or 0), wing_put_symbol),
+            ]
+        )
     if btc > 0:
-        if float(call_fill) > 0:
-            est_exit_fees += estimate_option_trading_fee(
-                option_price=float(call_fill),
-                quantity_lots=qty,
-                btc_index_price=btc,
-            )
-        if float(put_fill) > 0:
-            est_exit_fees += estimate_option_trading_fee(
-                option_price=float(put_fill),
-                quantity_lots=qty,
-                btc_index_price=btc,
-            )
+        for px, _sym in fill_legs:
+            if px > 0:
+                est_exit_fees += estimate_option_trading_fee(
+                    option_price=px,
+                    quantity_lots=qty,
+                    btc_index_price=btc,
+                )
 
     est_exit_spread = 0.0
     try:
-        if call_symbol and float(call_fill) > 0:
-            est_exit_spread += await estimate_and_log_exit_spread_usd(
-                symbol=str(call_symbol),
-                offer_price=float(call_fill),
-                quantity=qty,
-                settings=settings,
-                kind="basket",
-                client=client,
-                log_id=0,
-            )
-        if put_symbol and float(put_fill) > 0:
-            est_exit_spread += await estimate_and_log_exit_spread_usd(
-                symbol=str(put_symbol),
-                offer_price=float(put_fill),
-                quantity=qty,
-                settings=settings,
-                kind="basket",
-                client=client,
-                log_id=0,
-            )
+        for px, sym in fill_legs:
+            if sym and px > 0:
+                est_exit_spread += await estimate_and_log_exit_spread_usd(
+                    symbol=str(sym),
+                    offer_price=px,
+                    quantity=qty,
+                    settings=settings,
+                    kind="basket",
+                    client=client,
+                    log_id=0,
+                )
     except Exception as exc:
         logger.warning(
             "basket target exit-spread estimate failed: %s", exc, exc_info=True
@@ -541,14 +564,59 @@ async def compute_basket_profit_target_at_entry(
         )
         est_exit_spread = credit * (max(0.0, spread_pct) / 100.0)
 
-    friction = entry_fees + est_exit_fees + max(0.0, float(est_exit_spread))
+    friction = entry_fees + est_exit_fees + abs_execution_cost_usd(est_exit_spread)
     max_achievable = max(0.0, credit - friction)
 
     hedge_theta: float | None = None
     target_source = "PCT"
     raw_target = round(credit * float(tp_pct) / 100.0, 6)
 
-    if mode == "THETA" and hedge is not None:
+    if mode == "THETA" and wings_on:
+        # Net basket option theta: shorts (−apiθ) − wings (+apiθ drag)
+        # = −(θ_sc + θ_sp) + (θ_wc + θ_wp) when apiθ is long-side.
+        try:
+            thetas: list[float] = []
+            for sym in (
+                call_symbol,
+                put_symbol,
+                str(wing_call_symbol or ""),
+                str(wing_put_symbol or ""),
+            ):
+                if not sym:
+                    thetas = []
+                    break
+                ticker = await client.get_ticker(sym)
+                th = float(_extract_greek(ticker, "theta") or 0.0)
+                thetas.append(th)
+            if len(thetas) == 4:
+                sc_th, sp_th, wc_th, wp_th = thetas
+                # Position net theta per lot (API long-side convention)
+                net_theta = -(sc_th + sp_th) + (wc_th + wp_th)
+                # Beneficial time decay magnitude for target sizing
+                net_abs = abs(float(net_theta))
+                if net_abs > 0:
+                    raw_target = round(
+                        multiple * net_abs * qty * CONTRACT_SIZE, 6
+                    )
+                    target_source = "THETA"
+                    hedge_theta = net_abs
+                    logger.info(
+                        "basket THETA target (net wings): sc=%.6f sp=%.6f "
+                        "wc=%.6f wp=%.6f net=%.6f target=%.6f",
+                        sc_th,
+                        sp_th,
+                        wc_th,
+                        wp_th,
+                        net_theta,
+                        raw_target,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "basket THETA net-wing theta failed (%s) — trying hedge/PCT",
+                exc,
+            )
+
+    if mode == "THETA" and target_source != "THETA" and hedge is not None:
         try:
             theta_info = await get_hedge_theta(client, hedge)
             hedge_theta = abs(float(theta_info.get("total_theta") or 0.0))

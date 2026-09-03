@@ -158,6 +158,10 @@ class Trade(Base):
     original_basket_qty: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None
     )
+    # Wings debit paid at entry (USD) — audit vs net initial_max_profit
+    wing_premium_paid_usd: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
 
     account: Mapped[Account] = relationship("Account", back_populates="trades")
     hedge_position: Mapped[HedgePosition | None] = relationship(

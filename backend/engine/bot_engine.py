@@ -1728,10 +1728,12 @@ class BotEngine:
                 _db_legs.expunge(_leg)
 
         # Demo trades: no Delta positions — P&L from live mark prices only
-        # demo_upnl = (entry - mark) × qty × 0.001 for shorts
+        # demo_upnl shorts: (entry - mark) × qty × CV
+        # demo_upnl wings:  (mark - entry) × qty × CV
         if trade_is_demo:
             delta_upnl = 0.0
             hedge_upnl = 0.0
+            wing_upnl = 0.0
             call_mtm = 0.0
             put_mtm = 0.0
             for leg in all_open_legs:
@@ -1766,8 +1768,10 @@ class BotEngine:
                     put_mtm = leg_upnl
                     put_premium = px
                     put_offer = px
+                elif lt in ("wing_call", "wing_put"):
+                    wing_upnl += leg_upnl
                 elif is_long:
-                    hedge_upnl = leg_upnl
+                    hedge_upnl += leg_upnl
                 self._live_prices[str(leg.symbol)] = px
             self.position_tracker.update_delta_mtm(trade_id, delta_upnl)
             mtm_available = True
@@ -1779,6 +1783,7 @@ class BotEngine:
                     "put_mark": round(put_premium, 2),
                     "call_upnl": round(call_mtm, 4),
                     "put_upnl": round(put_mtm, 4),
+                    "wing_upnl": round(wing_upnl, 4),
                     "hedge_upnl": round(hedge_upnl, 4),
                     "delta_upnl": round(delta_upnl, 4),
                     "realized": round(realized, 4),
@@ -1786,10 +1791,11 @@ class BotEngine:
             )
             logger.info(
                 "[DEMO] Trade %s P&L from marks: call=%.4f put=%.4f "
-                "hedge=%.4f total_upnl=%.4f",
+                "wing=%.4f hedge=%.4f total_upnl=%.4f",
                 trade_id,
                 call_mtm,
                 put_mtm,
+                wing_upnl,
                 hedge_upnl,
                 delta_upnl,
             )
@@ -1804,6 +1810,7 @@ class BotEngine:
                 if pids:
                     upnl_data = await self.delta_client.get_positions_upnl(pids)
                     any_hit = False
+                    wing_upnl = 0.0
                     for leg in all_open_legs:
                         pid = int(leg.product_id)
                         row = upnl_data.get(pid) or {}
@@ -1826,10 +1833,14 @@ class BotEngine:
                                 put_offer = best
                                 put_premium = put_offer
                                 self._live_prices[str(leg.symbol)] = put_premium
+                        elif lt in ("wing_call", "wing_put"):
+                            wing_upnl += leg_upnl
+                            if best > 0:
+                                self._live_prices[str(leg.symbol)] = best
                         elif bool(getattr(leg, "is_long", False)) or lt.startswith(
                             "hedge"
                         ):
-                            hedge_upnl = leg_upnl
+                            hedge_upnl += leg_upnl
                             if best > 0:
                                 self._live_prices[str(leg.symbol)] = best
 
@@ -1838,12 +1849,13 @@ class BotEngine:
                         mtm_available = True
                         logger.info(
                             "Trade %s P&L: call_upnl=%.4f put_upnl=%.4f "
-                            "hedge_upnl=%.4f delta_upnl=%.4f realized=%.4f "
-                            "total=%.4f call_offer=%.2f put_offer=%.2f "
-                            "target=%s sl=%s",
+                            "wing_upnl=%.4f hedge_upnl=%.4f delta_upnl=%.4f "
+                            "realized=%.4f total=%.4f call_offer=%.2f "
+                            "put_offer=%.2f target=%s sl=%s",
                             trade_id,
                             call_mtm,
                             put_mtm,
+                            wing_upnl,
                             hedge_upnl,
                             delta_upnl,
                             realized,
@@ -1914,8 +1926,11 @@ class BotEngine:
                 elif lt == "put":
                     put_mtm = leg_upnl
                     put_premium = px
+                elif lt in ("wing_call", "wing_put"):
+                    pass  # included in delta_upnl already
                 elif is_long:
-                    hedge_upnl = leg_upnl
+                    hedge_upnl += leg_upnl
+                self._live_prices[str(leg.symbol)] = px
 
         total_pnl = realized + delta_upnl
         target = float(getattr(trade, "profit_target_usd", 0) or 0)
@@ -2054,6 +2069,28 @@ class BotEngine:
             premium_slabs = None
             if str(getattr(trade, "trigger_mode", "") or "").lower() == "premium":
                 premium_slabs = self.strategy.get_slabs(trade.id, db)
+
+            wing_call_leg_tick = None
+            wing_put_leg_tick = None
+            wing_call_px_tick: float | None = None
+            wing_put_px_tick: float | None = None
+            for lg in all_open_legs:
+                lt = str(getattr(lg, "leg_type", "") or "").lower()
+                if lt == "wing_call":
+                    wing_call_leg_tick = lg
+                    sym = str(lg.symbol)
+                    if sym in self._live_prices:
+                        wing_call_px_tick = float(self._live_prices[sym])
+                    else:
+                        wing_call_px_tick = float(lg.initial_premium or 0)
+                elif lt == "wing_put":
+                    wing_put_leg_tick = lg
+                    sym = str(lg.symbol)
+                    if sym in self._live_prices:
+                        wing_put_px_tick = float(self._live_prices[sym])
+                    else:
+                        wing_put_px_tick = float(lg.initial_premium or 0)
+
             action = await self.strategy.on_tick(
                 trade,
                 call_leg,
@@ -2066,6 +2103,10 @@ class BotEngine:
                 net_mtm=net_mtm_val,
                 slippage_pct=slip_pct,
                 gross_mtm_for_sl=gross_mtm_for_stoploss,
+                wing_call_leg=wing_call_leg_tick,
+                wing_put_leg=wing_put_leg_tick,
+                wing_call_premium=wing_call_px_tick,
+                wing_put_premium=wing_put_px_tick,
             )
             if float(getattr(action, "call_trigger_pct", 0) or 0) > 0:
                 call_trig_pct = float(action.call_trigger_pct)

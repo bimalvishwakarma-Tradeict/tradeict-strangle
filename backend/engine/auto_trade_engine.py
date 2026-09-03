@@ -1667,8 +1667,34 @@ class AutoTradeEngine:
             # TP/SL locked to initial deployment premium (actual fills)
             # initial_max_profit never changes after trade entry
             # adjustments do NOT affect TP/SL
+            # Net credit when wings on: shorts credit − wings debit
+            from backend.core.basket_legs import compute_net_credit_usd
+
+            wing_premium_paid_usd = 0.0
+            if (
+                wings_enabled
+                and wing_call_pick is not None
+                and wing_put_pick is not None
+            ):
+                wing_premium_paid_usd = round(
+                    (float(wing_call_fill) + float(wing_put_fill))
+                    * qty
+                    * float(OPTIONS_CONTRACT_VALUE),
+                    6,
+                )
             initial_max_profit = round(
-                (call_fill + put_fill) * qty * float(OPTIONS_CONTRACT_VALUE),
+                compute_net_credit_usd(
+                    short_call_premium=float(call_fill),
+                    short_put_premium=float(put_fill),
+                    short_qty=qty,
+                    wing_call_premium=float(wing_call_fill)
+                    if wing_premium_paid_usd > 0
+                    else 0.0,
+                    wing_put_premium=float(wing_put_fill)
+                    if wing_premium_paid_usd > 0
+                    else 0.0,
+                    wing_qty=qty,
+                ),
                 6,
             )
             stoploss_usd = round(initial_max_profit * sl_pct / 100.0, 2)
@@ -1717,6 +1743,24 @@ class AutoTradeEngine:
                 put_symbol=str(straddle.get("put_symbol") or ""),
                 tp_pct=float(tp_pct),
                 btc_index=btc_for_target,
+                wing_call_fill=float(wing_call_fill)
+                if wing_premium_paid_usd > 0
+                else None,
+                wing_put_fill=float(wing_put_fill)
+                if wing_premium_paid_usd > 0
+                else None,
+                wing_call_fee=wing_call_fee if wing_premium_paid_usd > 0 else None,
+                wing_put_fee=wing_put_fee if wing_premium_paid_usd > 0 else None,
+                wing_call_symbol=(
+                    str(wing_call_pick.get("symbol") or "")
+                    if wing_call_pick is not None and wing_premium_paid_usd > 0
+                    else None
+                ),
+                wing_put_symbol=(
+                    str(wing_put_pick.get("symbol") or "")
+                    if wing_put_pick is not None and wing_premium_paid_usd > 0
+                    else None
+                ),
             )
             profit_target_usd = float(target_info["profit_target_usd"])
             target_source = str(target_info["target_source"])
@@ -1798,6 +1842,11 @@ class AutoTradeEngine:
                     else None
                 ),
                 original_basket_qty=int(qty),
+                wing_premium_paid_usd=(
+                    float(wing_premium_paid_usd)
+                    if wing_premium_paid_usd > 0
+                    else None
+                ),
             )
             db.add(trade)
             db.flush()
@@ -2053,6 +2102,16 @@ class AutoTradeEngine:
                 )
                 db.add(wing_call_leg)
                 db.add(wing_put_leg)
+                # All four legs' entry spreads feed SL add-back
+                reset_entry_spread_for_sl(
+                    trade,
+                    abs(float(call_entry_spread or 0.0))
+                    + abs(float(put_entry_spread or 0.0))
+                    + abs(float(wing_call_entry_spread or 0.0))
+                    + abs(float(wing_put_entry_spread or 0.0)),
+                    reason="trade_entry_with_wings",
+                    leg="call+put+wings",
+                )
 
             mode = str(settings.trigger_mode or "slab")
             slab_map: dict[str, Any] = {

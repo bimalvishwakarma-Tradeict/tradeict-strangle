@@ -74,6 +74,16 @@ def compute_slippage_amount(gross_mtm: float, slippage_pct: float | None) -> flo
     return abs(float(gross_mtm or 0.0)) * pct / 100.0
 
 
+def abs_execution_cost_usd(raw_usd: float | None) -> float:
+    """
+    Spread and slippage are ALWAYS a cost — never a credit.
+
+    BUY and SELL both lose to the bid/ask: never multiply by direction in a way
+    that turns a spread into a credit. Callers must subtract this (always ≥ 0).
+    """
+    return abs(float(raw_usd or 0.0))
+
+
 def compute_entry_spread_usd(
     *,
     sent_price: float,
@@ -83,18 +93,23 @@ def compute_entry_spread_usd(
     contract_value: float | None = None,
 ) -> float:
     """
-    Entry execution spread in USD.
+    Entry execution spread cost in USD (always ≥ 0 — never a credit).
 
-    Short: (sent − fill) × qty × CV  (fill cheaper → positive)
-    Long:  (fill − sent) × qty × CV  (fill higher → positive cost as negative PnL)
+    Short (SELL): adverse when fill < sent → (sent − fill) × qty × CV
+    Long  (BUY):  adverse when fill > sent → (fill − sent) × qty × CV
+
+    Magnitude is taken with abs_execution_cost_usd so a lucky fill cannot
+    inflate profit via a negative "spread".
     """
     cv = float(OPTIONS_CONTRACT_VALUE if contract_value is None else contract_value)
     qty = abs(int(quantity or 0))
     sent = float(sent_price or 0.0)
     fill = float(fill_price or 0.0)
     if is_long:
-        return (fill - sent) * qty * cv
-    return (sent - fill) * qty * cv
+        raw = (fill - sent) * qty * cv
+    else:
+        raw = (sent - fill) * qty * cv
+    return abs_execution_cost_usd(raw)
 
 
 def get_entry_spread_for_sl(trade: Any) -> float:
@@ -126,7 +141,7 @@ def reset_entry_spread_for_sl(
       - adjustment / conversion: spread(s) of the newly opened leg(s) only
     """
     old_value = get_entry_spread_for_sl(trade)
-    new_value = abs(float(entry_spread_usd or 0.0))
+    new_value = abs_execution_cost_usd(entry_spread_usd)
     trade.entry_spread_for_sl_usd = new_value
     trade_id = int(getattr(trade, "id", 0) or 0)
     logger.info(
@@ -178,13 +193,13 @@ def estimate_expected_exit_spread_usd(
     contract_value: float | None = None,
     spread_factor: float = 0.005,
 ) -> float:
-    """Conservative exit-spread proxy: offer × qty × CV × 0.5%."""
+    """Conservative exit-spread cost (always ≥ 0): offer × qty × CV × 0.5%."""
     cv = float(OPTIONS_CONTRACT_VALUE if contract_value is None else contract_value)
     offer = float(offer_price or 0.0)
     qty = abs(int(quantity or 0))
     if offer <= 0 or qty <= 0:
         return 0.0
-    return offer * qty * cv * float(spread_factor)
+    return abs_execution_cost_usd(offer * qty * cv * float(spread_factor))
 
 
 def compute_net_mtm(
@@ -204,10 +219,10 @@ def compute_net_mtm(
     slip_pct = float(slippage_pct if slippage_pct is not None else 2.0)
     if slip_pct < 0:
         slip_pct = 0.0
-    fees = max(0.0, float(fees_paid or 0.0))
-    est_exit = max(0.0, float(est_exit_fees or 0.0))
-    exit_spread = max(0.0, float(expected_exit_spread_usd or 0.0))
-    slip = compute_slippage_amount(gross_mtm, slip_pct)
+    fees = abs_execution_cost_usd(fees_paid)
+    est_exit = abs_execution_cost_usd(est_exit_fees)
+    exit_spread = abs_execution_cost_usd(expected_exit_spread_usd)
+    slip = abs_execution_cost_usd(compute_slippage_amount(gross_mtm, slip_pct))
     deductions = fees + est_exit + slip + exit_spread
     net = float(gross_mtm or 0.0) - deductions
     return {
