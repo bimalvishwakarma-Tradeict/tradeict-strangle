@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 from backend.config import OPTIONS_CONTRACT_VALUE
@@ -48,6 +49,8 @@ _FILLED_STATES = frozenset(
 _OPEN_STATES = frozenset(
     {"open", "pending", "accepted", "untriggered", "partially_filled"}
 )
+_IN_FLIGHT_ORDER_COUNT = 0
+_IN_FLIGHT_ORDER_LOCK = asyncio.Lock()
 
 
 def should_use_midprice(*, enabled: bool, reason: str) -> bool:
@@ -55,6 +58,49 @@ def should_use_midprice(*, enabled: bool, reason: str) -> bool:
     if not bool(enabled):
         return False
     return str(reason or "").upper().strip() in MIDPRICE_ALLOWED_REASONS
+
+
+def is_placing_order() -> bool:
+    """True when a mid-price execution flow currently has orders in flight."""
+    return _IN_FLIGHT_ORDER_COUNT > 0
+
+
+@asynccontextmanager
+async def order_placement_guard(
+    *,
+    trade_id: int | None = None,
+    leg_label: str = "",
+    phase: str = "",
+) -> Any:
+    """Reference-counted in-flight flag for reconciliation clash guard."""
+    global _IN_FLIGHT_ORDER_COUNT
+    async with _IN_FLIGHT_ORDER_LOCK:
+        _IN_FLIGHT_ORDER_COUNT += 1
+        log_and_buffer(
+            "ORDER_PLACEMENT_STATE",
+            trade_id or 0,
+            {
+                "leg": leg_label,
+                "phase": phase,
+                "is_placing_order": True,
+                "in_flight_count": _IN_FLIGHT_ORDER_COUNT,
+            },
+        )
+    try:
+        yield
+    finally:
+        async with _IN_FLIGHT_ORDER_LOCK:
+            _IN_FLIGHT_ORDER_COUNT = max(0, _IN_FLIGHT_ORDER_COUNT - 1)
+            log_and_buffer(
+                "ORDER_PLACEMENT_STATE",
+                trade_id or 0,
+                {
+                    "leg": leg_label,
+                    "phase": phase,
+                    "is_placing_order": _IN_FLIGHT_ORDER_COUNT > 0,
+                    "in_flight_count": _IN_FLIGHT_ORDER_COUNT,
+                },
+            )
 
 
 def profile_for_group_leg(leg_index_in_group: int) -> str:
@@ -513,70 +559,70 @@ async def execute_with_midprice(
     Place one leg via chase or urgent ladder. Falls back to market when
     midprice is disabled or reason is not allow-listed.
     """
-    sleep = sleep_fn or asyncio.sleep
-    now = monotonic_fn or time.monotonic
-    qty_total = max(1, abs(int(quantity)))
-    side_l = str(side).lower().strip()
-    prof = str(profile or "urgent").lower().strip()
-    if prof not in {"chase", "urgent"}:
-        prof = "urgent"
+    async with order_placement_guard(
+        trade_id=trade_id,
+        leg_label=leg_label,
+        phase=phase or leg_type,
+    ):
+        sleep = sleep_fn or asyncio.sleep
+        now = monotonic_fn or time.monotonic
+        qty_total = max(1, abs(int(quantity)))
+        side_l = str(side).lower().strip()
+        prof = str(profile or "urgent").lower().strip()
+        if prof not in {"chase", "urgent"}:
+            prof = "urgent"
 
-    if not should_use_midprice(enabled=midprice_enabled, reason=reason):
-        res = await _place_market(
-            delta_client,
-            product_id=product_id,
-            side=side_l,
-            quantity=qty_total,
-            reduce_only=reduce_only,
-            bracket_sl_price=bracket_sl_price,
-            bracket_sl_limit=bracket_sl_limit,
-        )
-        res.fill_type = "market"
-        return res
+        if not should_use_midprice(enabled=midprice_enabled, reason=reason):
+            res = await _place_market(
+                delta_client,
+                product_id=product_id,
+                side=side_l,
+                quantity=qty_total,
+                reduce_only=reduce_only,
+                bracket_sl_price=bracket_sl_price,
+                bracket_sl_limit=bracket_sl_limit,
+            )
+            res.fill_type = "market"
+            return res
 
-    chase_max = clamp_chase_max_seconds(max_chase_seconds)
-    started = now()
-    remaining = qty_total
-    filled_total = 0
-    fill_price_sum = 0.0  # weighted
-    last_oid: int | None = None
-    attempt = 0
-    mid_at_start: float | None = None
-    fill_type_used = "market"
-
-    # urgent: attempt types cycle mid → best → best → market
-    urgent_types = ("mid", "best", "best", "market")
-    # Partner-signal mode state (used by parallel call+put execution).
-    partner_mode_started_at: float | None = None
-    partner_final_mid_attempt_armed = False
-    partner_market_fallback_done = False
-    last_order_was_partner_final_attempt = False
-
-    while remaining > 0:
-        elapsed = now() - started
-        attempt += 1
+        chase_max = clamp_chase_max_seconds(max_chase_seconds)
+        started = now()
+        remaining = qty_total
+        filled_total = 0
+        fill_price_sum = 0.0
+        last_oid: int | None = None
+        attempt = 0
+        mid_at_start: float | None = None
+        fill_type_used = "market"
+        urgent_types = ("mid", "best", "best", "market")
+        partner_mode_started_at: float | None = None
+        partner_final_mid_attempt_armed = False
+        partner_market_fallback_done = False
         last_order_was_partner_final_attempt = False
 
-        # Partner filled signal: other leg should shorten to a 5s mid window
-        # and then do exactly one final mid attempt before market fallback.
-        if (
-            partner_filled_event is not None
-            and partner_mode_started_at is None
-            and partner_filled_event.is_set()
-        ):
-            partner_mode_started_at = float(now())
-            log_and_buffer(
-                "PARTNER_SIGNAL_RECEIVED",
-                trade_id or 0,
-                {
-                    "leg": leg_label,
-                    "attempt": attempt,
-                },
-            )
-            partner_final_mid_attempt_armed = False
+        while remaining > 0:
+            elapsed = now() - started
+            attempt += 1
+            last_order_was_partner_final_attempt = False
 
-        if partner_mode_started_at is not None and not partner_final_mid_attempt_armed:
-            if (now() - partner_mode_started_at) >= float(HOLD_SECONDS):
+            if (
+                partner_filled_event is not None
+                and partner_mode_started_at is None
+                and partner_filled_event.is_set()
+            ):
+                partner_mode_started_at = float(now())
+                log_and_buffer(
+                    "PARTNER_SIGNAL_RECEIVED",
+                    trade_id or 0,
+                    {"leg": leg_label, "attempt": attempt},
+                )
+                partner_final_mid_attempt_armed = False
+
+            if (
+                partner_mode_started_at is not None
+                and not partner_final_mid_attempt_armed
+                and (now() - partner_mode_started_at) >= float(HOLD_SECONDS)
+            ):
                 partner_final_mid_attempt_armed = True
                 log_and_buffer(
                     "PARTNER_FINAL_ATTEMPT_ARMED",
@@ -591,296 +637,213 @@ async def execute_with_midprice(
                     },
                 )
 
-        if prof == "chase" and elapsed >= chase_max and partner_mode_started_at is None:
-            logger.warning(
-                "[MIDPRICE_CHASE_TIMEOUT] leg=%s elapsed=%.1f attempts=%s "
-                "action=market",
-                leg_label,
-                elapsed,
-                attempt,
-            )
-            order_kind = "market"
-            if await _pre_place_position_check(
-                delta_client,
-                product_id=product_id,
-                qty_intended=qty_total,
-                leg_label=leg_label,
-                attempt=attempt,
-                reduce_only=reduce_only,
-                trade_id=trade_id,
-                check_position_size=check_position_size,
+            if (
+                prof == "chase"
+                and elapsed >= chase_max
+                and partner_mode_started_at is None
             ):
-                remaining = 0
-                filled_total = qty_total
-                fill_type_used = "position_already_filled"
-                break
-            _fire_exec_event(
-                trade_id=trade_id,
-                hedge_position_id=hedge_position_id,
-                phase=phase,
-                leg=leg_label,
-                side=side_l,
-                qty=remaining,
-                attempt=attempt,
-                profile=prof,
-                order_kind=order_kind,
-                bid=0.0,
-                ask=0.0,
-                mid=None,
-                limit=None,
-                status="timeout_market",
-                fill_price=None,
-            )
-            mkt = await _place_market(
-                delta_client,
-                product_id=product_id,
-                side=side_l,
-                quantity=remaining,
-                reduce_only=reduce_only,
-                bracket_sl_price=bracket_sl_price,
-                bracket_sl_limit=bracket_sl_limit,
-            )
-            if mkt.success:
-                fsz = int(mkt.filled_size or remaining)
-                filled_total += fsz
-                if mkt.filled_price:
-                    fill_price_sum += float(mkt.filled_price) * fsz
-                last_oid = mkt.order_id
-                fill_type_used = "market"
-                remaining = 0
-            else:
-                return OrderResult(
-                    success=False,
-                    error=mkt.error or "chase_timeout_market_failed",
-                    order_id=last_oid,
-                    filled_size=filled_total if filled_total else None,
-                    fill_attempt=attempt,
-                    fill_type="market",
-                    mid_at_start=mid_at_start,
+                logger.warning(
+                    "[MIDPRICE_CHASE_TIMEOUT] leg=%s elapsed=%.1f attempts=%s "
+                    "action=market",
+                    leg_label,
+                    elapsed,
+                    attempt,
                 )
-            break
-
-        if prof == "urgent" and attempt > len(urgent_types):
-            # safety — should have market on 4th
-            break
-
-        try:
-            bid, ask = await _fetch_book(delta_client, symbol)
-        except Exception as exc:
-            logger.warning(
-                "[MIDPRICE_ATTEMPT] book fetch failed leg=%s: %s",
-                leg_label,
-                exc,
-            )
-            bid, ask = 0.0, 0.0
-
-        mid = compute_mid(bid, ask)
-        if mid_at_start is None and mid is not None:
-            mid_at_start = mid
-        mkt_ref = market_would_be_price(side_l, bid, ask)
-
-        if prof == "chase":
-            order_kind = "mid"
-        else:
-            idx = min(attempt - 1, len(urgent_types) - 1)
-            order_kind = urgent_types[idx]
-
-        if order_kind == "market":
-            if await _pre_place_position_check(
-                delta_client,
-                product_id=product_id,
-                qty_intended=qty_total,
-                leg_label=leg_label,
-                attempt=attempt,
-                reduce_only=reduce_only,
-                trade_id=trade_id,
-                check_position_size=check_position_size,
-            ):
-                remaining = 0
-                filled_total = qty_total
-                fill_type_used = "position_already_filled"
+                order_kind = "market"
+                if await _pre_place_position_check(
+                    delta_client,
+                    product_id=product_id,
+                    qty_intended=qty_total,
+                    leg_label=leg_label,
+                    attempt=attempt,
+                    reduce_only=reduce_only,
+                    trade_id=trade_id,
+                    check_position_size=check_position_size,
+                ):
+                    remaining = 0
+                    filled_total = qty_total
+                    fill_type_used = "position_already_filled"
+                    break
+                _fire_exec_event(
+                    trade_id=trade_id,
+                    hedge_position_id=hedge_position_id,
+                    phase=phase,
+                    leg=leg_label,
+                    side=side_l,
+                    qty=remaining,
+                    attempt=attempt,
+                    profile=prof,
+                    order_kind=order_kind,
+                    bid=0.0,
+                    ask=0.0,
+                    mid=None,
+                    limit=None,
+                    status="timeout_market",
+                    fill_price=None,
+                )
+                mkt = await _place_market(
+                    delta_client,
+                    product_id=product_id,
+                    side=side_l,
+                    quantity=remaining,
+                    reduce_only=reduce_only,
+                    bracket_sl_price=bracket_sl_price,
+                    bracket_sl_limit=bracket_sl_limit,
+                )
+                if mkt.success:
+                    fsz = int(mkt.filled_size or remaining)
+                    filled_total += fsz
+                    if mkt.filled_price:
+                        fill_price_sum += float(mkt.filled_price) * fsz
+                    last_oid = mkt.order_id
+                    fill_type_used = "market"
+                    remaining = 0
+                else:
+                    return OrderResult(
+                        success=False,
+                        error=mkt.error or "chase_timeout_market_failed",
+                        order_id=last_oid,
+                        filled_size=filled_total if filled_total else None,
+                        fill_attempt=attempt,
+                        fill_type="market",
+                        mid_at_start=mid_at_start,
+                    )
                 break
+
+            if prof == "urgent" and attempt > len(urgent_types):
+                break
+
+            try:
+                bid, ask = await _fetch_book(delta_client, symbol)
+            except Exception as exc:
+                logger.warning(
+                    "[MIDPRICE_ATTEMPT] book fetch failed leg=%s: %s",
+                    leg_label,
+                    exc,
+                )
+                bid, ask = 0.0, 0.0
+
+            mid = compute_mid(bid, ask)
+            if mid_at_start is None and mid is not None:
+                mid_at_start = mid
+            mkt_ref = market_would_be_price(side_l, bid, ask)
+
+            if prof == "chase":
+                order_kind = "mid"
+            else:
+                idx = min(attempt - 1, len(urgent_types) - 1)
+                order_kind = urgent_types[idx]
+
+            if order_kind == "market":
+                if await _pre_place_position_check(
+                    delta_client,
+                    product_id=product_id,
+                    qty_intended=qty_total,
+                    leg_label=leg_label,
+                    attempt=attempt,
+                    reduce_only=reduce_only,
+                    trade_id=trade_id,
+                    check_position_size=check_position_size,
+                ):
+                    remaining = 0
+                    filled_total = qty_total
+                    fill_type_used = "position_already_filled"
+                    break
+                logger.info(
+                    "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=market "
+                    "bid=%s ask=%s mid=%s limit=.. qty=%s filled=0",
+                    leg_label,
+                    prof,
+                    attempt,
+                    bid,
+                    ask,
+                    mid,
+                    remaining,
+                )
+                mkt = await _place_market(
+                    delta_client,
+                    product_id=product_id,
+                    side=side_l,
+                    quantity=remaining,
+                    reduce_only=reduce_only,
+                    bracket_sl_price=bracket_sl_price,
+                    bracket_sl_limit=bracket_sl_limit,
+                )
+                if mkt.success:
+                    fsz = int(mkt.filled_size or remaining)
+                    filled_total += fsz
+                    if mkt.filled_price:
+                        fill_price_sum += float(mkt.filled_price) * fsz
+                    last_oid = mkt.order_id
+                    fill_type_used = "market"
+                    remaining = 0
+                else:
+                    return OrderResult(
+                        success=False,
+                        error=mkt.error or "urgent_market_failed",
+                        order_id=last_oid,
+                        filled_size=filled_total if filled_total else None,
+                        fill_attempt=attempt,
+                        fill_type="market",
+                        mid_at_start=mid_at_start,
+                    )
+                break
+
+            use_post_only = order_kind == "mid"
+            if order_kind == "mid":
+                limit = mid
+            else:
+                limit = best_price_for_side(side_l, bid, ask)
+
+            if limit is None or limit <= 0:
+                if prof == "urgent" and attempt >= 3:
+                    order_kind = "market"
+                    continue
+                await sleep(0)
+                continue
+
             logger.info(
-                "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=market "
-                "bid=%s ask=%s mid=%s limit=.. qty=%s filled=0",
+                "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=%s "
+                "bid=%s ask=%s mid=%s limit=%s qty=%s filled=0",
                 leg_label,
                 prof,
                 attempt,
+                order_kind,
                 bid,
                 ask,
                 mid,
+                round(float(limit), 4),
                 remaining,
             )
-            mkt = await _place_market(
-                delta_client,
-                product_id=product_id,
-                side=side_l,
-                quantity=remaining,
-                reduce_only=reduce_only,
-                bracket_sl_price=bracket_sl_price,
-                bracket_sl_limit=bracket_sl_limit,
-            )
-            if mkt.success:
-                fsz = int(mkt.filled_size or remaining)
-                filled_total += fsz
-                if mkt.filled_price:
-                    fill_price_sum += float(mkt.filled_price) * fsz
-                last_oid = mkt.order_id
-                fill_type_used = "market"
-                remaining = 0
-            else:
-                return OrderResult(
-                    success=False,
-                    error=mkt.error or "urgent_market_failed",
-                    order_id=last_oid,
-                    filled_size=filled_total if filled_total else None,
-                    fill_attempt=attempt,
-                    fill_type="market",
-                    mid_at_start=mid_at_start,
-                )
-            break
-
-        # Limit path: mid (post-only) or best (crossing, no post-only)
-        use_post_only = order_kind == "mid"
-        if order_kind == "mid":
-            limit = mid
-        else:
-            limit = best_price_for_side(side_l, bid, ask)
-
-        if limit is None or limit <= 0:
-            # No book — skip to next / market
-            if prof == "urgent" and attempt >= 3:
-                order_kind = "market"
-                continue
-            await sleep(0)  # yield
-            continue
-
-        logger.info(
-            "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=%s "
-            "bid=%s ask=%s mid=%s limit=%s qty=%s filled=0",
-            leg_label,
-            prof,
-            attempt,
-            order_kind,
-            bid,
-            ask,
-            mid,
-            round(float(limit), 4),
-            remaining,
-        )
-        if prof == "chase" and attempt % 5 == 0:
-            logger.info(
-                "[MIDPRICE_CHASE] leg=%s attempt=%s elapsed=%.1f mid=%s "
-                "bid=%s ask=%s",
-                leg_label,
-                attempt,
-                elapsed,
-                mid,
-                bid,
-                ask,
-            )
-
-        if await _pre_place_position_check(
-            delta_client,
-            product_id=product_id,
-            qty_intended=qty_total,
-            leg_label=leg_label,
-            attempt=attempt,
-            reduce_only=reduce_only,
-            trade_id=trade_id,
-            check_position_size=check_position_size,
-        ):
-            remaining = 0
-            filled_total = qty_total
-            fill_type_used = "position_already_filled"
-            break
-
-        # Mark whether this placed order is the partner-final attempt.
-        last_order_was_partner_final_attempt = (
-            partner_final_mid_attempt_armed is True
-        )
-        _fire_exec_event(
-            trade_id=trade_id,
-            hedge_position_id=hedge_position_id,
-            phase=phase,
-            leg=leg_label,
-            side=side_l,
-            qty=remaining,
-            attempt=attempt,
-            profile=prof,
-            order_kind=order_kind,
-            bid=bid,
-            ask=ask,
-            mid=mid,
-            limit=limit,
-            status="pending",
-            fill_price=None,
-        )
-        try:
-            placed = await delta_client.place_order(
-                product_id=int(product_id),
-                size=int(remaining),
-                side=side_l,
-                order_type="limit_order",
-                time_in_force="gtc",
-                limit_price=float(limit),
-                post_only=bool(use_post_only),
-                reduce_only=bool(reduce_only),
-                bracket_stop_loss_price=bracket_sl_price,
-                bracket_stop_loss_limit_price=bracket_sl_limit,
-            )
-        except Exception as exc:
-            if use_post_only and is_post_only_reject(exc):
-                logger.warning(
-                    "[MIDPRICE_POSTONLY_REJECT] leg=%s attempt=%s mid=%s "
+            if prof == "chase" and attempt % 5 == 0:
+                logger.info(
+                    "[MIDPRICE_CHASE] leg=%s attempt=%s elapsed=%.1f mid=%s "
                     "bid=%s ask=%s",
                     leg_label,
                     attempt,
+                    elapsed,
                     mid,
                     bid,
                     ask,
                 )
-                # No 3s wait — immediate next attempt
-                continue
-            logger.warning(
-                "[MIDPRICE_ATTEMPT] place failed leg=%s: %s",
-                leg_label,
-                exc,
-            )
-            if prof == "urgent" and attempt >= 3:
-                continue  # fall through to market on next loop
-            await sleep(0.2)
-            continue
 
-        oid = placed.get("order_id") or placed.get("id")
-        if oid is None:
-            continue
-        last_oid = int(oid)
+            if await _pre_place_position_check(
+                delta_client,
+                product_id=product_id,
+                qty_intended=qty_total,
+                leg_label=leg_label,
+                attempt=attempt,
+                reduce_only=reduce_only,
+                trade_id=trade_id,
+                check_position_size=check_position_size,
+            ):
+                remaining = 0
+                filled_total = qty_total
+                fill_type_used = "position_already_filled"
+                break
 
-        # Hold + poll Delta (source of truth — never trust local state alone)
-        after = await _poll_order_until_hold(
-            delta_client,
-            last_oid,
-            hold_seconds=float(hold_seconds),
-        )
-        got = _filled_size_from_order(after, requested=remaining)
-        state = _order_state(after)
-
-        if state in _FILLED_STATES or got >= remaining:
-            # FULL FILL — STOP immediately, no new order
-            px = _avg_fill_from_order(after) or float(limit)
-            filled_total += remaining
-            fill_price_sum += px * remaining
-            fill_type_used = order_kind
-            logger.info(
-                "[MIDPRICE_FILL] leg=%s attempt=%s fill=%s mid_at_start=%s "
-                "market_would_be=%s saved_usd=%s",
-                leg_label,
-                attempt,
-                px,
-                mid_at_start,
-                mkt_ref,
-                _saved_usd(side_l, px, mkt_ref, remaining),
+            last_order_was_partner_final_attempt = (
+                partner_final_mid_attempt_armed is True
             )
             _fire_exec_event(
                 trade_id=trade_id,
@@ -896,209 +859,278 @@ async def execute_with_midprice(
                 ask=ask,
                 mid=mid,
                 limit=limit,
-                status="filled",
-                fill_price=px,
+                status="pending",
+                fill_price=None,
             )
-            remaining = 0
-            break
+            try:
+                placed = await delta_client.place_order(
+                    product_id=int(product_id),
+                    size=int(remaining),
+                    side=side_l,
+                    order_type="limit_order",
+                    time_in_force="gtc",
+                    limit_price=float(limit),
+                    post_only=bool(use_post_only),
+                    reduce_only=bool(reduce_only),
+                    bracket_stop_loss_price=bracket_sl_price,
+                    bracket_stop_loss_limit_price=bracket_sl_limit,
+                )
+            except Exception as exc:
+                if use_post_only and is_post_only_reject(exc):
+                    logger.warning(
+                        "[MIDPRICE_POSTONLY_REJECT] leg=%s attempt=%s mid=%s "
+                        "bid=%s ask=%s",
+                        leg_label,
+                        attempt,
+                        mid,
+                        bid,
+                        ask,
+                    )
+                    continue
+                logger.warning(
+                    "[MIDPRICE_ATTEMPT] place failed leg=%s: %s",
+                    leg_label,
+                    exc,
+                )
+                if prof == "urgent" and attempt >= 3:
+                    continue
+                await sleep(0.2)
+                continue
 
-        if got > 0:
-            # PARTIAL — only remainder on next order
-            px = _avg_fill_from_order(after) or float(limit)
-            filled_total += got
-            fill_price_sum += px * got
-            remaining = max(0, remaining - got)
-            fill_type_used = order_kind
-            logger.info(
-                "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=%s "
-                "bid=%s ask=%s mid=%s limit=%s qty=%s filled=%s (partial)",
-                leg_label,
-                prof,
-                attempt,
-                order_kind,
-                bid,
-                ask,
-                mid,
-                round(float(limit), 4),
-                remaining + got,
-                got,
-            )
+            oid = placed.get("order_id") or placed.get("id")
+            if oid is None:
+                continue
+            last_oid = int(oid)
 
-        # Cancel before placing anything else
-        outcome, after_cancel = await _cancel_confirm(delta_client, last_oid)
-        if outcome == "filled":
-            # Filled during cancel race — STOP
-            extra = _filled_size_from_order(
-                after_cancel, requested=remaining
+            after = await _poll_order_until_hold(
+                delta_client,
+                last_oid,
+                hold_seconds=float(hold_seconds),
             )
-            if remaining > 0 and extra >= remaining:
-                px = _avg_fill_from_order(after_cancel) or float(limit)
+            got = _filled_size_from_order(after, requested=remaining)
+            state = _order_state(after)
+
+            if state in _FILLED_STATES or got >= remaining:
+                px = _avg_fill_from_order(after) or float(limit)
                 filled_total += remaining
                 fill_price_sum += px * remaining
-                remaining = 0
                 fill_type_used = order_kind
                 logger.info(
-                    "[MIDPRICE_FILL] leg=%s attempt=%s fill=%s "
-                    "(cancel-already-filled) mid_at_start=%s "
+                    "[MIDPRICE_FILL] leg=%s attempt=%s fill=%s mid_at_start=%s "
                     "market_would_be=%s saved_usd=%s",
                     leg_label,
                     attempt,
                     px,
                     mid_at_start,
                     mkt_ref,
-                    _saved_usd(side_l, px, mkt_ref, qty_total),
+                    _saved_usd(side_l, px, mkt_ref, remaining),
                 )
+                _fire_exec_event(
+                    trade_id=trade_id,
+                    hedge_position_id=hedge_position_id,
+                    phase=phase,
+                    leg=leg_label,
+                    side=side_l,
+                    qty=remaining,
+                    attempt=attempt,
+                    profile=prof,
+                    order_kind=order_kind,
+                    bid=bid,
+                    ask=ask,
+                    mid=mid,
+                    limit=limit,
+                    status="filled",
+                    fill_price=px,
+                )
+                remaining = 0
                 break
-            if remaining > 0 and extra > 0:
-                px = _avg_fill_from_order(after_cancel) or float(limit)
-                filled_total += extra
-                fill_price_sum += px * extra
-                remaining = max(0, remaining - extra)
 
-        # Post-cancel settle: let Delta matching engine finalise
-        log_and_buffer(
-            "POST_CANCEL_SETTLE",
-            trade_id or 0,
-            {"leg": leg_label, "attempt": attempt, "settle_seconds": POST_CANCEL_SETTLE_SECONDS},
-        )
-        await sleep(POST_CANCEL_SETTLE_SECONDS)
+            if got > 0:
+                px = _avg_fill_from_order(after) or float(limit)
+                filled_total += got
+                fill_price_sum += px * got
+                remaining = max(0, remaining - got)
+                fill_type_used = order_kind
+                logger.info(
+                    "[MIDPRICE_ATTEMPT] leg=%s profile=%s attempt=%s type=%s "
+                    "bid=%s ask=%s mid=%s limit=%s qty=%s filled=%s (partial)",
+                    leg_label,
+                    prof,
+                    attempt,
+                    order_kind,
+                    bid,
+                    ask,
+                    mid,
+                    round(float(limit), 4),
+                    remaining + got,
+                    got,
+                )
 
-        # Partner market fallback: after exactly one final mid attempt fails,
-        # place market for the remaining quantity.
-        if (
-            partner_mode_started_at is not None
-            and last_order_was_partner_final_attempt
-            and remaining > 0
-            and not partner_market_fallback_done
-        ):
-            partner_market_fallback_done = True
+            outcome, after_cancel = await _cancel_confirm(delta_client, last_oid)
+            if outcome == "filled":
+                extra = _filled_size_from_order(after_cancel, requested=remaining)
+                if remaining > 0 and extra >= remaining:
+                    px = _avg_fill_from_order(after_cancel) or float(limit)
+                    filled_total += remaining
+                    fill_price_sum += px * remaining
+                    remaining = 0
+                    fill_type_used = order_kind
+                    logger.info(
+                        "[MIDPRICE_FILL] leg=%s attempt=%s fill=%s "
+                        "(cancel-already-filled) mid_at_start=%s "
+                        "market_would_be=%s saved_usd=%s",
+                        leg_label,
+                        attempt,
+                        px,
+                        mid_at_start,
+                        mkt_ref,
+                        _saved_usd(side_l, px, mkt_ref, qty_total),
+                    )
+                    break
+                if remaining > 0 and extra > 0:
+                    px = _avg_fill_from_order(after_cancel) or float(limit)
+                    filled_total += extra
+                    fill_price_sum += px * extra
+                    remaining = max(0, remaining - extra)
+
             log_and_buffer(
-                "PARTNER_MARKET_FALLBACK_TRIGGERED",
+                "POST_CANCEL_SETTLE",
                 trade_id or 0,
                 {
                     "leg": leg_label,
                     "attempt": attempt,
-                    "remaining": remaining,
+                    "settle_seconds": POST_CANCEL_SETTLE_SECONDS,
                 },
             )
-            if await _pre_place_position_check(
-                delta_client,
-                product_id=product_id,
-                qty_intended=qty_total,
-                leg_label=leg_label,
-                attempt=attempt,
-                reduce_only=reduce_only,
-                trade_id=trade_id,
-                check_position_size=check_position_size,
+            await sleep(POST_CANCEL_SETTLE_SECONDS)
+
+            if (
+                partner_mode_started_at is not None
+                and last_order_was_partner_final_attempt
+                and remaining > 0
+                and not partner_market_fallback_done
             ):
-                remaining = 0
-                filled_total = qty_total
-                fill_type_used = "position_already_filled"
-                break
-
-            mkt = await _place_market(
-                delta_client,
-                product_id=product_id,
-                side=side_l,
-                quantity=remaining,
-                reduce_only=reduce_only,
-                bracket_sl_price=bracket_sl_price,
-                bracket_sl_limit=bracket_sl_limit,
-            )
-            if mkt.success:
-                fsz = int(mkt.filled_size or remaining)
-                filled_total += fsz
-                if mkt.filled_price:
-                    fill_price_sum += float(mkt.filled_price) * fsz
-                last_oid = mkt.order_id
-                fill_type_used = "market"
-                remaining = 0
-                break
-
-            return OrderResult(
-                success=False,
-                error=mkt.error or "partner_final_market_failed",
-                order_id=last_oid,
-                filled_size=filled_total if filled_total else None,
-                fill_attempt=attempt,
-                fill_type="market",
-                mid_at_start=mid_at_start,
-            )
-
-        # chase continues with FRESH mid; urgent next type
-        if prof == "urgent" and attempt >= 4:
-            break
-
-    avg_fill = (
-        fill_price_sum / filled_total if filled_total > 0 else None
-    )
-    success = filled_total >= qty_total
-    saved = None
-    if avg_fill and mid_at_start is not None:
-        # compare fill vs market-crossing price at start if we have book
-        pass
-    if avg_fill is not None:
-        try:
-            bid0, ask0 = await _fetch_book(delta_client, symbol)
-            mkt0 = market_would_be_price(side_l, bid0, ask0)
-            saved = _saved_usd(side_l, avg_fill, mkt0, filled_total)
-        except Exception:
-            saved = None
-
-    result = OrderResult(
-        success=success,
-        order_id=last_oid,
-        filled_price=avg_fill,
-        filled_size=filled_total if filled_total else None,
-        error=None if success else "incomplete_fill",
-        fill_attempt=attempt,
-        fill_type=fill_type_used,
-        mid_at_start=mid_at_start,
-        saved_usd=saved,
-        selected_premium=(
-            float(selected_premium) if selected_premium is not None else None
-        ),
-    )
-
-    if (
-        success
-        and selected_premium is not None
-        and avg_fill is not None
-        and selection_ts is not None
-    ):
-        drift = log_entry_drift(
-            leg_label=leg_label,
-            selected_premium=float(selected_premium),
-            fill_premium=float(avg_fill),
-            seconds_since_selection=max(
-                0.0, time.monotonic() - float(selection_ts)
-            ),
-            tolerance_pct=float(entry_premium_match_tolerance_pct),
-        )
-        result.drift_pct = drift
-        result.seconds_since_selection = max(
-            0.0, time.monotonic() - float(selection_ts)
-        )
-
-    # Final position size check (opens only — closes skip)
-    if check_position_size and success and not reduce_only:
-        try:
-            actual = await get_live_position_size(delta_client, product_id)
-            if abs(abs(float(actual)) - float(qty_total)) > 0.5:
-                log_size_mismatch(
-                    leg_label=leg_label,
-                    intended=qty_total,
-                    actual=actual,
-                    attempts=attempt,
+                partner_market_fallback_done = True
+                log_and_buffer(
+                    "PARTNER_MARKET_FALLBACK_TRIGGERED",
+                    trade_id or 0,
+                    {
+                        "leg": leg_label,
+                        "attempt": attempt,
+                        "remaining": remaining,
+                    },
                 )
-        except Exception as exc:
-            logger.warning(
-                "[MIDPRICE_SIZE_MISMATCH] verify failed leg=%s: %s",
-                leg_label,
-                exc,
+                if await _pre_place_position_check(
+                    delta_client,
+                    product_id=product_id,
+                    qty_intended=qty_total,
+                    leg_label=leg_label,
+                    attempt=attempt,
+                    reduce_only=reduce_only,
+                    trade_id=trade_id,
+                    check_position_size=check_position_size,
+                ):
+                    remaining = 0
+                    filled_total = qty_total
+                    fill_type_used = "position_already_filled"
+                    break
+
+                mkt = await _place_market(
+                    delta_client,
+                    product_id=product_id,
+                    side=side_l,
+                    quantity=remaining,
+                    reduce_only=reduce_only,
+                    bracket_sl_price=bracket_sl_price,
+                    bracket_sl_limit=bracket_sl_limit,
+                )
+                if mkt.success:
+                    fsz = int(mkt.filled_size or remaining)
+                    filled_total += fsz
+                    if mkt.filled_price:
+                        fill_price_sum += float(mkt.filled_price) * fsz
+                    last_oid = mkt.order_id
+                    fill_type_used = "market"
+                    remaining = 0
+                    break
+
+                return OrderResult(
+                    success=False,
+                    error=mkt.error or "partner_final_market_failed",
+                    order_id=last_oid,
+                    filled_size=filled_total if filled_total else None,
+                    fill_attempt=attempt,
+                    fill_type="market",
+                    mid_at_start=mid_at_start,
+                )
+
+            if prof == "urgent" and attempt >= 4:
+                break
+
+        avg_fill = fill_price_sum / filled_total if filled_total > 0 else None
+        success = filled_total >= qty_total
+        saved = None
+        if avg_fill is not None:
+            try:
+                bid0, ask0 = await _fetch_book(delta_client, symbol)
+                mkt0 = market_would_be_price(side_l, bid0, ask0)
+                saved = _saved_usd(side_l, avg_fill, mkt0, filled_total)
+            except Exception:
+                saved = None
+
+        result = OrderResult(
+            success=success,
+            order_id=last_oid,
+            filled_price=avg_fill,
+            filled_size=filled_total if filled_total else None,
+            error=None if success else "incomplete_fill",
+            fill_attempt=attempt,
+            fill_type=fill_type_used,
+            mid_at_start=mid_at_start,
+            saved_usd=saved,
+            selected_premium=(
+                float(selected_premium) if selected_premium is not None else None
+            ),
+        )
+
+        if (
+            success
+            and selected_premium is not None
+            and avg_fill is not None
+            and selection_ts is not None
+        ):
+            drift = log_entry_drift(
+                leg_label=leg_label,
+                selected_premium=float(selected_premium),
+                fill_premium=float(avg_fill),
+                seconds_since_selection=max(
+                    0.0, time.monotonic() - float(selection_ts)
+                ),
+                tolerance_pct=float(entry_premium_match_tolerance_pct),
+            )
+            result.drift_pct = drift
+            result.seconds_since_selection = max(
+                0.0, time.monotonic() - float(selection_ts)
             )
 
-    return result
+        if check_position_size and success and not reduce_only:
+            try:
+                actual = await get_live_position_size(delta_client, product_id)
+                if abs(abs(float(actual)) - float(qty_total)) > 0.5:
+                    log_size_mismatch(
+                        leg_label=leg_label,
+                        intended=qty_total,
+                        actual=actual,
+                        attempts=attempt,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[MIDPRICE_SIZE_MISMATCH] verify failed leg=%s: %s",
+                    leg_label,
+                    exc,
+                )
+
+        return result
 
 
 def _saved_usd(

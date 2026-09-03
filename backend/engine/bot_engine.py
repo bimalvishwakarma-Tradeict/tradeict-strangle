@@ -77,6 +77,7 @@ class BotEngine:
         # Live mark prices from Delta WS: { symbol: mark_price }
         self._live_prices: dict[str, float] = {}
         self._ws_feed_task: asyncio.Task[None] | None = None
+        self._reconciliation_task: asyncio.Task[None] | None = None
         self._last_price_tick_at: dict[int, float] = {}
         self._btc_spot: float = 0.0
         self._btc_spot_at: float = 0.0
@@ -96,6 +97,9 @@ class BotEngine:
         # Periodic structure-ledger reconcile (billing blind spots)
         self._last_ledger_reconcile_at: float | None = None
         self._ledger_reconcile_interval_seconds: float = 15 * 60
+        self._reconcile_fail_counts: dict[tuple[int, int], int] = {}
+        self._reconcile_last_signature: dict[tuple[int, int], tuple[str, int, int]] = {}
+        self._reconcile_disabled: set[tuple[int, int]] = set()
 
     def _get_exit_lock(self, trade_id: int) -> asyncio.Lock:
         tid = int(trade_id)
@@ -125,8 +129,14 @@ class BotEngine:
         self._ws_feed_task = asyncio.create_task(
             self._start_price_feed(), name="delta-price-feed"
         )
+        self._reconciliation_task = asyncio.create_task(
+            self.reconciliation_loop(), name="qty-reconciliation-loop"
+        )
         logger.info("Starting monitoring loop...")
-        await self.monitoring_loop()
+        tasks = [asyncio.create_task(self.monitoring_loop(), name="trade-monitoring-loop")]
+        if self._reconciliation_task is not None:
+            tasks.append(self._reconciliation_task)
+        await asyncio.gather(*tasks)
 
     async def _start_margins_feed(self) -> None:
         """Start master margins WS at bot startup (do not wait for first API call)."""
@@ -161,6 +171,13 @@ class BotEngine:
             except asyncio.CancelledError:
                 pass
             self._ws_feed_task = None
+        if self._reconciliation_task is not None:
+            self._reconciliation_task.cancel()
+            try:
+                await self._reconciliation_task
+            except asyncio.CancelledError:
+                pass
+            self._reconciliation_task = None
         if self.delta_client is not None:
             try:
                 await self.delta_client.close()
@@ -612,6 +629,390 @@ class BotEngine:
             except Exception as exc:
                 logger.critical("Monitoring loop error: %s", exc, exc_info=True)
             await asyncio.sleep(MONITORING_INTERVAL_SECONDS)
+
+    async def reconciliation_loop(self) -> None:
+        """Independent 30s DB-vs-Delta qty reconcile with clash guard."""
+        while self.is_running:
+            try:
+                await self._run_qty_reconciliation_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_and_buffer(
+                    "QTY_RECONCILE_ERROR",
+                    0,
+                    {
+                        "error": str(exc),
+                    },
+                )
+            await asyncio.sleep(30)
+
+    async def _run_qty_reconciliation_tick(self) -> None:
+        from backend.engine.midprice_executor import is_placing_order
+
+        if is_placing_order():
+            log_and_buffer(
+                "QTY_RECONCILE_SKIP",
+                0,
+                {
+                    "reason": "is_placing_order",
+                    "is_placing_order": True,
+                },
+            )
+            return
+
+        if self.delta_client is None:
+            self._refresh_delta_client()
+        if self.delta_client is None:
+            log_and_buffer(
+                "QTY_RECONCILE_SKIP",
+                0,
+                {
+                    "reason": "delta_client_unavailable",
+                    "is_placing_order": False,
+                },
+            )
+            return
+
+        positions = await self.delta_client.get_option_positions()
+        delta_by_pid: dict[int, dict[str, Any]] = {}
+        for row in positions or []:
+            try:
+                pid = int(row.get("product_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0:
+                continue
+            delta_by_pid[pid] = row
+
+        with self.db_factory() as db:
+            active_trades = (
+                db.query(Trade)
+                .filter(Trade.status == TradeStatus.ACTIVE.value)
+                .all()
+            )
+            for trade in active_trades:
+                await self._reconcile_trade_quantities(
+                    db=db,
+                    trade=trade,
+                    delta_by_pid=delta_by_pid,
+                )
+
+    async def _broadcast_qty_mismatch(
+        self,
+        *,
+        trade_id: int,
+        leg: Any,
+        db_qty: int,
+        delta_qty: int,
+        is_ghost_position: bool = False,
+        reason: str = "qty_mismatch",
+    ) -> None:
+        payload = {
+            "type": "QTY_MISMATCH",
+            "trade_id": int(trade_id),
+            "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+            "leg_type": str(getattr(leg, "leg_type", "") or ""),
+            "product_id": int(getattr(leg, "product_id", 0) or 0),
+            "db_qty": int(db_qty),
+            "delta_qty": int(delta_qty),
+            "is_ghost_position": bool(is_ghost_position),
+            "reason": reason,
+        }
+        log_and_buffer("QTY_MISMATCH", int(trade_id), payload)
+        await ws_manager.broadcast(payload)
+
+    def _record_reconcile_failure(
+        self,
+        *,
+        trade_id: int,
+        product_id: int,
+        action: str,
+        db_qty: int,
+        delta_qty: int,
+    ) -> int:
+        key = (int(trade_id), int(product_id))
+        signature = (str(action), int(db_qty), int(delta_qty))
+        if self._reconcile_last_signature.get(key) == signature:
+            count = self._reconcile_fail_counts.get(key, 0) + 1
+        else:
+            count = 1
+        self._reconcile_last_signature[key] = signature
+        self._reconcile_fail_counts[key] = count
+        if count >= 2:
+            self._reconcile_disabled.add(key)
+        return count
+
+    def _clear_reconcile_failure(self, *, trade_id: int, product_id: int) -> None:
+        key = (int(trade_id), int(product_id))
+        self._reconcile_fail_counts.pop(key, None)
+        self._reconcile_last_signature.pop(key, None)
+        self._reconcile_disabled.discard(key)
+
+    async def _reconcile_trade_quantities(
+        self,
+        *,
+        db: Any,
+        trade: Any,
+        delta_by_pid: dict[int, dict[str, Any]],
+    ) -> None:
+        from backend.engine.midprice_executor import (
+            execute_with_midprice,
+            get_live_position_size,
+            is_placing_order,
+        )
+        from backend.strategies.s001_short_strangle.logic import leg_entry_phase
+
+        trade_id = int(trade.id)
+        legs = (
+            db.query(Leg)
+            .filter(
+                Leg.trade_id == trade_id,
+                Leg.is_bot_managed.is_(True),
+            )
+            .all()
+        )
+        if not legs:
+            return
+
+        missing_open_legs: list[tuple[int, Any, int, int]] = []
+        phase_order = {"wing": 0, "short": 1, "hedge": 2}
+
+        for leg in legs:
+            pid = int(getattr(leg, "product_id", 0) or 0)
+            if pid <= 0:
+                continue
+            delta_row = delta_by_pid.get(pid) or {}
+            try:
+                delta_raw_qty = float(delta_row.get("size") or 0)
+            except (TypeError, ValueError):
+                delta_raw_qty = 0.0
+            delta_qty = abs(int(round(delta_raw_qty)))
+            db_qty = int(getattr(leg, "quantity", 0) or 0)
+            is_open = str(getattr(leg, "status", "") or "").lower() == "open"
+            intended_qty = db_qty if is_open else 0
+
+            if delta_qty == intended_qty:
+                self._clear_reconcile_failure(
+                    trade_id=trade_id,
+                    product_id=pid,
+                )
+                continue
+
+            if intended_qty == 0 and delta_qty > 0:
+                await self._broadcast_qty_mismatch(
+                    trade_id=trade_id,
+                    leg=leg,
+                    db_qty=0,
+                    delta_qty=delta_qty,
+                    is_ghost_position=True,
+                    reason="ghost_position",
+                )
+                continue
+
+            await self._broadcast_qty_mismatch(
+                trade_id=trade_id,
+                leg=leg,
+                db_qty=intended_qty,
+                delta_qty=delta_qty,
+                reason="delta_db_diverged",
+            )
+
+            key = (trade_id, pid)
+            if key in self._reconcile_disabled:
+                log_and_buffer(
+                    "QTY_RECONCILE_DISABLED",
+                    trade_id,
+                    {
+                        "product_id": pid,
+                        "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                        "db_qty": intended_qty,
+                        "delta_qty": delta_qty,
+                        "reason": "two_strike_rule",
+                    },
+                )
+                continue
+
+            if is_placing_order():
+                log_and_buffer(
+                    "QTY_RECONCILE_SKIP",
+                    trade_id,
+                    {
+                        "reason": "is_placing_order_mid_tick",
+                        "product_id": pid,
+                    },
+                )
+                return
+
+            if delta_qty > intended_qty:
+                excess_qty = delta_qty - intended_qty
+                live_now = abs(
+                    int(round(float(await get_live_position_size(self.delta_client, pid))))
+                )
+                if live_now <= intended_qty:
+                    self._clear_reconcile_failure(
+                        trade_id=trade_id,
+                        product_id=pid,
+                    )
+                    continue
+                side = "sell" if bool(getattr(leg, "is_long", False)) else "buy"
+                result = await execute_with_midprice(
+                    product_id=pid,
+                    side=side,
+                    quantity=excess_qty,
+                    profile="chase",
+                    delta_client=self.delta_client,
+                    reason="HEDGE_MANUAL",
+                    leg_label=f"reconcile_reduce_{getattr(leg, 'leg_type', 'leg')}",
+                    symbol=str(getattr(leg, "symbol", "") or ""),
+                    max_chase_seconds=30,
+                    reduce_only=True,
+                    midprice_enabled=False,
+                    check_position_size=False,
+                    trade_id=trade_id,
+                    phase="QTY_RECONCILE_REDUCE",
+                    leg_type=str(getattr(leg, "leg_type", "") or ""),
+                )
+                if result.success:
+                    self._clear_reconcile_failure(
+                        trade_id=trade_id,
+                        product_id=pid,
+                    )
+                    log_and_buffer(
+                        "QTY_RECONCILE_CORRECTED",
+                        trade_id,
+                        {
+                            "product_id": pid,
+                            "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                            "action": "reduce_excess",
+                            "db_qty": intended_qty,
+                            "delta_qty": delta_qty,
+                            "corrected_qty": excess_qty,
+                        },
+                    )
+                else:
+                    strikes = self._record_reconcile_failure(
+                        trade_id=trade_id,
+                        product_id=pid,
+                        action="reduce_excess",
+                        db_qty=intended_qty,
+                        delta_qty=delta_qty,
+                    )
+                    log_and_buffer(
+                        "QTY_RECONCILE_FAIL",
+                        trade_id,
+                        {
+                            "product_id": pid,
+                            "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                            "action": "reduce_excess",
+                            "db_qty": intended_qty,
+                            "delta_qty": delta_qty,
+                            "strikes": strikes,
+                            "error": str(result.error or "correction_failed"),
+                        },
+                    )
+                continue
+
+            missing_qty = intended_qty - delta_qty
+            missing_open_legs.append(
+                (
+                    phase_order.get(leg_entry_phase(str(getattr(leg, "leg_type", ""))), 9),
+                    leg,
+                    intended_qty,
+                    missing_qty,
+                )
+            )
+
+        for phase_index, leg, intended_qty, missing_qty in sorted(
+            missing_open_legs,
+            key=lambda row: (row[0], str(getattr(row[1], "leg_type", ""))),
+        ):
+            pid = int(getattr(leg, "product_id", 0) or 0)
+            key = (trade_id, pid)
+            if key in self._reconcile_disabled:
+                continue
+            if is_placing_order():
+                log_and_buffer(
+                    "QTY_RECONCILE_SKIP",
+                    trade_id,
+                    {
+                        "reason": "is_placing_order_mid_tick",
+                        "product_id": pid,
+                    },
+                )
+                return
+
+            leg_type = str(getattr(leg, "leg_type", "") or "")
+            phase_name = leg_entry_phase(leg_type)
+            reason = (
+                "HEDGE_ENTRY"
+                if phase_name == "hedge"
+                else "CONDOR_ENTRY"
+                if phase_name == "wing"
+                else "BASKET_ENTRY"
+            )
+            side = "buy" if bool(getattr(leg, "is_long", False)) else "sell"
+            result = await execute_with_midprice(
+                product_id=pid,
+                side=side,
+                quantity=missing_qty,
+                profile="chase",
+                delta_client=self.delta_client,
+                reason=reason,
+                leg_label=f"reconcile_add_{leg_type}",
+                symbol=str(getattr(leg, "symbol", "") or ""),
+                max_chase_seconds=30,
+                reduce_only=False,
+                midprice_enabled=False,
+                check_position_size=True,
+                trade_id=trade_id,
+                phase=f"QTY_RECONCILE_{phase_name.upper()}",
+                leg_type=leg_type,
+            )
+            if result.success:
+                self._clear_reconcile_failure(
+                    trade_id=trade_id,
+                    product_id=pid,
+                )
+                log_and_buffer(
+                    "QTY_RECONCILE_CORRECTED",
+                    trade_id,
+                    {
+                        "product_id": pid,
+                        "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                        "action": "add_missing",
+                        "phase": phase_name,
+                        "sequence_position": phase_index + 1,
+                        "db_qty": intended_qty,
+                        "delta_qty": intended_qty - missing_qty,
+                        "corrected_qty": missing_qty,
+                    },
+                )
+                continue
+
+            strikes = self._record_reconcile_failure(
+                trade_id=trade_id,
+                product_id=pid,
+                action="add_missing",
+                db_qty=intended_qty,
+                delta_qty=intended_qty - missing_qty,
+            )
+            log_and_buffer(
+                "QTY_RECONCILE_FAIL",
+                trade_id,
+                {
+                    "product_id": pid,
+                    "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                    "action": "add_missing",
+                    "phase": phase_name,
+                    "sequence_position": phase_index + 1,
+                    "db_qty": intended_qty,
+                    "delta_qty": intended_qty - missing_qty,
+                    "strikes": strikes,
+                    "error": str(result.error or "correction_failed"),
+                },
+            )
+            break
 
     async def _process_all_trades(self) -> None:
         # Daily noon IST balance snapshots (no-op outside 12:00–12:02 window)
