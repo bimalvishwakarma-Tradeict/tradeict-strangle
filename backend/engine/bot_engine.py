@@ -707,6 +707,7 @@ class BotEngine:
         delta_qty: int,
         is_ghost_position: bool = False,
         reason: str = "qty_mismatch",
+        strategy_expected_qty: int | None = None,
     ) -> None:
         payload = {
             "type": "QTY_MISMATCH",
@@ -719,8 +720,50 @@ class BotEngine:
             "is_ghost_position": bool(is_ghost_position),
             "reason": reason,
         }
+        if strategy_expected_qty is not None:
+            payload["strategy_expected_qty"] = int(strategy_expected_qty)
         log_and_buffer("QTY_MISMATCH", int(trade_id), payload)
         await ws_manager.broadcast(payload)
+
+    def _strategy_expected_qty_for_leg(
+        self,
+        *,
+        trade: Any,
+        leg: Any,
+        decrease_pct: float,
+    ) -> int | None:
+        """
+        Strategy-expected open qty for reconciliation.
+
+        Returns None when this leg type should be skipped (hedge).
+        Falls back to DB qty when no adjustment history / original qty.
+        """
+        import math
+
+        from backend.strategies.s001_short_strangle.logic import leg_entry_phase
+
+        phase = leg_entry_phase(str(getattr(leg, "leg_type", "") or ""))
+        if phase == "hedge":
+            return None
+
+        db_qty = abs(int(getattr(leg, "quantity", 0) or 0))
+        adj_count = int(getattr(trade, "adjustment_count", 0) or 0)
+        orig_raw = getattr(trade, "original_basket_qty", None)
+        if adj_count <= 0 or orig_raw is None:
+            return db_qty
+
+        orig = max(1, int(orig_raw))
+        if phase == "wing":
+            return orig
+
+        # SHORT legs (decrease_step): floor(orig × (1 − pct/100 × adj_n))
+        pct = float(decrease_pct)
+        if not (0 < pct < 100):
+            pct = 25.0
+        remaining = 1.0 - (pct / 100.0) * float(adj_count)
+        if remaining <= 0:
+            return 0
+        return max(1, int(math.floor(orig * remaining)))
 
     def _record_reconcile_failure(
         self,
@@ -761,6 +804,7 @@ class BotEngine:
             get_live_position_size,
             is_placing_order,
         )
+        from backend.models import AutoTradeSettings
         from backend.strategies.s001_short_strangle.logic import leg_entry_phase
 
         trade_id = int(trade.id)
@@ -775,6 +819,36 @@ class BotEngine:
         if not legs:
             return
 
+        decrease_pct = 25.0
+        try:
+            ats = db.query(AutoTradeSettings).order_by(AutoTradeSettings.id.asc()).first()
+            if ats is not None:
+                raw_pct = float(
+                    getattr(ats, "adjustment_qty_decrease_pct", None) or 25.0
+                )
+                if 0 < raw_pct < 100:
+                    decrease_pct = raw_pct
+        except Exception as exc:
+            logger.warning(
+                "Trade %s: could not load decrease_pct for reconcile: %s",
+                trade_id,
+                exc,
+            )
+
+        adj_count = int(getattr(trade, "adjustment_count", 0) or 0)
+        orig_basket = getattr(trade, "original_basket_qty", None)
+        log_and_buffer(
+            "QTY_RECONCILE_STRATEGY_BASE",
+            trade_id,
+            {
+                "adjustment_count": adj_count,
+                "original_basket_qty": (
+                    int(orig_basket) if orig_basket is not None else None
+                ),
+                "decrease_pct": decrease_pct,
+            },
+        )
+
         missing_open_legs: list[tuple[int, Any, int, int]] = []
         phase_order = {"wing": 0, "short": 1, "hedge": 2}
 
@@ -788,34 +862,113 @@ class BotEngine:
             except (TypeError, ValueError):
                 delta_raw_qty = 0.0
             delta_qty = abs(int(round(delta_raw_qty)))
-            db_qty = int(getattr(leg, "quantity", 0) or 0)
+            db_qty = abs(int(getattr(leg, "quantity", 0) or 0))
             is_open = str(getattr(leg, "status", "") or "").lower() == "open"
-            intended_qty = db_qty if is_open else 0
+
+            # Case C — ghost: Delta has qty but DB shows closed (unchanged).
+            if not is_open:
+                if delta_qty > 0:
+                    await self._broadcast_qty_mismatch(
+                        trade_id=trade_id,
+                        leg=leg,
+                        db_qty=0,
+                        delta_qty=delta_qty,
+                        is_ghost_position=True,
+                        reason="ghost_position",
+                        strategy_expected_qty=0,
+                    )
+                else:
+                    self._clear_reconcile_failure(
+                        trade_id=trade_id,
+                        product_id=pid,
+                    )
+                continue
+
+            phase_name = leg_entry_phase(str(getattr(leg, "leg_type", "") or ""))
+            # Hedge has its own monitoring — skip qty reconciliation.
+            if phase_name == "hedge":
+                continue
+
+            strategy_expected = self._strategy_expected_qty_for_leg(
+                trade=trade,
+                leg=leg,
+                decrease_pct=decrease_pct,
+            )
+            if strategy_expected is None:
+                continue
+            intended_qty = int(strategy_expected)
+
+            log_and_buffer(
+                "QTY_RECONCILE_STRATEGY_EXPECTED",
+                trade_id,
+                {
+                    "product_id": pid,
+                    "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                    "leg_type": str(getattr(leg, "leg_type", "") or ""),
+                    "phase": phase_name,
+                    "db_qty": db_qty,
+                    "delta_qty": delta_qty,
+                    "strategy_expected_qty": intended_qty,
+                    "adjustment_count": adj_count,
+                    "original_basket_qty": (
+                        int(orig_basket) if orig_basket is not None else None
+                    ),
+                    "decrease_pct": decrease_pct,
+                },
+            )
 
             if delta_qty == intended_qty:
                 self._clear_reconcile_failure(
                     trade_id=trade_id,
                     product_id=pid,
                 )
+                # Delta matches strategy — if DB is stale, fix DB only (no order).
+                if db_qty != intended_qty:
+                    logger.warning(
+                        "Trade %s: DB qty %s != strategy_expected %s for %s "
+                        "(Delta OK) — updating DB only",
+                        trade_id,
+                        db_qty,
+                        intended_qty,
+                        getattr(leg, "symbol", ""),
+                    )
+                    leg.quantity = intended_qty
+                    db.commit()
+                    log_and_buffer(
+                        "QTY_RECONCILE_DB_SYNC",
+                        trade_id,
+                        {
+                            "product_id": pid,
+                            "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                            "action": "db_qty_synced_to_strategy",
+                            "db_qty_was": db_qty,
+                            "delta_qty": delta_qty,
+                            "strategy_expected_qty": intended_qty,
+                            "correction_order": False,
+                        },
+                    )
                 continue
 
-            if intended_qty == 0 and delta_qty > 0:
-                await self._broadcast_qty_mismatch(
-                    trade_id=trade_id,
-                    leg=leg,
-                    db_qty=0,
-                    delta_qty=delta_qty,
-                    is_ghost_position=True,
-                    reason="ghost_position",
-                )
-                continue
-
+            # Real mismatch: Delta != strategy-expected.
             await self._broadcast_qty_mismatch(
                 trade_id=trade_id,
                 leg=leg,
-                db_qty=intended_qty,
+                db_qty=db_qty,
                 delta_qty=delta_qty,
-                reason="delta_db_diverged",
+                reason="delta_strategy_diverged",
+                strategy_expected_qty=intended_qty,
+            )
+            log_and_buffer(
+                "QTY_RECONCILE_REAL_MISMATCH",
+                trade_id,
+                {
+                    "product_id": pid,
+                    "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                    "db_qty": db_qty,
+                    "delta_qty": delta_qty,
+                    "strategy_expected_qty": intended_qty,
+                    "correction_order": True,
+                },
             )
 
             key = (trade_id, pid)
@@ -826,8 +979,9 @@ class BotEngine:
                     {
                         "product_id": pid,
                         "leg_symbol": str(getattr(leg, "symbol", "") or ""),
-                        "db_qty": intended_qty,
+                        "db_qty": db_qty,
                         "delta_qty": delta_qty,
+                        "strategy_expected_qty": intended_qty,
                         "reason": "two_strike_rule",
                     },
                 )
@@ -878,6 +1032,9 @@ class BotEngine:
                         trade_id=trade_id,
                         product_id=pid,
                     )
+                    if db_qty != intended_qty:
+                        leg.quantity = intended_qty
+                        db.commit()
                     log_and_buffer(
                         "QTY_RECONCILE_CORRECTED",
                         trade_id,
@@ -885,8 +1042,9 @@ class BotEngine:
                             "product_id": pid,
                             "leg_symbol": str(getattr(leg, "symbol", "") or ""),
                             "action": "reduce_excess",
-                            "db_qty": intended_qty,
+                            "db_qty": db_qty,
                             "delta_qty": delta_qty,
+                            "strategy_expected_qty": intended_qty,
                             "corrected_qty": excess_qty,
                         },
                     )
@@ -905,8 +1063,9 @@ class BotEngine:
                             "product_id": pid,
                             "leg_symbol": str(getattr(leg, "symbol", "") or ""),
                             "action": "reduce_excess",
-                            "db_qty": intended_qty,
+                            "db_qty": db_qty,
                             "delta_qty": delta_qty,
+                            "strategy_expected_qty": intended_qty,
                             "strikes": strikes,
                             "error": str(result.error or "correction_failed"),
                         },
@@ -916,7 +1075,7 @@ class BotEngine:
             missing_qty = intended_qty - delta_qty
             missing_open_legs.append(
                 (
-                    phase_order.get(leg_entry_phase(str(getattr(leg, "leg_type", ""))), 9),
+                    phase_order.get(phase_name, 9),
                     leg,
                     intended_qty,
                     missing_qty,
@@ -944,10 +1103,9 @@ class BotEngine:
 
             leg_type = str(getattr(leg, "leg_type", "") or "")
             phase_name = leg_entry_phase(leg_type)
+            db_qty = abs(int(getattr(leg, "quantity", 0) or 0))
             reason = (
-                "HEDGE_ENTRY"
-                if phase_name == "hedge"
-                else "CONDOR_ENTRY"
+                "CONDOR_ENTRY"
                 if phase_name == "wing"
                 else "BASKET_ENTRY"
             )
@@ -974,6 +1132,9 @@ class BotEngine:
                     trade_id=trade_id,
                     product_id=pid,
                 )
+                if db_qty != intended_qty:
+                    leg.quantity = intended_qty
+                    db.commit()
                 log_and_buffer(
                     "QTY_RECONCILE_CORRECTED",
                     trade_id,
@@ -983,8 +1144,9 @@ class BotEngine:
                         "action": "add_missing",
                         "phase": phase_name,
                         "sequence_position": phase_index + 1,
-                        "db_qty": intended_qty,
+                        "db_qty": db_qty,
                         "delta_qty": intended_qty - missing_qty,
+                        "strategy_expected_qty": intended_qty,
                         "corrected_qty": missing_qty,
                     },
                 )
@@ -1006,8 +1168,9 @@ class BotEngine:
                     "action": "add_missing",
                     "phase": phase_name,
                     "sequence_position": phase_index + 1,
-                    "db_qty": intended_qty,
+                    "db_qty": db_qty,
                     "delta_qty": intended_qty - missing_qty,
+                    "strategy_expected_qty": intended_qty,
                     "strikes": strikes,
                     "error": str(result.error or "correction_failed"),
                 },
