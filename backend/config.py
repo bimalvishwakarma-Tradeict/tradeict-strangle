@@ -120,3 +120,5 @@ class ExitReason(str, Enum):
     ORPHAN_NO_HEDGE = "ORPHAN_NO_HEDGE"
     # Entry basket could not fully fill after retries — positions unwound
     ENTRY_PARTIAL_UNWIND = "ENTRY_PARTIAL_UNWIND"
+    # Both shorts closed; remaining long wings auto-closed (not a loss reason)
+    WINGS_ORPHANED = "WINGS_ORPHANED"

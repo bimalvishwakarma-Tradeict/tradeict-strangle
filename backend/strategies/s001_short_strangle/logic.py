@@ -1242,6 +1242,128 @@ class ShortStrangleStrategy(BaseStrategy):
                 else 0.0
             )
         )
+        wing_clamp_bypass_tolerance = False
+
+        # ── Wing cross-guard: short must stay STRICTLY inside wing ──
+        if old_strike is not None:
+            try:
+                from backend.database import SessionLocal
+                from backend.engine.wing_exit import (
+                    clamp_short_strike_inside_wing,
+                    find_chain_row_for_strike,
+                    get_open_wing_strikes,
+                )
+                from backend.models import Leg as _Leg
+
+                with SessionLocal() as _wdb:
+                    _wlegs = (
+                        _wdb.query(_Leg)
+                        .filter(
+                            _Leg.trade_id == trade_id,
+                            _Leg.status == "open",
+                            _Leg.is_bot_managed.is_(True),
+                        )
+                        .all()
+                    )
+                    wing_call_k, wing_put_k = get_open_wing_strikes(_wlegs)
+                wing_k = wing_call_k if leg == "call" else wing_put_k
+                if wing_k is not None:
+                    chain = await delta_client.get_option_chain(
+                        underlying_symbol, expiry_str
+                    )
+                    avail = []
+                    for cr in chain or []:
+                        try:
+                            avail.append(float(cr.get("strike") or 0))
+                        except (TypeError, ValueError):
+                            continue
+                    clamped, clamp_status = clamp_short_strike_inside_wing(
+                        leg=leg,
+                        wanted_strike=new_strike,
+                        wing_strike=float(wing_k),
+                        available_strikes=avail,
+                        current_short_strike=float(old_strike),
+                    )
+                    if clamp_status == "dead_end":
+                        try:
+                            log_and_buffer(
+                                "ADJUSTMENT_ABORT",
+                                trade_id,
+                                {
+                                    "trade": trade_id,
+                                    "leg": leg,
+                                    "reason": "CHAIN_EXHAUSTED",
+                                    "old_strike": old_strike,
+                                    "wanted": new_strike,
+                                    "wing": wing_k,
+                                    "summary": (
+                                        f"[CHAIN_EXHAUSTED] wing cross-guard "
+                                        f"dead_end trade={trade_id} leg={leg} "
+                                        f"wanted={new_strike} wing={wing_k}"
+                                    ),
+                                },
+                            )
+                        except Exception:
+                            pass
+                        raise ValueError(
+                            f"ADJUSTMENT_ABORT: CHAIN_EXHAUSTED wing cross-guard "
+                            f"dead_end for {leg} wanted={new_strike} wing={wing_k} "
+                            f"from {old_strike}"
+                        )
+                    if clamp_status == "clamped" and clamped is not None:
+                        wanted_prem = new_premium
+                        crow = find_chain_row_for_strike(
+                            chain or [], leg=leg, strike=float(clamped)
+                        )
+                        if crow is None:
+                            raise ValueError(
+                                f"ADJUSTMENT_ABORT: CHAIN_EXHAUSTED clamped "
+                                f"strike {clamped} missing from chain"
+                            )
+                        row = crow
+                        new_strike = float(clamped)
+                        new_premium = float(row.get(mark_key) or 0)
+                        method = "wing_cross_guard_clamp"
+                        deviation_pct = (
+                            abs(new_premium - final_target) / final_target * 100.0
+                            if final_target > 0
+                            else 0.0
+                        )
+                        if deviation_pct > tolerance_pct:
+                            wing_clamp_bypass_tolerance = True
+                            logger.warning(
+                                "[WING_CROSS_GUARD_TOLERANCE_BYPASS] "
+                                "wanted_prem=%.4f picked_prem=%.4f pct_off=%.2f",
+                                wanted_prem,
+                                new_premium,
+                                deviation_pct,
+                            )
+                            try:
+                                log_and_buffer(
+                                    "WING_CROSS_GUARD_TOLERANCE_BYPASS",
+                                    trade_id,
+                                    {
+                                        "wanted_prem": round(wanted_prem, 4),
+                                        "picked_prem": round(new_premium, 4),
+                                        "pct_off": round(deviation_pct, 2),
+                                        "wanted_strike": float(
+                                            row.get("_wanted_strike") or 0
+                                        )
+                                        or None,
+                                        "clamped_to": new_strike,
+                                        "wing": wing_k,
+                                    },
+                                )
+                            except Exception:
+                                pass
+            except ValueError:
+                raise
+            except Exception as wing_exc:
+                logger.warning(
+                    "wing cross-guard failed (non-fatal continue): %s",
+                    wing_exc,
+                )
+
         other_offer = (
             float(untouched_for_log)
             if untouched_for_log is not None
@@ -1289,7 +1411,7 @@ class ShortStrangleStrategy(BaseStrategy):
                 f"(no alternate strike for {leg})"
             )
 
-        if deviation_pct > tolerance_pct:
+        if deviation_pct > tolerance_pct and not wing_clamp_bypass_tolerance:
             try:
                 log_and_buffer(
                     "ADJUSTMENT_PREMIUM_MISS",

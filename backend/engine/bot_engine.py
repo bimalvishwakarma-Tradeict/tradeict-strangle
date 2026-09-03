@@ -1406,51 +1406,107 @@ class BotEngine:
                                 if prior_notes
                                 else note_tag
                             )
-            # Close any other open legs (incl. tracked hedge — not treated as orphan)
+            # Close any other open legs (wings / hedges) — shorts first then wings
             other_open = (
                 db.query(Leg)
                 .filter(Leg.trade_id == trade_id, Leg.status == "open")
                 .all()
             )
-            for leftover in other_open:
-                is_long = bool(getattr(leftover, "is_long", False)) or str(
-                    getattr(leftover, "leg_type", "")
-                ).startswith("hedge")
-                exit_px: float | None = None
-                if self.delta_client is not None:
-                    try:
-                        if is_long:
-                            close_res = await self.order_executor.close_long_position(
-                                product_id=int(leftover.product_id),
-                                quantity=int(leftover.quantity),
-                                delta_client=self.delta_client,
-                                symbol_for_fallback=str(leftover.symbol),
-                            )
-                        else:
-                            close_res = await self.order_executor.close_leg(
-                                leftover, self.delta_client
-                            )
-                        if close_res.success:
-                            px = float(close_res.filled_price or 0)
-                            exit_px = px if px > 0 else None
-                    except Exception as exc:
-                        logger.warning(
-                            "Emergency leftover close failed %s: %s",
-                            leftover.symbol,
-                            exc,
+            if other_open and self.delta_client is not None and trade is not None:
+                from backend.engine.wing_exit import close_basket_legs
+                from backend.strategies.base_strategy import OrderResult as _OR
+
+                bundle = await close_basket_legs(
+                    trade=trade,
+                    reason=ExitReason.INTEGRITY_NAKED_CLOSE.value,
+                    db=db,
+                    delta_client=self.delta_client,
+                    order_executor=self.order_executor,
+                    legs_to_close="all",
+                    legs=other_open,
+                    verify_on_delta=True,
+                )
+                for row in bundle.legs:
+                    if row.leg_id is None:
+                        continue
+                    leftover = (
+                        db.query(Leg).filter(Leg.id == int(row.leg_id)).first()
+                    )
+                    if leftover is None or str(leftover.status).lower() != "open":
+                        continue
+                    if row.is_wing and not row.success:
+                        note = (
+                            f"WING_CLOSE_FAILED: {row.leg_type}:{row.error}"
                         )
-                if trade is not None:
+                        prior = str(getattr(trade, "notes", None) or "")
+                        if "WING_CLOSE_FAILED" not in prior:
+                            trade.notes = (
+                                f"{prior} | {note}" if prior else note
+                            )
+                        continue
                     book_leg_close(
                         leg=leftover,
                         trade=trade,
-                        exit_premium=exit_px,
+                        exit_premium=row.fill_price,
                         exit_time=now_utc,
+                        exit_fee_usd=row.commission,
+                        exit_order_id=row.order_id,
                         db=db,
                     )
-                else:
-                    leftover.status = "closed"
-                    leftover.exit_time = get_utc_now()
-                    leftover.exit_premium = exit_px
+                if bundle.any_wing_fail:
+                    await ws_manager.broadcast(
+                        {
+                            "type": "WING_CLOSE_FAILED",
+                            "trade_id": trade_id,
+                            "reason": ExitReason.INTEGRITY_NAKED_CLOSE.value,
+                            "message": (
+                                f"Wing close failed after naked emergency "
+                                f"on trade {trade_id}"
+                            ),
+                        }
+                    )
+            elif other_open:
+                for leftover in other_open:
+                    is_long = bool(getattr(leftover, "is_long", False)) or str(
+                        getattr(leftover, "leg_type", "")
+                    ).startswith("hedge")
+                    exit_px: float | None = None
+                    if self.delta_client is not None:
+                        try:
+                            if is_long:
+                                close_res = (
+                                    await self.order_executor.close_long_position(
+                                        product_id=int(leftover.product_id),
+                                        quantity=int(leftover.quantity),
+                                        delta_client=self.delta_client,
+                                        symbol_for_fallback=str(leftover.symbol),
+                                    )
+                                )
+                            else:
+                                close_res = await self.order_executor.close_leg(
+                                    leftover, self.delta_client
+                                )
+                            if close_res.success:
+                                px = float(close_res.filled_price or 0)
+                                exit_px = px if px > 0 else None
+                        except Exception as exc:
+                            logger.warning(
+                                "Emergency leftover close failed %s: %s",
+                                leftover.symbol,
+                                exc,
+                            )
+                    if trade is not None:
+                        book_leg_close(
+                            leg=leftover,
+                            trade=trade,
+                            exit_premium=exit_px,
+                            exit_time=now_utc,
+                            db=db,
+                        )
+                    else:
+                        leftover.status = "closed"
+                        leftover.exit_time = get_utc_now()
+                        leftover.exit_premium = exit_px
 
             if trade is not None:
                 recompute_trade_realized_pnl(db, trade)
@@ -2906,11 +2962,13 @@ class BotEngine:
             slaves_closed = 0
             slaves_failed = slaves_total
 
-        # Step 4: Close ALL open legs on Delta (short=BUY, long hedge=SELL)
+        # Step 4: Close ALL open legs via centralised helper
+        # SAFE ORDER: shorts → wings → conversion hedges (never reverse)
         close_results: dict[int, Any] = {}
         basket_close_times: dict[str, tuple[Any, Any]] = {}
         hard_fail = False
         trade_is_demo = bool(getattr(trade, "is_demo", False))
+        wing_close_failed_note = False
 
         if skip_master_legs:
             log_and_buffer(
@@ -2929,17 +2987,22 @@ class BotEngine:
             )
         elif trade_is_demo:
             from backend.strategies.base_strategy import OrderResult
+            from backend.engine.wing_exit import filter_legs_for_close
 
             logger.info(
                 "[DEMO] Virtual exit — no real Delta orders, "
-                "marking closed with mark prices"
+                "marking closed with mark prices (shorts→wings order)"
             )
-            for leg in all_open_legs:
+            for leg in filter_legs_for_close(all_open_legs, "all"):
                 leg_id = int(leg.id)
                 is_long = bool(getattr(leg, "is_long", False)) or str(
                     getattr(leg, "leg_type", "")
-                ).startswith("hedge")
-                fill_label = "hedge" if is_long else str(leg.leg_type)
+                ).startswith("hedge") or str(
+                    getattr(leg, "leg_type", "")
+                ).startswith("wing")
+                fill_label = "hedge" if (
+                    str(getattr(leg, "leg_type", "")).startswith("hedge")
+                ) else str(leg.leg_type)
                 try:
                     px = float(
                         await self.delta_client.get_mark_price(str(leg.symbol))
@@ -2957,6 +3020,15 @@ class BotEngine:
                 lt = str(getattr(leg, "leg_type", "") or "").lower()
                 if lt in ("call", "put") and not is_long:
                     basket_close_times[lt] = (leg_close_ts, leg_close_fill_ts)
+                if lt.startswith("wing"):
+                    logger.info(
+                        "[WING_EXIT] trade=%s leg=%s qty=%s fill=%s reason=%s",
+                        trade_id,
+                        "call" if "call" in lt else "put",
+                        int(getattr(leg, "quantity", 0) or 0),
+                        px,
+                        reason,
+                    )
                 log_and_buffer(
                     "EXIT_CLOSE",
                     trade_id,
@@ -2969,80 +3041,118 @@ class BotEngine:
                     },
                 )
         else:
-            for leg in all_open_legs:
-                leg_id = int(leg.id)
-                is_long = bool(getattr(leg, "is_long", False)) or str(
-                    getattr(leg, "leg_type", "")
-                ).startswith("hedge")
-                fill_label = "hedge" if is_long else str(leg.leg_type)
-                on_delta = exists_map.get(leg_id, False)
+            from backend.engine.wing_exit import close_basket_legs
+            from backend.strategies.base_strategy import OrderResult
 
-                if not on_delta:
-                    logger.warning(
-                        "[EXIT_CLOSE] %s not on Delta — skipping close", fill_label
-                    )
-                    log_and_buffer(
-                        "EXIT_CLOSE",
-                        trade_id,
-                        {
-                            "leg": fill_label,
-                            "ok": True,
-                            "skipped": "not_on_delta",
-                            "is_long": is_long,
-                        },
-                    )
+            close_bundle = await close_basket_legs(
+                trade=trade,
+                reason=reason,
+                db=None,
+                delta_client=self.delta_client,
+                order_executor=self.order_executor,
+                legs_to_close="all",
+                legs=all_open_legs,
+                verify_on_delta=True,
+            )
+            for row in close_bundle.legs:
+                if row.leg_id is None:
                     continue
-
-                leg_close_ts = get_utc_now()
-                if is_long:
-                    close_result = await self.order_executor.close_long_position(
-                        product_id=int(leg.product_id),
-                        quantity=int(leg.quantity),
-                        delta_client=self.delta_client,
-                        symbol_for_fallback=str(leg.symbol),
-                    )
-                else:
-                    close_result = await self.order_executor.close_leg(
-                        leg, self.delta_client
-                    )
-                leg_close_fill_ts = get_utc_now()
-                close_results[leg_id] = close_result
-                lt = str(getattr(leg, "leg_type", "") or "").lower()
-                if lt in ("call", "put") and not is_long:
-                    basket_close_times[lt] = (leg_close_ts, leg_close_fill_ts)
-
-                if close_result.success:
+                lid = int(row.leg_id)
+                close_results[lid] = OrderResult(
+                    success=bool(row.success),
+                    order_id=(
+                        int(row.order_id)
+                        if row.order_id and str(row.order_id).isdigit()
+                        else None
+                    ),
+                    filled_price=row.fill_price,
+                    commission=row.commission,
+                    error=row.error,
+                )
+                # Preserve string order ids that are non-numeric
+                if row.order_id and close_results[lid].order_id is None:
+                    # OrderResult.order_id is int|None — keep via filled path
+                    pass
+                lt = str(row.leg_type or "").lower()
+                if row.is_short and lt in ("call", "put") and row.success:
+                    now_pair = (get_utc_now(), get_utc_now())
+                    basket_close_times[lt] = now_pair
+                fill_label = row.leg_type
+                log_and_buffer(
+                    "EXIT_CLOSE",
+                    trade_id,
+                    {
+                        "leg": fill_label,
+                        "ok": bool(row.success),
+                        "fill": float(row.fill_price or 0),
+                        "is_long": row.is_wing or not row.is_short,
+                        "skipped": bool(row.skipped),
+                        "error": row.error,
+                    },
+                )
+                if row.success:
                     logger.info(
                         "EXIT_CLOSE %s @ %.2f",
                         fill_label,
-                        float(close_result.filled_price or 0),
+                        float(row.fill_price or 0),
                     )
-                    log_and_buffer(
-                        "EXIT_CLOSE",
-                        trade_id,
-                        {
-                            "leg": fill_label,
-                            "ok": True,
-                            "fill": float(close_result.filled_price or 0),
-                            "is_long": is_long,
-                        },
-                    )
-                else:
+                    master_legs_closed += 1
+                elif not row.skipped:
                     logger.error(
                         "EXIT_CLOSE FAILED for %s: %s",
-                        leg.symbol,
-                        close_result.error,
+                        row.symbol,
+                        row.error,
                     )
-                    log_and_buffer(
-                        "EXIT_CLOSE",
-                        trade_id,
-                        {
-                            "leg": fill_label,
-                            "ok": False,
-                            "error": close_result.error,
-                            "is_long": is_long,
-                        },
+
+            if close_bundle.any_wing_fail:
+                wing_close_failed_note = True
+                fail_bits = [
+                    f"{r.leg_type}:{r.error}" for r in close_bundle.wings_failed
+                ]
+                note = "WING_CLOSE_FAILED: " + "; ".join(fail_bits[:5])
+                logger.critical(
+                    "[WING_CLOSE_FAILED] trade=%s %s",
+                    trade_id,
+                    note,
+                )
+                try:
+                    with self.db_factory() as note_db:
+                        t_note = (
+                            note_db.query(Trade)
+                            .filter(Trade.id == trade_id)
+                            .first()
+                        )
+                        if t_note is not None:
+                            existing = str(t_note.notes or "").strip()
+                            if "WING_CLOSE_FAILED" not in existing:
+                                t_note.notes = (
+                                    f"{existing} | {note}"
+                                    if existing
+                                    else note
+                                )
+                                note_db.commit()
+                except Exception as note_exc:
+                    logger.warning(
+                        "Could not persist WING_CLOSE_FAILED note: %s",
+                        note_exc,
                     )
+                await ws_manager.broadcast(
+                    {
+                        "type": "WING_CLOSE_FAILED",
+                        "trade_id": trade_id,
+                        "reason": reason,
+                        "failures": fail_bits,
+                        "message": (
+                            f"Wing close failed on trade {trade_id} — "
+                            "long wing may still be open (theta bleed risk)"
+                        ),
+                    }
+                )
+                await self._push_error(
+                    trade_id,
+                    f"WING_CLOSE_FAILED: {note}",
+                    requires_manual_action=True,
+                )
 
         # Step 5: Wait and verify closes
         if not skip_master_legs:
@@ -3057,11 +3167,7 @@ class BotEngine:
                     still = await self.delta_client.verify_position_exists(
                         int(leg.product_id)
                     )
-                    label = (
-                        "hedge"
-                        if bool(getattr(leg, "is_long", False))
-                        else str(leg.leg_type)
-                    )
+                    label = str(leg.leg_type)
                     still_map[label] = still
                     if still:
                         hard_fail = True
@@ -3070,12 +3176,7 @@ class BotEngine:
                             label,
                         )
                 else:
-                    label = (
-                        "hedge"
-                        if bool(getattr(leg, "is_long", False))
-                        else str(leg.leg_type)
-                    )
-                    still_map[label] = False
+                    still_map[str(leg.leg_type)] = False
 
             log_and_buffer(
                 "EXIT_VERIFY",
@@ -3083,30 +3184,39 @@ class BotEngine:
                 {"stage": "post_exit", "still_open": still_map},
             )
 
-            if hard_fail:
-                msg = (
-                    f"Exit order failure trade={trade_id} "
-                    f"still_open={still_map}"
-                )
-                logger.critical(msg)
-                log_and_buffer(
-                    "EXIT_FAIL",
-                    trade_id,
-                    {"reason": reason, "error": msg},
-                )
-                await self._push_error(
-                    trade_id, msg, requires_manual_action=True
-                )
-                result = {
-                    "slaves_total": slaves_total,
-                    "slaves_closed": slaves_closed,
-                    "slaves_failed": slaves_failed,
-                    "master_legs_closed": master_legs_closed,
+            if hard_fail and not wing_close_failed_note:
+                # Wing failures already surfaced; short hard-fail still aborts
+                short_still = {
+                    k: v
+                    for k, v in still_map.items()
+                    if k in ("call", "put") and v
                 }
-                self._emit_exit_funnel(
-                    trade_id, reason, result, note="exit_order_hard_fail"
-                )
-                return result
+                if short_still:
+                    msg = (
+                        f"Exit order failure trade={trade_id} "
+                        f"still_open={still_map}"
+                    )
+                    logger.critical(msg)
+                    log_and_buffer(
+                        "EXIT_FAIL",
+                        trade_id,
+                        {"reason": reason, "error": msg},
+                    )
+                    await self._push_error(
+                        trade_id, msg, requires_manual_action=True
+                    )
+                    result = {
+                        "slaves_total": slaves_total,
+                        "slaves_closed": slaves_closed,
+                        "slaves_failed": slaves_failed,
+                        "master_legs_closed": master_legs_closed,
+                    }
+                    self._emit_exit_funnel(
+                        trade_id, reason, result, note="exit_order_hard_fail"
+                    )
+                    return result
+                # Only wings still open — continue to book shorts; note already set
+                hard_fail = False
 
         # Step 6: Update DB — book closes for all tracked legs
         status = self._status_for_reason(reason)
@@ -3143,6 +3253,20 @@ class BotEngine:
                 if leg_db is None or str(leg_db.status).lower() != "open":
                     continue
                 res = close_results.get(int(leg_mem.id))
+                # Skip booking wings that failed to close — leave open
+                lt_check = str(leg_db.leg_type or "").lower()
+                if (
+                    res is not None
+                    and not res.success
+                    and lt_check.startswith("wing")
+                ):
+                    logger.critical(
+                        "[WING_CLOSE_FAILED] leaving wing open in DB "
+                        "trade=%s leg=%s",
+                        trade_id,
+                        lt_check,
+                    )
+                    continue
                 exit_px: float | None = None
                 if res is not None and res.success:
                     px = float(res.filled_price or 0.0)
@@ -3178,8 +3302,15 @@ class BotEngine:
                     put_fill = float(exit_px or 0.0)
                     put_close = res
 
-            # True orphans only — hedge_call/hedge_put are tracked, not orphans
-            tracked_types = {"call", "put", "hedge_call", "hedge_put"}
+            # True orphans only — tracked types include wings
+            tracked_types = {
+                "call",
+                "put",
+                "hedge_call",
+                "hedge_put",
+                "wing_call",
+                "wing_put",
+            }
             remaining_open = (
                 exit_db.query(Leg)
                 .filter(Leg.trade_id == trade_id, Leg.status == "open")
@@ -3197,6 +3328,7 @@ class BotEngine:
                 for leg in remaining_open
                 if int(leg.id) not in booked_ids
                 and str(leg.leg_type or "").lower() in tracked_types
+                and not str(leg.leg_type or "").lower().startswith("wing")
             ]
             if true_orphans:
                 logger.warning(
@@ -3491,6 +3623,152 @@ class BotEngine:
                 slippage_amount=slippage_amount,
                 net_mtm=net_mtm,
             )
+
+    async def maybe_close_orphaned_wings(
+        self,
+        *,
+        trade_id: int,
+        db: Any,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Post-close hook: if BOTH short legs are closed and any wing is still
+        open, close wings (shorts-first order N/A — shorts already flat).
+
+        Does NOT add WINGS_ORPHANED to loss_reasons / cooldown set.
+        """
+        from backend.engine.wing_exit import (
+            both_shorts_closed,
+            close_basket_legs,
+            open_wing_legs,
+        )
+        from backend.engine.trade_reconcile import (
+            book_leg_close,
+            recompute_trade_realized_pnl,
+        )
+        from backend.core.ws_manager import ws_manager as _ws
+
+        tid = int(trade_id)
+        trade = db.query(Trade).filter(Trade.id == tid).first()
+        if trade is None:
+            return {"closed": False, "reason": "no_trade"}
+
+        all_legs = (
+            db.query(Leg)
+            .filter(Leg.trade_id == tid, Leg.is_bot_managed.is_(True))
+            .all()
+        )
+        wings = open_wing_legs(all_legs)
+        if not wings:
+            return {"closed": False, "reason": "no_open_wings"}
+        if not both_shorts_closed(all_legs):
+            return {"closed": False, "reason": "shorts_still_open"}
+
+        exit_reason = reason or ExitReason.WINGS_ORPHANED.value
+        if self.delta_client is None:
+            self._refresh_delta_client()
+        if self.delta_client is None:
+            logger.critical(
+                "[WING_CLOSE_FAILED] trade=%s — no delta client for orphan wings",
+                tid,
+            )
+            return {"closed": False, "reason": "no_client"}
+
+        bundle = await close_basket_legs(
+            trade=trade,
+            reason=exit_reason,
+            db=db,
+            delta_client=self.delta_client,
+            order_executor=self.order_executor,
+            legs_to_close="wings_only",
+            legs=wings,
+            verify_on_delta=True,
+        )
+        now_utc = get_utc_now()
+        for row in bundle.legs:
+            if row.leg_id is None:
+                continue
+            leg = db.query(Leg).filter(Leg.id == int(row.leg_id)).first()
+            if leg is None or str(leg.status).lower() != "open":
+                continue
+            if not row.success:
+                continue
+            book_leg_close(
+                leg=leg,
+                trade=trade,
+                exit_premium=row.fill_price,
+                exit_time=now_utc,
+                exit_fee_usd=row.commission,
+                exit_order_id=row.order_id,
+                db=db,
+            )
+
+        if bundle.any_wing_fail:
+            fail_bits = [
+                f"{r.leg_type}:{r.error}" for r in bundle.wings_failed
+            ]
+            note = "WING_CLOSE_FAILED: " + "; ".join(fail_bits[:5])
+            prior = str(trade.notes or "").strip()
+            if "WING_CLOSE_FAILED" not in prior:
+                trade.notes = f"{prior} | {note}" if prior else note
+            logger.critical("[WING_CLOSE_FAILED] trade=%s %s", tid, note)
+            await _ws.broadcast(
+                {
+                    "type": "WING_CLOSE_FAILED",
+                    "trade_id": tid,
+                    "reason": exit_reason,
+                    "failures": fail_bits,
+                    "message": (
+                        f"Orphan wing close failed on trade {tid} — "
+                        "long wing may still be open"
+                    ),
+                }
+            )
+
+        # If no open bot legs remain, mark trade closed
+        still_open = (
+            db.query(Leg)
+            .filter(
+                Leg.trade_id == tid,
+                Leg.status == "open",
+                Leg.is_bot_managed.is_(True),
+            )
+            .count()
+        )
+        if still_open == 0 and str(trade.status or "").lower() == TradeStatus.ACTIVE.value:
+            trade.status = TradeStatus.CLOSED.value
+            trade.exit_time = now_utc
+            trade.exit_reason = exit_reason
+            recompute_trade_realized_pnl(db, trade)
+            self.position_tracker.mark_closed(tid)
+            await _ws.broadcast(
+                {
+                    "type": "TRADE_CLOSED",
+                    "trade_id": tid,
+                    "reason": exit_reason,
+                    "message": (
+                        f"Wings closed after both shorts flat "
+                        f"({exit_reason})"
+                    ),
+                }
+            )
+
+        try:
+            db.commit()
+        except Exception as exc:
+            logger.warning(
+                "maybe_close_orphaned_wings commit failed trade=%s: %s",
+                tid,
+                exc,
+            )
+            db.rollback()
+
+        return {
+            "closed": True,
+            "wings_closed": bundle.wings_closed,
+            "any_wing_fail": bundle.any_wing_fail,
+            "exit_reason": exit_reason,
+        }
 
     async def _check_conversion_mode_exit(
         self,
