@@ -121,6 +121,13 @@ class AutoTradeSettingsSchema(BaseModel):
     entry_premium_match_tolerance_pct: float = Field(
         default=25.0, ge=5, le=100
     )
+    # Basket wings (condor) — settings only; engine ignores until later steps
+    basket_wings_enabled: bool = False
+    wing_strike_mode: str = "points"
+    wing_points_away: float = Field(default=2000.0, gt=0)
+    wing_delta_min: float = Field(default=0.05, gt=0, lt=1)
+    wing_delta_max: float = Field(default=0.07, gt=0, lt=1)
+    wing_pct_of_premium: float = Field(default=20.0, gt=0, lt=100)
 
     @field_validator("trade_type")
     @classmethod
@@ -219,8 +226,22 @@ class AutoTradeSettingsSchema(BaseModel):
             raise ValueError("spread_mode must be 'AUTO' or 'MANUAL'")
         return normalized
 
+    @field_validator("wing_strike_mode")
+    @classmethod
+    def validate_wing_strike_mode(cls, v: str) -> str:
+        from backend.strategies.s001_short_strangle.wing_select import (
+            normalize_wing_mode,
+        )
+
+        return normalize_wing_mode(v)
+
     @model_validator(mode="after")
     def validate_hedge_money_when_enabled(self) -> AutoTradeSettingsSchema:
+        if float(self.wing_delta_max) < float(self.wing_delta_min):
+            raise ValueError(
+                "wing_delta_max must be >= wing_delta_min "
+                f"(got min={self.wing_delta_min}, max={self.wing_delta_max})"
+            )
         if (
             self.min_hedge_dte_enabled
             and self.hedge_roll_enabled
@@ -578,6 +599,32 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             if getattr(s, "entry_premium_match_tolerance_pct", None) is not None
             else 25.0
         ),
+        "basket_wings_enabled": bool(
+            getattr(s, "basket_wings_enabled", False)
+        ),
+        "wing_strike_mode": str(
+            getattr(s, "wing_strike_mode", None) or "points"
+        ).lower(),
+        "wing_points_away": float(
+            getattr(s, "wing_points_away", None)
+            if getattr(s, "wing_points_away", None) is not None
+            else 2000.0
+        ),
+        "wing_delta_min": float(
+            getattr(s, "wing_delta_min", None)
+            if getattr(s, "wing_delta_min", None) is not None
+            else 0.05
+        ),
+        "wing_delta_max": float(
+            getattr(s, "wing_delta_max", None)
+            if getattr(s, "wing_delta_max", None) is not None
+            else 0.07
+        ),
+        "wing_pct_of_premium": float(
+            getattr(s, "wing_pct_of_premium", None)
+            if getattr(s, "wing_pct_of_premium", None) is not None
+            else 20.0
+        ),
         # Placeholder until Step 4 supplies live order margin
         "order_margin_per_lot": None,
         "capital_per_lot": None,
@@ -895,6 +942,12 @@ async def update_auto_trade_settings(
     settings.entry_premium_match_tolerance_pct = float(
         payload.entry_premium_match_tolerance_pct
     )
+    settings.basket_wings_enabled = bool(payload.basket_wings_enabled)
+    settings.wing_strike_mode = str(payload.wing_strike_mode or "points").lower()
+    settings.wing_points_away = float(payload.wing_points_away)
+    settings.wing_delta_min = float(payload.wing_delta_min)
+    settings.wing_delta_max = float(payload.wing_delta_max)
+    settings.wing_pct_of_premium = float(payload.wing_pct_of_premium)
 
     settings.updated_at = get_utc_now()
     # Do NOT change is_enabled here

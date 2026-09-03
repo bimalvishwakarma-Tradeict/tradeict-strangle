@@ -7,6 +7,7 @@ export const NAV_SECTIONS = [
   { id: 'adjustment-trigger', label: 'Adjustment' },
   { id: 'adjustment-behaviour', label: 'Adjustment' },
   { id: 'risk-target', label: 'Risk & Target' },
+  { id: 'basket-wings', label: 'Wings' },
   { id: 'hedge-mode', label: 'Hedge' },
   { id: 'strike-selection', label: 'Strike Selection' },
   { id: 'advanced', label: 'Advanced' },
@@ -18,6 +19,7 @@ export const NAV_TABS = [
   { id: 'basket-sizing', label: 'Basket Sizing' },
   { id: 'adjustment-trigger', label: 'Adjustment' },
   { id: 'risk-target', label: 'Risk & Target' },
+  { id: 'basket-wings', label: 'Wings' },
   { id: 'hedge-mode', label: 'Hedge' },
   { id: 'advanced', label: 'Advanced' },
 ]

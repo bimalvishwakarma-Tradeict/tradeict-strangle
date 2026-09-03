@@ -802,3 +802,371 @@ async def target_preview(
         }
     finally:
         await client.close()
+
+
+def _pick_short_legs_for_wing_preview(
+    chain: list[dict[str, Any]],
+    spot: float,
+    *,
+    trade_type: str,
+    target_premium: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """ATM straddle or nearest-premium strangle from a live chain (preview only)."""
+    atm = annotate_atm(chain, float(spot))
+    if atm is None:
+        raise ValueError("Could not resolve ATM strike from chain")
+
+    trade = str(trade_type or "straddle").lower().strip()
+    if trade != "strangle":
+        row = next(
+            (r for r in chain if float(r.get("strike") or 0) == float(atm)),
+            None,
+        )
+        if row is None:
+            raise ValueError(f"ATM strike {atm} missing from chain")
+        return (
+            {
+                "strike": float(row["strike"]),
+                "premium": float(row.get("call_mark_price") or 0),
+                "symbol": str(row.get("call_symbol") or ""),
+                "product_id": int(row.get("call_product_id") or 0),
+                "delta": float(row.get("call_delta") or 0),
+            },
+            {
+                "strike": float(row["strike"]),
+                "premium": float(row.get("put_mark_price") or 0),
+                "symbol": str(row.get("put_symbol") or ""),
+                "product_id": int(row.get("put_product_id") or 0),
+                "delta": float(row.get("put_delta") or 0),
+            },
+        )
+
+    target = max(1.0, float(target_premium or 150.0))
+    best_call: dict[str, Any] | None = None
+    best_put: dict[str, Any] | None = None
+    best_call_diff = float("inf")
+    best_put_diff = float("inf")
+    for row in chain:
+        strike = float(row.get("strike") or 0)
+        call_px = float(row.get("call_mark_price") or 0)
+        put_px = float(row.get("put_mark_price") or 0)
+        if strike >= float(spot) and call_px > 0:
+            diff = abs(call_px - target)
+            if diff < best_call_diff:
+                best_call_diff = diff
+                best_call = {
+                    "strike": strike,
+                    "premium": call_px,
+                    "symbol": str(row.get("call_symbol") or ""),
+                    "product_id": int(row.get("call_product_id") or 0),
+                    "delta": float(row.get("call_delta") or 0),
+                }
+        if strike <= float(spot) and put_px > 0:
+            diff = abs(put_px - target)
+            if diff < best_put_diff:
+                best_put_diff = diff
+                best_put = {
+                    "strike": strike,
+                    "premium": put_px,
+                    "symbol": str(row.get("put_symbol") or ""),
+                    "product_id": int(row.get("put_product_id") or 0),
+                    "delta": float(row.get("put_delta") or 0),
+                }
+    if best_call is None or best_put is None:
+        raise ValueError("Could not resolve strangle shorts near target premium")
+    return best_call, best_put
+
+
+@router.get("/wing-preview")
+async def wing_preview(
+    db: Session = Depends(get_db),
+    underlying: str | None = Query(None),
+    quantity: int | None = Query(None, ge=1, le=1000),
+    expiry_dte: int | None = Query(None, ge=0, le=90),
+    expiry_date_override: str | None = Query(None),
+    expiry_date: str | None = Query(None),
+    trade_type: str | None = Query(None),
+    target_premium_per_side: float | None = Query(None, gt=0),
+    wing_strike_mode: str | None = Query(None),
+    wing_points_away: float | None = Query(None, gt=0),
+    wing_delta_min: float | None = Query(None, gt=0, lt=1),
+    wing_delta_max: float | None = Query(None, gt=0, lt=1),
+    wing_pct_of_premium: float | None = Query(None, gt=0, lt=100),
+    strike_selection_mode: str | None = Query(None),
+    theta_multiplier: float | None = Query(None, gt=0, le=20),
+    hedge_expiry_mode: str | None = Query(None),
+    hedge_expiry_date_override: str | None = Query(None),
+    hedge_expiry_dte: int | None = Query(None),
+) -> dict[str, Any]:
+    """
+    Live wing strike preview for basket condor settings.
+
+    Read-only — never places orders. informational only (no minimum credit rule).
+    """
+    from datetime import date as date_cls
+
+    from backend.config import OPTIONS_CONTRACT_VALUE
+    from backend.core.fees import estimate_option_trading_fee
+    from backend.core.hedge_theta import (
+        ExpiryNotAvailableError,
+        HedgeThetaError,
+        assert_expiry_available,
+        get_hypothetical_hedge_theta,
+        resolve_hedge_expiry_date,
+        resolve_short_expiry_date,
+        select_theta_based_strikes,
+    )
+    from backend.database import get_or_create_auto_settings
+    from backend.strategies.s001_short_strangle.wing_select import (
+        normalize_wing_mode,
+        resolve_wing_strikes,
+    )
+
+    settings = get_or_create_auto_settings(db)
+    und = (underlying or str(settings.underlying or "BTC")).upper()
+    qty = max(1, int(quantity if quantity is not None else (settings.quantity or 1)))
+    mode = normalize_wing_mode(
+        wing_strike_mode
+        if wing_strike_mode is not None
+        else getattr(settings, "wing_strike_mode", None)
+    )
+    points_away = float(
+        wing_points_away
+        if wing_points_away is not None
+        else (getattr(settings, "wing_points_away", None) or 2000.0)
+    )
+    d_min = float(
+        wing_delta_min
+        if wing_delta_min is not None
+        else (getattr(settings, "wing_delta_min", None) or 0.05)
+    )
+    d_max = float(
+        wing_delta_max
+        if wing_delta_max is not None
+        else (getattr(settings, "wing_delta_max", None) or 0.07)
+    )
+    if d_max < d_min:
+        d_min, d_max = d_max, d_min
+    pct = float(
+        wing_pct_of_premium
+        if wing_pct_of_premium is not None
+        else (getattr(settings, "wing_pct_of_premium", None) or 20.0)
+    )
+    trade = str(
+        trade_type
+        if trade_type is not None
+        else (getattr(settings, "trade_type", None) or "straddle")
+    ).lower().strip()
+    target_prem = float(
+        target_premium_per_side
+        if target_premium_per_side is not None
+        else (getattr(settings, "target_premium_per_side", None) or 150.0)
+    )
+    sel_mode = str(
+        strike_selection_mode
+        if strike_selection_mode is not None
+        else (getattr(settings, "strike_selection_mode", None) or "fixed_premium")
+    ).lower().strip()
+    multiplier = float(
+        theta_multiplier
+        if theta_multiplier is not None
+        else (getattr(settings, "theta_multiplier", None) or 3.0)
+    )
+    short_dte = int(
+        expiry_dte
+        if expiry_dte is not None
+        else (settings.expiry_dte if settings.expiry_dte is not None else 1)
+    )
+    short_override = (
+        expiry_date_override
+        if expiry_date_override is not None
+        else getattr(settings, "expiry_date_override", None)
+    )
+
+    client = _get_delta_client(db)
+    try:
+        try:
+            if expiry_date is not None:
+                try:
+                    short_exp = date_cls.fromisoformat(
+                        str(expiry_date).strip()[:10]
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid expiry date: {expiry_date}",
+                    ) from exc
+            else:
+                short_exp = await resolve_short_expiry_date(
+                    expiry_dte=short_dte,
+                    expiry_date_override=short_override,
+                )
+            await assert_expiry_available(client, und, short_exp)
+
+            product_u = _resolve_product_underlying(und)
+            price_symbol = _resolve_underlying_symbol(und)
+            spot = float(await client.get_underlying_price(price_symbol))
+            short_chain = await client.get_option_chain(
+                product_u, short_exp.isoformat()
+            )
+            if not short_chain:
+                raise HedgeThetaError(
+                    f"Empty option chain for short expiry {short_exp.isoformat()}"
+                )
+
+            short_call: dict[str, Any]
+            short_put: dict[str, Any]
+            if sel_mode == "theta_based" and bool(
+                getattr(settings, "hedge_enabled", False)
+            ):
+                hedge_exp = await resolve_hedge_expiry_date(
+                    client,
+                    und,
+                    expiry_mode=str(
+                        hedge_expiry_mode
+                        or getattr(settings, "hedge_expiry_mode", None)
+                        or "month_1"
+                    ),
+                    expiry_date_override=(
+                        hedge_expiry_date_override
+                        if hedge_expiry_date_override is not None
+                        else getattr(settings, "hedge_expiry_date_override", None)
+                    ),
+                    expiry_dte=(
+                        hedge_expiry_dte
+                        if hedge_expiry_dte is not None
+                        else getattr(settings, "hedge_expiry_dte", None)
+                    ),
+                )
+                hedge = await get_hypothetical_hedge_theta(
+                    client, und, hedge_exp, qty
+                )
+                required = abs(float(hedge["call_theta"])) * multiplier
+                picks = select_theta_based_strikes(
+                    short_chain,
+                    spot,
+                    required,
+                    hedge_call_theta=abs(float(hedge["call_theta"])),
+                    theta_multiplier=multiplier,
+                    log_hedge_id=_active_hedge_id(db),
+                )
+                short_call = {
+                    "strike": float(picks["call"]["strike"]),
+                    "premium": float(picks["call"]["premium"]),
+                    "symbol": str(picks["call"].get("symbol") or ""),
+                    "product_id": int(picks["call"].get("product_id") or 0),
+                    "delta": float(picks["call"].get("delta") or 0),
+                }
+                short_put = {
+                    "strike": float(picks["put"]["strike"]),
+                    "premium": float(picks["put"]["premium"]),
+                    "symbol": str(picks["put"].get("symbol") or ""),
+                    "product_id": int(picks["put"].get("product_id") or 0),
+                    "delta": float(picks["put"].get("delta") or 0),
+                }
+            else:
+                short_call, short_put = _pick_short_legs_for_wing_preview(
+                    short_chain,
+                    spot,
+                    trade_type=trade,
+                    target_premium=target_prem,
+                )
+        except ExpiryNotAvailableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except (HedgeThetaError, ValueError) as exc:
+            logger.warning("wing-preview unavailable: %s", exc)
+            return {
+                "success": False,
+                "unavailable": True,
+                "message": "unavailable - chain fetch failed",
+                "detail": str(exc),
+            }
+        except DeltaAPIError as exc:
+            logger.warning("wing-preview Delta error: %s", exc)
+            return {
+                "success": False,
+                "unavailable": True,
+                "message": "unavailable - chain fetch failed",
+                "detail": str(exc),
+            }
+
+        wing_call, wing_put = resolve_wing_strikes(
+            chain=short_chain,
+            short_call_strike=float(short_call["strike"]),
+            short_put_strike=float(short_put["strike"]),
+            short_call_premium=float(short_call["premium"]),
+            short_put_premium=float(short_put["premium"]),
+            mode=mode,
+            points_away=points_away,
+            delta_min=d_min,
+            delta_max=d_max,
+            pct_of_premium=pct,
+        )
+
+        cv = float(OPTIONS_CONTRACT_VALUE)
+        short_credit_pts = float(short_call["premium"]) + float(short_put["premium"])
+        wing_debit_pts = 0.0
+        if wing_call is not None:
+            wing_debit_pts += float(wing_call["premium"])
+        if wing_put is not None:
+            wing_debit_pts += float(wing_put["premium"])
+        net_credit_pts = short_credit_pts - wing_debit_pts
+        net_credit_usd = net_credit_pts * cv
+
+        fee_total = 0.0
+        for prem in (
+            float(short_call["premium"]),
+            float(short_put["premium"]),
+            float(wing_call["premium"]) if wing_call else 0.0,
+            float(wing_put["premium"]) if wing_put else 0.0,
+        ):
+            if prem <= 0:
+                continue
+            # Entry + exit estimate per leg
+            one = estimate_option_trading_fee(
+                option_price=prem,
+                quantity_lots=qty,
+                btc_index_price=spot,
+            )
+            fee_total += 2.0 * one
+
+        fee_per_lot = fee_total / float(qty) if qty > 0 else fee_total
+        net_after = net_credit_usd - fee_per_lot
+        consumed_pct = (
+            (fee_per_lot / net_credit_usd * 100.0) if net_credit_usd > 0 else 0.0
+        )
+
+        def _gap(short_k: float, wing: dict[str, Any] | None, leg: str) -> float | None:
+            if wing is None:
+                return None
+            if leg == "call":
+                return float(wing["strike"]) - float(short_k)
+            return float(short_k) - float(wing["strike"])
+
+        return {
+            "success": True,
+            "unavailable": False,
+            "underlying": und,
+            "spot": spot,
+            "short_expiry": short_exp.isoformat(),
+            "quantity": qty,
+            "wing_strike_mode": mode,
+            "short_call": short_call,
+            "short_put": short_put,
+            "wing_call": wing_call,
+            "wing_put": wing_put,
+            "call_gap_points": _gap(float(short_call["strike"]), wing_call, "call"),
+            "put_gap_points": _gap(float(short_put["strike"]), wing_put, "put"),
+            "short_credit_pts": round(short_credit_pts, 4),
+            "wing_debit_pts": round(wing_debit_pts, 4),
+            "net_credit_pts": round(net_credit_pts, 4),
+            "net_credit_usd_per_lot": round(net_credit_usd, 6),
+            "est_round_trip_cost_usd_per_lot": round(fee_per_lot, 6),
+            "net_credit_after_cost_usd_per_lot": round(net_after, 6),
+            "cost_consumed_pct": round(consumed_pct, 2),
+            "contract_value": cv,
+        }
+    finally:
+        await client.close()

@@ -207,9 +207,13 @@ class Leg(Base):
     exit_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # BOT TRADE ISOLATION: True = bot-placed; never manage manual account positions
     is_bot_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    # True = we BOUGHT this leg (hedge); False = we SOLD (normal short option)
-    # leg_type: 'call' | 'put' | 'hedge_call' | 'hedge_put'
+    # True = we BOUGHT this leg (hedge / wing); False = we SOLD (normal short option)
+    # leg_type: 'call' | 'put' | 'hedge_call' | 'hedge_put' | 'wing_call' | 'wing_put'
     is_long: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # BUY | SELL — wings and structure hedges are BUY; short basket legs are SELL
+    side: Mapped[str] = mapped_column(
+        String(4), nullable=False, default="SELL", server_default="SELL"
+    )
 
     trade: Mapped[Trade] = relationship("Trade", back_populates="legs")
 
@@ -491,6 +495,26 @@ class AutoTradeSettings(Base):
     # Max |put − call| / call × 100 at theta entry; warn only, still enter
     entry_premium_match_tolerance_pct: Mapped[float] = mapped_column(
         Float, nullable=False, default=25.0
+    )
+    # Basket wings (long far-OTM legs → iron condor). Default OFF — no engine wiring yet.
+    basket_wings_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    # points | delta | pct_of_premium
+    wing_strike_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="points", server_default="points"
+    )
+    wing_points_away: Mapped[float] = mapped_column(
+        Float, nullable=False, default=2000.0, server_default="2000.0"
+    )
+    wing_delta_min: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.05, server_default="0.05"
+    )
+    wing_delta_max: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.07, server_default="0.07"
+    )
+    wing_pct_of_premium: Mapped[float] = mapped_column(
+        Float, nullable=False, default=20.0, server_default="20.0"
     )
 
     # Demo/virtual mode — places virtual trades without real Delta orders
@@ -910,6 +934,7 @@ class StructureLeg(Base):
         Integer, ForeignKey("structures.id"), nullable=False
     )
     # HEDGE_CALL | HEDGE_PUT | BASKET_CALL | BASKET_PUT
+    # | BASKET_WING_CALL | BASKET_WING_PUT
     leg_role: Mapped[str] = mapped_column(String(20), nullable=False)
     basket_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 0 = original, 1..n = adjustments

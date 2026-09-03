@@ -113,6 +113,19 @@ export const getHedgePreview = async (params = {}) => {
   }
 }
 
+export const getWingPreview = async (params = {}) => {
+  try {
+    const res = await api.get('/api/strategy/wing-preview', {
+      params: cleanPreviewParams(params),
+    })
+    return res.data
+  } catch (err) {
+    return PREVIEW_UNAVAILABLE(
+      extractError(err, 'Failed to fetch wing preview'),
+    )
+  }
+}
+
 export const getThetaPreview = async (params = {}) => {
   try {
     const res = await api.get('/api/strategy/theta-preview', {

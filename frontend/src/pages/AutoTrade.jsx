@@ -23,6 +23,7 @@ import {
   getHedgePreview,
   getTargetPreview,
   getThetaPreview,
+  getWingPreview,
   saveAutoTradeSettings,
 } from '../services/api'
 import { formatNextEntryWait } from '../utils/nextEntryLabel'
@@ -151,6 +152,12 @@ function applyStatusToForm(data, setters) {
       ? true
       : Boolean(data.hedge_close_at_expiry_enabled),
   )
+  setters.setBasketWingsEnabled(Boolean(data.basket_wings_enabled))
+  setters.setWingStrikeMode(data.wing_strike_mode || 'points')
+  setters.setWingPointsAway(String(data.wing_points_away ?? 2000))
+  setters.setWingDeltaMin(String(data.wing_delta_min ?? 0.05))
+  setters.setWingDeltaMax(String(data.wing_delta_max ?? 0.07))
+  setters.setWingPctOfPremium(String(data.wing_pct_of_premium ?? 20))
   setters.setHedgeAutoReopenAfterRoll(
     data.hedge_auto_reopen_after_roll == null
       ? true
@@ -290,6 +297,13 @@ export default function AutoTrade() {
   const [hedgeForceRollEnabled, setHedgeForceRollEnabled] = useState(true)
   const [hedgeCloseAtExpiryEnabled, setHedgeCloseAtExpiryEnabled] =
     useState(true)
+  const [basketWingsEnabled, setBasketWingsEnabled] = useState(false)
+  const [wingStrikeMode, setWingStrikeMode] = useState('points')
+  const [wingPointsAway, setWingPointsAway] = useState('2000')
+  const [wingDeltaMin, setWingDeltaMin] = useState('0.05')
+  const [wingDeltaMax, setWingDeltaMax] = useState('0.07')
+  const [wingPctOfPremium, setWingPctOfPremium] = useState('20')
+  const [wingPreview, setWingPreview] = useState(null)
   const [hedgeAutoReopenAfterRoll, setHedgeAutoReopenAfterRoll] = useState(true)
   const [hedgeTargetUsd, setHedgeTargetUsd] = useState('')
   const [hedgeStoplossUsd, setHedgeStoplossUsd] = useState('')
@@ -372,6 +386,12 @@ export default function AutoTrade() {
       setHedgeRollHardDte,
       setHedgeForceRollEnabled,
       setHedgeCloseAtExpiryEnabled,
+      setBasketWingsEnabled,
+      setWingStrikeMode,
+      setWingPointsAway,
+      setWingDeltaMin,
+      setWingDeltaMax,
+      setWingPctOfPremium,
       setHedgeAutoReopenAfterRoll,
       setHedgeTargetUsd,
       setHedgeStoplossUsd,
@@ -669,6 +689,21 @@ export default function AutoTrade() {
       ),
       hedge_force_roll_enabled: Boolean(hedgeForceRollEnabled),
       hedge_close_at_expiry_enabled: Boolean(hedgeCloseAtExpiryEnabled),
+      basket_wings_enabled: Boolean(basketWingsEnabled),
+      wing_strike_mode: wingStrikeMode || 'points',
+      wing_points_away: Math.max(1, Number(wingPointsAway) || 2000),
+      wing_delta_min: Math.min(
+        0.99,
+        Math.max(0.001, Number(wingDeltaMin) || 0.05),
+      ),
+      wing_delta_max: Math.min(
+        0.99,
+        Math.max(0.001, Number(wingDeltaMax) || 0.07),
+      ),
+      wing_pct_of_premium: Math.min(
+        99.99,
+        Math.max(0.01, Number(wingPctOfPremium) || 20),
+      ),
       hedge_auto_reopen_after_roll: Boolean(hedgeAutoReopenAfterRoll),
       hedge_target_usd:
         hedgeTargetUsd === '' || hedgeTargetUsd == null
@@ -881,6 +916,17 @@ export default function AutoTrade() {
     hedgeRollHardDteError,
   ])
 
+  const wingDeltaOrderingError = useMemo(() => {
+    if (!basketWingsEnabled || wingStrikeMode !== 'delta') return null
+    const lo = Number(wingDeltaMin)
+    const hi = Number(wingDeltaMax)
+    if (Number.isNaN(lo) || Number.isNaN(hi)) return null
+    if (hi < lo) {
+      return 'Wing delta max must be ≥ min'
+    }
+    return null
+  }, [basketWingsEnabled, wingStrikeMode, wingDeltaMin, wingDeltaMax])
+
   const allHedgeDteGuardsOff = useMemo(
     () =>
       !minHedgeDteEnabled &&
@@ -1028,6 +1074,26 @@ export default function AutoTrade() {
       theta_multiplier: Math.min(20, Math.max(0.01, Number(thetaMultiplier) || 3)),
       target_theta_pct: Math.min(1000, Math.max(10, Number(targetThetaPct) || 150)),
       expiry_dte: dte,
+      trade_type: tradeType || 'straddle',
+      target_premium_per_side:
+        tradeType === 'strangle' ? Number(targetPremium) || 150 : 150,
+      wing_strike_mode: wingStrikeMode || 'points',
+      wing_points_away: Math.max(1, Number(wingPointsAway) || 2000),
+      wing_delta_min: Math.min(
+        0.99,
+        Math.max(0.001, Number(wingDeltaMin) || 0.05),
+      ),
+      wing_delta_max: Math.min(
+        0.99,
+        Math.max(0.001, Number(wingDeltaMax) || 0.07),
+      ),
+      wing_pct_of_premium: Math.min(
+        99.99,
+        Math.max(0.01, Number(wingPctOfPremium) || 20),
+      ),
+      strike_selection_mode: hedgeEnabled
+        ? strikeSelectionMode || 'fixed_premium'
+        : 'fixed_premium',
     }
     // Match auto-trade save rules: daily 0/1/2 DTE never send a calendar override
     if (dte > 2 && selectedExpiryDate) {
@@ -1049,16 +1115,27 @@ export default function AutoTrade() {
     targetThetaPct,
     expiryDte,
     selectedExpiryDate,
+    tradeType,
+    targetPremium,
+    wingStrikeMode,
+    wingPointsAway,
+    wingDeltaMin,
+    wingDeltaMax,
+    wingPctOfPremium,
+    strikeSelectionMode,
   ])
 
   const refreshPreviews = useCallback(async () => {
     setPreviewLoading(true)
     try {
       const params = buildPreviewParams()
-      const [hp, tp, tgp, activeHedgeRes] = await Promise.all([
+      const [hp, tp, tgp, wp, activeHedgeRes] = await Promise.all([
         getHedgePreview(params),
         getThetaPreview(params),
         getTargetPreview(params),
+        basketWingsEnabled
+          ? getWingPreview(params)
+          : Promise.resolve(null),
         hedgeEnabled
           ? getActiveHedge().catch(() => ({ hedge: null }))
           : Promise.resolve({ hedge: null }),
@@ -1069,6 +1146,15 @@ export default function AutoTrade() {
       setTargetPreview(
         tgp?.unavailable || tgp?.success === false ? { ...PREVIEW_FAIL, ...tgp } : tgp,
       )
+      if (basketWingsEnabled) {
+        setWingPreview(
+          wp?.unavailable || wp?.success === false
+            ? { ...PREVIEW_FAIL, ...wp }
+            : wp,
+        )
+      } else {
+        setWingPreview(null)
+      }
       setActiveHedgePanel(activeHedgeRes?.hedge ?? null)
       if (hp?.order_margin_per_lot != null && !hp?.unavailable) {
         setOrderMarginPerLot(Number(hp.order_margin_per_lot))
@@ -1079,11 +1165,12 @@ export default function AutoTrade() {
       setHedgePreview(PREVIEW_FAIL)
       setThetaPreview(PREVIEW_FAIL)
       setTargetPreview(PREVIEW_FAIL)
+      setWingPreview(basketWingsEnabled ? PREVIEW_FAIL : null)
       setOrderMarginPerLot(null)
     } finally {
       setPreviewLoading(false)
     }
-  }, [buildPreviewParams, hedgeEnabled])
+  }, [buildPreviewParams, hedgeEnabled, basketWingsEnabled])
 
   useEffect(() => {
     if (loading) return undefined
@@ -1105,6 +1192,7 @@ export default function AutoTrade() {
       hedgeRollDteError ||
       hedgeRollHardDteError ||
       hedgeDteOrderingError ||
+      wingDeltaOrderingError ||
       spreadSettingsError ||
       basketQtyThetaMultError
     ) {
@@ -1119,6 +1207,7 @@ export default function AutoTrade() {
           hedgeRollDteError ||
           hedgeRollHardDteError ||
           hedgeDteOrderingError ||
+          wingDeltaOrderingError ||
           spreadSettingsError ||
           basketQtyThetaMultError ||
           'Fix validation errors before saving',
@@ -1151,6 +1240,7 @@ export default function AutoTrade() {
       hedgeRollDteError ||
       hedgeRollHardDteError ||
       hedgeDteOrderingError ||
+      wingDeltaOrderingError ||
       spreadSettingsError ||
       basketQtyThetaMultError
     ) {
@@ -1165,6 +1255,7 @@ export default function AutoTrade() {
           hedgeRollDteError ||
           hedgeRollHardDteError ||
           hedgeDteOrderingError ||
+          wingDeltaOrderingError ||
           spreadSettingsError ||
           basketQtyThetaMultError ||
           'Fix validation errors before enabling',
@@ -2139,6 +2230,201 @@ export default function AutoTrade() {
               ) : (
                 <p className="text-sm text-gray-500">Loading preview…</p>
               )}
+            </div>
+          </SectionCard>
+
+          <SectionCard
+            id="basket-wings"
+            icon="🛡"
+            title="BASKET WINGS (tail protection)"
+          >
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                checked={basketWingsEnabled}
+                onChange={(e) => setBasketWingsEnabled(e.target.checked)}
+                className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500"
+              />
+              <span className="text-sm text-gray-300">
+                Enable wings
+                <span className="mt-1 block text-xs text-gray-500">
+                  Adds a long far-OTM call + put to every basket. Turns the
+                  short strangle into a defined-risk condor so a gap or spike
+                  cannot run unbounded.
+                </span>
+              </span>
+            </label>
+
+            <div
+              className={`mt-4 space-y-4 ${
+                basketWingsEnabled ? '' : 'pointer-events-none opacity-40'
+              }`}
+            >
+              <fieldset className="space-y-3">
+                <legend className="text-sm text-gray-300">
+                  Strike selection rule
+                </legend>
+                <label className="flex items-center gap-2 text-sm text-gray-300">
+                  <input
+                    type="radio"
+                    name="wingStrikeMode"
+                    checked={wingStrikeMode === 'points'}
+                    onChange={() => setWingStrikeMode('points')}
+                    disabled={!basketWingsEnabled}
+                    className="h-4 w-4 border-gray-600 bg-gray-900 text-emerald-500"
+                  />
+                  Points away
+                  <input
+                    type="number"
+                    min={1}
+                    step={100}
+                    value={wingPointsAway}
+                    onChange={(e) => setWingPointsAway(e.target.value)}
+                    disabled={
+                      !basketWingsEnabled || wingStrikeMode !== 'points'
+                    }
+                    className="ml-2 w-28 rounded-md border border-gray-600 bg-gray-900 px-2 py-1 text-white disabled:opacity-40"
+                  />
+                  <span className="text-xs text-gray-500">
+                    points further OTM
+                  </span>
+                </label>
+                <label className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
+                  <input
+                    type="radio"
+                    name="wingStrikeMode"
+                    checked={wingStrikeMode === 'delta'}
+                    onChange={() => setWingStrikeMode('delta')}
+                    disabled={!basketWingsEnabled}
+                    className="h-4 w-4 border-gray-600 bg-gray-900 text-emerald-500"
+                  />
+                  Delta band
+                  <input
+                    type="number"
+                    min={0.001}
+                    max={0.99}
+                    step={0.01}
+                    value={wingDeltaMin}
+                    onChange={(e) => setWingDeltaMin(e.target.value)}
+                    disabled={
+                      !basketWingsEnabled || wingStrikeMode !== 'delta'
+                    }
+                    className="ml-2 w-20 rounded-md border border-gray-600 bg-gray-900 px-2 py-1 text-white disabled:opacity-40"
+                  />
+                  <span className="text-xs text-gray-500">to</span>
+                  <input
+                    type="number"
+                    min={0.001}
+                    max={0.99}
+                    step={0.01}
+                    value={wingDeltaMax}
+                    onChange={(e) => setWingDeltaMax(e.target.value)}
+                    disabled={
+                      !basketWingsEnabled || wingStrikeMode !== 'delta'
+                    }
+                    className="w-20 rounded-md border border-gray-600 bg-gray-900 px-2 py-1 text-white disabled:opacity-40"
+                  />
+                </label>
+                {wingDeltaOrderingError ? (
+                  <span className="block text-xs text-red-400">
+                    {wingDeltaOrderingError}
+                  </span>
+                ) : null}
+                <label className="flex flex-wrap items-center gap-2 text-sm text-gray-300">
+                  <input
+                    type="radio"
+                    name="wingStrikeMode"
+                    checked={wingStrikeMode === 'pct_of_premium'}
+                    onChange={() => setWingStrikeMode('pct_of_premium')}
+                    disabled={!basketWingsEnabled}
+                    className="h-4 w-4 border-gray-600 bg-gray-900 text-emerald-500"
+                  />
+                  % of short premium
+                  <input
+                    type="number"
+                    min={0.01}
+                    max={99.99}
+                    step={1}
+                    value={wingPctOfPremium}
+                    onChange={(e) => setWingPctOfPremium(e.target.value)}
+                    disabled={
+                      !basketWingsEnabled ||
+                      wingStrikeMode !== 'pct_of_premium'
+                    }
+                    className="ml-2 w-20 rounded-md border border-gray-600 bg-gray-900 px-2 py-1 text-white disabled:opacity-40"
+                  />
+                  <span className="text-xs text-gray-500">
+                    % → short $200 → wing ≈ $
+                    {((200 * (Number(wingPctOfPremium) || 20)) / 100).toFixed(
+                      0,
+                    )}
+                  </span>
+                </label>
+              </fieldset>
+
+              <div className="rounded-md border border-gray-700/80 bg-gray-950/50 px-3 py-3 font-mono text-xs text-gray-300">
+                <p className="mb-2 text-[11px] uppercase tracking-wide text-gray-500">
+                  Live wing preview
+                </p>
+                {!basketWingsEnabled ? (
+                  <p className="text-gray-500">Enable wings to preview.</p>
+                ) : wingPreview?.unavailable ||
+                  wingPreview?.success === false ? (
+                  <p className="text-amber-400">
+                    {wingPreview?.message ||
+                      'unavailable - chain fetch failed'}
+                  </p>
+                ) : wingPreview?.success ? (
+                  <div className="space-y-1.5">
+                    <p>
+                      Short C {Math.round(Number(wingPreview.short_call?.strike))}{' '}
+                      @ {formatMoney(wingPreview.short_call?.premium)}
+                      {'  →  '}
+                      Wing C{' '}
+                      {wingPreview.wing_call
+                        ? `${Math.round(Number(wingPreview.wing_call.strike))} @ ${formatMoney(wingPreview.wing_call.premium)} (+${Math.round(Number(wingPreview.call_gap_points) || 0)} pts)`
+                        : '— none'}
+                    </p>
+                    <p>
+                      Short P {Math.round(Number(wingPreview.short_put?.strike))}{' '}
+                      @ {formatMoney(wingPreview.short_put?.premium)}
+                      {'  →  '}
+                      Wing P{' '}
+                      {wingPreview.wing_put
+                        ? `${Math.round(Number(wingPreview.wing_put.strike))} @ ${formatMoney(wingPreview.wing_put.premium)} (−${Math.round(Number(wingPreview.put_gap_points) || 0)} pts)`
+                        : '— none'}
+                    </p>
+                    <div className="my-2 border-t border-gray-700" />
+                    <p>
+                      Net credit{' '}
+                      {formatMoney(wingPreview.net_credit_usd_per_lot, 3)} / lot
+                    </p>
+                    <p>
+                      Est. round-trip cost{' '}
+                      {formatMoney(
+                        wingPreview.est_round_trip_cost_usd_per_lot,
+                        3,
+                      )}{' '}
+                      / lot
+                    </p>
+                    <p>
+                      Net credit after cost{' '}
+                      {formatMoney(
+                        wingPreview.net_credit_after_cost_usd_per_lot,
+                        3,
+                      )}{' '}
+                      / lot
+                      {wingPreview.cost_consumed_pct != null
+                        ? ` (${Number(wingPreview.cost_consumed_pct).toFixed(0)}% consumed)`
+                        : ''}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-gray-500">
+                    {previewLoading ? 'Loading preview…' : 'Waiting for chain…'}
+                  </p>
+                )}
+              </div>
             </div>
           </SectionCard>
 

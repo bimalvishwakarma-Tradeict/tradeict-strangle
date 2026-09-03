@@ -36,7 +36,13 @@ KIND_OPEN_LEG_CLOSED_TRADE = "OPEN_LEG_CLOSED_TRADE"
 KIND_ATTRIBUTION_WARNING = "ATTRIBUTION_WARNING"
 KIND_NO_STRUCTURE_FOR_HEDGE = "NO_STRUCTURE_FOR_HEDGE"
 
-_BASKET_ROLES = ("BASKET_CALL", "BASKET_PUT")
+# Shorts + wings belong to the basket; HEDGE_* must never appear here
+_BASKET_ROLES = (
+    "BASKET_CALL",
+    "BASKET_PUT",
+    "BASKET_WING_CALL",
+    "BASKET_WING_PUT",
+)
 
 # Statuses that never produced a billable mirror position
 _ORPHAN_SKIP_STATUSES = frozenset(

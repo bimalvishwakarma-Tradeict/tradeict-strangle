@@ -282,6 +282,23 @@ def _migrate_schema() -> None:
                         "is_long BOOLEAN NOT NULL DEFAULT 0"
                     )
                 )
+        leg_cols = {col["name"] for col in inspector.get_columns("legs")}
+        if "side" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE legs ADD COLUMN "
+                        "side VARCHAR(4) NOT NULL DEFAULT 'SELL'"
+                    )
+                )
+                # Sync existing long hedge legs if any
+                conn.execute(
+                    text(
+                        "UPDATE legs SET side = 'BUY' "
+                        "WHERE is_long = 1 OR leg_type IN "
+                        "('hedge_call', 'hedge_put')"
+                    )
+                )
     if "trades" in tables:
         trade_cols = {col["name"] for col in inspector.get_columns("trades")}
         if "universal_sl_pct" not in trade_cols:
@@ -922,6 +939,12 @@ def _migrate_schema() -> None:
                 "strangle_premium_pct_of_hedge",
                 "FLOAT NOT NULL DEFAULT 3.0",
             ),
+            ("basket_wings_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("wing_strike_mode", "VARCHAR(20) NOT NULL DEFAULT 'points'"),
+            ("wing_points_away", "FLOAT NOT NULL DEFAULT 2000.0"),
+            ("wing_delta_min", "FLOAT NOT NULL DEFAULT 0.05"),
+            ("wing_delta_max", "FLOAT NOT NULL DEFAULT 0.07"),
+            ("wing_pct_of_premium", "FLOAT NOT NULL DEFAULT 20.0"),
         ]
         for col_name, col_type in hedge_setting_cols:
             if col_name not in at_cols:
