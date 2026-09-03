@@ -45,6 +45,8 @@ class OrderResult:
     filled_price: float | None = None
     # Actual Delta commission for this order (inc. GST), sum of fills when partial
     commission: float | None = None
+    # Contracts filled this attempt (None = unknown / treat success as full)
+    filled_size: int | None = None
     error: str | None = None
 
 

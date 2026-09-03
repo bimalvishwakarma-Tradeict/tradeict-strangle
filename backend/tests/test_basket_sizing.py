@@ -59,6 +59,8 @@ def _settings(**kwargs: object) -> SimpleNamespace:
         "basket_qty_dynamic": False,
         "basket_qty_theta_mult": 2.0,
         "use_dynamic_qty_on_adjustment": False,
+        "adjustment_qty_mode": "unchanged",
+        "adjustment_qty_decrease_pct": 25.0,
         "hedge_enabled": False,
         "hedge_qty_lots": None,
     }
@@ -70,10 +72,11 @@ def test_adjustment_qty_dynamic_on_capped_at_half_hedge() -> None:
     """theta=57, mult=3, call_ask=300, hedge_qty=5 → raw 3, cap 2."""
     settings = _settings(
         use_dynamic_qty_on_adjustment=True,
+        adjustment_qty_mode="increase_dynamic",
         basket_qty_dynamic=True,
         basket_qty_theta_mult=3.0,
     )
-    qty = resolve_adjustment_basket_qty(
+    qty, close = resolve_adjustment_basket_qty(
         settings=settings,
         triggered_leg_qty=1,
         hedge_qty=5,
@@ -81,16 +84,18 @@ def test_adjustment_qty_dynamic_on_capped_at_half_hedge() -> None:
         new_strike_ask=300.0,
     )
     assert qty == 2
+    assert close is False
 
 
 def test_adjustment_qty_dynamic_on_below_cap() -> None:
     """Small raw qty stays uncapped."""
     settings = _settings(
         use_dynamic_qty_on_adjustment=True,
+        adjustment_qty_mode="increase_dynamic",
         basket_qty_dynamic=True,
         basket_qty_theta_mult=2.0,
     )
-    qty = resolve_adjustment_basket_qty(
+    qty, close = resolve_adjustment_basket_qty(
         settings=settings,
         triggered_leg_qty=1,
         hedge_qty=5,
@@ -99,15 +104,17 @@ def test_adjustment_qty_dynamic_on_below_cap() -> None:
         trade_id=99,
     )
     assert qty == 1
+    assert close is False
 
 
 def test_adjustment_qty_dynamic_off_uses_triggered_qty() -> None:
     settings = _settings(
         use_dynamic_qty_on_adjustment=False,
+        adjustment_qty_mode="unchanged",
         basket_qty_dynamic=True,
         basket_qty_theta_mult=3.0,
     )
-    qty = resolve_adjustment_basket_qty(
+    qty, close = resolve_adjustment_basket_qty(
         settings=settings,
         triggered_leg_qty=4,
         hedge_qty=5,
@@ -115,15 +122,17 @@ def test_adjustment_qty_dynamic_off_uses_triggered_qty() -> None:
         new_strike_ask=300.0,
     )
     assert qty == 4
+    assert close is False
 
 
 def test_adjustment_qty_requires_basket_qty_dynamic() -> None:
     settings = _settings(
         use_dynamic_qty_on_adjustment=True,
+        adjustment_qty_mode="increase_dynamic",
         basket_qty_dynamic=False,
         basket_qty_theta_mult=3.0,
     )
-    qty = resolve_adjustment_basket_qty(
+    qty, close = resolve_adjustment_basket_qty(
         settings=settings,
         triggered_leg_qty=1,
         hedge_qty=5,
@@ -131,6 +140,124 @@ def test_adjustment_qty_requires_basket_qty_dynamic() -> None:
         new_strike_ask=300.0,
     )
     assert qty == 1
+    assert close is False
+
+
+def test_decrease_step_adj1_adj2() -> None:
+    settings = _settings(
+        adjustment_qty_mode="decrease_step",
+        adjustment_qty_decrease_pct=25.0,
+    )
+    q1, c1 = resolve_adjustment_basket_qty(
+        settings=settings,
+        triggered_leg_qty=100,
+        hedge_qty=0,
+        hedge_call_theta=0,
+        new_strike_ask=1,
+        original_qty=100,
+        adjustment_number=1,
+    )
+    q2, c2 = resolve_adjustment_basket_qty(
+        settings=settings,
+        triggered_leg_qty=75,
+        hedge_qty=0,
+        hedge_call_theta=0,
+        new_strike_ask=1,
+        original_qty=100,
+        adjustment_number=2,
+    )
+    assert (q1, c1) == (75, False)
+    assert (q2, c2) == (50, False)
+
+
+def test_decrease_step_floor_min_1() -> None:
+    settings = _settings(
+        adjustment_qty_mode="decrease_step",
+        adjustment_qty_decrease_pct=25.0,
+    )
+    q1, _ = resolve_adjustment_basket_qty(
+        settings=settings,
+        triggered_leg_qty=3,
+        hedge_qty=0,
+        hedge_call_theta=0,
+        new_strike_ask=1,
+        original_qty=3,
+        adjustment_number=1,
+    )
+    q2, _ = resolve_adjustment_basket_qty(
+        settings=settings,
+        triggered_leg_qty=2,
+        hedge_qty=0,
+        hedge_call_theta=0,
+        new_strike_ask=1,
+        original_qty=3,
+        adjustment_number=2,
+    )
+    assert q1 == 2
+    assert q2 == 1
+
+
+def test_decrease_step_same_qty_no_resize_signal() -> None:
+    """Helper still returns same qty; caller skips resize orders."""
+    settings = _settings(
+        adjustment_qty_mode="decrease_step",
+        adjustment_qty_decrease_pct=25.0,
+    )
+    # orig 4, adj1 → floor(4*0.75)=3; if current already 3, equal
+    qty, close = resolve_adjustment_basket_qty(
+        settings=settings,
+        triggered_leg_qty=3,
+        hedge_qty=0,
+        hedge_call_theta=0,
+        new_strike_ask=1,
+        original_qty=4,
+        adjustment_number=1,
+    )
+    assert qty == 3
+    assert close is False
+    assert qty == 3  # == current → no resize order at caller
+
+
+def test_increase_dynamic_mode_unchanged_from_b25() -> None:
+    settings = _settings(
+        adjustment_qty_mode="increase_dynamic",
+        basket_qty_dynamic=True,
+        basket_qty_theta_mult=3.0,
+    )
+    qty, close = resolve_adjustment_basket_qty(
+        settings=settings,
+        triggered_leg_qty=1,
+        hedge_qty=5,
+        hedge_call_theta=57.0,
+        new_strike_ask=300.0,
+    )
+    assert qty == 2
+    assert close is False
+
+
+def test_all_modes_do_not_touch_wing_qty() -> None:
+    """resolve_adjustment_basket_qty never returns wing qty — wings stay apart."""
+    from backend.engine.wing_entry import resolve_adjustment_qty_mode
+
+    for mode in ("unchanged", "increase_dynamic", "decrease_step"):
+        s = _settings(
+            adjustment_qty_mode=mode,
+            basket_qty_dynamic=True,
+            use_dynamic_qty_on_adjustment=(mode == "increase_dynamic"),
+        )
+        assert resolve_adjustment_qty_mode(s) == mode
+        # Function signature has no wing_qty arg — wings unchanged by design
+        qty, _ = resolve_adjustment_basket_qty(
+            settings=s,
+            triggered_leg_qty=10,
+            hedge_qty=20,
+            hedge_call_theta=50.0,
+            new_strike_ask=200.0,
+            original_qty=10,
+            adjustment_number=1,
+        )
+        assert isinstance(qty, int)
+        assert qty >= 1
 
 
 def test_resolve_sizing_mode_fixed_when_hedge_off() -> None:

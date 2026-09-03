@@ -270,11 +270,29 @@ class OrderExecutor:
                     filled_price,
                     commission,
                 )
+                filled_size = size
+                try:
+                    raw_size = result.get("size")
+                    if raw_size is not None:
+                        filled_size = int(raw_size)
+                except (TypeError, ValueError):
+                    filled_size = size
+                if isinstance(raw, dict):
+                    try:
+                        if raw.get("filled_size") is not None:
+                            filled_size = int(float(raw["filled_size"]))
+                        elif raw.get("unfilled_size") is not None:
+                            filled_size = max(
+                                0, int(size) - int(float(raw["unfilled_size"]))
+                            )
+                    except (TypeError, ValueError):
+                        pass
                 return OrderResult(
                     success=True,
                     order_id=int(order_id) if order_id is not None else None,
                     filled_price=filled_price,
                     commission=float(commission or 0.0),
+                    filled_size=int(filled_size),
                 )
             except DeltaAPIError as exc:
                 last_error = str(exc)

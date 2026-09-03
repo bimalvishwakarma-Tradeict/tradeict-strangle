@@ -82,7 +82,17 @@ function applyStatusToForm(data, setters) {
     data.hedge_qty_lots == null ? '' : String(data.hedge_qty_lots),
   )
   setters.setBasketQtyDynamic(!!data.basket_qty_dynamic)
-  setters.setUseDynamicQtyOnAdj(!!data.use_dynamic_qty_on_adjustment)
+  const adjModeRaw = String(data.adjustment_qty_mode || '').toLowerCase()
+  const adjMode =
+    adjModeRaw === 'increase_dynamic' || adjModeRaw === 'decrease_step'
+      ? adjModeRaw
+      : data.use_dynamic_qty_on_adjustment
+        ? 'increase_dynamic'
+        : 'unchanged'
+  setters.setAdjustmentQtyMode(adjMode)
+  setters.setAdjustmentQtyDecreasePct(
+    String(data.adjustment_qty_decrease_pct ?? 25),
+  )
   setters.setBasketDecayExitEnabled(!!data.basket_decay_exit_enabled)
   setters.setBasketDecayExitPct(String(data.basket_decay_exit_pct ?? 50))
   setters.setBasketDecayExitMode(
@@ -260,7 +270,9 @@ export default function AutoTrade() {
   const [basketQtyPctOfHedge, setBasketQtyPctOfHedge] = useState('20')
   const [hedgeQtyLots, setHedgeQtyLots] = useState('')
   const [basketQtyDynamic, setBasketQtyDynamic] = useState(false)
-  const [useDynamicQtyOnAdj, setUseDynamicQtyOnAdj] = useState(false)
+  const [adjustmentQtyMode, setAdjustmentQtyMode] = useState('unchanged')
+  const [adjustmentQtyDecreasePct, setAdjustmentQtyDecreasePct] =
+    useState('25')
   const [basketDecayExitEnabled, setBasketDecayExitEnabled] = useState(false)
   const [basketDecayExitPct, setBasketDecayExitPct] = useState('50')
   const [basketDecayExitMode, setBasketDecayExitMode] = useState('both_legs')
@@ -352,7 +364,8 @@ export default function AutoTrade() {
       setBasketQtyPctOfHedge,
       setHedgeQtyLots,
       setBasketQtyDynamic,
-      setUseDynamicQtyOnAdj,
+      setAdjustmentQtyMode,
+      setAdjustmentQtyDecreasePct,
       setBasketDecayExitEnabled,
       setBasketDecayExitPct,
       setBasketDecayExitMode,
@@ -775,10 +788,24 @@ export default function AutoTrade() {
           ? Math.max(1, Number(hedgeQtyLots) || 1)
           : null,
       basket_qty_dynamic: pctOfHedgeSizingActive ? basketQtyDynamic : false,
-      use_dynamic_qty_on_adjustment:
+      adjustment_qty_mode:
         pctOfHedgeSizingActive && basketQtyDynamic
-          ? useDynamicQtyOnAdj
-          : false,
+          ? adjustmentQtyMode === 'increase_dynamic'
+            ? 'increase_dynamic'
+            : adjustmentQtyMode === 'decrease_step'
+              ? 'decrease_step'
+              : 'unchanged'
+          : adjustmentQtyMode === 'decrease_step'
+            ? 'decrease_step'
+            : 'unchanged',
+      adjustment_qty_decrease_pct: Math.min(
+        99,
+        Math.max(1, Number(adjustmentQtyDecreasePct) || 25),
+      ),
+      use_dynamic_qty_on_adjustment:
+        pctOfHedgeSizingActive &&
+        basketQtyDynamic &&
+        adjustmentQtyMode === 'increase_dynamic',
       basket_qty_theta_mult: Math.min(
         10,
         Math.max(0.1, Number(basketQtyThetaMult) || 2.0),
@@ -1786,29 +1813,98 @@ export default function AutoTrade() {
                       </p>
                     )}
                   </label>
-                  <div className="mt-2">
-                    <label className="flex cursor-pointer items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={useDynamicQtyOnAdj}
-                        onChange={(e) =>
-                          setUseDynamicQtyOnAdj(e.target.checked)
-                        }
-                      />
-                      <span className="text-sm text-white">
-                        Re-calculate qty at each adjustment
-                      </span>
-                      <InfoTooltip text="At adjustment, bot recalculates basket qty using live hedge theta and new strike ask price. Untested leg qty increases to match. Hard cap: max 50% of hedge qty (e.g. max 2 for 5-lot hedge). Entry target ($) stays unchanged — higher qty helps reach it faster." />
-                    </label>
-                    <p className="ml-6 mt-1 text-xs text-gray-400">
-                      Uses dynamic % formula at adjustment time. Max qty: 50%
-                      of hedge qty.
-                    </p>
-                  </div>
                   <p className="text-xs text-gray-400">
                     Dynamic: (hedge_theta ×{' '}
                     {Number(basketQtyThetaMult) || 2.0} × 100) / call_ask →
                     computed at entry
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+          {hedgeEnabled && (
+            <div className="mt-3 space-y-2 border-t border-gray-700/60 pt-3">
+              <p className="text-sm text-white">Qty at adjustment</p>
+              <label className="flex cursor-pointer items-start gap-2">
+                <input
+                  type="radio"
+                  name="adjustmentQtyModeOuter"
+                  className="mt-1"
+                  checked={adjustmentQtyMode === 'unchanged'}
+                  onChange={() => setAdjustmentQtyMode('unchanged')}
+                />
+                <span className="text-sm text-gray-200">
+                  Qty unchanged at adjustment
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2">
+                <input
+                  type="radio"
+                  name="adjustmentQtyModeOuter"
+                  className="mt-1"
+                  checked={adjustmentQtyMode === 'increase_dynamic'}
+                  onChange={() => setAdjustmentQtyMode('increase_dynamic')}
+                  disabled={!basketQtyDynamic}
+                />
+                <span
+                  className={`text-sm ${
+                    basketQtyDynamic ? 'text-gray-200' : 'text-gray-500'
+                  }`}
+                >
+                  Increase — dynamic theta-based
+                  <span className="mt-0.5 block text-xs text-gray-500">
+                    Requires % of hedge — dynamic. Cap: 50% of hedge.
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2">
+                <input
+                  type="radio"
+                  name="adjustmentQtyModeOuter"
+                  className="mt-1"
+                  checked={adjustmentQtyMode === 'decrease_step'}
+                  onChange={() => setAdjustmentQtyMode('decrease_step')}
+                />
+                <span className="text-sm text-gray-200">
+                  Decrease — step down
+                </span>
+              </label>
+              {adjustmentQtyMode === 'decrease_step' && (
+                <div className="ml-6 space-y-1">
+                  <label className="block text-sm text-gray-300">
+                    % of original each adjustment
+                    <input
+                      type="number"
+                      min={1}
+                      max={99}
+                      step={1}
+                      value={adjustmentQtyDecreasePct}
+                      onChange={(e) =>
+                        setAdjustmentQtyDecreasePct(e.target.value)
+                      }
+                      className="mt-1 w-24 rounded-md border border-gray-600 bg-gray-900 px-2 py-1 text-white"
+                    />
+                  </label>
+                  <p className="text-xs text-gray-400">
+                    preview:{' '}
+                    {(() => {
+                      const orig = 100
+                      const pct = Math.min(
+                        99,
+                        Math.max(1, Number(adjustmentQtyDecreasePct) || 25),
+                      )
+                      const a1 = Math.max(1, Math.floor(orig * (1 - pct / 100)))
+                      const a2 = Math.max(
+                        1,
+                        Math.floor(orig * (1 - (2 * pct) / 100)),
+                      )
+                      return `${orig} lots → adj 1: ${a1} → adj 2: ${a2}`
+                    })()}
+                  </p>
+                  <p className="text-xs text-amber-400/90">
+                    Wings qty unchanged rehti hai, to reduction ke baad shorts
+                    se zyada wings hongi — protection badhega, thoda extra
+                    theta drag lagega.
                   </p>
                 </div>
               )}

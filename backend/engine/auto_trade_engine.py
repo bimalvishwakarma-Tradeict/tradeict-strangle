@@ -115,19 +115,70 @@ def resolve_adjustment_basket_qty(
     hedge_call_theta: float,
     new_strike_ask: float,
     trade_id: int | None = None,
-) -> int:
+    original_qty: int | None = None,
+    adjustment_number: int | None = None,
+) -> tuple[int, bool]:
     """
-    Lot count for replacement leg at adjustment (B25).
+    Lot count for replacement short leg at adjustment.
 
-    When use_dynamic_qty_on_adjustment and basket_qty_dynamic are both enabled,
-    recomputes qty from live hedge call theta and new-strike ask, capped at
-    floor(hedge_qty × 0.5). Otherwise returns triggered_leg_qty unchanged.
+    Returns (new_qty, close_basket).
+    Wings are never resized here — caller must leave wing legs untouched.
+
+    Modes (adjustment_qty_mode, with migration from use_dynamic_qty_on_adjustment):
+      unchanged         — return triggered_leg_qty
+      increase_dynamic  — B25 theta formula + 50% hedge cap
+      decrease_step     — floor(original × (1 − pct/100 × adj_n)), min 1
     """
+    from backend.engine.wing_entry import (
+        compute_decrease_step_qty,
+        resolve_adjustment_qty_mode,
+    )
+
     base_qty = max(1, int(triggered_leg_qty or 1))
-    use_dyn = bool(getattr(settings, "use_dynamic_qty_on_adjustment", False))
+    mode = resolve_adjustment_qty_mode(settings)
+
+    if mode == "decrease_step":
+        orig = int(original_qty) if original_qty is not None else base_qty
+        orig = max(1, orig)
+        adj_n = int(adjustment_number) if adjustment_number is not None else 1
+        adj_n = max(1, adj_n)
+        pct = float(
+            getattr(settings, "adjustment_qty_decrease_pct", None) or 25.0
+        )
+        if not (0 < pct < 100):
+            pct = 25.0
+        new_qty, close_basket = compute_decrease_step_qty(
+            original_qty=orig,
+            adjustment_number=adj_n,
+            decrease_pct=pct,
+        )
+        if close_basket or new_qty is None:
+            logger.info(
+                "[ADJ_QTY_DECREASE] trade=%s original=%s adj_n=%s pct=%s "
+                "new_qty=close remaining<=0",
+                trade_id if trade_id is not None else "?",
+                orig,
+                adj_n,
+                pct,
+            )
+            return base_qty, True
+        logger.info(
+            "[ADJ_QTY_DECREASE] trade=%s original=%s adj_n=%s pct=%s new_qty=%s",
+            trade_id if trade_id is not None else "?",
+            orig,
+            adj_n,
+            pct,
+            new_qty,
+        )
+        return int(new_qty), False
+
+    if mode != "increase_dynamic":
+        return base_qty, False
+
+    # increase_dynamic (B25): requires basket_qty_dynamic
     basket_dyn = bool(getattr(settings, "basket_qty_dynamic", False))
-    if not (use_dyn and basket_dyn):
-        return base_qty
+    if not basket_dyn:
+        return base_qty, False
 
     mult = float(getattr(settings, "basket_qty_theta_mult", None) or 2.0)
     raw_pct = compute_dynamic_basket_qty_pct(
@@ -137,7 +188,7 @@ def resolve_adjustment_basket_qty(
     )
     hq = int(hedge_qty or 0)
     if raw_pct is None or raw_pct <= 0 or hq <= 0:
-        return base_qty
+        return base_qty, False
 
     raw_qty = int(math.ceil(hq * float(raw_pct) / 100.0))
     max_qty = max(1, int(math.floor(hq * 0.5)))
@@ -154,7 +205,7 @@ def resolve_adjustment_basket_qty(
         max_qty,
         new_qty,
     )
-    return new_qty
+    return new_qty, False
 
 
 def resolve_strangle_target_premium(
@@ -473,6 +524,11 @@ class AutoTradeEngine:
 
     async def _place_trade(self, settings: Any, db: Any) -> None:
         from backend.models import Account, Leg, Setting, Trade
+        from backend.engine.wing_entry import (
+            EntryGuardBlock,
+            EntryPartialUnwind,
+            unwind_partial_entry,
+        )
 
         client = self._resolve_delta_client()
         if client is None:
@@ -1261,115 +1317,352 @@ class AutoTradeEngine:
                 trade_id=None,
             )
 
-            # --- Place CALL (bracket SL attached inline) ---
-            logger.info(
-                "Placing CALL: %s qty=%s bracket_sl=%s",
-                straddle["call_symbol"],
-                qty,
-                call_prov_sl,
-            )
-            call_open_ts = get_utc_now()
-            call_result = await self.order_executor.sell_option(
-                product_id=int(straddle["call_product_id"]),
-                quantity=qty,
-                delta_client=client,
-                symbol_for_fallback=str(straddle["call_symbol"]),
-                bracket_sl_price=call_prov_sl if call_prov_sl > 0 else None,
-                bracket_sl_limit=call_prov_limit if call_prov_sl > 0 else None,
-            )
-            if not call_result.success:
-                raise RuntimeError(
-                    f"Call order failed: {call_result.error or 'unknown'}"
-                )
-            call_fill_ts = get_utc_now()
-            call_fill = float(call_result.filled_price or 0.0)
-            if call_fill <= 0:
-                call_fill = call_mark
-                logger.warning(
-                    "Call fill unavailable, using mark: %.4f", call_fill
-                )
-            call_order_id = (
-                str(call_result.order_id)
-                if call_result.order_id is not None
-                else None
-            )
-            call_fee = (
-                abs(float(call_result.commission))
-                if call_result.commission is not None
-                else None
-            )
-            logger.info(
-                "Call filled @ %s order_id=%s", call_fill, call_order_id
-            )
-            call_sl_trigger_price, call_sl_limit = (
-                await finalize_bracket_sl_after_fill(
-                    client,
-                    entry_order_id=call_order_id,
-                    product_id=int(straddle["call_product_id"]),
-                    mark_price=call_mark,
-                    fill_price=call_fill,
-                    universal_sl_pct=universal_sl_pct,
-                    provisional_stop=call_prov_sl,
-                    provisional_limit=call_prov_limit,
-                    leg="call",
-                    trade_id=None,
-                )
+            # --- Wings strike resolve + entry order sequencing ---
+            from backend.core.bot_logger import log_and_buffer
+            from backend.engine.wing_entry import (
+                EntryGuardBlock,
+                EntryPartialUnwind,
+                FilledEntryLeg,
+                build_entry_order_plan,
+                is_full_fill,
+                place_leg_with_retries,
+                unwind_partial_entry,
             )
 
-            # --- Place PUT (bracket SL attached inline) ---
-            logger.info(
-                "Placing PUT: %s qty=%s bracket_sl=%s",
-                straddle["put_symbol"],
-                qty,
-                put_prov_sl,
+            wings_enabled = bool(
+                getattr(settings, "basket_wings_enabled", False)
             )
+            wing_call_pick: dict[str, Any] | None = None
+            wing_put_pick: dict[str, Any] | None = None
+            wing_call_fill = 0.0
+            wing_put_fill = 0.0
+            wing_call_order_id: str | None = None
+            wing_put_order_id: str | None = None
+            wing_call_fee: float | None = None
+            wing_put_fee: float | None = None
+            wing_call_open_ts = None
+            wing_put_open_ts = None
+            wing_call_fill_ts = None
+            wing_put_fill_ts = None
+            wing_call_mark = 0.0
+            wing_put_mark = 0.0
+            filled_entry_legs: list[FilledEntryLeg] = []
+
+            if wings_enabled:
+                from backend.strategies.s001_short_strangle.wing_select import (
+                    resolve_wing_strikes,
+                )
+
+                chain_for_wings = locals().get("short_chain") or None
+                if not chain_for_wings:
+                    und_key = str(settings.underlying).upper().strip()
+                    chain_for_wings = await client.get_option_chain(
+                        und_key, expiry_str
+                    )
+                wing_call_pick, wing_put_pick = resolve_wing_strikes(
+                    chain=chain_for_wings or [],
+                    short_call_strike=float(
+                        straddle.get("call_strike", straddle.get("strike"))
+                    ),
+                    short_put_strike=float(
+                        straddle.get("put_strike", straddle.get("strike"))
+                    ),
+                    short_call_premium=call_mark,
+                    short_put_premium=put_mark,
+                    mode=str(
+                        getattr(settings, "wing_strike_mode", None) or "points"
+                    ),
+                    points_away=float(
+                        getattr(settings, "wing_points_away", None) or 2000.0
+                    ),
+                    delta_min=float(
+                        getattr(settings, "wing_delta_min", None) or 0.05
+                    ),
+                    delta_max=float(
+                        getattr(settings, "wing_delta_max", None) or 0.07
+                    ),
+                    pct_of_premium=float(
+                        getattr(settings, "wing_pct_of_premium", None) or 20.0
+                    ),
+                )
+                if wing_call_pick is None or wing_put_pick is None:
+                    missing = "call" if wing_call_pick is None else "put"
+                    log_and_buffer(
+                        "ENTRY_GUARD_BLOCK",
+                        0,
+                        {
+                            "source": "auto",
+                            "guard": "no_wing_strike",
+                            "leg": missing,
+                            "underlying": underlying,
+                        },
+                    )
+                    logger.error(
+                        "[ENTRY_GUARD_BLOCK] guard=no_wing_strike leg=%s",
+                        missing,
+                    )
+                    raise EntryGuardBlock("no_wing_strike", missing)
+
+            try:
+                plan = build_entry_order_plan(
+                    qty=qty,
+                    straddle=straddle,
+                    wing_call=wing_call_pick,
+                    wing_put=wing_put_pick,
+                    wings_enabled=wings_enabled,
+                    call_bracket_sl=call_prov_sl if call_prov_sl > 0 else None,
+                    call_bracket_limit=(
+                        call_prov_limit if call_prov_sl > 0 else None
+                    ),
+                    put_bracket_sl=put_prov_sl if put_prov_sl > 0 else None,
+                    put_bracket_limit=(
+                        put_prov_limit if put_prov_sl > 0 else None
+                    ),
+                )
+            except EntryGuardBlock as guard_exc:
+                log_and_buffer(
+                    "ENTRY_GUARD_BLOCK",
+                    0,
+                    {
+                        "source": "auto",
+                        "guard": guard_exc.guard,
+                        "leg": guard_exc.leg,
+                        "underlying": underlying,
+                    },
+                )
+                logger.error(
+                    "[ENTRY_GUARD_BLOCK] guard=%s leg=%s",
+                    guard_exc.guard,
+                    guard_exc.leg,
+                )
+                raise
+
+            call_result = None
+            put_result = None
+            call_fill = 0.0
+            put_fill = 0.0
+            call_order_id = None
+            put_order_id = None
+            call_fee = None
+            put_fee = None
+            call_open_ts = get_utc_now()
             put_open_ts = get_utc_now()
-            put_result = await self.order_executor.sell_option(
-                product_id=int(straddle["put_product_id"]),
-                quantity=qty,
-                delta_client=client,
-                symbol_for_fallback=str(straddle["put_symbol"]),
-                bracket_sl_price=put_prov_sl if put_prov_sl > 0 else None,
-                bracket_sl_limit=put_prov_limit if put_prov_sl > 0 else None,
-            )
-            if not put_result.success:
-                raise RuntimeError(
-                    f"PARTIAL: Call placed @ {call_fill} "
-                    f"(order {call_order_id}) but Put failed: "
-                    f"{put_result.error or 'unknown'}"
+            call_fill_ts = call_open_ts
+            put_fill_ts = put_open_ts
+            call_sl_trigger_price = call_prov_sl
+            call_sl_limit = call_prov_limit
+            put_sl_trigger_price = put_prov_sl
+            put_sl_limit = put_prov_limit
+
+            for spec in plan:
+
+                async def _place_one(
+                    _spec=spec,
+                ):
+                    if _spec.is_long:
+                        return await self.order_executor.buy_option(
+                            product_id=int(_spec.product_id),
+                            quantity=int(_spec.quantity),
+                            delta_client=client,
+                            symbol_for_fallback=str(_spec.symbol),
+                        )
+                    return await self.order_executor.sell_option(
+                        product_id=int(_spec.product_id),
+                        quantity=int(_spec.quantity),
+                        delta_client=client,
+                        symbol_for_fallback=str(_spec.symbol),
+                        bracket_sl_price=_spec.bracket_sl_price,
+                        bracket_sl_limit=_spec.bracket_sl_limit,
+                    )
+
+                open_ts = get_utc_now()
+                if not spec.is_long:
+                    logger.info(
+                        "Placing %s: %s qty=%s bracket_sl=%s",
+                        spec.role.upper(),
+                        spec.symbol,
+                        spec.quantity,
+                        spec.bracket_sl_price,
+                    )
+                else:
+                    logger.info(
+                        "Placing WING %s BUY: %s qty=%s (no bracket SL)",
+                        spec.role,
+                        spec.symbol,
+                        spec.quantity,
+                    )
+
+                result = await place_leg_with_retries(
+                    role=spec.role,
+                    requested=int(spec.quantity),
+                    place_fn=_place_one,
                 )
-            put_fill_ts = get_utc_now()
-            put_fill = float(put_result.filled_price or 0.0)
-            if put_fill <= 0:
-                put_fill = put_mark
-                logger.warning(
-                    "Put fill unavailable, using mark: %.4f", put_fill
+                fill_ts = get_utc_now()
+
+                if not is_full_fill(result, int(spec.quantity)):
+                    # Record any partial fill before raising unwind
+                    partial_size = 0
+                    if result.success:
+                        try:
+                            partial_size = int(
+                                getattr(result, "filled_size", 0) or 0
+                            )
+                        except (TypeError, ValueError):
+                            partial_size = 0
+                    if partial_size > 0:
+                        filled_entry_legs.append(
+                            FilledEntryLeg(
+                                role=spec.role,
+                                product_id=int(spec.product_id),
+                                symbol=str(spec.symbol),
+                                strike=float(spec.strike),
+                                requested_qty=int(spec.quantity),
+                                filled_size=partial_size,
+                                fill_price=float(
+                                    result.filled_price or spec.mark_premium
+                                ),
+                                order_id=(
+                                    str(result.order_id)
+                                    if result.order_id is not None
+                                    else None
+                                ),
+                                commission=(
+                                    abs(float(result.commission))
+                                    if result.commission is not None
+                                    else None
+                                ),
+                                is_long=bool(spec.is_long),
+                                mark_premium=float(spec.mark_premium),
+                            )
+                        )
+                    raise EntryPartialUnwind(
+                        f"Entry leg {spec.role} incomplete after retries: "
+                        f"{result.error or 'partial_fill'}",
+                        filled_legs=list(filled_entry_legs),
+                        failed_role=spec.role,
+                    )
+
+                fill_px = float(result.filled_price or 0.0)
+                if fill_px <= 0:
+                    fill_px = float(spec.mark_premium)
+                oid = (
+                    str(result.order_id)
+                    if result.order_id is not None
+                    else None
                 )
-            put_order_id = (
-                str(put_result.order_id)
-                if put_result.order_id is not None
-                else None
-            )
-            put_fee = (
-                abs(float(put_result.commission))
-                if put_result.commission is not None
-                else None
-            )
-            logger.info("Put filled @ %s order_id=%s", put_fill, put_order_id)
-            put_sl_trigger_price, put_sl_limit = (
-                await finalize_bracket_sl_after_fill(
-                    client,
-                    entry_order_id=put_order_id,
-                    product_id=int(straddle["put_product_id"]),
-                    mark_price=put_mark,
-                    fill_price=put_fill,
-                    universal_sl_pct=universal_sl_pct,
-                    provisional_stop=put_prov_sl,
-                    provisional_limit=put_prov_limit,
-                    leg="put",
-                    trade_id=None,
+                fee = (
+                    abs(float(result.commission))
+                    if result.commission is not None
+                    else None
                 )
-            )
+                filled_size = int(
+                    getattr(result, "filled_size", None) or spec.quantity
+                )
+
+                filled_entry_legs.append(
+                    FilledEntryLeg(
+                        role=spec.role,
+                        product_id=int(spec.product_id),
+                        symbol=str(spec.symbol),
+                        strike=float(spec.strike),
+                        requested_qty=int(spec.quantity),
+                        filled_size=filled_size,
+                        fill_price=fill_px,
+                        order_id=oid,
+                        commission=fee,
+                        is_long=bool(spec.is_long),
+                        mark_premium=float(spec.mark_premium),
+                    )
+                )
+
+                if spec.role == "wing_call":
+                    wing_call_open_ts = open_ts
+                    wing_call_fill_ts = fill_ts
+                    wing_call_fill = fill_px
+                    wing_call_order_id = oid
+                    wing_call_fee = fee
+                    wing_call_mark = float(spec.mark_premium)
+                    logger.info(
+                        "[WING_ENTRY] leg=call strike=%s qty=%s fill=%s "
+                        "order_id=%s",
+                        spec.strike,
+                        spec.quantity,
+                        fill_px,
+                        oid,
+                    )
+                elif spec.role == "wing_put":
+                    wing_put_open_ts = open_ts
+                    wing_put_fill_ts = fill_ts
+                    wing_put_fill = fill_px
+                    wing_put_order_id = oid
+                    wing_put_fee = fee
+                    wing_put_mark = float(spec.mark_premium)
+                    logger.info(
+                        "[WING_ENTRY] leg=put strike=%s qty=%s fill=%s "
+                        "order_id=%s",
+                        spec.strike,
+                        spec.quantity,
+                        fill_px,
+                        oid,
+                    )
+                elif spec.role == "call":
+                    call_result = result
+                    call_open_ts = open_ts
+                    call_fill_ts = fill_ts
+                    call_fill = fill_px
+                    call_order_id = oid
+                    call_fee = fee
+                    logger.info(
+                        "Call filled @ %s order_id=%s", call_fill, call_order_id
+                    )
+                    call_sl_trigger_price, call_sl_limit = (
+                        await finalize_bracket_sl_after_fill(
+                            client,
+                            entry_order_id=call_order_id,
+                            product_id=int(spec.product_id),
+                            mark_price=call_mark,
+                            fill_price=call_fill,
+                            universal_sl_pct=universal_sl_pct,
+                            provisional_stop=call_prov_sl,
+                            provisional_limit=call_prov_limit,
+                            leg="call",
+                            trade_id=None,
+                        )
+                    )
+                    filled_entry_legs[-1].sl_trigger_price = (
+                        float(call_sl_trigger_price)
+                        if call_sl_trigger_price
+                        else None
+                    )
+                elif spec.role == "put":
+                    put_result = result
+                    put_open_ts = open_ts
+                    put_fill_ts = fill_ts
+                    put_fill = fill_px
+                    put_order_id = oid
+                    put_fee = fee
+                    logger.info(
+                        "Put filled @ %s order_id=%s", put_fill, put_order_id
+                    )
+                    put_sl_trigger_price, put_sl_limit = (
+                        await finalize_bracket_sl_after_fill(
+                            client,
+                            entry_order_id=put_order_id,
+                            product_id=int(spec.product_id),
+                            mark_price=put_mark,
+                            fill_price=put_fill,
+                            universal_sl_pct=universal_sl_pct,
+                            provisional_stop=put_prov_sl,
+                            provisional_limit=put_prov_limit,
+                            leg="put",
+                            trade_id=None,
+                        )
+                    )
+                    filled_entry_legs[-1].sl_trigger_price = (
+                        float(put_sl_trigger_price)
+                        if put_sl_trigger_price
+                        else None
+                    )
 
             # TP/SL locked to initial deployment premium (actual fills)
             # initial_max_profit never changes after trade entry
@@ -1504,6 +1797,7 @@ class AutoTradeEngine:
                     if strangle_premium_computed is not None
                     else None
                 ),
+                original_basket_qty=int(qty),
             )
             db.add(trade)
             db.flush()
@@ -1653,6 +1947,8 @@ class AutoTradeEngine:
                 entry_time=now_utc,
                 status="open",
                 is_bot_managed=True,
+                is_long=False,
+                side="SELL",
                 delta_order_id=call_order_id,
                 delta_at_entry=float(straddle.get("call_delta") or 0),
                 entry_fee_usd=call_fee,
@@ -1676,6 +1972,8 @@ class AutoTradeEngine:
                 entry_time=now_utc,
                 status="open",
                 is_bot_managed=True,
+                is_long=False,
+                side="SELL",
                 delta_order_id=put_order_id,
                 delta_at_entry=float(straddle.get("put_delta") or 0),
                 entry_fee_usd=put_fee,
@@ -1695,6 +1993,66 @@ class AutoTradeEngine:
             )
             db.add(call_leg)
             db.add(put_leg)
+
+            wing_call_leg = None
+            wing_put_leg = None
+            if wings_enabled and wing_call_pick is not None and wing_put_pick is not None:
+                wing_call_entry_spread = compute_entry_spread_usd(
+                    sent_price=wing_call_mark,
+                    fill_price=wing_call_fill,
+                    quantity=qty,
+                    is_long=True,
+                )
+                wing_put_entry_spread = compute_entry_spread_usd(
+                    sent_price=wing_put_mark,
+                    fill_price=wing_put_fill,
+                    quantity=qty,
+                    is_long=True,
+                )
+                wing_call_leg = Leg(
+                    trade_id=trade.id,
+                    leg_type="wing_call",
+                    strike=float(wing_call_pick["strike"]),
+                    symbol=str(wing_call_pick["symbol"]),
+                    product_id=int(wing_call_pick["product_id"]),
+                    initial_premium=wing_call_fill,
+                    trigger_baseline_premium=wing_call_fill,
+                    trigger_premium=wing_call_fill,
+                    quantity=qty,
+                    entry_time=now_utc,
+                    status="open",
+                    is_bot_managed=True,
+                    is_long=True,
+                    side="BUY",
+                    delta_order_id=wing_call_order_id,
+                    delta_at_entry=float(wing_call_pick.get("delta") or 0),
+                    entry_fee_usd=wing_call_fee,
+                    order_sent_price=wing_call_mark,
+                    entry_spread_usd=wing_call_entry_spread,
+                )
+                wing_put_leg = Leg(
+                    trade_id=trade.id,
+                    leg_type="wing_put",
+                    strike=float(wing_put_pick["strike"]),
+                    symbol=str(wing_put_pick["symbol"]),
+                    product_id=int(wing_put_pick["product_id"]),
+                    initial_premium=wing_put_fill,
+                    trigger_baseline_premium=wing_put_fill,
+                    trigger_premium=wing_put_fill,
+                    quantity=qty,
+                    entry_time=now_utc,
+                    status="open",
+                    is_bot_managed=True,
+                    is_long=True,
+                    side="BUY",
+                    delta_order_id=wing_put_order_id,
+                    delta_at_entry=float(wing_put_pick.get("delta") or 0),
+                    entry_fee_usd=wing_put_fee,
+                    order_sent_price=wing_put_mark,
+                    entry_spread_usd=wing_put_entry_spread,
+                )
+                db.add(wing_call_leg)
+                db.add(wing_put_leg)
 
             mode = str(settings.trigger_mode or "slab")
             slab_map: dict[str, Any] = {
@@ -1722,6 +2080,10 @@ class AutoTradeEngine:
             db.refresh(trade)
             db.refresh(call_leg)
             db.refresh(put_leg)
+            if wing_call_leg is not None:
+                db.refresh(wing_call_leg)
+            if wing_put_leg is not None:
+                db.refresh(wing_put_leg)
 
             try:
                 from backend.engine.structure_ledger import (
@@ -1737,6 +2099,12 @@ class AutoTradeEngine:
                     put_opened_at=put_open_ts,
                     call_fill_at=call_fill_ts,
                     put_fill_at=put_fill_ts,
+                    wing_call_leg=wing_call_leg,
+                    wing_put_leg=wing_put_leg,
+                    wing_call_opened_at=wing_call_open_ts,
+                    wing_put_opened_at=wing_put_open_ts,
+                    wing_call_fill_at=wing_call_fill_ts,
+                    wing_put_fill_at=wing_put_fill_ts,
                 )
                 db.commit()
             except Exception as ledger_exc:
@@ -1768,15 +2136,25 @@ class AutoTradeEngine:
                 .filter(Leg.trade_id == trade.id, Leg.status == "open")
                 .all()
             )
-            if len(saved_legs) != 2:
+            expected_open = 4 if (
+                wings_enabled
+                and wing_call_leg is not None
+                and wing_put_leg is not None
+            ) else 2
+            if len(saved_legs) != expected_open:
                 logger.critical(
-                    "Auto trade %s has %s open legs (expected 2)! "
+                    "Auto trade %s has %s open legs (expected %s)! "
                     "DB save may be incomplete.",
                     trade.id,
                     len(saved_legs),
+                    expected_open,
                 )
             else:
-                logger.info("Auto trade %s has 2 open legs in DB", trade.id)
+                logger.info(
+                    "Auto trade %s has %s open legs in DB",
+                    trade.id,
+                    expected_open,
+                )
 
             # Detach for tracker after session commits
             db.expunge(trade)
@@ -1901,18 +2279,189 @@ class AutoTradeEngine:
                 }
             )
 
+        except EntryGuardBlock as guard_exc:
+            logger.error(
+                "Auto trade entry blocked by guard: %s",
+                guard_exc,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            await self._record_failure(settings, db, str(guard_exc))
+
+        except EntryPartialUnwind as unwind_exc:
+            logger.critical(
+                "ENTRY PARTIAL — unwinding filled legs (failed=%s): %s",
+                unwind_exc.failed_role,
+                unwind_exc,
+            )
+            unwind_res = None
+            closed_trade_id = None
+            note = None
+            try:
+                if client is not None and unwind_exc.filled_legs:
+                    unwind_res = await unwind_partial_entry(
+                        order_executor=self.order_executor,
+                        delta_client=client,
+                        filled_legs=list(unwind_exc.filled_legs),
+                        trade_id=None,
+                    )
+                # Persist a CLOSED trade for audit + cooldown
+                from backend.config import ExitReason as _ER
+                from backend.database import get_or_create_auto_settings
+
+                now_u = get_utc_now()
+                note = None
+                if unwind_res is not None and unwind_res.legs_failed > 0:
+                    note = (
+                        "PARTIAL_UNWIND_FAILED: "
+                        + "; ".join(unwind_res.failures[:5])
+                    )
+                    logger.critical(
+                        "PARTIAL_UNWIND_FAILED trade pending: %s",
+                        note,
+                    )
+                closed = Trade(
+                    account_id=int(account.id) if account is not None else 0,
+                    underlying=str(
+                        getattr(settings, "underlying", "BTC") or "BTC"
+                    ).upper(),
+                    expiry_date=expiry_date if "expiry_date" in locals() else (
+                        get_ist_now().date()
+                    ),
+                    status=TradeStatus.CLOSED.value,
+                    entry_time=now_u,
+                    exit_time=now_u,
+                    total_premium_collected=0.0,
+                    profit_target_usd=0.0,
+                    stoploss_usd=0.0,
+                    trigger_mode=str(
+                        getattr(settings, "trigger_mode", None) or "slab"
+                    ),
+                    realized_pnl=0.0,
+                    exit_reason=_ER.ENTRY_PARTIAL_UNWIND.value,
+                    notes=note or "ENTRY_PARTIAL_UNWIND",
+                    hedge_position_id=(
+                        int(hedge_position_id)
+                        if "hedge_position_id" in locals()
+                        and hedge_position_id is not None
+                        else None
+                    ),
+                )
+                db.add(closed)
+                db.commit()
+                db.refresh(closed)
+                closed_trade_id = int(closed.id)
+                logger.warning(
+                    "[ENTRY_PARTIAL_UNWIND] trade=%s legs_closed=%s "
+                    "legs_failed=%s",
+                    closed_trade_id,
+                    unwind_res.legs_closed if unwind_res else 0,
+                    unwind_res.legs_failed if unwind_res else 0,
+                )
+                # Cooldown — do not instant re-enter
+                cooldown = int(
+                    getattr(settings, "cooldown_after_loss_minutes", None)
+                    if getattr(settings, "cooldown_after_loss_minutes", None)
+                    is not None
+                    else 120
+                )
+                self.schedule_reentry(
+                    str(getattr(settings, "underlying", "") or ""),
+                    cooldown,
+                    source="cooldown_after_loss",
+                )
+                await ws_manager.broadcast(
+                    {
+                        "type": "ENTRY_PARTIAL_UNWIND",
+                        "trade_id": closed_trade_id,
+                        "exit_reason": _ER.ENTRY_PARTIAL_UNWIND.value,
+                        "legs_closed": (
+                            unwind_res.legs_closed if unwind_res else 0
+                        ),
+                        "legs_failed": (
+                            unwind_res.legs_failed if unwind_res else 0
+                        ),
+                        "partial_unwind_failed": bool(
+                            note and "PARTIAL_UNWIND_FAILED" in note
+                        ),
+                        "message": (
+                            f"Entry partial unwind — trade {closed_trade_id} "
+                            f"closed ({_ER.ENTRY_PARTIAL_UNWIND.value})"
+                            + (
+                                " — PARTIAL_UNWIND_FAILED, check positions!"
+                                if note and "PARTIAL_UNWIND_FAILED" in note
+                                else ""
+                            )
+                        ),
+                    }
+                )
+            except Exception as persist_exc:
+                logger.critical(
+                    "ENTRY_PARTIAL_UNWIND persist/schedule failed: %s",
+                    persist_exc,
+                    exc_info=True,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                await self._record_failure(settings, db, str(unwind_exc))
+            else:
+                # Already scheduled cooldown — skip short retry
+                try:
+                    settings_row = get_or_create_auto_settings(db)
+                    settings_row.last_error = str(unwind_exc)[:500]
+                    settings_row.updated_at = get_utc_now()
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+
         except Exception as exc:
+            # Import may not be in scope if failure before wing imports
+            from backend.engine.wing_entry import (
+                EntryGuardBlock as _EGB,
+                EntryPartialUnwind as _EPU,
+            )
+
+            if isinstance(exc, (_EGB, _EPU)):
+                raise  # should have been caught above
             logger.error("Auto trade placement failed: %s", exc, exc_info=True)
 
-            # CRITICAL: If call was placed but put failed, close the call
-            # to avoid naked exposure on Delta
+            # Prefer filled_entry_legs unwind when available (wings path)
             if (
+                "filled_entry_legs" in locals()
+                and filled_entry_legs
+                and client is not None
+            ):
+                try:
+                    await unwind_partial_entry(
+                        order_executor=self.order_executor,
+                        delta_client=client,
+                        filled_legs=list(filled_entry_legs),
+                        trade_id=None,
+                    )
+                except Exception as cleanup_exc:
+                    logger.critical(
+                        "PARTIAL ENTRY CLEANUP (filled_entry_legs) FAILED: %s",
+                        cleanup_exc,
+                        exc_info=True,
+                    )
+            # Legacy: If call was placed but put failed, close the call
+            elif (
                 "call_result" in locals()
-                and call_result.success
+                and call_result is not None
+                and getattr(call_result, "success", False)
                 and "straddle" in locals()
                 and client is not None
             ):
-                if "put_result" not in locals() or not put_result.success:
+                if "put_result" not in locals() or not getattr(
+                    put_result, "success", False
+                ):
                     logger.critical(
                         "PARTIAL ENTRY: Call placed but Put failed. "
                         "Attempting to close call order to avoid naked exposure."
@@ -1927,7 +2476,7 @@ class AutoTradeEngine:
                         close_res = await client.close_position(
                             product_id=call_pid,
                             size=call_qty,
-                            is_long=False,  # we sold it (short), close = buy
+                            is_long=False,
                         )
                         logger.info("Partial entry cleanup: %s", close_res)
                         log_and_buffer(

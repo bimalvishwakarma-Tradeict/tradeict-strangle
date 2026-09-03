@@ -118,3 +118,5 @@ class ExitReason(str, Enum):
     HEDGE_ROLL = "HEDGE_ROLL"
     # Active basket whose linked hedge is gone / inactive
     ORPHAN_NO_HEDGE = "ORPHAN_NO_HEDGE"
+    # Entry basket could not fully fill after retries — positions unwound
+    ENTRY_PARTIAL_UNWIND = "ENTRY_PARTIAL_UNWIND"

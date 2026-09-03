@@ -1532,6 +1532,7 @@ class BotEngine:
                 ExitReason.STOPLOSS.value,
                 ExitReason.MAX_ADJUSTMENTS_REACHED.value,
                 ExitReason.CHAIN_EXHAUSTED.value,
+                ExitReason.ENTRY_PARTIAL_UNWIND.value,
             }
             reason = str(exit_reason or "").strip().upper()
 

@@ -110,7 +110,9 @@ class AutoTradeSettingsSchema(BaseModel):
     hedge_qty_lots: int | None = Field(default=None, ge=1, le=10000)
     basket_qty_dynamic: bool = False
     basket_qty_theta_mult: float = Field(default=2.0, ge=0.1, le=10.0)
-    use_dynamic_qty_on_adjustment: bool = False
+    use_dynamic_qty_on_adjustment: bool = False  # deprecated → adjustment_qty_mode
+    adjustment_qty_mode: str = "unchanged"  # unchanged | increase_dynamic | decrease_step
+    adjustment_qty_decrease_pct: float = Field(default=25.0, gt=0, lt=100)
     basket_decay_exit_enabled: bool = False
     basket_decay_exit_pct: float = Field(default=50.0, gt=0, lt=100)
     basket_decay_exit_mode: str = "both_legs"
@@ -234,6 +236,18 @@ class AutoTradeSettingsSchema(BaseModel):
         )
 
         return normalize_wing_mode(v)
+
+    @field_validator("adjustment_qty_mode")
+    @classmethod
+    def validate_adjustment_qty_mode(cls, v: str) -> str:
+        normalized = str(v or "unchanged").lower().strip()
+        if normalized not in {
+            "unchanged",
+            "increase_dynamic",
+            "decrease_step",
+        }:
+            return "unchanged"
+        return normalized
 
     @model_validator(mode="after")
     def validate_hedge_money_when_enabled(self) -> AutoTradeSettingsSchema:
@@ -572,6 +586,21 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
         ),
         "use_dynamic_qty_on_adjustment": bool(
             getattr(s, "use_dynamic_qty_on_adjustment", False)
+        ),
+        "adjustment_qty_mode": (
+            str(getattr(s, "adjustment_qty_mode", None) or "").lower().strip()
+            if str(getattr(s, "adjustment_qty_mode", None) or "").lower().strip()
+            in {"unchanged", "increase_dynamic", "decrease_step"}
+            else (
+                "increase_dynamic"
+                if bool(getattr(s, "use_dynamic_qty_on_adjustment", False))
+                else "unchanged"
+            )
+        ),
+        "adjustment_qty_decrease_pct": float(
+            getattr(s, "adjustment_qty_decrease_pct", None)
+            if getattr(s, "adjustment_qty_decrease_pct", None) is not None
+            else 25.0
         ),
         "basket_decay_exit_enabled": bool(
             getattr(s, "basket_decay_exit_enabled", False)
@@ -924,9 +953,18 @@ async def update_auto_trade_settings(
     )
     settings.basket_qty_dynamic = bool(payload.basket_qty_dynamic)
     settings.basket_qty_theta_mult = float(payload.basket_qty_theta_mult)
-    settings.use_dynamic_qty_on_adjustment = bool(
-        payload.use_dynamic_qty_on_adjustment and payload.basket_qty_dynamic
+    adj_mode = str(payload.adjustment_qty_mode or "unchanged").lower().strip()
+    if adj_mode not in {"unchanged", "increase_dynamic", "decrease_step"}:
+        adj_mode = "unchanged"
+    # increase_dynamic still requires basket_qty_dynamic
+    if adj_mode == "increase_dynamic" and not payload.basket_qty_dynamic:
+        adj_mode = "unchanged"
+    settings.adjustment_qty_mode = adj_mode
+    settings.adjustment_qty_decrease_pct = float(
+        payload.adjustment_qty_decrease_pct
     )
+    # Keep deprecated bool in sync for rollback / old readers
+    settings.use_dynamic_qty_on_adjustment = adj_mode == "increase_dynamic"
     settings.basket_decay_exit_enabled = bool(payload.basket_decay_exit_enabled)
     settings.basket_decay_exit_pct = float(payload.basket_decay_exit_pct)
     decay_mode = str(payload.basket_decay_exit_mode or "both_legs").lower().strip()

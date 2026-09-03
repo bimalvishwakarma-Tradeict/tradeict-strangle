@@ -154,6 +154,10 @@ class Trade(Base):
     strangle_premium_computed_usd: Mapped[float | None] = mapped_column(
         Float, nullable=True, default=None
     )
+    # Deploy qty at first entry — fixed base for decrease_step adjustment mode
+    original_basket_qty: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )
 
     account: Mapped[Account] = relationship("Account", back_populates="trades")
     hedge_position: Mapped[HedgePosition | None] = relationship(
@@ -472,9 +476,20 @@ class AutoTradeSettings(Base):
     basket_qty_theta_mult: Mapped[float] = mapped_column(
         Float, nullable=False, server_default="2.0", default=2.0
     )
-    # When True + basket_qty_dynamic: recalculate basket qty at each adjustment
+    # Deprecated: migrated to adjustment_qty_mode; keep for rollback safety
     use_dynamic_qty_on_adjustment: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0", default=False
+    )
+    # unchanged | increase_dynamic | decrease_step
+    adjustment_qty_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="unchanged",
+        default="unchanged",
+    )
+    # Used when adjustment_qty_mode='decrease_step' (pct of original each adj)
+    adjustment_qty_decrease_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="25.0", default=25.0
     )
     basket_decay_exit_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0", default=False

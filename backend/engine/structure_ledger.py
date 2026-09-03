@@ -709,6 +709,12 @@ def record_master_basket_entry(
     put_opened_at: Any,
     call_fill_at: Any = None,
     put_fill_at: Any = None,
+    wing_call_leg: Any = None,
+    wing_put_leg: Any = None,
+    wing_call_opened_at: Any = None,
+    wing_put_opened_at: Any = None,
+    wing_call_fill_at: Any = None,
+    wing_put_fill_at: Any = None,
 ) -> None:
     try:
         hid = getattr(trade, "hedge_position_id", None)
@@ -750,6 +756,38 @@ def record_master_basket_entry(
             opened_at=put_opened_at,
             fill_at=put_fill_at,
         )
+        if wing_call_leg is not None:
+            open_leg(
+                db,
+                structure=struct,
+                leg_role=ROLE_BASKET_WING_CALL,
+                product_id=int(wing_call_leg.product_id),
+                side="BUY",
+                quantity=abs(int(wing_call_leg.quantity or 0)),
+                symbol=getattr(wing_call_leg, "symbol", None),
+                strike=getattr(wing_call_leg, "strike", None),
+                basket_seq=int(basket_seq) if basket_seq is not None else None,
+                adj_seq=0,
+                entry_order_id=getattr(wing_call_leg, "delta_order_id", None),
+                opened_at=wing_call_opened_at or call_opened_at,
+                fill_at=wing_call_fill_at,
+            )
+        if wing_put_leg is not None:
+            open_leg(
+                db,
+                structure=struct,
+                leg_role=ROLE_BASKET_WING_PUT,
+                product_id=int(wing_put_leg.product_id),
+                side="BUY",
+                quantity=abs(int(wing_put_leg.quantity or 0)),
+                symbol=getattr(wing_put_leg, "symbol", None),
+                strike=getattr(wing_put_leg, "strike", None),
+                basket_seq=int(basket_seq) if basket_seq is not None else None,
+                adj_seq=0,
+                entry_order_id=getattr(wing_put_leg, "delta_order_id", None),
+                opened_at=wing_put_opened_at or put_opened_at,
+                fill_at=wing_put_fill_at,
+            )
         db.flush()
     except Exception as exc:
         logger.error(

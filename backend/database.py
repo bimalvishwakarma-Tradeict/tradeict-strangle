@@ -864,6 +864,7 @@ def _migrate_schema() -> None:
             ("hedge_theta_at_entry", "FLOAT"),
             ("basket_qty_computed_pct", "FLOAT"),
             ("strangle_premium_computed_usd", "FLOAT"),
+            ("original_basket_qty", "INTEGER"),
         ):
             if col_name not in trade_cols:
                 with engine.begin() as conn:
@@ -921,6 +922,11 @@ def _migrate_schema() -> None:
             ("basket_qty_dynamic", "BOOLEAN NOT NULL DEFAULT 0"),
             ("basket_qty_theta_mult", "FLOAT NOT NULL DEFAULT 2.0"),
             ("use_dynamic_qty_on_adjustment", "BOOLEAN NOT NULL DEFAULT 0"),
+            (
+                "adjustment_qty_mode",
+                "VARCHAR(20) NOT NULL DEFAULT 'unchanged'",
+            ),
+            ("adjustment_qty_decrease_pct", "FLOAT NOT NULL DEFAULT 25.0"),
             ("basket_decay_exit_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
             ("basket_decay_exit_pct", "FLOAT NOT NULL DEFAULT 50.0"),
             ("basket_decay_exit_mode", "VARCHAR(20) NOT NULL DEFAULT 'both_legs'"),
@@ -956,6 +962,20 @@ def _migrate_schema() -> None:
                         )
                     )
                 at_cols.add(col_name)
+
+        # Migrate deprecated use_dynamic_qty_on_adjustment → adjustment_qty_mode
+        # Only when mode still at default 'unchanged' and legacy flag is True.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE auto_trade_settings "
+                    "SET adjustment_qty_mode = 'increase_dynamic' "
+                    "WHERE use_dynamic_qty_on_adjustment = 1 "
+                    "AND (adjustment_qty_mode IS NULL "
+                    "OR adjustment_qty_mode = '' "
+                    "OR adjustment_qty_mode = 'unchanged')"
+                )
+            )
 
         # Migrate legacy hedge_expiry_mode values to relative label keys
         with engine.begin() as conn:

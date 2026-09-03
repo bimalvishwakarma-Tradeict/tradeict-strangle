@@ -1183,14 +1183,57 @@ class AdjustmentExecutor:
                             float(hedge_row.entry_total_theta or 0) / 2.0
                         )
 
-            new_qty = resolve_adjustment_basket_qty(
+            orig_qty = getattr(trade, "original_basket_qty", None)
+            if orig_qty is None or int(orig_qty or 0) <= 0:
+                orig_qty = max(
+                    int(triggered_leg.quantity or 1),
+                    int(other_leg.quantity or 1),
+                )
+                try:
+                    trade.original_basket_qty = int(orig_qty)
+                except Exception:
+                    pass
+            adj_number = int(getattr(trade, "adjustment_count", 0) or 0) + 1
+
+            new_qty, qty_close_basket = resolve_adjustment_basket_qty(
                 settings=adj_cfg,
                 triggered_leg_qty=int(triggered_leg.quantity),
                 hedge_qty=hedge_qty,
                 hedge_call_theta=hedge_call_theta,
                 new_strike_ask=new_strike_ask,
                 trade_id=int(trade.id),
+                original_qty=int(orig_qty),
+                adjustment_number=adj_number,
             )
+            if qty_close_basket:
+                logger.info(
+                    "[ADJ_QTY_DECREASE] trade=%s remaining<=0 — closing basket "
+                    "(no adjust)",
+                    trade.id,
+                )
+                return AdjustmentResult(
+                    success=False,
+                    close_basket=True,
+                    error_message=(
+                        "decrease_step remaining<=0 — close basket"
+                    ),
+                )
+
+            from backend.engine.wing_entry import resolve_adjustment_qty_mode
+
+            qty_mode = resolve_adjustment_qty_mode(adj_cfg)
+            current_short_qty = int(triggered_leg.quantity or 1)
+            if (
+                qty_mode == "decrease_step"
+                and int(new_qty) == current_short_qty
+                and int(new_qty) == int(other_leg.quantity or 0)
+            ):
+                logger.info(
+                    "[ADJ_QTY_DECREASE] trade=%s new_qty=%s == current — "
+                    "no qty resize orders (strike roll continues)",
+                    trade.id,
+                    new_qty,
+                )
 
             if trade_is_demo:
                 logger.info(
@@ -1412,11 +1455,11 @@ class AdjustmentExecutor:
                 logger.info("[AUDIT] New leg confirmed on Delta")
 
             extra_qty = int(new_qty) - int(other_leg.quantity or 0)
-            if (
-                extra_qty > 0
-                and bool(getattr(adj_cfg, "use_dynamic_qty_on_adjustment", False))
-                and bool(getattr(adj_cfg, "basket_qty_dynamic", False))
-            ):
+            increase_ok = qty_mode == "increase_dynamic" and (
+                bool(getattr(adj_cfg, "basket_qty_dynamic", False))
+                or bool(getattr(adj_cfg, "use_dynamic_qty_on_adjustment", False))
+            )
+            if extra_qty > 0 and increase_ok:
                 untested_side = str(other_leg.leg_type)
                 current_untested_qty = int(other_leg.quantity or 0)
                 try:
@@ -1454,7 +1497,7 @@ class AdjustmentExecutor:
                                 extra_prov_sl if extra_prov_sl > 0 else None
                             ),
                             bracket_sl_limit=(
-                                extra_prov_limit if extra_prov_sl > 0 else None
+                                extra_prov_limit if extra_prov_limit > 0 else None
                             ),
                         )
                     if extra_result.success:
@@ -1524,6 +1567,86 @@ class AdjustmentExecutor:
                         extra_qty,
                         exc,
                     )
+            elif extra_qty < 0 and qty_mode == "decrease_step":
+                # Reduce untested short leg toward new_qty (buy-to-close excess).
+                # Wings are never touched.
+                reduce_qty = abs(int(extra_qty))
+                current_untested_qty = int(other_leg.quantity or 0)
+                if reduce_qty >= current_untested_qty:
+                    logger.warning(
+                        "[ADJ_QTY_DECREASE] trade=%s untested reduce would "
+                        "zero leg — skipping reduce_qty=%s current=%s",
+                        trade.id,
+                        reduce_qty,
+                        current_untested_qty,
+                    )
+                elif reduce_qty > 0:
+                    untested_side = str(other_leg.leg_type)
+                    try:
+                        synth = type(
+                            "SynthLeg",
+                            (),
+                            {
+                                "is_bot_managed": True,
+                                "status": "open",
+                                "id": getattr(other_leg, "id", None),
+                                "leg_type": other_leg.leg_type,
+                                "symbol": other_leg.symbol,
+                                "quantity": reduce_qty,
+                                "product_id": other_leg.product_id,
+                                "exit_premium": None,
+                                "delta_order_id": getattr(
+                                    other_leg, "delta_order_id", None
+                                ),
+                            },
+                        )()
+                        if trade_is_demo:
+                            reduce_result = await _demo_mark_order_result(
+                                delta_client,
+                                str(other_leg.symbol),
+                                float(
+                                    other_leg.trigger_baseline_premium
+                                    or other_leg.initial_premium
+                                    or 0
+                                ),
+                            )
+                        else:
+                            reduce_result = await order_executor.close_leg(
+                                synth, delta_client
+                            )
+                        if reduce_result.success:
+                            other_leg.quantity = current_untested_qty - reduce_qty
+                            logger.info(
+                                "[ADJ_QTY_DECREASE] trade=%s untested side=%s "
+                                "reduced by %s → qty=%s",
+                                trade.id,
+                                untested_side,
+                                reduce_qty,
+                                other_leg.quantity,
+                            )
+                        else:
+                            logger.warning(
+                                "[ADJ_QTY_DECREASE] trade=%s untested reduce "
+                                "FAILED side=%s error=%s",
+                                trade.id,
+                                untested_side,
+                                getattr(reduce_result, "error", None),
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "[ADJ_QTY_DECREASE] trade=%s untested reduce "
+                            "EXCEPTION side=%s: %s",
+                            trade.id,
+                            str(other_leg.leg_type),
+                            exc,
+                        )
+            elif extra_qty == 0 and qty_mode == "decrease_step":
+                logger.info(
+                    "[ADJ_QTY_DECREASE] trade=%s new_qty=%s == untested current — "
+                    "no untested qty order",
+                    trade.id,
+                    new_qty,
+                )
 
             # Re-attach legs/trade after potential cross-session commits
             # (e.g. reconcile emergency close on another SessionLocal).
