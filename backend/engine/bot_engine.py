@@ -126,8 +126,6 @@ class BotEngine:
                     state.put_leg.symbol,
                 )
         self._last_trade_count = len(self.position_tracker.get_all_active())
-        # Leftover GTC limit orders from a killed chase — before any trading loop.
-        await self._sweep_orphan_working_limit_orders()
         self._ws_feed_task = asyncio.create_task(
             self._start_price_feed(), name="delta-price-feed"
         )
@@ -479,351 +477,57 @@ class BotEngine:
             return False
         return True
 
-    @staticmethod
-    def _order_is_bracket_or_stop(order: dict[str, Any]) -> bool:
-        """True for protective stop / standalone SL — never cancel those.
-
-        Do NOT treat a working GTC limit_order as a stop just because
-        bracket_stop_loss_* was attached at place time (chase leftover).
-        Those unfilled limits are exactly what this sweep must cancel.
-        Resting protection is stop_order_type / untriggered / stop_price.
+    async def _run_post_exit_orphan_sl_sweep(
+        self,
+        trade_id: int,
+        *,
+        via_finally_after_exception: bool = False,
+    ) -> None:
         """
-        stop_type = str(
-            order.get("stop_order_type")
-            or order.get("stop_order_kind")
-            or ""
-        ).lower().strip()
-        if stop_type:
-            return True
-        otype = str(order.get("order_type") or order.get("type") or "").lower()
-        if "stop" in otype:
-            return True
-        state = str(order.get("state") or order.get("status") or "").lower()
-        if "untriggered" in state:
-            return True
-        for key in ("stop_price", "stop_trigger_price"):
-            val = order.get(key)
-            if val not in (None, "", 0, "0", "0.0"):
-                try:
-                    if float(val) > 0:
-                        return True
-                except (TypeError, ValueError):
-                    return True
-        return False
+        Cancel orphan standalone/bracket SLs after exit.
 
-    @staticmethod
-    def _order_product_id(order: dict[str, Any]) -> int:
-        raw = order.get("product_id")
-        if raw in (None, ""):
-            product = order.get("product")
-            if isinstance(product, dict):
-                raw = product.get("id") or product.get("product_id")
-        try:
-            return int(raw or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    async def _sweep_orphan_working_limit_orders(self) -> None:
-        """
-        Startup-only: cancel leftover GTC limit orders from a killed midprice chase.
-
-        Never cancels bracket / stop-loss orders. Never cancel-all.
-        If type or purpose is unclear, skip with a warning.
+        Always safe to call: cleanup_orphan_sl_orders keeps stops tied to
+        live positions. Own try/except so sweep failure never breaks exit.
         """
         try:
-            if self.delta_client is None:
-                self._refresh_delta_client()
-            if self.delta_client is None:
-                log_and_buffer(
-                    "ORPHAN_ORDER_SWEEP",
-                    0,
-                    {
-                        "phase": "skip",
-                        "reason": "delta_client_unavailable",
-                    },
+            from backend.api.routes_account import cleanup_orphan_sl_orders
+
+            with self.db_factory() as orphan_db:
+                orphan_summary = await cleanup_orphan_sl_orders(
+                    orphan_db, trade_id=trade_id
                 )
-                return
-
-            active_pids: set[int] = set()
-            with self.db_factory() as db:
-                active_trades = (
-                    db.query(Trade)
-                    .filter(Trade.status == TradeStatus.ACTIVE.value)
-                    .all()
-                )
-                trade_ids = [int(t.id) for t in active_trades]
-                if trade_ids:
-                    legs = (
-                        db.query(Leg)
-                        .filter(
-                            Leg.trade_id.in_(trade_ids),
-                            Leg.is_bot_managed.is_(True),
-                            Leg.status == "open",
-                        )
-                        .all()
-                    )
-                    for leg in legs:
-                        try:
-                            pid = int(getattr(leg, "product_id", 0) or 0)
-                        except (TypeError, ValueError):
-                            pid = 0
-                        if pid > 0:
-                            active_pids.add(pid)
-
-            try:
-                orders = await self.delta_client.get_open_orders()
-            except Exception as list_exc:
-                log_and_buffer(
-                    "ORPHAN_ORDER_SWEEP",
-                    0,
-                    {
-                        "phase": "list_failed",
-                        "error": str(list_exc),
-                    },
-                )
-                logger.error(
-                    "ORPHAN_ORDER_SWEEP: list open orders failed: %s",
-                    list_exc,
-                    exc_info=True,
-                )
-                return
-
-            working_states = {
-                "open",
-                "pending",
-                "pending_open",
-                "resting",
-                "live",
-                "unfilled",
-                "accepted",
-                "partially_filled",
-                "partial_fill",
-            }
-            cancelled = 0
-            skipped = 0
-            candidates = 0
-
-            for order in orders or []:
-                if not isinstance(order, dict):
-                    skipped += 1
-                    continue
-                oid_raw = order.get("id") or order.get("order_id")
-                otype = str(
-                    order.get("order_type") or order.get("type") or ""
-                ).lower().strip()
-                state = str(
-                    order.get("state") or order.get("status") or ""
-                ).lower().strip()
-                pid = self._order_product_id(order)
-                symbol = str(
-                    order.get("product_symbol")
-                    or order.get("symbol")
-                    or ""
-                )
-                side = str(order.get("side") or "")
-                size = order.get("unfilled_size") or order.get("size")
-                price = (
-                    order.get("limit_price")
-                    or order.get("price")
-                    or order.get("average_fill_price")
-                )
-
-                if self._order_is_bracket_or_stop(order):
-                    skipped += 1
-                    log_and_buffer(
-                        "ORPHAN_ORDER_SWEEP",
-                        0,
-                        {
-                            "phase": "skip",
-                            "reason": "bracket_or_stop_loss",
-                            "order_id": oid_raw,
-                            "symbol": symbol,
-                            "order_type": otype,
-                            "state": state,
-                            "product_id": pid,
-                        },
-                    )
-                    continue
-
-                if not otype:
-                    skipped += 1
-                    log_and_buffer(
-                        "ORPHAN_ORDER_SWEEP",
-                        0,
-                        {
-                            "phase": "skip",
-                            "reason": "unknown_order_type",
-                            "order_id": oid_raw,
-                            "symbol": symbol,
-                            "state": state,
-                            "product_id": pid,
-                        },
-                    )
-                    continue
-                if otype not in {"limit_order", "limit"}:
-                    skipped += 1
-                    continue
-
-                if not state or state not in working_states:
-                    skipped += 1
-                    if state and state not in {
-                        "closed",
-                        "cancelled",
-                        "canceled",
-                        "filled",
-                        "rejected",
-                        "expired",
-                    }:
-                        log_and_buffer(
-                            "ORPHAN_ORDER_SWEEP",
-                            0,
-                            {
-                                "phase": "skip",
-                                "reason": "unknown_or_non_working_state",
-                                "order_id": oid_raw,
-                                "symbol": symbol,
-                                "order_type": otype,
-                                "state": state,
-                                "product_id": pid,
-                            },
-                        )
-                    continue
-
-                if pid <= 0:
-                    skipped += 1
-                    log_and_buffer(
-                        "ORPHAN_ORDER_SWEEP",
-                        0,
-                        {
-                            "phase": "skip",
-                            "reason": "unknown_product_id",
-                            "order_id": oid_raw,
-                            "symbol": symbol,
-                            "order_type": otype,
-                            "state": state,
-                        },
-                    )
-                    continue
-
-                if pid not in active_pids:
-                    skipped += 1
-                    continue
-
-                try:
-                    oid = int(oid_raw)
-                except (TypeError, ValueError):
-                    skipped += 1
-                    log_and_buffer(
-                        "ORPHAN_ORDER_SWEEP",
-                        0,
-                        {
-                            "phase": "skip",
-                            "reason": "invalid_order_id",
-                            "order_id": oid_raw,
-                            "symbol": symbol,
-                            "product_id": pid,
-                        },
-                    )
-                    continue
-
-                candidates += 1
-                log_and_buffer(
-                    "ORPHAN_ORDER_SWEEP",
-                    0,
-                    {
-                        "phase": "cancel_before",
-                        "order_id": oid,
-                        "symbol": symbol,
-                        "side": side,
-                        "size": size,
-                        "price": price,
-                        "product_id": pid,
-                        "order_type": otype,
-                        "state": state,
-                    },
-                )
-                try:
-                    result = await self.delta_client.cancel_order(oid)
-                    cancelled += 1
-                    log_and_buffer(
-                        "ORPHAN_ORDER_SWEEP",
-                        0,
-                        {
-                            "phase": "cancel_after",
-                            "order_id": oid,
-                            "symbol": symbol,
-                            "side": side,
-                            "size": size,
-                            "price": price,
-                            "product_id": pid,
-                            "result": "cancelled",
-                            "exchange": (
-                                str(result.get("state") or result.get("status") or "")
-                                if isinstance(result, dict)
-                                else str(result)
-                            ),
-                        },
-                    )
-                except Exception as cancel_exc:
-                    log_and_buffer(
-                        "ORPHAN_ORDER_SWEEP",
-                        0,
-                        {
-                            "phase": "cancel_after",
-                            "order_id": oid,
-                            "symbol": symbol,
-                            "side": side,
-                            "size": size,
-                            "price": price,
-                            "product_id": pid,
-                            "result": "failed",
-                            "error": str(cancel_exc),
-                        },
-                    )
-
-            if candidates > 0:
-                log_and_buffer(
-                    "ORPHAN_ORDER_SWEEP",
-                    0,
-                    {
-                        "phase": "found_orphans",
-                        "candidates": candidates,
-                        "cancelled": cancelled,
-                        "skipped": skipped,
-                        "open_listed": len(orders or []),
-                        "active_leg_products": len(active_pids),
-                        "note": "previous_run_likely_killed_mid_chase",
-                    },
-                )
-            else:
-                log_and_buffer(
-                    "ORPHAN_ORDER_SWEEP",
-                    0,
-                    {
-                        "phase": "done",
-                        "candidates": 0,
-                        "cancelled": 0,
-                        "skipped": skipped,
-                        "open_listed": len(orders or []),
-                    },
-                )
-        except Exception as exc:
-            logger.error(
-                "ORPHAN_ORDER_SWEEP failed (boot continues): %s",
-                exc,
-                exc_info=True,
+            log_and_buffer(
+                "ORPHAN_SL_SWEEP",
+                trade_id,
+                {
+                    "cancelled": orphan_summary.get("cancelled"),
+                    "kept": orphan_summary.get("kept"),
+                    "already_gone": orphan_summary.get("already_gone"),
+                    "errors": orphan_summary.get("errors"),
+                    "via_finally_after_exception": bool(
+                        via_finally_after_exception
+                    ),
+                },
             )
-            try:
-                log_and_buffer(
-                    "ORPHAN_ORDER_SWEEP",
-                    0,
-                    {
-                        "phase": "sweep_failed",
-                        "error": str(exc),
-                    },
-                )
-            except Exception:
-                pass
+        except Exception as orphan_exc:
+            log_and_buffer(
+                "ORPHAN_SL_SWEEP",
+                trade_id,
+                {
+                    "cancelled": 0,
+                    "kept": 0,
+                    "already_gone": 0,
+                    "errors": 1,
+                    "via_finally_after_exception": bool(
+                        via_finally_after_exception
+                    ),
+                    "error": str(orphan_exc),
+                },
+            )
+            logger.warning(
+                "[ORPHAN_SL] post-exit sweep failed (non-fatal): %s",
+                orphan_exc,
+            )
 
     async def _sweep_orphan_baskets(self) -> None:
         """
@@ -3534,32 +3238,32 @@ class BotEngine:
                 trade_id,
             )
 
-        self.position_tracker.mark_closed(trade_id)
-        self._maybe_schedule_auto_reentry(
-            str(getattr(trade_row, "underlying", "") or "")
-            if trade_row is not None
-            else "",
-            exit_reason=reason,
-        )
-
+        exit_path_exc: BaseException | None = None
         try:
-            from backend.api.routes_account import cleanup_orphan_sl_orders
-
-            with self.db_factory() as orphan_db:
-                await cleanup_orphan_sl_orders(orphan_db, trade_id=trade_id)
-        except Exception as orphan_exc:
-            logger.warning(
-                "[ORPHAN_SL] db-only post-exit sweep failed: %s", orphan_exc
+            self.position_tracker.mark_closed(trade_id)
+            self._maybe_schedule_auto_reentry(
+                str(getattr(trade_row, "underlying", "") or "")
+                if trade_row is not None
+                else "",
+                exit_reason=reason,
             )
 
-        result = {
-            "slaves_total": slaves_total,
-            "slaves_closed": slaves_closed,
-            "slaves_failed": slaves_failed,
-            "master_legs_closed": 0,
-        }
-        self._emit_exit_funnel(trade_id, reason, result, note="db_only")
-        return result
+            result = {
+                "slaves_total": slaves_total,
+                "slaves_closed": slaves_closed,
+                "slaves_failed": slaves_failed,
+                "master_legs_closed": 0,
+            }
+            self._emit_exit_funnel(trade_id, reason, result, note="db_only")
+            return result
+        except BaseException as exit_exc:
+            exit_path_exc = exit_exc
+            raise
+        finally:
+            await self._run_post_exit_orphan_sl_sweep(
+                trade_id,
+                via_finally_after_exception=exit_path_exc is not None,
+            )
 
     async def close_master_trade(
         self,
@@ -4140,56 +3844,90 @@ class BotEngine:
                     requires_manual_action=True,
                 )
 
-        # Step 5: Wait and verify closes
-        if not skip_master_legs:
-            await asyncio.sleep(2 if not trade_is_demo else 0)
-            still_map: dict[str, bool] = {}
-            for leg in all_open_legs:
-                leg_id = int(leg.id)
-                if not exists_map.get(leg_id, False):
-                    continue
-                res = close_results.get(leg_id)
-                if res is not None and not res.success:
-                    still = await self.delta_client.verify_position_exists(
-                        int(leg.product_id)
-                    )
-                    label = str(leg.leg_type)
-                    still_map[label] = still
-                    if still:
-                        hard_fail = True
-                        logger.warning(
-                            "[EXIT_VERIFY] %s still visible on Delta after close!",
-                            label,
+        # Step 5+ — always run orphan SL sweep in finally after legs close
+        exit_path_exc: BaseException | None = None
+        try:
+            # Step 5: Wait and verify closes
+            if not skip_master_legs:
+                await asyncio.sleep(2 if not trade_is_demo else 0)
+                still_map: dict[str, bool] = {}
+                for leg in all_open_legs:
+                    leg_id = int(leg.id)
+                    if not exists_map.get(leg_id, False):
+                        continue
+                    res = close_results.get(leg_id)
+                    if res is not None and not res.success:
+                        still = await self.delta_client.verify_position_exists(
+                            int(leg.product_id)
                         )
-                else:
-                    still_map[str(leg.leg_type)] = False
+                        label = str(leg.leg_type)
+                        still_map[label] = still
+                        if still:
+                            hard_fail = True
+                            logger.warning(
+                                "[EXIT_VERIFY] %s still visible on Delta after close!",
+                                label,
+                            )
+                    else:
+                        still_map[str(leg.leg_type)] = False
 
-            log_and_buffer(
-                "EXIT_VERIFY",
-                trade_id,
-                {"stage": "post_exit", "still_open": still_map},
-            )
+                log_and_buffer(
+                    "EXIT_VERIFY",
+                    trade_id,
+                    {"stage": "post_exit", "still_open": still_map},
+                )
 
-            if hard_fail and not wing_close_failed_note:
-                # Wing failures already surfaced; short hard-fail still aborts
-                short_still = {
-                    k: v
-                    for k, v in still_map.items()
-                    if k in ("call", "put") and v
-                }
-                if short_still:
-                    msg = (
-                        f"Exit order failure trade={trade_id} "
-                        f"still_open={still_map}"
-                    )
-                    logger.critical(msg)
+                if hard_fail and not wing_close_failed_note:
+                    # Wing failures already surfaced; short hard-fail still aborts
+                    short_still = {
+                        k: v
+                        for k, v in still_map.items()
+                        if k in ("call", "put") and v
+                    }
+                    if short_still:
+                        msg = (
+                            f"Exit order failure trade={trade_id} "
+                            f"still_open={still_map}"
+                        )
+                        logger.critical(msg)
+                        log_and_buffer(
+                            "EXIT_FAIL",
+                            trade_id,
+                            {"reason": reason, "error": msg},
+                        )
+                        await self._push_error(
+                            trade_id, msg, requires_manual_action=True
+                        )
+                        result = {
+                            "slaves_total": slaves_total,
+                            "slaves_closed": slaves_closed,
+                            "slaves_failed": slaves_failed,
+                            "master_legs_closed": master_legs_closed,
+                        }
+                        self._emit_exit_funnel(
+                            trade_id, reason, result, note="exit_order_hard_fail"
+                        )
+                        return result
+                    # Only wings still open — continue to book shorts; note already set
+                    hard_fail = False
+
+            # Step 6: Update DB — book closes for all tracked legs
+            status = self._status_for_reason(reason)
+            now_utc = get_utc_now()
+            call_fill = 0.0
+            put_fill = 0.0
+            call_close = None
+            put_close = None
+            final_pnl = pnl_now
+
+            with self.db_factory() as exit_db:
+                trade_row = exit_db.query(Trade).filter(Trade.id == trade_id).first()
+                if trade_row is None:
+                    logger.error("Exit DB trade row missing for trade %s", trade_id)
                     log_and_buffer(
                         "EXIT_FAIL",
                         trade_id,
-                        {"reason": reason, "error": msg},
-                    )
-                    await self._push_error(
-                        trade_id, msg, requires_manual_action=True
+                        {"reason": reason, "error": "DB trade missing"},
                     )
                     result = {
                         "slaves_total": slaves_total,
@@ -4198,400 +3936,356 @@ class BotEngine:
                         "master_legs_closed": master_legs_closed,
                     }
                     self._emit_exit_funnel(
-                        trade_id, reason, result, note="exit_order_hard_fail"
+                        trade_id, reason, result, note="db_trade_missing"
                     )
                     return result
-                # Only wings still open — continue to book shorts; note already set
-                hard_fail = False
 
-        # Step 6: Update DB — book closes for all tracked legs
-        status = self._status_for_reason(reason)
-        now_utc = get_utc_now()
-        call_fill = 0.0
-        put_fill = 0.0
-        call_close = None
-        put_close = None
-        final_pnl = pnl_now
+                booked_ids: set[int] = set()
+                for leg_mem in all_open_legs:
+                    leg_db = exit_db.query(Leg).filter(Leg.id == leg_mem.id).first()
+                    if leg_db is None or str(leg_db.status).lower() != "open":
+                        continue
+                    res = close_results.get(int(leg_mem.id))
+                    # Skip booking wings that failed to close — leave open
+                    lt_check = str(leg_db.leg_type or "").lower()
+                    if (
+                        res is not None
+                        and not res.success
+                        and lt_check.startswith("wing")
+                    ):
+                        logger.critical(
+                            "[WING_CLOSE_FAILED] leaving wing open in DB "
+                            "trade=%s leg=%s",
+                            trade_id,
+                            lt_check,
+                        )
+                        continue
+                    exit_px: float | None = None
+                    if res is not None and res.success:
+                        px = float(res.filled_price or 0.0)
+                        exit_px = px if px > 0 else None
+                    if exit_px is None and skip_master_legs:
+                        # Exchange-close / already flat — fetch real fill, never 0.0
+                        exit_px = await resolve_external_exit_fill(
+                            self.delta_client, leg_db
+                        )
+                    book_leg_close(
+                        leg=leg_db,
+                        trade=trade_row,
+                        exit_premium=exit_px,
+                        exit_time=now_utc,
+                        exit_fee_usd=(
+                            float(res.commission)
+                            if res is not None and res.commission is not None
+                            else None
+                        ),
+                        exit_order_id=(
+                            str(res.order_id)
+                            if res is not None and res.order_id is not None
+                            else None
+                        ),
+                        db=exit_db,
+                    )
+                    booked_ids.add(int(leg_db.id))
+                    lt = str(leg_db.leg_type or "").lower()
+                    if lt == "call":
+                        call_fill = float(exit_px or 0.0)
+                        call_close = res
+                    elif lt == "put":
+                        put_fill = float(exit_px or 0.0)
+                        put_close = res
 
-        with self.db_factory() as exit_db:
-            trade_row = exit_db.query(Trade).filter(Trade.id == trade_id).first()
-            if trade_row is None:
-                logger.error("Exit DB trade row missing for trade %s", trade_id)
-                log_and_buffer(
-                    "EXIT_FAIL",
-                    trade_id,
-                    {"reason": reason, "error": "DB trade missing"},
-                )
-                result = {
-                    "slaves_total": slaves_total,
-                    "slaves_closed": slaves_closed,
-                    "slaves_failed": slaves_failed,
-                    "master_legs_closed": master_legs_closed,
+                # True orphans only — tracked types include wings
+                tracked_types = {
+                    "call",
+                    "put",
+                    "hedge_call",
+                    "hedge_put",
+                    "wing_call",
+                    "wing_put",
                 }
-                self._emit_exit_funnel(
-                    trade_id, reason, result, note="db_trade_missing"
+                remaining_open = (
+                    exit_db.query(Leg)
+                    .filter(Leg.trade_id == trade_id, Leg.status == "open")
+                    .all()
                 )
-                return result
-
-            booked_ids: set[int] = set()
-            for leg_mem in all_open_legs:
-                leg_db = exit_db.query(Leg).filter(Leg.id == leg_mem.id).first()
-                if leg_db is None or str(leg_db.status).lower() != "open":
-                    continue
-                res = close_results.get(int(leg_mem.id))
-                # Skip booking wings that failed to close — leave open
-                lt_check = str(leg_db.leg_type or "").lower()
-                if (
-                    res is not None
-                    and not res.success
-                    and lt_check.startswith("wing")
-                ):
-                    logger.critical(
-                        "[WING_CLOSE_FAILED] leaving wing open in DB "
-                        "trade=%s leg=%s",
+                true_orphans = [
+                    leg
+                    for leg in remaining_open
+                    if int(leg.id) not in booked_ids
+                    and str(leg.leg_type or "").lower() not in tracked_types
+                ]
+                # Any remaining tracked legs that failed to book (edge) — still close in DB
+                leftover_tracked = [
+                    leg
+                    for leg in remaining_open
+                    if int(leg.id) not in booked_ids
+                    and str(leg.leg_type or "").lower() in tracked_types
+                    and not str(leg.leg_type or "").lower().startswith("wing")
+                ]
+                if true_orphans:
+                    logger.warning(
+                        "[EXIT_CLEANUP] Found %s untracked orphan legs for "
+                        "trade %s: %s",
+                        len(true_orphans),
                         trade_id,
-                        lt_check,
+                        [leg.symbol for leg in true_orphans],
                     )
-                    continue
-                exit_px: float | None = None
-                if res is not None and res.success:
-                    px = float(res.filled_price or 0.0)
-                    exit_px = px if px > 0 else None
-                if exit_px is None and skip_master_legs:
-                    # Exchange-close / already flat — fetch real fill, never 0.0
-                    exit_px = await resolve_external_exit_fill(
-                        self.delta_client, leg_db
+                    log_and_buffer(
+                        "EXIT_CLEANUP",
+                        trade_id,
+                        {
+                            "orphan_count": len(true_orphans),
+                            "symbols": [leg.symbol for leg in true_orphans],
+                        },
                     )
-                book_leg_close(
-                    leg=leg_db,
-                    trade=trade_row,
-                    exit_premium=exit_px,
-                    exit_time=now_utc,
-                    exit_fee_usd=(
-                        float(res.commission)
-                        if res is not None and res.commission is not None
-                        else None
-                    ),
-                    exit_order_id=(
-                        str(res.order_id)
-                        if res is not None and res.order_id is not None
-                        else None
-                    ),
-                    db=exit_db,
-                )
-                booked_ids.add(int(leg_db.id))
-                lt = str(leg_db.leg_type or "").lower()
-                if lt == "call":
-                    call_fill = float(exit_px or 0.0)
-                    call_close = res
-                elif lt == "put":
-                    put_fill = float(exit_px or 0.0)
-                    put_close = res
-
-            # True orphans only — tracked types include wings
-            tracked_types = {
-                "call",
-                "put",
-                "hedge_call",
-                "hedge_put",
-                "wing_call",
-                "wing_put",
-            }
-            remaining_open = (
-                exit_db.query(Leg)
-                .filter(Leg.trade_id == trade_id, Leg.status == "open")
-                .all()
-            )
-            true_orphans = [
-                leg
-                for leg in remaining_open
-                if int(leg.id) not in booked_ids
-                and str(leg.leg_type or "").lower() not in tracked_types
-            ]
-            # Any remaining tracked legs that failed to book (edge) — still close in DB
-            leftover_tracked = [
-                leg
-                for leg in remaining_open
-                if int(leg.id) not in booked_ids
-                and str(leg.leg_type or "").lower() in tracked_types
-                and not str(leg.leg_type or "").lower().startswith("wing")
-            ]
-            if true_orphans:
-                logger.warning(
-                    "[EXIT_CLEANUP] Found %s untracked orphan legs for "
-                    "trade %s: %s",
-                    len(true_orphans),
-                    trade_id,
-                    [leg.symbol for leg in true_orphans],
-                )
-                log_and_buffer(
-                    "EXIT_CLEANUP",
-                    trade_id,
-                    {
-                        "orphan_count": len(true_orphans),
-                        "symbols": [leg.symbol for leg in true_orphans],
-                    },
-                )
-                for orphan in true_orphans:
-                    existing_px = getattr(orphan, "exit_premium", None)
+                    for orphan in true_orphans:
+                        existing_px = getattr(orphan, "exit_premium", None)
+                        exit_px = (
+                            float(existing_px)
+                            if existing_px is not None and float(existing_px) > 0
+                            else await resolve_external_exit_fill(
+                                self.delta_client, orphan
+                            )
+                        )
+                        book_leg_close(
+                            leg=orphan,
+                            trade=trade_row,
+                            exit_premium=exit_px,
+                            exit_time=now_utc,
+                            db=exit_db,
+                        )
+                for leftover in leftover_tracked:
+                    logger.info(
+                        "[EXIT_CLEANUP] Booking leftover tracked leg %s (%s)",
+                        leftover.symbol,
+                        leftover.leg_type,
+                    )
+                    existing_px = getattr(leftover, "exit_premium", None)
                     exit_px = (
                         float(existing_px)
                         if existing_px is not None and float(existing_px) > 0
                         else await resolve_external_exit_fill(
-                            self.delta_client, orphan
+                            self.delta_client, leftover
                         )
                     )
                     book_leg_close(
-                        leg=orphan,
+                        leg=leftover,
                         trade=trade_row,
                         exit_premium=exit_px,
                         exit_time=now_utc,
                         db=exit_db,
                     )
-            for leftover in leftover_tracked:
-                logger.info(
-                    "[EXIT_CLEANUP] Booking leftover tracked leg %s (%s)",
-                    leftover.symbol,
-                    leftover.leg_type,
-                )
-                existing_px = getattr(leftover, "exit_premium", None)
-                exit_px = (
-                    float(existing_px)
-                    if existing_px is not None and float(existing_px) > 0
-                    else await resolve_external_exit_fill(
-                        self.delta_client, leftover
+
+                # Clear conversion mode
+                trade_row.in_conversion_mode = False
+                trade_row.conversion_hedge_symbol = None
+                trade_row.conversion_hedge_product_id = None
+                trade_row.conversion_hedge_entry_price = None
+                trade_row.conversion_hedge_order_id = None
+                trade_row.conversion_triggered_leg = None
+
+                trade_row.status = status
+                trade_row.exit_time = get_utc_now()
+                trade_row.exit_reason = reason
+                # Single source of truth: sum of closed legs (not incremental paths)
+                final_pnl = recompute_trade_realized_pnl(exit_db, trade_row)
+                try:
+                    from backend.engine.structure_ledger import (
+                        record_master_basket_exit,
                     )
-                )
-                book_leg_close(
-                    leg=leftover,
-                    trade=trade_row,
-                    exit_premium=exit_px,
-                    exit_time=now_utc,
-                    db=exit_db,
-                )
 
-            # Clear conversion mode
-            trade_row.in_conversion_mode = False
-            trade_row.conversion_hedge_symbol = None
-            trade_row.conversion_hedge_product_id = None
-            trade_row.conversion_hedge_entry_price = None
-            trade_row.conversion_hedge_order_id = None
-            trade_row.conversion_triggered_leg = None
-
-            trade_row.status = status
-            trade_row.exit_time = get_utc_now()
-            trade_row.exit_reason = reason
-            # Single source of truth: sum of closed legs (not incremental paths)
-            final_pnl = recompute_trade_realized_pnl(exit_db, trade_row)
-            try:
-                from backend.engine.structure_ledger import (
-                    record_master_basket_exit,
+                    # Timestamp pair (closed_at, fill_at) — never overwrite
+                    # call_close / put_close OrderResult used for .success below.
+                    call_ts = basket_close_times.get("call", (None, None))
+                    put_ts = basket_close_times.get("put", (None, None))
+                    record_master_basket_exit(
+                        exit_db,
+                        trade_row,
+                        reason=str(reason or ""),
+                        call_closed_at=call_ts[0],
+                        put_closed_at=put_ts[0],
+                        call_fill_at=call_ts[1],
+                        put_fill_at=put_ts[1],
+                    )
+                except Exception as ledger_exc:
+                    logger.error(
+                        "structure ledger master basket exit failed: %s",
+                        ledger_exc,
+                        exc_info=True,
+                    )
+                all_legs_for_sanity = (
+                    exit_db.query(Leg)
+                    .filter(
+                        Leg.trade_id == trade_id,
+                        Leg.is_bot_managed.is_(True),
+                    )
+                    .all()
                 )
-
-                # Timestamp pair (closed_at, fill_at) — never overwrite
-                # call_close / put_close OrderResult used for .success below.
-                call_ts = basket_close_times.get("call", (None, None))
-                put_ts = basket_close_times.get("put", (None, None))
-                record_master_basket_exit(
-                    exit_db,
-                    trade_row,
-                    reason=str(reason or ""),
-                    call_closed_at=call_ts[0],
-                    put_closed_at=put_ts[0],
-                    call_fill_at=call_ts[1],
-                    put_fill_at=put_ts[1],
+                pnl_sanity_check(
+                    trade_id=trade_id,
+                    realized_pnl=final_pnl,
+                    last_gross_mtm=gross,
+                    legs=all_legs_for_sanity,
                 )
-            except Exception as ledger_exc:
+                exit_db.commit()
+
+                still_open = (
+                    exit_db.query(Leg)
+                    .filter(Leg.trade_id == trade_id, Leg.status == "open")
+                    .count()
+                )
+                if still_open > 0:
+                    logger.critical(
+                        "[EXIT_VERIFY] %s legs still 'open' in DB for closed "
+                        "trade %s! DB inconsistency!",
+                        still_open,
+                        trade_id,
+                    )
+                else:
+                    logger.info(
+                        "[EXIT_VERIFY] All legs closed in DB for trade %s",
+                        trade_id,
+                    )
+
+            master_legs_closed = sum(
+                1
+                for res in close_results.values()
+                if res is not None and getattr(res, "success", False)
+            )
+            if skip_master_legs:
+                # Legs already flat on Delta — report open-leg count as closed in DB path
+                master_legs_closed = len(all_open_legs)
+
+            trade_state.hedge_leg = None
+
+            # Step 7: Remove from tracker
+            self.position_tracker.mark_closed(trade_id)
+            if self.position_tracker.get(trade_id) is not None:
                 logger.error(
-                    "structure ledger master basket exit failed: %s",
-                    ledger_exc,
-                    exc_info=True,
-                )
-            all_legs_for_sanity = (
-                exit_db.query(Leg)
-                .filter(
-                    Leg.trade_id == trade_id,
-                    Leg.is_bot_managed.is_(True),
-                )
-                .all()
-            )
-            pnl_sanity_check(
-                trade_id=trade_id,
-                realized_pnl=final_pnl,
-                last_gross_mtm=gross,
-                legs=all_legs_for_sanity,
-            )
-            exit_db.commit()
-
-            still_open = (
-                exit_db.query(Leg)
-                .filter(Leg.trade_id == trade_id, Leg.status == "open")
-                .count()
-            )
-            if still_open > 0:
-                logger.critical(
-                    "[EXIT_VERIFY] %s legs still 'open' in DB for closed "
-                    "trade %s! DB inconsistency!",
-                    still_open,
+                    "[EXIT_VERIFY] Trade %s still in tracker after mark_closed!",
                     trade_id,
                 )
             else:
                 logger.info(
-                    "[EXIT_VERIFY] All legs closed in DB for trade %s",
-                    trade_id,
+                    "[EXIT_VERIFY] Trade %s removed from tracker", trade_id
                 )
 
-        master_legs_closed = sum(
-            1
-            for res in close_results.values()
-            if res is not None and getattr(res, "success", False)
-        )
-        if skip_master_legs:
-            # Legs already flat on Delta — report open-leg count as closed in DB path
-            master_legs_closed = len(all_open_legs)
+            # Step 8: Schedule auto re-entry
+            self._maybe_schedule_auto_reentry(
+                str(getattr(trade, "underlying", "") or ""),
+                exit_reason=reason,
+            )
 
-        trade_state.hedge_leg = None
-
-        # Step 7: Remove from tracker
-        self.position_tracker.mark_closed(trade_id)
-        if self.position_tracker.get(trade_id) is not None:
-            logger.error(
-                "[EXIT_VERIFY] Trade %s still in tracker after mark_closed!",
+            # Step 9: Broadcast
+            log_and_buffer(
+                "EXIT_COMPLETE",
                 trade_id,
+                {
+                    "reason": reason,
+                    "call_closed_at": round(call_fill, 2),
+                    "put_closed_at": round(put_fill, 2),
+                    "final_pnl": round(final_pnl, 4),
+                },
             )
-        else:
+            log_and_buffer(
+                "EXIT_DONE",
+                trade_id,
+                {
+                    "reason": reason,
+                    "call_closed_at": round(call_fill, 2),
+                    "put_closed_at": round(put_fill, 2),
+                    "final_pnl": round(final_pnl, 2),
+                },
+            )
+            await ws_manager.broadcast(
+                {
+                    "type": "TRADE_CLOSED",
+                    "trade_id": trade_id,
+                    "reason": reason,
+                    "final_pnl": final_pnl,
+                    "call_closed_at": (
+                        call_fill
+                        if call_close is not None and getattr(call_close, "success", False)
+                        else None
+                    ),
+                    "put_closed_at": (
+                        put_fill
+                        if put_close is not None and getattr(put_close, "success", False)
+                        else None
+                    ),
+                    "timestamp": get_ist_now().isoformat(),
+                }
+            )
             logger.info(
-                "[EXIT_VERIFY] Trade %s removed from tracker", trade_id
+                "[EXIT_COMPLETE] Trade %s fully closed: reason=%s final_pnl=%.4f",
+                trade_id,
+                reason,
+                final_pnl,
             )
 
-        # Step 8: Schedule auto re-entry
-        self._maybe_schedule_auto_reentry(
-            str(getattr(trade, "underlying", "") or ""),
-            exit_reason=reason,
-        )
+            # Notify Earner backend (fire-and-forget, non-fatal)
+            try:
+                from backend.core.earner_webhook import notify_earner_trade_closed
+                from backend.models import SlaveAccount, SlaveTrade
 
-        # Step 9: Broadcast
-        log_and_buffer(
-            "EXIT_COMPLETE",
-            trade_id,
-            {
-                "reason": reason,
-                "call_closed_at": round(call_fill, 2),
-                "put_closed_at": round(put_fill, 2),
-                "final_pnl": round(final_pnl, 4),
-            },
-        )
-        log_and_buffer(
-            "EXIT_DONE",
-            trade_id,
-            {
-                "reason": reason,
-                "call_closed_at": round(call_fill, 2),
-                "put_closed_at": round(put_fill, 2),
-                "final_pnl": round(final_pnl, 2),
-            },
-        )
-        await ws_manager.broadcast(
-            {
-                "type": "TRADE_CLOSED",
-                "trade_id": trade_id,
-                "reason": reason,
-                "final_pnl": final_pnl,
-                "call_closed_at": (
-                    call_fill
-                    if call_close is not None and getattr(call_close, "success", False)
-                    else None
-                ),
-                "put_closed_at": (
-                    put_fill
-                    if put_close is not None and getattr(put_close, "success", False)
-                    else None
-                ),
-                "timestamp": get_ist_now().isoformat(),
-            }
-        )
-        logger.info(
-            "[EXIT_COMPLETE] Trade %s fully closed: reason=%s final_pnl=%.4f",
-            trade_id,
-            reason,
-            final_pnl,
-        )
-
-        # Notify Earner backend (fire-and-forget, non-fatal)
-        try:
-            from backend.core.earner_webhook import notify_earner_trade_closed
-            from backend.models import SlaveAccount, SlaveTrade
-
-            with self.db_factory() as webhook_db:
-                # Find all slave trades linked to this master trade
-                slave_trades = (
-                    webhook_db.query(SlaveTrade)
-                    .filter(
-                        SlaveTrade.master_trade_id == trade_id,
-                        SlaveTrade.status == "active",
-                    )
-                    .all()
-                )
-                slave_payloads = []
-                for st in slave_trades:
-                    slave_acc = (
-                        webhook_db.query(SlaveAccount)
-                        .filter(SlaveAccount.id == st.slave_account_id)
-                        .first()
-                    )
-                    if slave_acc and slave_acc.earner_user_id:
-                        slave_payloads.append({
-                            "earner_user_id": slave_acc.earner_user_id,
-                            "earner_subscription_id": (
-                                slave_acc.earner_subscription_id
-                            ),
-                            "actual_quantity": int(st.actual_quantity or 1),
-                            "slave_account_id": int(slave_acc.id),
-                            "slave_name": slave_acc.name,
-                        })
-
-                if slave_payloads:
-                    asyncio.ensure_future(
-                        notify_earner_trade_closed(
-                            master_trade_id=trade_id,
-                            exit_reason=str(reason),
-                            slave_accounts=slave_payloads,
+                with self.db_factory() as webhook_db:
+                    # Find all slave trades linked to this master trade
+                    slave_trades = (
+                        webhook_db.query(SlaveTrade)
+                        .filter(
+                            SlaveTrade.master_trade_id == trade_id,
+                            SlaveTrade.status == "active",
                         )
+                        .all()
                     )
-        except Exception as webhook_exc:
-            logger.warning(
-                "[EARNER_WEBHOOK] Setup failed: %s", webhook_exc
-            )
+                    slave_payloads = []
+                    for st in slave_trades:
+                        slave_acc = (
+                            webhook_db.query(SlaveAccount)
+                            .filter(SlaveAccount.id == st.slave_account_id)
+                            .first()
+                        )
+                        if slave_acc and slave_acc.earner_user_id:
+                            slave_payloads.append({
+                                "earner_user_id": slave_acc.earner_user_id,
+                                "earner_subscription_id": (
+                                    slave_acc.earner_subscription_id
+                                ),
+                                "actual_quantity": int(st.actual_quantity or 1),
+                                "slave_account_id": int(slave_acc.id),
+                                "slave_name": slave_acc.name,
+                            })
 
-        # Per-exit orphan standalone SL sweep (master + slaves).
-        # Live-position stops (e.g. Trade#65 mid-trade) are kept until flat.
-        try:
-            from backend.api.routes_account import cleanup_orphan_sl_orders
-
-            with self.db_factory() as orphan_db:
-                orphan_summary = await cleanup_orphan_sl_orders(
-                    orphan_db, trade_id=trade_id
+                    if slave_payloads:
+                        asyncio.ensure_future(
+                            notify_earner_trade_closed(
+                                master_trade_id=trade_id,
+                                exit_reason=str(reason),
+                                slave_accounts=slave_payloads,
+                            )
+                        )
+            except Exception as webhook_exc:
+                logger.warning(
+                    "[EARNER_WEBHOOK] Setup failed: %s", webhook_exc
                 )
-            logger.info(
-                "[ORPHAN_SL] post-exit sweep trade=%s cancelled=%s kept=%s",
-                trade_id,
-                orphan_summary.get("cancelled"),
-                orphan_summary.get("kept"),
-            )
-        except Exception as orphan_exc:
-            logger.warning(
-                "[ORPHAN_SL] post-exit sweep failed (non-fatal): %s",
-                orphan_exc,
-            )
 
-        result = {
-            "slaves_total": slaves_total,
-            "slaves_closed": slaves_closed,
-            "slaves_failed": slaves_failed,
-            "master_legs_closed": master_legs_closed,
-        }
-        self._emit_exit_funnel(trade_id, reason, result)
-        return result
+            result = {
+                "slaves_total": slaves_total,
+                "slaves_closed": slaves_closed,
+                "slaves_failed": slaves_failed,
+                "master_legs_closed": master_legs_closed,
+            }
+            self._emit_exit_funnel(trade_id, reason, result)
+            return result
+        except BaseException as exit_exc:
+            exit_path_exc = exit_exc
+            raise
+        finally:
+            await self._run_post_exit_orphan_sl_sweep(
+                trade_id,
+                via_finally_after_exception=exit_path_exc is not None,
+            )
 
     async def _exit_trade(
         self,

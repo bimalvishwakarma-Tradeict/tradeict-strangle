@@ -60,7 +60,7 @@ _IMPORTANT_EVENTS = frozenset(
         "ORPHAN_AUTO_CLOSED",
         "ORPHAN_SL_CANCELLED",
         "ORPHAN_BASKET",
-        "ORPHAN_ORDER_SWEEP",
+        "ORPHAN_SL_SWEEP",
         "ENTRY_SPREAD_RESET",
         "PARTIAL_ENTRY_CLEANUP",
         "PARTIAL_ENTRY_CLEANUP_FAILED",
@@ -278,6 +278,12 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MIDPRICE_SIZE_MISMATCH",
     ):
         bot_log.critical(msg)
+    elif event_type == "ORPHAN_SL_SWEEP":
+        # Normal path = INFO; finally-after-exception = WARNING (exit broke)
+        if details.get("via_finally_after_exception"):
+            bot_log.warning(msg)
+        else:
+            bot_log.info(msg)
     elif event_type in (
         "ERROR",
         "ADJUSTMENT_FAIL",
@@ -317,7 +323,6 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "EXIT_CLEANUP",
         "INTEGRITY_MANUAL_CLOSE",
         "ORPHAN_DETECTED",
-        "ORPHAN_ORDER_SWEEP",
         "CONVERSION_HOLD",
         "PARTIAL_ENTRY_CLEANUP_FAILED",
         "DB_AUDIT_SKIP",
