@@ -4075,11 +4075,12 @@ class BotEngine:
                     # OrderResult.order_id is int|None — keep via filled path
                     pass
                 lt = str(row.leg_type or "").lower()
-                if row.is_short and lt in ("call", "put") and row.success:
-                    now_pair = (get_utc_now(), get_utc_now())
-                    basket_close_times[lt] = now_pair
-                if row.is_wing and lt in ("wing_call", "wing_put") and row.success:
-                    # Prefer pre-placement stamp from wing_exit (ledger contract)
+                # Ledger closed_at/fill_at from ClosedLegResult (pre-placement
+                # in wing_exit) — never post-fill get_utc_now() here.
+                if row.success and (
+                    (row.is_short and lt in ("call", "put"))
+                    or (row.is_wing and lt in ("wing_call", "wing_put"))
+                ):
                     basket_close_times[lt] = (
                         getattr(row, "closed_at", None) or get_utc_now(),
                         getattr(row, "fill_at", None) or get_utc_now(),
