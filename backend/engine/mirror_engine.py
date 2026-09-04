@@ -1900,20 +1900,40 @@ class MirrorEngine:
                 db.commit()
                 return
 
-            # Map filled legs → call/put/wing locals (compat with verify/ledger)
+            # Map filled legs → call/put/wing locals (compat with verify/ledger).
+            # Use per-leg pre-placement opened_at from place_slave_plan_legs —
+            # never get_utc_now() here (post-fill overwrite breaks attribution).
+            def _slave_leg_open_ts(fl: Any, role: str) -> Any:
+                ts = getattr(fl, "opened_at", None)
+                if ts is not None:
+                    return ts
+                log_and_buffer(
+                    "SLAVE_LEG_TS_FALLBACK",
+                    int(master_trade_id),
+                    {
+                        "leg": role,
+                        "slave_id": int(slave.id),
+                        "slave": str(slave.name or ""),
+                        "note": "FilledEntryLeg.opened_at missing — "
+                        "using get_utc_now() fallback",
+                    },
+                )
+                return get_utc_now()
+
             for fl in filled_entry_legs:
                 if fl.role == "wing_call":
-                    wing_call_open_ts = get_utc_now()
+                    wing_call_open_ts = _slave_leg_open_ts(fl, "wing_call")
+                    # No exchange fill clock on OrderResult — placement time.
                     wing_call_fill_ts = wing_call_open_ts
                     wing_call_fill_px = float(fl.fill_price)
                     wing_call_oid = fl.order_id
                 elif fl.role == "wing_put":
-                    wing_put_open_ts = get_utc_now()
+                    wing_put_open_ts = _slave_leg_open_ts(fl, "wing_put")
                     wing_put_fill_ts = wing_put_open_ts
                     wing_put_fill_px = float(fl.fill_price)
                     wing_put_oid = fl.order_id
                 elif fl.role == "call":
-                    call_open_ts = get_utc_now()
+                    call_open_ts = _slave_leg_open_ts(fl, "call")
                     call_fill_ts = call_open_ts
                     call_fill = float(fl.fill_price) or call_fill
                     call_order_id = fl.order_id
@@ -1938,7 +1958,7 @@ class MirrorEngine:
                         },
                     )
                 elif fl.role == "put":
-                    put_open_ts = get_utc_now()
+                    put_open_ts = _slave_leg_open_ts(fl, "put")
                     put_fill_ts = put_open_ts
                     put_fill = float(fl.fill_price) or put_fill
                     put_order_id = fl.order_id

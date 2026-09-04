@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from backend.core.time_utils import get_utc_now
 from backend.engine.wing_entry import (
     ENTRY_LEG_MAX_ATTEMPTS,
     EntryGuardBlock,
@@ -250,6 +251,9 @@ async def place_slave_plan_legs(
     filled: list[FilledEntryLeg] = []
     for spec in plan:
         place_fn = place_fn_for_spec(spec)
+        # RULE 8 / structure_ledger: opened_at MUST be pre-placement, not
+        # post-fill — otherwise entry cashflows miss the attribution window.
+        leg_opened_at = get_utc_now()
         result = await place_leg_with_retries(
             role=spec.role,
             requested=int(spec.quantity),
@@ -287,6 +291,7 @@ async def place_slave_plan_legs(
                         ),
                         is_long=bool(spec.is_long),
                         mark_premium=float(spec.mark_premium),
+                        opened_at=leg_opened_at,
                     )
                 )
             raise EntryPartialUnwind(
@@ -319,6 +324,7 @@ async def place_slave_plan_legs(
                 commission=fee,
                 is_long=bool(spec.is_long),
                 mark_premium=float(spec.mark_premium),
+                opened_at=leg_opened_at,
             )
         )
         if spec.role.startswith("wing"):

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from backend.strategies.base_strategy import OrderResult
@@ -51,6 +52,10 @@ class FilledEntryLeg:
     is_long: bool
     mark_premium: float
     sl_trigger_price: float | None = None
+    # Captured immediately BEFORE place_order — used as ledger opened_at
+    # (post-fill timestamps break earner attribution windows). Optional so
+    # existing callers that omit it keep compiling.
+    opened_at: datetime | None = None
 
 
 @dataclass
