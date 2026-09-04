@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend.core.time_utils import get_utc_now
 from backend.strategies.base_strategy import OrderResult
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,9 @@ class ClosedLegResult:
     skipped: bool = False
     is_wing: bool = False
     is_short: bool = False
+    # Pre-placement clock for ledger closed_at (structure_ledger contract)
+    closed_at: Any = None
+    fill_at: Any = None
 
 
 @dataclass
@@ -133,6 +137,8 @@ async def _close_one_leg_with_retries(
 
     last_error = "unknown"
     last_res: OrderResult | None = None
+    # Ledger closed_at MUST be captured immediately BEFORE place (not post-fill).
+    place_closed_at = get_utc_now()
     for attempt in range(1, max_attempts + 1):
         try:
             if is_long:
@@ -178,6 +184,8 @@ async def _close_one_leg_with_retries(
                     attempts=attempt,
                     is_wing=is_wing,
                     is_short=is_short,
+                    closed_at=place_closed_at,
+                    fill_at=get_utc_now(),
                 )
             last_error = str(last_res.error or "close_failed")
         except Exception as exc:
@@ -195,6 +203,8 @@ async def _close_one_leg_with_retries(
             import asyncio
 
             await asyncio.sleep(0.5)
+            # Next attempt is a new place — refresh closed_at bound
+            place_closed_at = get_utc_now()
 
     result = ClosedLegResult(
         leg_id=int(leg_id) if leg_id is not None else None,
@@ -216,6 +226,7 @@ async def _close_one_leg_with_retries(
             if last_res is not None and last_res.order_id is not None
             else None
         ),
+        closed_at=place_closed_at,
     )
     if is_wing:
         side = "call" if "call" in lt else "put"

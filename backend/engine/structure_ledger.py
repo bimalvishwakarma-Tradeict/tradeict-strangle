@@ -922,6 +922,10 @@ def record_master_basket_exit(
     put_closed_at: Any = None,
     call_fill_at: Any = None,
     put_fill_at: Any = None,
+    wing_call_closed_at: Any = None,
+    wing_put_closed_at: Any = None,
+    wing_call_fill_at: Any = None,
+    wing_put_fill_at: Any = None,
 ) -> None:
     try:
         hid = getattr(trade, "hedge_position_id", None)
@@ -962,6 +966,28 @@ def record_master_basket_exit(
             closed_at=put_closed_at,
             fill_at=put_fill_at,
         )
+        # Wings only when timestamp provided — skip avoids LEDGER_MISS on
+        # wingless baskets (no wing legs open).
+        if wing_call_closed_at is not None:
+            _close_role_leg(
+                db,
+                structure=struct,
+                leg_role=ROLE_BASKET_WING_CALL,
+                basket_seq=bs,
+                reason=reason,
+                closed_at=wing_call_closed_at,
+                fill_at=wing_call_fill_at,
+            )
+        if wing_put_closed_at is not None:
+            _close_role_leg(
+                db,
+                structure=struct,
+                leg_role=ROLE_BASKET_WING_PUT,
+                basket_seq=bs,
+                reason=reason,
+                closed_at=wing_put_closed_at,
+                fill_at=wing_put_fill_at,
+            )
     except Exception as exc:
         logger.error(
             "structure ledger master basket exit failed: %s",
@@ -981,6 +1007,10 @@ def record_slave_basket_exit(
     put_closed_at: Any = None,
     call_fill_at: Any = None,
     put_fill_at: Any = None,
+    wing_call_closed_at: Any = None,
+    wing_put_closed_at: Any = None,
+    wing_call_fill_at: Any = None,
+    wing_put_fill_at: Any = None,
 ) -> None:
     try:
         hid = None
@@ -1028,6 +1058,26 @@ def record_slave_basket_exit(
             closed_at=put_closed_at,
             fill_at=put_fill_at,
         )
+        if wing_call_closed_at is not None:
+            _close_role_leg(
+                db,
+                structure=struct,
+                leg_role=ROLE_BASKET_WING_CALL,
+                basket_seq=bs,
+                reason=reason,
+                closed_at=wing_call_closed_at,
+                fill_at=wing_call_fill_at,
+            )
+        if wing_put_closed_at is not None:
+            _close_role_leg(
+                db,
+                structure=struct,
+                leg_role=ROLE_BASKET_WING_PUT,
+                basket_seq=bs,
+                reason=reason,
+                closed_at=wing_put_closed_at,
+                fill_at=wing_put_fill_at,
+            )
     except Exception as exc:
         logger.error(
             "structure ledger slave basket exit failed: %s",

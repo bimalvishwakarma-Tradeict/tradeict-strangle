@@ -6975,6 +6975,40 @@ class MirrorEngine:
                             put_closed_at=virt_basket_close_ts,
                             call_fill_at=virt_basket_close_ts,
                             put_fill_at=virt_basket_close_ts,
+                            wing_call_closed_at=(
+                                virt_basket_close_ts
+                                if int(
+                                    getattr(st, "wing_call_product_id", 0)
+                                    or 0
+                                )
+                                > 0
+                                else None
+                            ),
+                            wing_put_closed_at=(
+                                virt_basket_close_ts
+                                if int(
+                                    getattr(st, "wing_put_product_id", 0) or 0
+                                )
+                                > 0
+                                else None
+                            ),
+                            wing_call_fill_at=(
+                                virt_basket_close_ts
+                                if int(
+                                    getattr(st, "wing_call_product_id", 0)
+                                    or 0
+                                )
+                                > 0
+                                else None
+                            ),
+                            wing_put_fill_at=(
+                                virt_basket_close_ts
+                                if int(
+                                    getattr(st, "wing_put_product_id", 0) or 0
+                                )
+                                > 0
+                                else None
+                            ),
                         )
                     except Exception as ledger_exc:
                         logger.error(
@@ -7554,6 +7588,38 @@ class MirrorEngine:
                     exit_by_pid.get(put_pid_hint, {}).get("fill_at")
                     or put_closed_at
                 )
+                wing_call_pid = int(
+                    getattr(slave_trade, "wing_call_product_id", 0) or 0
+                )
+                wing_put_pid = int(
+                    getattr(slave_trade, "wing_put_product_id", 0) or 0
+                )
+                # Verified-flat path only reaches here — stamp wing windows
+                # when this slave trade carried wings (same resolve as shorts).
+                wing_call_closed_at = None
+                wing_put_closed_at = None
+                wing_call_fill_at = None
+                wing_put_fill_at = None
+                if wing_call_pid > 0:
+                    wing_call_closed_at = self._resolve_basket_exit_closed_at(
+                        exit_by_pid,
+                        wing_call_pid,
+                        exit_batch_ts=exit_batch_ts,
+                    )
+                    wing_call_fill_at = (
+                        exit_by_pid.get(wing_call_pid, {}).get("fill_at")
+                        or wing_call_closed_at
+                    )
+                if wing_put_pid > 0:
+                    wing_put_closed_at = self._resolve_basket_exit_closed_at(
+                        exit_by_pid,
+                        wing_put_pid,
+                        exit_batch_ts=exit_batch_ts,
+                    )
+                    wing_put_fill_at = (
+                        exit_by_pid.get(wing_put_pid, {}).get("fill_at")
+                        or wing_put_closed_at
+                    )
                 record_slave_basket_exit(
                     db,
                     slave_trade=slave_trade,
@@ -7564,6 +7630,10 @@ class MirrorEngine:
                     put_closed_at=put_closed_at,
                     call_fill_at=call_fill_at,
                     put_fill_at=put_fill_at,
+                    wing_call_closed_at=wing_call_closed_at,
+                    wing_put_closed_at=wing_put_closed_at,
+                    wing_call_fill_at=wing_call_fill_at,
+                    wing_put_fill_at=wing_put_fill_at,
                 )
             except Exception as ledger_exc:
                 logger.error(

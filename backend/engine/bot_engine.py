@@ -4014,6 +4014,8 @@ class BotEngine:
                 lt = str(getattr(leg, "leg_type", "") or "").lower()
                 if lt in ("call", "put") and not is_long:
                     basket_close_times[lt] = (leg_close_ts, leg_close_fill_ts)
+                if lt in ("wing_call", "wing_put"):
+                    basket_close_times[lt] = (leg_close_ts, leg_close_fill_ts)
                 if lt.startswith("wing"):
                     logger.info(
                         "[WING_EXIT] trade=%s leg=%s qty=%s fill=%s reason=%s",
@@ -4076,6 +4078,12 @@ class BotEngine:
                 if row.is_short and lt in ("call", "put") and row.success:
                     now_pair = (get_utc_now(), get_utc_now())
                     basket_close_times[lt] = now_pair
+                if row.is_wing and lt in ("wing_call", "wing_put") and row.success:
+                    # Prefer pre-placement stamp from wing_exit (ledger contract)
+                    basket_close_times[lt] = (
+                        getattr(row, "closed_at", None) or get_utc_now(),
+                        getattr(row, "fill_at", None) or get_utc_now(),
+                    )
                 fill_label = row.leg_type
                 log_and_buffer(
                     "EXIT_CLOSE",
@@ -4408,6 +4416,12 @@ class BotEngine:
                     # call_close / put_close OrderResult used for .success below.
                     call_ts = basket_close_times.get("call", (None, None))
                     put_ts = basket_close_times.get("put", (None, None))
+                    wing_call_ts = basket_close_times.get(
+                        "wing_call", (None, None)
+                    )
+                    wing_put_ts = basket_close_times.get(
+                        "wing_put", (None, None)
+                    )
                     record_master_basket_exit(
                         exit_db,
                         trade_row,
@@ -4416,6 +4430,10 @@ class BotEngine:
                         put_closed_at=put_ts[0],
                         call_fill_at=call_ts[1],
                         put_fill_at=put_ts[1],
+                        wing_call_closed_at=wing_call_ts[0],
+                        wing_put_closed_at=wing_put_ts[0],
+                        wing_call_fill_at=wing_call_ts[1],
+                        wing_put_fill_at=wing_put_ts[1],
                     )
                 except Exception as ledger_exc:
                     logger.error(
