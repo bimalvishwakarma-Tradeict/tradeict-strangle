@@ -477,6 +477,61 @@ class BotEngine:
             return False
         return True
 
+    async def _resolve_exit_fee_usd(
+        self,
+        *,
+        trade_id: int,
+        leg_id: int,
+        leg_type: str,
+        commission: float | None,
+        exit_order_id: Any,
+        delta_client: Any | None = None,
+    ) -> float | None:
+        """
+        Resolve exit_fee_usd for a booked leg.
+
+        Prefer OrderResult/ClosedLegResult commission; else fetch via
+        get_order_commission(exit_order_id). Leave NULL + EXIT_FEE_MISSING
+        when unknown (never invent 0.0).
+        """
+        if commission is not None:
+            try:
+                return abs(float(commission))
+            except (TypeError, ValueError):
+                pass
+
+        client = delta_client if delta_client is not None else self.delta_client
+        oid = exit_order_id
+        if oid is not None and client is not None:
+            try:
+                fee = float(await client.get_order_commission(oid))
+                return abs(fee)
+            except Exception as fee_exc:
+                reason = f"get_order_commission_failed:{fee_exc}"
+                logger.warning(
+                    "EXIT_FEE_MISSING trade=%s leg=%s oid=%s: %s",
+                    trade_id,
+                    leg_id,
+                    oid,
+                    fee_exc,
+                )
+        elif oid is None:
+            reason = "no_commission_no_order_id"
+        else:
+            reason = "no_delta_client"
+
+        log_and_buffer(
+            "EXIT_FEE_MISSING",
+            int(trade_id or 0),
+            {
+                "leg_id": int(leg_id or 0),
+                "leg_type": str(leg_type or ""),
+                "exit_order_id": str(oid) if oid is not None else None,
+                "reason": reason,
+            },
+        )
+        return None
+
     async def _run_post_exit_orphan_sl_sweep(
         self,
         trade_id: int,
@@ -2400,7 +2455,14 @@ class BotEngine:
                         trade=trade,
                         exit_premium=row.fill_price,
                         exit_time=now_utc,
-                        exit_fee_usd=row.commission,
+                        exit_fee_usd=await self._resolve_exit_fee_usd(
+                            trade_id=trade_id,
+                            leg_id=int(leftover.id),
+                            leg_type=str(leftover.leg_type or ""),
+                            commission=row.commission,
+                            exit_order_id=row.order_id,
+                            delta_client=self.delta_client,
+                        ),
                         exit_order_id=row.order_id,
                         db=db,
                     )
@@ -4287,21 +4349,30 @@ class BotEngine:
                         exit_px = await resolve_external_exit_fill(
                             self.delta_client, leg_db
                         )
+                    exit_oid = (
+                        str(res.order_id)
+                        if res is not None and res.order_id is not None
+                        else None
+                    )
+                    exit_fee = await self._resolve_exit_fee_usd(
+                        trade_id=trade_id,
+                        leg_id=int(leg_db.id),
+                        leg_type=str(leg_db.leg_type or ""),
+                        commission=(
+                            float(res.commission)
+                            if res is not None and res.commission is not None
+                            else None
+                        ),
+                        exit_order_id=exit_oid,
+                        delta_client=self.delta_client,
+                    )
                     book_leg_close(
                         leg=leg_db,
                         trade=trade_row,
                         exit_premium=exit_px,
                         exit_time=now_utc,
-                        exit_fee_usd=(
-                            float(res.commission)
-                            if res is not None and res.commission is not None
-                            else None
-                        ),
-                        exit_order_id=(
-                            str(res.order_id)
-                            if res is not None and res.order_id is not None
-                            else None
-                        ),
+                        exit_fee_usd=exit_fee,
+                        exit_order_id=exit_oid,
                         db=exit_db,
                     )
                     booked_ids.add(int(leg_db.id))
@@ -4366,11 +4437,23 @@ class BotEngine:
                                 self.delta_client, orphan
                             )
                         )
+                        orphan_oid = getattr(orphan, "exit_order_id", None)
                         book_leg_close(
                             leg=orphan,
                             trade=trade_row,
                             exit_premium=exit_px,
                             exit_time=now_utc,
+                            exit_fee_usd=await self._resolve_exit_fee_usd(
+                                trade_id=trade_id,
+                                leg_id=int(orphan.id),
+                                leg_type=str(orphan.leg_type or ""),
+                                commission=getattr(
+                                    orphan, "exit_fee_usd", None
+                                ),
+                                exit_order_id=orphan_oid,
+                                delta_client=self.delta_client,
+                            ),
+                            exit_order_id=orphan_oid,
                             db=exit_db,
                         )
                 for leftover in leftover_tracked:
@@ -4387,11 +4470,23 @@ class BotEngine:
                             self.delta_client, leftover
                         )
                     )
+                    leftover_oid = getattr(leftover, "exit_order_id", None)
                     book_leg_close(
                         leg=leftover,
                         trade=trade_row,
                         exit_premium=exit_px,
                         exit_time=now_utc,
+                        exit_fee_usd=await self._resolve_exit_fee_usd(
+                            trade_id=trade_id,
+                            leg_id=int(leftover.id),
+                            leg_type=str(leftover.leg_type or ""),
+                            commission=getattr(
+                                leftover, "exit_fee_usd", None
+                            ),
+                            exit_order_id=leftover_oid,
+                            delta_client=self.delta_client,
+                        ),
+                        exit_order_id=leftover_oid,
                         db=exit_db,
                     )
 
@@ -4716,7 +4811,14 @@ class BotEngine:
                 trade=trade,
                 exit_premium=row.fill_price,
                 exit_time=now_utc,
-                exit_fee_usd=row.commission,
+                exit_fee_usd=await self._resolve_exit_fee_usd(
+                    trade_id=tid,
+                    leg_id=int(leg.id),
+                    leg_type=str(leg.leg_type or ""),
+                    commission=row.commission,
+                    exit_order_id=row.order_id,
+                    delta_client=self.delta_client,
+                ),
                 exit_order_id=row.order_id,
                 db=db,
             )
@@ -4968,11 +5070,17 @@ class BotEngine:
                         hedge_leg.exit_premium = hedge_close_price
                         if close_res.order_id is not None:
                             hedge_leg.exit_order_id = str(close_res.order_id)
-                        if close_res.commission is not None:
-                            hedge_leg.exit_fee_usd = abs(
-                                float(close_res.commission)
-                            )
-                        # Long P&L: sell_exit - buy_entry
+                        exit_fee = await self._resolve_exit_fee_usd(
+                            trade_id=trade_id,
+                            leg_id=int(hedge_leg.id),
+                            leg_type=str(hedge_leg.leg_type or ""),
+                            commission=close_res.commission,
+                            exit_order_id=close_res.order_id,
+                            delta_client=self.delta_client,
+                        )
+                        if exit_fee is not None:
+                            hedge_leg.exit_fee_usd = exit_fee
+                        # Long P&L: sell_exit - buy_entry (GROSS — fees separate)
                         hedge_pnl = (
                             (
                                 hedge_close_price

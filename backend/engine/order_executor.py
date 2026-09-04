@@ -151,7 +151,7 @@ class OrderExecutor:
         symbol_for_fallback: str | None = None,
     ) -> OrderResult:
         """
-        Close a long option (hedge) with a SELL market IOC order.
+        Close a long option (hedge/wing) with a SELL market IOC order.
 
         No bracket_stop_loss — hedge is a long buy; SL brackets apply only
         to short sells.
@@ -183,12 +183,48 @@ class OrderExecutor:
                     pass
             status = str(result.get("status") or "").lower()
             oid = result.get("order_id")
+
+            # Same commission pattern as _execute_with_retry: place response
+            # first, then get_order_commission. Leave None when unknown —
+            # do not write 0.0 (fee-unknown ≠ fee-zero).
+            commission: float | None = None
+            raw = (
+                result.get("raw")
+                if isinstance(result.get("raw"), dict)
+                else {}
+            )
+            for src in (result, raw):
+                for field in ("paid_commission", "commission"):
+                    try:
+                        val = abs(float(src.get(field) or 0))
+                    except (TypeError, ValueError):
+                        val = 0.0
+                    if val > 0:
+                        commission = val
+                        break
+                if commission is not None:
+                    break
+            if commission is None and oid is not None:
+                try:
+                    commission = abs(
+                        float(await delta_client.get_order_commission(oid))
+                    )
+                except Exception as fee_exc:
+                    logger.warning(
+                        "Could not fetch commission for long-close "
+                        "order %s: %s",
+                        oid,
+                        fee_exc,
+                    )
+                    commission = None
+
             return OrderResult(
                 success=(
                     status in ("closed", "filled", "open") or oid is not None
                 ),
                 filled_price=fill if fill > 0 else None,
                 order_id=int(oid) if oid is not None else None,
+                commission=commission,
             )
         except Exception as exc:
             logger.error("close_long_position failed: %s", exc)
