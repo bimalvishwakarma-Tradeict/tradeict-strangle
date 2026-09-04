@@ -1886,31 +1886,12 @@ export default function AutoTrade() {
                   Qty unchanged at adjustment
                 </span>
               </label>
-              <label className="flex cursor-pointer items-start gap-2">
-                <input
-                  type="radio"
-                  name="adjustmentQtyModeOuter"
-                  className="mt-1"
-                  checked={adjustmentQtyMode === 'increase_dynamic'}
-                  onChange={() => setAdjustmentQtyMode('increase_dynamic')}
-                  disabled={!basketQtyDynamic}
-                />
-                <span
-                  className={`text-sm ${
-                    basketQtyDynamic ? 'text-gray-200' : 'text-gray-500'
-                  }`}
-                >
-                  Increase — dynamic theta-based
-                  <span className="mt-0.5 block text-xs text-gray-500">
-                    Requires % of hedge — dynamic. Cap: 50% of hedge.
-                  </span>
-                  <span className="mt-0.5 block text-xs text-gray-500">
-                    Cap: 50% of hedge. Agar entry size cap se upar hai to
-                    adjustment par qty unchanged rahegi — cap kabhi qty
-                    ghatayega nahi.
-                  </span>
-                </span>
-              </label>
+              {adjustmentQtyMode === 'increase_dynamic' && (
+                <p className="rounded border border-amber-700/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+                  Dynamic increase mode is active on this account — contact
+                  admin. This option is hidden from new selections.
+                </p>
+              )}
               <label className="flex cursor-pointer items-start gap-2">
                 <input
                   type="radio"

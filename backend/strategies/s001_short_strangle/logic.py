@@ -1363,27 +1363,21 @@ class ShortStrangleStrategy(BaseStrategy):
                     if clamp_status == "dead_end":
                         try:
                             log_and_buffer(
-                                "ADJUSTMENT_ABORT",
+                                "WING_CROSS_GUARD_ABORT",
                                 trade_id,
                                 {
-                                    "trade": trade_id,
                                     "leg": leg,
-                                    "reason": "CHAIN_EXHAUSTED",
-                                    "old_strike": old_strike,
-                                    "wanted": new_strike,
-                                    "wing": wing_k,
-                                    "summary": (
-                                        f"[CHAIN_EXHAUSTED] wing cross-guard "
-                                        f"dead_end trade={trade_id} leg={leg} "
-                                        f"wanted={new_strike} wing={wing_k}"
-                                    ),
+                                    "wanted_strike": new_strike,
+                                    "wing_strike": wing_k,
+                                    "current_strike": old_strike,
+                                    "reason": "no_room_inside_wing",
                                 },
                             )
                         except Exception:
                             pass
                         raise ValueError(
-                            f"ADJUSTMENT_ABORT: CHAIN_EXHAUSTED wing cross-guard "
-                            f"dead_end for {leg} wanted={new_strike} wing={wing_k} "
+                            f"WING_CROSS_GUARD_ABORT: no_room_inside_wing "
+                            f"for {leg} wanted={new_strike} wing={wing_k} "
                             f"from {old_strike}"
                         )
                     if clamp_status == "clamped" and clamped is not None:
@@ -1393,10 +1387,11 @@ class ShortStrangleStrategy(BaseStrategy):
                         )
                         if crow is None:
                             raise ValueError(
-                                f"ADJUSTMENT_ABORT: CHAIN_EXHAUSTED clamped "
+                                f"WING_CROSS_GUARD_ABORT: clamped "
                                 f"strike {clamped} missing from chain"
                             )
                         row = crow
+                        wanted_strike_log = new_strike
                         new_strike = float(clamped)
                         new_premium = float(row.get(mark_key) or 0)
                         method = "wing_cross_guard_clamp"
@@ -1404,6 +1399,27 @@ class ShortStrangleStrategy(BaseStrategy):
                             abs(new_premium - final_target) / final_target * 100.0
                             if final_target > 0
                             else 0.0
+                        )
+                        try:
+                            log_and_buffer(
+                                "WING_CROSS_GUARD",
+                                trade_id,
+                                {
+                                    "leg": leg,
+                                    "wanted_strike": wanted_strike_log,
+                                    "wing_strike": wing_k,
+                                    "clamped_to": new_strike,
+                                    "target_premium": round(final_target, 4),
+                                    "clamped_premium": round(new_premium, 4),
+                                },
+                            )
+                        except Exception:
+                            pass
+                        logger.warning(
+                            "[WING_CROSS_GUARD] wanted=%s wing=%s clamped_to=%s",
+                            wanted_strike_log,
+                            wing_k,
+                            new_strike,
                         )
                         if deviation_pct > tolerance_pct:
                             wing_clamp_bypass_tolerance = True
@@ -1419,15 +1435,17 @@ class ShortStrangleStrategy(BaseStrategy):
                                     "WING_CROSS_GUARD_TOLERANCE_BYPASS",
                                     trade_id,
                                     {
-                                        "wanted_prem": round(wanted_prem, 4),
-                                        "picked_prem": round(new_premium, 4),
-                                        "pct_off": round(deviation_pct, 2),
-                                        "wanted_strike": float(
-                                            row.get("_wanted_strike") or 0
-                                        )
-                                        or None,
+                                        "leg": leg,
                                         "clamped_to": new_strike,
-                                        "wing": wing_k,
+                                        "target_premium": round(
+                                            final_target, 4
+                                        ),
+                                        "clamped_premium": round(
+                                            new_premium, 4
+                                        ),
+                                        "deviation_pct": round(
+                                            deviation_pct, 2
+                                        ),
                                     },
                                 )
                             except Exception:
@@ -1435,10 +1453,28 @@ class ShortStrangleStrategy(BaseStrategy):
             except ValueError:
                 raise
             except Exception as wing_exc:
-                logger.warning(
-                    "wing cross-guard failed (non-fatal continue): %s",
+                # Do NOT silently continue with a crossed strike — abort
+                logger.critical(
+                    "[WING_CROSS_GUARD_ABORT] wing cross-guard failed: %s",
                     wing_exc,
                 )
+                try:
+                    log_and_buffer(
+                        "WING_CROSS_GUARD_ABORT",
+                        trade_id,
+                        {
+                            "leg": leg,
+                            "wanted_strike": new_strike,
+                            "current_strike": old_strike,
+                            "reason": "guard_exception",
+                            "error": str(wing_exc)[:200],
+                        },
+                    )
+                except Exception:
+                    pass
+                raise ValueError(
+                    f"WING_CROSS_GUARD_ABORT: guard_exception {wing_exc}"
+                ) from wing_exc
 
         other_offer = (
             float(untouched_for_log)

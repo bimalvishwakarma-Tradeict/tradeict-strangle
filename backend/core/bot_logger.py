@@ -32,6 +32,9 @@ _IMPORTANT_EVENTS = frozenset(
         "WING_SELECT",
         "WING_SELECT_CHAIN_END",
         "WING_SELECT_PCT_MISS",
+        "WING_CROSS_GUARD",
+        "WING_CROSS_GUARD_TOLERANCE_BYPASS",
+        "WING_CROSS_GUARD_ABORT",
         "ENTRY_PREMIUM_MISS",
         "THETA_SELECT_SUBOPTIMAL",
         "NEW_STRIKE_SELECTED",
@@ -289,6 +292,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MIDPRICE_SIZE_MISMATCH",
         "HEDGE_LEGS_UNBALANCED",
         "ORDER_CANCEL_UNCONFIRMED",
+        "WING_CROSS_GUARD_ABORT",
     ):
         bot_log.critical(msg)
     elif event_type == "ORPHAN_SL_SWEEP":
@@ -362,6 +366,8 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "MIDPRICE_POSTONLY_REJECT",
         "MAX_ADJUSTMENTS_REACHED",
         "ADJUSTMENT_LIMIT_UNSET",
+        "WING_CROSS_GUARD",
+        "WING_CROSS_GUARD_TOLERANCE_BYPASS",
     ):
         bot_log.warning(msg)
     elif event_type in (
