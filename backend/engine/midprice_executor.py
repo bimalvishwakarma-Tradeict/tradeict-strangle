@@ -303,6 +303,7 @@ async def _cancel_confirm(
     *,
     trade_id: int | None = None,
     leg_label: str = "",
+    product_id: int | None = None,
     sleep_fn: Any = None,
     monotonic_fn: Any = None,
 ) -> tuple[str, dict[str, Any] | None]:
@@ -315,12 +316,18 @@ async def _cancel_confirm(
     Polls until the order leaves open states (or CANCEL_CONFIRM_TIMEOUT).
     Filled size is read from the order regardless of state; callers must
     account any filled > 0 even on still_open / cancelled.
+
+    product_id is optional; when set it is passed to cancel_order so Delta
+    gets the required body without an extra get_order round-trip.
     """
     sleep = sleep_fn or asyncio.sleep
     now = monotonic_fn or time.monotonic
     cancel_sent = False
     try:
-        await delta_client.cancel_order(int(order_id))
+        await delta_client.cancel_order(
+            int(order_id),
+            product_id=int(product_id) if product_id is not None else None,
+        )
         cancel_sent = True
     except Exception as exc:
         if is_already_filled_cancel_error(exc):
@@ -1296,6 +1303,7 @@ async def execute_with_midprice(
                 last_oid,
                 trade_id=trade_id,
                 leg_label=leg_label,
+                product_id=int(product_id),
                 sleep_fn=sleep,
                 monotonic_fn=now,
             )

@@ -1379,18 +1379,87 @@ class DeltaClient:
                 best_px = px
         return best_px
 
-    async def cancel_order(self, order_id: int) -> dict[str, Any]:
+    async def cancel_order(
+        self,
+        order_id: int,
+        product_id: int | None = None,
+    ) -> dict[str, Any]:
         """
-        DELETE /v2/orders/{order_id}
+        DELETE /v2/orders with body {id, product_id}.
+
+        Delta India does not accept DELETE /v2/orders/{id} (404 every time).
+        product_id is required by the API; when omitted we resolve it via
+        get_order so existing callers keep working.
 
         BOT TRADE ISOLATION: Only call with order_ids stored in our DB.
         """
-        result = await self._request(
-            "DELETE",
-            f"/v2/orders/{order_id}",
-            timeout=ORDER_TIMEOUT_SECONDS,
-        )
+        oid = int(order_id)
+        pid: int | None = int(product_id) if product_id is not None else None
+        if pid is None:
+            order = await self.get_order(oid)
+            raw_pid = order.get("product_id") if isinstance(order, dict) else None
+            try:
+                pid = int(raw_pid) if raw_pid is not None else None
+            except (TypeError, ValueError):
+                pid = None
+            if pid is None:
+                err = (
+                    f"cancel_order: product_id missing for order_id={oid} "
+                    f"(get_order did not return product_id)"
+                )
+                self._audit_order_cancel_sent(oid, None, ok=False, error=err)
+                raise DeltaAPIError(0, err)
+
+        body: dict[str, Any] = {"id": oid, "product_id": int(pid)}
+        try:
+            result = await self._request(
+                "DELETE",
+                "/v2/orders",
+                body=body,
+                timeout=ORDER_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            self._audit_order_cancel_sent(
+                oid, int(pid), ok=False, error=str(exc)
+            )
+            raise
+
+        self._audit_order_cancel_sent(oid, int(pid), ok=True, error=None)
         return result if isinstance(result, dict) else {"result": result}
+
+    @staticmethod
+    def _audit_order_cancel_sent(
+        order_id: int,
+        product_id: int | None,
+        *,
+        ok: bool,
+        error: str | None,
+    ) -> None:
+        """Audit cancel attempt via log_and_buffer (RULE 5 — not plain logger)."""
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "ORDER_CANCEL_SENT",
+                0,
+                {
+                    "order_id": int(order_id),
+                    "product_id": product_id,
+                    "ok": bool(ok),
+                    "error": error,
+                },
+            )
+        except Exception as audit_exc:
+            # Last-resort: still surface on activity log if buffer path fails
+            logger.info(
+                "[ORDER_CANCEL_SENT] order_id=%s product_id=%s ok=%s "
+                "error=%s (audit_fallback=%s)",
+                order_id,
+                product_id,
+                ok,
+                error,
+                audit_exc,
+            )
 
     async def place_stop_order(
         self,

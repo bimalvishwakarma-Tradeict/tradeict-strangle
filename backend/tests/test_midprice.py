@@ -124,7 +124,9 @@ class FakeDelta:
             return base
         return dict(self.orders.get(oid) or {"order_id": oid, "state": "open"})
 
-    async def cancel_order(self, order_id: int) -> dict[str, Any]:
+    async def cancel_order(
+        self, order_id: int, product_id: int | None = None
+    ) -> dict[str, Any]:
         oid = int(order_id)
         self.cancel_calls.append(oid)
         beh = self.cancel_behavior.get(oid)
