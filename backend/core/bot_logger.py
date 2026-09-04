@@ -173,6 +173,7 @@ _IMPORTANT_EVENTS = frozenset(
         "PARTNER_MARKET_FALLBACK_TRIGGERED",
         "ORDER_RESTING",
         "ORDER_RESTING_CLEARED",
+        "ORDER_CANCEL_UNCONFIRMED",
         "ORDER_ID_LOST",
     }
 )
@@ -286,6 +287,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ORDER_ID_LOST",
         "MIDPRICE_SIZE_MISMATCH",
         "HEDGE_LEGS_UNBALANCED",
+        "ORDER_CANCEL_UNCONFIRMED",
     ):
         bot_log.critical(msg)
     elif event_type == "ORPHAN_SL_SWEEP":

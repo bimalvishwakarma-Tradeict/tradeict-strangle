@@ -133,6 +133,11 @@ class FakeDelta:
         od = self.orders.get(oid)
         if od and str(od.get("state")).lower() not in {"filled", "closed"}:
             od["state"] = "cancelled"
+            # Subsequent get_order must not keep scripting "open" — that was
+            # the live bug (treat open as cancelled) and hangs the new poll.
+            self.fills_on_get[oid] = [
+                {"state": "cancelled", "filled_size": int(od.get("filled_size") or 0)}
+            ]
         return od or {"order_id": oid, "state": "cancelled"}
 
     async def get_option_positions(self) -> list[dict[str, Any]]:

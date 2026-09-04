@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 HOLD_SECONDS = 5.0
 POST_CANCEL_SETTLE_SECONDS = 2.0
+# Bound how long we wait for Delta to leave _OPEN_STATES after cancel.
+# Never treat "open" as cancelled — that spawned duplicate GTCs / over-fills.
+CANCEL_CONFIRM_TIMEOUT_SECONDS = 15.0
+CANCEL_CONFIRM_POLL_SECONDS = 0.5
 DEFAULT_CHASE_MAX_SECONDS = 120
 CHASE_MAX_SECONDS_MIN = 10
 CHASE_MAX_SECONDS_MAX = 600
@@ -299,13 +303,25 @@ async def _cancel_confirm(
     *,
     trade_id: int | None = None,
     leg_label: str = "",
+    sleep_fn: Any = None,
+    monotonic_fn: Any = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """
     Cancel and verify. Returns (outcome, order_after):
-      cancelled | filled | unknown
+      cancelled | filled | still_open | unknown
+
+    Never reports "cancelled" while state is still in _OPEN_STATES — that
+    race left live GTCs on the book and the chase ladder stacked duplicates.
+    Polls until the order leaves open states (or CANCEL_CONFIRM_TIMEOUT).
+    Filled size is read from the order regardless of state; callers must
+    account any filled > 0 even on still_open / cancelled.
     """
+    sleep = sleep_fn or asyncio.sleep
+    now = monotonic_fn or time.monotonic
+    cancel_sent = False
     try:
         await delta_client.cancel_order(int(order_id))
+        cancel_sent = True
     except Exception as exc:
         if is_already_filled_cancel_error(exc):
             # Re-read to confirm
@@ -336,9 +352,121 @@ async def _cancel_confirm(
             },
         )
 
-    try:
-        od = await delta_client.get_order(order_id)
-    except Exception:
+    started = float(now())
+    deadline = started + float(CANCEL_CONFIRM_TIMEOUT_SECONDS)
+    od: dict[str, Any] | None = None
+    state = ""
+    poll_attempts = 0
+
+    while True:
+        poll_attempts += 1
+        try:
+            od = await delta_client.get_order(order_id)
+        except Exception:
+            od = None
+
+        if od is not None:
+            state = _order_state(od)
+            filled = _filled_size_from_order(od, requested=0)
+
+            if state in _FILLED_STATES:
+                # Settle wait belongs BEFORE the decision (propagation), not after.
+                elapsed = float(now()) - started
+                if elapsed < float(POST_CANCEL_SETTLE_SECONDS):
+                    await sleep(float(POST_CANCEL_SETTLE_SECONDS) - elapsed)
+                    try:
+                        od = await delta_client.get_order(order_id) or od
+                    except Exception:
+                        pass
+                    state = _order_state(od)
+                    filled = _filled_size_from_order(od, requested=0)
+                outcome = "filled"
+                _mid_log(
+                    "ORDER_RESTING_CLEARED",
+                    trade_id,
+                    {
+                        "order_id": order_id,
+                        "leg": leg_label,
+                        "outcome": outcome,
+                        "state": state,
+                        "filled": filled,
+                        "poll_attempts": poll_attempts,
+                        "wait_s": round(float(now()) - started, 3),
+                    },
+                )
+                return outcome, od
+
+            if state and state not in _OPEN_STATES:
+                # Cancelled / rejected / terminal — confirm after settle floor.
+                elapsed = float(now()) - started
+                if elapsed < float(POST_CANCEL_SETTLE_SECONDS):
+                    await sleep(float(POST_CANCEL_SETTLE_SECONDS) - elapsed)
+                    try:
+                        od = await delta_client.get_order(order_id) or od
+                    except Exception:
+                        pass
+                    state = _order_state(od)
+                    filled = _filled_size_from_order(od, requested=0)
+                    if state in _OPEN_STATES:
+                        # Flip-flopped back to open during settle — keep polling
+                        pass
+                    elif state in _FILLED_STATES or filled > 0:
+                        outcome = "filled"
+                        _mid_log(
+                            "ORDER_RESTING_CLEARED",
+                            trade_id,
+                            {
+                                "order_id": order_id,
+                                "leg": leg_label,
+                                "outcome": outcome,
+                                "state": state,
+                                "filled": filled,
+                                "poll_attempts": poll_attempts,
+                                "wait_s": round(float(now()) - started, 3),
+                            },
+                        )
+                        return outcome, od
+                    else:
+                        outcome = "cancelled"
+                        _mid_log(
+                            "ORDER_RESTING_CLEARED",
+                            trade_id,
+                            {
+                                "order_id": order_id,
+                                "leg": leg_label,
+                                "outcome": outcome,
+                                "state": state,
+                                "filled": filled,
+                                "poll_attempts": poll_attempts,
+                                "wait_s": round(float(now()) - started, 3),
+                            },
+                        )
+                        return outcome, od
+                else:
+                    # Terminal non-open: any fill counts as filled for accounting
+                    outcome = "filled" if filled > 0 else "cancelled"
+                    _mid_log(
+                        "ORDER_RESTING_CLEARED",
+                        trade_id,
+                        {
+                            "order_id": order_id,
+                            "leg": leg_label,
+                            "outcome": outcome,
+                            "state": state,
+                            "filled": filled,
+                            "poll_attempts": poll_attempts,
+                            "wait_s": round(float(now()) - started, 3),
+                        },
+                    )
+                    return outcome, od
+
+        remaining_t = deadline - float(now())
+        if remaining_t <= 0:
+            break
+        await sleep(min(float(CANCEL_CONFIRM_POLL_SECONDS), remaining_t))
+
+    wait_s = round(float(now()) - started, 3)
+    if od is None:
         _mid_log(
             "ORDER_RESTING_CLEARED",
             trade_id,
@@ -346,30 +474,64 @@ async def _cancel_confirm(
                 "order_id": order_id,
                 "leg": leg_label,
                 "outcome": "unknown",
+                "poll_attempts": poll_attempts,
+                "wait_s": wait_s,
+                "cancel_sent": cancel_sent,
             },
         )
         return "unknown", None
 
     state = _order_state(od)
+    filled = _filled_size_from_order(od, requested=0)
     if state in _FILLED_STATES:
-        outcome = "filled"
-    else:
-        filled = _filled_size_from_order(od, requested=0)
-        if filled > 0 and state not in _OPEN_STATES:
-            outcome = "filled"
-        else:
-            outcome = "cancelled"
-    _mid_log(
-        "ORDER_RESTING_CLEARED",
-        trade_id,
+        _mid_log(
+            "ORDER_RESTING_CLEARED",
+            trade_id,
+            {
+                "order_id": order_id,
+                "leg": leg_label,
+                "outcome": "filled",
+                "state": state,
+                "filled": filled,
+                "poll_attempts": poll_attempts,
+                "wait_s": wait_s,
+            },
+        )
+        return "filled", od
+    if state and state not in _OPEN_STATES:
+        outcome = "filled" if filled > 0 else "cancelled"
+        _mid_log(
+            "ORDER_RESTING_CLEARED",
+            trade_id,
+            {
+                "order_id": order_id,
+                "leg": leg_label,
+                "outcome": outcome,
+                "state": state,
+                "filled": filled,
+                "poll_attempts": poll_attempts,
+                "wait_s": wait_s,
+            },
+        )
+        return outcome, od
+
+    # Still open after bounded wait — NOT cancelled.
+    log_and_buffer(
+        "ORDER_CANCEL_UNCONFIRMED",
+        int(trade_id or 0),
         {
             "order_id": order_id,
             "leg": leg_label,
-            "outcome": outcome,
-            "state": state,
+            "outcome": "still_open",
+            "state": state or "open",
+            "filled": filled,
+            "poll_attempts": poll_attempts,
+            "wait_s": wait_s,
+            "timeout_s": float(CANCEL_CONFIRM_TIMEOUT_SECONDS),
+            "cancel_sent": cancel_sent,
         },
     )
-    return outcome, od
+    return "still_open", od
 
 
 async def _place_market(
@@ -1134,47 +1296,150 @@ async def execute_with_midprice(
                 last_oid,
                 trade_id=trade_id,
                 leg_label=leg_label,
+                sleep_fn=sleep,
+                monotonic_fn=now,
             )
-            if outcome == "filled":
-                extra = _filled_size_from_order(after_cancel, requested=remaining)
-                if remaining > 0 and extra >= remaining:
-                    px = _avg_fill_from_order(after_cancel) or float(limit)
-                    filled_total += remaining
-                    fill_price_sum += px * remaining
-                    remaining = 0
-                    fill_type_used = order_kind
-                    _mid_log(
-                        "MIDPRICE_FILL",
-                        trade_id,
-                        {
-                            "leg": leg_label,
-                            "attempt": attempt,
-                            "fill": px,
-                            "note": "cancel_already_filled",
-                            "mid_at_start": mid_at_start,
-                            "market_would_be": mkt_ref,
-                            "saved_usd": _saved_usd(
-                                side_l, px, mkt_ref, qty_total
-                            ),
-                        },
-                    )
-                    break
-                if remaining > 0 and extra > 0:
-                    px = _avg_fill_from_order(after_cancel) or float(limit)
-                    filled_total += extra
-                    fill_price_sum += px * extra
-                    remaining = max(0, remaining - extra)
+            # Fill accounting is state-independent: any size on the order
+            # counts, including partially_filled / still_open.
+            order_filled = _filled_size_from_order(
+                after_cancel, requested=0
+            )
+            new_fills = max(0, int(order_filled) - int(got))
+            if new_fills > 0 and remaining > 0:
+                take = min(new_fills, remaining)
+                px = _avg_fill_from_order(after_cancel) or float(limit)
+                filled_total += take
+                fill_price_sum += px * take
+                remaining = max(0, remaining - take)
+                fill_type_used = order_kind
 
-            log_and_buffer(
-                "POST_CANCEL_SETTLE",
-                trade_id or 0,
-                {
-                    "leg": leg_label,
-                    "attempt": attempt,
-                    "settle_seconds": POST_CANCEL_SETTLE_SECONDS,
-                },
-            )
-            await sleep(POST_CANCEL_SETTLE_SECONDS)
+            if remaining <= 0:
+                _mid_log(
+                    "MIDPRICE_FILL",
+                    trade_id,
+                    {
+                        "leg": leg_label,
+                        "attempt": attempt,
+                        "fill": _avg_fill_from_order(after_cancel)
+                        or float(limit),
+                        "note": f"cancel_outcome_{outcome}",
+                        "mid_at_start": mid_at_start,
+                        "market_would_be": mkt_ref,
+                        "saved_usd": _saved_usd(
+                            side_l,
+                            _avg_fill_from_order(after_cancel) or float(limit),
+                            mkt_ref,
+                            qty_total,
+                        ),
+                    },
+                )
+                break
+
+            if outcome == "still_open":
+                # CRITICAL: do NOT place another limit (or market) while this
+                # GTC is still live — that is the duplicate-fill / over-fill
+                # bug. Wait on the same order until it fills or leaves open;
+                # market only after cancel is confirmed.
+                od_wait = after_cancel
+                wait_deadline = now() + float(CANCEL_CONFIRM_TIMEOUT_SECONDS)
+                while remaining > 0 and now() < wait_deadline:
+                    await sleep(float(CANCEL_CONFIRM_POLL_SECONDS))
+                    try:
+                        od_wait = await delta_client.get_order(last_oid)
+                    except Exception:
+                        continue
+                    st = _order_state(od_wait)
+                    of = _filled_size_from_order(od_wait, requested=0)
+                    add = max(0, int(of) - int(order_filled))
+                    if add > 0:
+                        take = min(add, remaining)
+                        px = _avg_fill_from_order(od_wait) or float(limit)
+                        filled_total += take
+                        fill_price_sum += px * take
+                        remaining = max(0, remaining - take)
+                        order_filled = int(of)
+                        fill_type_used = order_kind
+                    if st in _FILLED_STATES or remaining <= 0:
+                        break
+                    if st and st not in _OPEN_STATES:
+                        # Finally left the book — safe to market remaining.
+                        break
+
+                if remaining <= 0:
+                    break
+
+                st_final = _order_state(od_wait)
+                if st_final in _OPEN_STATES or not st_final:
+                    # Still live — fail closed, no new order.
+                    return OrderResult(
+                        success=False,
+                        error="cancel_unconfirmed_order_still_open",
+                        order_id=last_oid,
+                        filled_size=filled_total if filled_total else None,
+                        fill_attempt=attempt,
+                        fill_type=fill_type_used,
+                        mid_at_start=mid_at_start,
+                    )
+
+                # Confirmed off-book with remainder — existing market fallback.
+                if await _pre_place_position_check(
+                    delta_client,
+                    product_id=product_id,
+                    qty_intended=qty_total,
+                    leg_label=leg_label,
+                    attempt=attempt,
+                    reduce_only=reduce_only,
+                    trade_id=trade_id,
+                    check_position_size=check_position_size,
+                ):
+                    remaining = 0
+                    filled_total = qty_total
+                    fill_type_used = "position_already_filled"
+                    break
+                mkt = await _place_market(
+                    delta_client,
+                    product_id=product_id,
+                    side=side_l,
+                    quantity=remaining,
+                    reduce_only=reduce_only,
+                    bracket_sl_price=bracket_sl_price,
+                    bracket_sl_limit=bracket_sl_limit,
+                    trade_id=trade_id,
+                    leg_label=leg_label,
+                )
+                if mkt.success:
+                    fsz = int(mkt.filled_size or remaining)
+                    filled_total += fsz
+                    if mkt.filled_price:
+                        fill_price_sum += float(mkt.filled_price) * fsz
+                    last_oid = mkt.order_id
+                    fill_type_used = "market"
+                    remaining = 0
+                    break
+                return OrderResult(
+                    success=False,
+                    error=mkt.error or "still_open_then_market_failed",
+                    order_id=last_oid,
+                    filled_size=filled_total if filled_total else None,
+                    fill_attempt=attempt,
+                    fill_type="market",
+                    mid_at_start=mid_at_start,
+                )
+
+            if outcome == "unknown":
+                # Could not read order after cancel — do not stack another limit.
+                return OrderResult(
+                    success=False,
+                    error="cancel_confirm_unknown",
+                    order_id=last_oid,
+                    filled_size=filled_total if filled_total else None,
+                    fill_attempt=attempt,
+                    fill_type=fill_type_used,
+                    mid_at_start=mid_at_start,
+                )
+
+            # outcome in {cancelled, filled} with remaining > 0:
+            # settle already happened inside _cancel_confirm (before decision).
 
             if (
                 partner_mode_started_at is not None
