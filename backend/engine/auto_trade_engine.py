@@ -1480,8 +1480,7 @@ class AutoTradeEngine:
             from backend.engine.midprice_executor import (
                 clamp_chase_max_seconds,
                 clamp_hold_seconds,
-                execute_with_midprice,
-                profile_for_group_leg,
+                execute_paired_legs,
                 should_use_midprice,
             )
             import time as _time_mod
@@ -1509,21 +1508,31 @@ class AutoTradeEngine:
                 log_sequence_step,
             )
 
-            if wings_enabled:
-                log_sequence_step(
-                    trade_id=0,
-                    action="entry_phase_start",
-                    phase="wing",
-                    position=2 if hedge_enabled_for_entry else 1,
-                    underlying=str(underlying),
+            # Role-based consecutive groups (never by bare index):
+            # wings ON  -> [[wing_call, wing_put], [call, put]]
+            # wings OFF -> [[call, put]]
+            # Groups stay SEQUENTIAL (margin rule W2); pair only within a group.
+            _wing_roles = frozenset({"wing_call", "wing_put"})
+            entry_groups: list[tuple[str, list[Any]]] = []
+            for _spec in plan:
+                _gkey = (
+                    "wing" if str(_spec.role) in _wing_roles else "short"
                 )
-            short_phase_logged = False
+                if not entry_groups or entry_groups[-1][0] != _gkey:
+                    entry_groups.append((_gkey, [_spec]))
+                else:
+                    entry_groups[-1][1].append(_spec)
 
-            for plan_idx, spec in enumerate(plan):
-                mp_profile = profile_for_group_leg(plan_idx)
-
-                if spec.role in ("call", "put") and not short_phase_logged:
-                    short_phase_logged = True
+            for phase, group_specs in entry_groups:
+                if phase == "wing":
+                    log_sequence_step(
+                        trade_id=0,
+                        action="entry_phase_start",
+                        phase="wing",
+                        position=2 if hedge_enabled_for_entry else 1,
+                        underlying=str(underlying),
+                    )
+                elif phase == "short":
                     log_sequence_step(
                         trade_id=0,
                         action="entry_phase_start",
@@ -1532,243 +1541,273 @@ class AutoTradeEngine:
                         underlying=str(underlying),
                     )
 
-                async def _place_one(
-                    _spec=spec,
-                    _profile=mp_profile,
-                ):
-                    if use_mp_entry:
-                        return await execute_with_midprice(
-                            product_id=int(_spec.product_id),
-                            side="buy" if _spec.is_long else "sell",
-                            quantity=int(_spec.quantity),
-                            profile=_profile,
-                            delta_client=client,
-                            reason=entry_reason,
-                            leg_label=str(_spec.role),
-                            symbol=str(_spec.symbol),
-                            max_chase_seconds=chase_max,
-                            hold_seconds=hold_s,
-                            midprice_enabled=True,
-                            bracket_sl_price=_spec.bracket_sl_price,
-                            bracket_sl_limit=_spec.bracket_sl_limit,
-                            selected_premium=float(
-                                _spec.mark_premium or 0
-                            )
-                            or None,
-                            selection_ts=selection_ts,
-                            entry_premium_match_tolerance_pct=entry_tol,
+                for _spec in group_specs:
+                    if not _spec.is_long:
+                        logger.info(
+                            "Placing %s: %s qty=%s bracket_sl=%s profile=%s",
+                            _spec.role.upper(),
+                            _spec.symbol,
+                            _spec.quantity,
+                            _spec.bracket_sl_price,
+                            "paired_chase" if use_mp_entry else "market",
                         )
-                    if _spec.is_long:
-                        return await self.order_executor.buy_option(
-                            product_id=int(_spec.product_id),
-                            quantity=int(_spec.quantity),
-                            delta_client=client,
-                            symbol_for_fallback=str(_spec.symbol),
+                    else:
+                        logger.info(
+                            "Placing WING %s BUY: %s qty=%s (no bracket SL) "
+                            "profile=%s",
+                            _spec.role,
+                            _spec.symbol,
+                            _spec.quantity,
+                            "paired_chase" if use_mp_entry else "market",
                         )
-                    return await self.order_executor.sell_option(
-                        product_id=int(_spec.product_id),
-                        quantity=int(_spec.quantity),
-                        delta_client=client,
-                        symbol_for_fallback=str(_spec.symbol),
-                        bracket_sl_price=_spec.bracket_sl_price,
-                        bracket_sl_limit=_spec.bracket_sl_limit,
-                    )
 
-                open_ts = get_utc_now()
-                if not spec.is_long:
-                    logger.info(
-                        "Placing %s: %s qty=%s bracket_sl=%s profile=%s",
-                        spec.role.upper(),
-                        spec.symbol,
-                        spec.quantity,
-                        spec.bracket_sl_price,
-                        mp_profile if use_mp_entry else "market",
-                    )
-                else:
-                    logger.info(
-                        "Placing WING %s BUY: %s qty=%s (no bracket SL) "
-                        "profile=%s",
-                        spec.role,
-                        spec.symbol,
-                        spec.quantity,
-                        mp_profile if use_mp_entry else "market",
-                    )
+                # (spec, result, open_ts, fill_ts) — bookkeeping unchanged below
+                placements: list[
+                    tuple[Any, Any, Any, Any]
+                ] = []
 
-                # Mid-price path already retries internally — no outer retries
                 if use_mp_entry:
-                    result = await _place_one()
+                    group_open_ts = get_utc_now()
+                    pair_results = await execute_paired_legs(
+                        legs=[
+                            {
+                                "product_id": int(s.product_id),
+                                "side": "buy" if s.is_long else "sell",
+                                "quantity": int(s.quantity),
+                                "symbol": str(s.symbol),
+                                "leg_label": str(s.role),
+                                "selected_premium": float(
+                                    s.mark_premium or 0
+                                )
+                                or None,
+                                "bracket_sl_price": s.bracket_sl_price,
+                                "bracket_sl_limit": s.bracket_sl_limit,
+                            }
+                            for s in group_specs
+                        ],
+                        delta_client=client,
+                        reason=entry_reason,
+                        midprice_enabled=True,
+                        max_chase_seconds=chase_max,
+                        hold_seconds=hold_s,
+                        entry_premium_match_tolerance_pct=entry_tol,
+                        selection_ts=selection_ts,
+                        phase=phase,
+                    )
+                    group_fill_ts = get_utc_now()
+                    if len(pair_results) != len(group_specs):
+                        raise EntryPartialUnwind(
+                            f"Entry {phase} pair returned "
+                            f"{len(pair_results)} results for "
+                            f"{len(group_specs)} legs",
+                            filled_legs=list(filled_entry_legs),
+                            failed_role=str(group_specs[0].role),
+                        )
+                    for s, res in zip(group_specs, pair_results):
+                        placements.append(
+                            (s, res, group_open_ts, group_fill_ts)
+                        )
                 else:
-                    result = await place_leg_with_retries(
-                        role=spec.role,
-                        requested=int(spec.quantity),
-                        place_fn=_place_one,
-                    )
-                fill_ts = get_utc_now()
+                    # Market path — sequential per leg (unchanged behaviour)
+                    for spec in group_specs:
 
-                if not is_full_fill(result, int(spec.quantity)):
-                    # Record any partial fill before raising unwind
-                    partial_size = 0
-                    if result.success:
-                        try:
-                            partial_size = int(
-                                getattr(result, "filled_size", 0) or 0
+                        async def _place_one(_spec=spec):
+                            if _spec.is_long:
+                                return await self.order_executor.buy_option(
+                                    product_id=int(_spec.product_id),
+                                    quantity=int(_spec.quantity),
+                                    delta_client=client,
+                                    symbol_for_fallback=str(_spec.symbol),
+                                )
+                            return await self.order_executor.sell_option(
+                                product_id=int(_spec.product_id),
+                                quantity=int(_spec.quantity),
+                                delta_client=client,
+                                symbol_for_fallback=str(_spec.symbol),
+                                bracket_sl_price=_spec.bracket_sl_price,
+                                bracket_sl_limit=_spec.bracket_sl_limit,
                             )
-                        except (TypeError, ValueError):
-                            partial_size = 0
-                    if partial_size > 0:
-                        filled_entry_legs.append(
-                            FilledEntryLeg(
-                                role=spec.role,
+
+                        open_ts = get_utc_now()
+                        result = await place_leg_with_retries(
+                            role=spec.role,
+                            requested=int(spec.quantity),
+                            place_fn=_place_one,
+                        )
+                        fill_ts = get_utc_now()
+                        placements.append((spec, result, open_ts, fill_ts))
+
+                # Commit every leg in this group before the next group starts.
+                for spec, result, open_ts, fill_ts in placements:
+                    if not is_full_fill(result, int(spec.quantity)):
+                        # Record any partial fill before raising unwind
+                        partial_size = 0
+                        if result.success:
+                            try:
+                                partial_size = int(
+                                    getattr(result, "filled_size", 0) or 0
+                                )
+                            except (TypeError, ValueError):
+                                partial_size = 0
+                        if partial_size > 0:
+                            filled_entry_legs.append(
+                                FilledEntryLeg(
+                                    role=spec.role,
+                                    product_id=int(spec.product_id),
+                                    symbol=str(spec.symbol),
+                                    strike=float(spec.strike),
+                                    requested_qty=int(spec.quantity),
+                                    filled_size=partial_size,
+                                    fill_price=float(
+                                        result.filled_price
+                                        or spec.mark_premium
+                                    ),
+                                    order_id=(
+                                        str(result.order_id)
+                                        if result.order_id is not None
+                                        else None
+                                    ),
+                                    commission=(
+                                        abs(float(result.commission))
+                                        if result.commission is not None
+                                        else None
+                                    ),
+                                    is_long=bool(spec.is_long),
+                                    mark_premium=float(spec.mark_premium),
+                                )
+                            )
+                        raise EntryPartialUnwind(
+                            f"Entry leg {spec.role} incomplete after retries: "
+                            f"{result.error or 'partial_fill'}",
+                            filled_legs=list(filled_entry_legs),
+                            failed_role=spec.role,
+                        )
+
+                    fill_px = float(result.filled_price or 0.0)
+                    if fill_px <= 0:
+                        fill_px = float(spec.mark_premium)
+                    oid = (
+                        str(result.order_id)
+                        if result.order_id is not None
+                        else None
+                    )
+                    fee = (
+                        abs(float(result.commission))
+                        if result.commission is not None
+                        else None
+                    )
+                    filled_size = int(
+                        getattr(result, "filled_size", None) or spec.quantity
+                    )
+
+                    filled_entry_legs.append(
+                        FilledEntryLeg(
+                            role=spec.role,
+                            product_id=int(spec.product_id),
+                            symbol=str(spec.symbol),
+                            strike=float(spec.strike),
+                            requested_qty=int(spec.quantity),
+                            filled_size=filled_size,
+                            fill_price=fill_px,
+                            order_id=oid,
+                            commission=fee,
+                            is_long=bool(spec.is_long),
+                            mark_premium=float(spec.mark_premium),
+                        )
+                    )
+
+                    if spec.role == "wing_call":
+                        wing_call_open_ts = open_ts
+                        wing_call_fill_ts = fill_ts
+                        wing_call_fill = fill_px
+                        wing_call_order_id = oid
+                        wing_call_fee = fee
+                        wing_call_mark = float(spec.mark_premium)
+                        logger.info(
+                            "[WING_ENTRY] leg=call strike=%s qty=%s fill=%s "
+                            "order_id=%s",
+                            spec.strike,
+                            spec.quantity,
+                            fill_px,
+                            oid,
+                        )
+                    elif spec.role == "wing_put":
+                        wing_put_open_ts = open_ts
+                        wing_put_fill_ts = fill_ts
+                        wing_put_fill = fill_px
+                        wing_put_order_id = oid
+                        wing_put_fee = fee
+                        wing_put_mark = float(spec.mark_premium)
+                        logger.info(
+                            "[WING_ENTRY] leg=put strike=%s qty=%s fill=%s "
+                            "order_id=%s",
+                            spec.strike,
+                            spec.quantity,
+                            fill_px,
+                            oid,
+                        )
+                    elif spec.role == "call":
+                        call_result = result
+                        call_open_ts = open_ts
+                        call_fill_ts = fill_ts
+                        call_fill = fill_px
+                        call_order_id = oid
+                        call_fee = fee
+                        logger.info(
+                            "Call filled @ %s order_id=%s",
+                            call_fill,
+                            call_order_id,
+                        )
+                        call_sl_trigger_price, call_sl_limit = (
+                            await finalize_bracket_sl_after_fill(
+                                client,
+                                entry_order_id=call_order_id,
                                 product_id=int(spec.product_id),
-                                symbol=str(spec.symbol),
-                                strike=float(spec.strike),
-                                requested_qty=int(spec.quantity),
-                                filled_size=partial_size,
-                                fill_price=float(
-                                    result.filled_price or spec.mark_premium
-                                ),
-                                order_id=(
-                                    str(result.order_id)
-                                    if result.order_id is not None
-                                    else None
-                                ),
-                                commission=(
-                                    abs(float(result.commission))
-                                    if result.commission is not None
-                                    else None
-                                ),
-                                is_long=bool(spec.is_long),
-                                mark_premium=float(spec.mark_premium),
+                                mark_price=call_mark,
+                                fill_price=call_fill,
+                                universal_sl_pct=universal_sl_pct,
+                                provisional_stop=call_prov_sl,
+                                provisional_limit=call_prov_limit,
+                                leg="call",
+                                trade_id=None,
                             )
                         )
-                    raise EntryPartialUnwind(
-                        f"Entry leg {spec.role} incomplete after retries: "
-                        f"{result.error or 'partial_fill'}",
-                        filled_legs=list(filled_entry_legs),
-                        failed_role=spec.role,
-                    )
-
-                fill_px = float(result.filled_price or 0.0)
-                if fill_px <= 0:
-                    fill_px = float(spec.mark_premium)
-                oid = (
-                    str(result.order_id)
-                    if result.order_id is not None
-                    else None
-                )
-                fee = (
-                    abs(float(result.commission))
-                    if result.commission is not None
-                    else None
-                )
-                filled_size = int(
-                    getattr(result, "filled_size", None) or spec.quantity
-                )
-
-                filled_entry_legs.append(
-                    FilledEntryLeg(
-                        role=spec.role,
-                        product_id=int(spec.product_id),
-                        symbol=str(spec.symbol),
-                        strike=float(spec.strike),
-                        requested_qty=int(spec.quantity),
-                        filled_size=filled_size,
-                        fill_price=fill_px,
-                        order_id=oid,
-                        commission=fee,
-                        is_long=bool(spec.is_long),
-                        mark_premium=float(spec.mark_premium),
-                    )
-                )
-
-                if spec.role == "wing_call":
-                    wing_call_open_ts = open_ts
-                    wing_call_fill_ts = fill_ts
-                    wing_call_fill = fill_px
-                    wing_call_order_id = oid
-                    wing_call_fee = fee
-                    wing_call_mark = float(spec.mark_premium)
-                    logger.info(
-                        "[WING_ENTRY] leg=call strike=%s qty=%s fill=%s "
-                        "order_id=%s",
-                        spec.strike,
-                        spec.quantity,
-                        fill_px,
-                        oid,
-                    )
-                elif spec.role == "wing_put":
-                    wing_put_open_ts = open_ts
-                    wing_put_fill_ts = fill_ts
-                    wing_put_fill = fill_px
-                    wing_put_order_id = oid
-                    wing_put_fee = fee
-                    wing_put_mark = float(spec.mark_premium)
-                    logger.info(
-                        "[WING_ENTRY] leg=put strike=%s qty=%s fill=%s "
-                        "order_id=%s",
-                        spec.strike,
-                        spec.quantity,
-                        fill_px,
-                        oid,
-                    )
-                elif spec.role == "call":
-                    call_result = result
-                    call_open_ts = open_ts
-                    call_fill_ts = fill_ts
-                    call_fill = fill_px
-                    call_order_id = oid
-                    call_fee = fee
-                    logger.info(
-                        "Call filled @ %s order_id=%s", call_fill, call_order_id
-                    )
-                    call_sl_trigger_price, call_sl_limit = (
-                        await finalize_bracket_sl_after_fill(
-                            client,
-                            entry_order_id=call_order_id,
-                            product_id=int(spec.product_id),
-                            mark_price=call_mark,
-                            fill_price=call_fill,
-                            universal_sl_pct=universal_sl_pct,
-                            provisional_stop=call_prov_sl,
-                            provisional_limit=call_prov_limit,
-                            leg="call",
-                            trade_id=None,
+                        filled_entry_legs[-1].sl_trigger_price = (
+                            float(call_sl_trigger_price)
+                            if call_sl_trigger_price
+                            else None
                         )
-                    )
-                    filled_entry_legs[-1].sl_trigger_price = (
-                        float(call_sl_trigger_price)
-                        if call_sl_trigger_price
-                        else None
-                    )
-                elif spec.role == "put":
-                    put_result = result
-                    put_open_ts = open_ts
-                    put_fill_ts = fill_ts
-                    put_fill = fill_px
-                    put_order_id = oid
-                    put_fee = fee
-                    logger.info(
-                        "Put filled @ %s order_id=%s", put_fill, put_order_id
-                    )
-                    put_sl_trigger_price, put_sl_limit = (
-                        await finalize_bracket_sl_after_fill(
-                            client,
-                            entry_order_id=put_order_id,
-                            product_id=int(spec.product_id),
-                            mark_price=put_mark,
-                            fill_price=put_fill,
-                            universal_sl_pct=universal_sl_pct,
-                            provisional_stop=put_prov_sl,
-                            provisional_limit=put_prov_limit,
-                            leg="put",
-                            trade_id=None,
+                    elif spec.role == "put":
+                        put_result = result
+                        put_open_ts = open_ts
+                        put_fill_ts = fill_ts
+                        put_fill = fill_px
+                        put_order_id = oid
+                        put_fee = fee
+                        logger.info(
+                            "Put filled @ %s order_id=%s",
+                            put_fill,
+                            put_order_id,
                         )
-                    )
-                    filled_entry_legs[-1].sl_trigger_price = (
-                        float(put_sl_trigger_price)
-                        if put_sl_trigger_price
-                        else None
-                    )
+                        put_sl_trigger_price, put_sl_limit = (
+                            await finalize_bracket_sl_after_fill(
+                                client,
+                                entry_order_id=put_order_id,
+                                product_id=int(spec.product_id),
+                                mark_price=put_mark,
+                                fill_price=put_fill,
+                                universal_sl_pct=universal_sl_pct,
+                                provisional_stop=put_prov_sl,
+                                provisional_limit=put_prov_limit,
+                                leg="put",
+                                trade_id=None,
+                            )
+                        )
+                        filled_entry_legs[-1].sl_trigger_price = (
+                            float(put_sl_trigger_price)
+                            if put_sl_trigger_price
+                            else None
+                        )
 
             # Hedge already opened/reused in phase 1 (before wings/shorts).
 
