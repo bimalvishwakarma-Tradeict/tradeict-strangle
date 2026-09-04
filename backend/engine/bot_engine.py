@@ -3617,6 +3617,9 @@ class BotEngine:
                 realized_pnl=final_pnl,
                 last_gross_mtm=last_gross,
                 legs=legs_for_sanity,
+                adjustment_count=int(
+                    getattr(trade_row, "adjustment_count", 0) or 0
+                ),
             )
             trade_row.in_conversion_mode = False
             db.commit()
@@ -4579,6 +4582,9 @@ class BotEngine:
                     realized_pnl=final_pnl,
                     last_gross_mtm=gross,
                     legs=all_legs_for_sanity,
+                    adjustment_count=int(
+                        getattr(trade_row, "adjustment_count", 0) or 0
+                    ),
                 )
                 exit_db.commit()
 

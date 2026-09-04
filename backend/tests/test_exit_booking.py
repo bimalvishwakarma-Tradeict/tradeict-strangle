@@ -186,6 +186,87 @@ def test_pnl_sanity_fail_on_sign_mismatch() -> None:
     assert ok2 is True
 
 
+def test_pnl_sanity_excludes_prior_adjustment_legs() -> None:
+    """Trade#130: total realized sign != gross, but final cohort matches."""
+    final_t = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    prior_t = datetime(2026, 9, 4, 10, 0, 0, tzinfo=timezone.utc)
+    legs = [
+        _leg(
+            id=1,
+            leg_type="call",
+            status="closed",
+            realized_pnl=-0.9740,
+            exit_time=prior_t,
+        ),
+        _leg(
+            id=2,
+            leg_type="put",
+            status="closed",
+            realized_pnl=0.4322,
+            exit_time=final_t,
+        ),
+        _leg(
+            id=3,
+            leg_type="wing_call",
+            status="closed",
+            realized_pnl=0.7556,
+            exit_time=final_t,
+        ),
+        _leg(
+            id=4,
+            leg_type="wing_put",
+            status="closed",
+            realized_pnl=-0.2320,
+            exit_time=final_t,
+        ),
+        _leg(
+            id=5,
+            leg_type="call",
+            status="closed",
+            realized_pnl=-0.4380,
+            exit_time=final_t,
+        ),
+    ]
+    # total realized ≈ -0.456; gross ≈ +0.521 — old check would FAIL
+    ok = pnl_sanity_check(
+        trade_id=130,
+        realized_pnl=-0.456213,
+        last_gross_mtm=0.5215,
+        legs=legs,
+        adjustment_count=1,
+    )
+    assert ok is True
+
+
+def test_pnl_sanity_still_fails_on_final_cohort_sign_mismatch() -> None:
+    """Real disagreement on final-open legs must still CRITICAL."""
+    t = datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    legs = [
+        _leg(
+            id=1,
+            leg_type="call",
+            status="closed",
+            realized_pnl=0.50,
+            exit_time=t,
+        ),
+        _leg(
+            id=2,
+            leg_type="put",
+            status="closed",
+            realized_pnl=0.10,
+            exit_time=t,
+        ),
+    ]
+    ok = pnl_sanity_check(
+        trade_id=999,
+        realized_pnl=0.60,
+        last_gross_mtm=-0.55,
+        legs=legs,
+        adjustment_count=0,
+    )
+    assert ok is False
+
+
 def test_backfill_class_a_b1_b2_classification() -> None:
     trade = SimpleNamespace(
         id=121,

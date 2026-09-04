@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from backend.core.delta_client import short_leg_realized_pnl
 from backend.core.time_utils import get_utc_now
 
 logger = logging.getLogger(__name__)
+
+# Phased basket exit closes shorts then wings a few seconds apart (live ~3s).
+# Legs within this window of the latest exit_time are treated as the final
+# exit cohort that last_gross_mtm covered. Earlier closes = adjustments.
+# Why exit_time (not adjustment_count alone): Leg has no adjustment marker;
+# multiple Leg rows of the same type appear after adjustment. Clustering by
+# max(exit_time) is the reliable way to separate prior closes from the
+# final-exit set that gross MTM actually included.
+_FINAL_EXIT_COHORT_SECONDS = 120.0
 
 
 def recompute_trade_realized_from_legs(
@@ -198,46 +207,136 @@ def book_leg_close(
     return realized
 
 
+def _as_aware_utc(dt: Any) -> datetime | None:
+    if dt is None or not isinstance(dt, datetime):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _split_legs_for_gross_mtm_compare(
+    legs: list[Any],
+) -> tuple[list[Any], list[Any]]:
+    """
+    Split legs into (final_exit_cohort, prior_closed).
+
+    last_gross_mtm only includes legs that were OPEN when it was sampled
+    (just before / during final exit). Adjustment/conversion closes create
+    separate Leg rows with earlier exit_time — those realized dollars are
+    in trade.realized_pnl but never in last_gross_mtm.
+
+    Identification: no Adjustment marker on Leg. Use exit_time clustering —
+    max(exit_time) is the final-exit anchor; legs within
+    _FINAL_EXIT_COHORT_SECONDS of that anchor are the like-for-like set.
+    Missing exit_time → treat as final cohort (just booked / still open).
+    """
+    if not legs:
+        return [], []
+    stamped: list[tuple[Any, datetime]] = []
+    unstamped: list[Any] = []
+    for leg in legs:
+        et = _as_aware_utc(getattr(leg, "exit_time", None))
+        if et is None:
+            unstamped.append(leg)
+        else:
+            stamped.append((leg, et))
+    if not stamped:
+        return list(legs), []
+    anchor = max(et for _, et in stamped)
+    window = timedelta(seconds=float(_FINAL_EXIT_COHORT_SECONDS))
+    cohort: list[Any] = list(unstamped)
+    prior: list[Any] = []
+    for leg, et in stamped:
+        if anchor - et <= window:
+            cohort.append(leg)
+        else:
+            prior.append(leg)
+    return cohort, prior
+
+
+def _sum_leg_realized(legs: list[Any]) -> float:
+    total = 0.0
+    for leg in legs:
+        try:
+            total += float(getattr(leg, "realized_pnl", None) or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def pnl_sanity_check(
     *,
     trade_id: int,
     realized_pnl: float,
     last_gross_mtm: float | None,
     legs: list[Any] | None = None,
+    adjustment_count: int | None = None,
 ) -> bool:
     """
     Return True if OK. Log CRITICAL [PNL_SANITY_FAIL] when signs disagree.
+
+    Compares last_gross_mtm to the realized sum of legs that were still open
+    at final exit (exit_time cohort), NOT the full trade.realized_pnl which
+    also includes earlier adjustment closes. Sign-disagreement on that
+    like-for-like pair still fails — this does not weaken the check.
     """
     from backend.config import PNL_SANITY_ABS_TOLERANCE_USD
 
     tol = float(PNL_SANITY_ABS_TOLERANCE_USD)
     gross = float(last_gross_mtm) if last_gross_mtm is not None else None
-    realized = float(realized_pnl)
+    total_realized = float(realized_pnl)
     if gross is None:
         return True
-    if abs(gross) < tol or abs(realized) < tol:
+
+    legs_list = list(legs or [])
+    cohort, prior = _split_legs_for_gross_mtm_compare(legs_list)
+    prior_realized = _sum_leg_realized(prior)
+    if legs_list:
+        # Like-for-like: only legs that shared the gross MTM snapshot
+        compare_realized = _sum_leg_realized(cohort)
+    else:
+        # No leg detail — fall back to trade total (legacy callers/tests)
+        compare_realized = total_realized
+
+    adj_count = int(adjustment_count) if adjustment_count is not None else 0
+
+    if abs(gross) < tol or abs(compare_realized) < tol:
         return True
-    if (gross > 0 and realized > 0) or (gross < 0 and realized < 0):
+    if (gross > 0 and compare_realized > 0) or (
+        gross < 0 and compare_realized < 0
+    ):
         return True
 
     breakdown = []
-    for leg in legs or []:
+    prior_ids = {int(getattr(leg, "id", 0) or 0) for leg in prior}
+    for leg in legs_list:
+        lid = int(getattr(leg, "id", 0) or 0)
         breakdown.append(
             {
-                "leg_id": int(getattr(leg, "id", 0) or 0),
+                "leg_id": lid,
                 "leg_type": str(getattr(leg, "leg_type", "")),
                 "entry": getattr(leg, "initial_premium", None),
                 "exit": getattr(leg, "exit_premium", None),
                 "realized": getattr(leg, "realized_pnl", None),
                 "status": getattr(leg, "status", None),
+                "exit_time": str(getattr(leg, "exit_time", None) or ""),
+                "cohort": "prior_closed" if lid in prior_ids else "final_exit",
             }
         )
     logger.critical(
-        "[PNL_SANITY_FAIL] trade_id=%s realized_pnl=%.6f "
-        "last_gross_mtm=%.6f legs=%s",
+        "[PNL_SANITY_FAIL] trade_id=%s total_realized=%.6f "
+        "compare_realized=%.6f last_gross_mtm=%.6f "
+        "prior_closed_legs=%s prior_realized=%.6f "
+        "final_cohort_legs=%s adjustment_count=%s legs=%s",
         trade_id,
-        realized,
+        total_realized,
+        compare_realized,
         gross,
+        len(prior),
+        prior_realized,
+        len(cohort),
+        adj_count,
         breakdown,
     )
     try:
@@ -247,8 +346,13 @@ def pnl_sanity_check(
             "PNL_SANITY_FAIL",
             int(trade_id),
             {
-                "realized_pnl": round(realized, 6),
+                "total_realized_pnl": round(total_realized, 6),
+                "compare_realized": round(compare_realized, 6),
                 "last_gross_mtm": round(gross, 6),
+                "prior_closed_legs": len(prior),
+                "prior_realized": round(prior_realized, 6),
+                "final_cohort_legs": len(cohort),
+                "adjustment_count": adj_count,
                 "legs": breakdown,
             },
         )
