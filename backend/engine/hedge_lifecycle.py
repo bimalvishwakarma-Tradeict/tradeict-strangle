@@ -614,10 +614,12 @@ async def open_hedge(
     opened_via: str = "auto",
 ) -> HedgePosition:
     """
-    Buy a long ATM straddle (call then put), verify both legs, persist hedge_positions.
+    Buy a long ATM straddle, verify both legs, persist hedge_positions.
 
-    If the put fails after the call is live, unwind the call with reduce_only and
-    persist status='error'. Never leaves a one-legged hedge unmarked.
+    Midprice entry places call+put in parallel via execute_paired_legs.
+    Market entry stays sequential (call then put). If only one leg is live
+    after entry, unwind that leg with reduce_only and persist status='error'.
+    Never leaves a one-legged hedge unmarked.
 
     opened_via: 'auto' (bot) or 'manual' (API) — logged when min-DTE skip fires.
     """
@@ -824,10 +826,12 @@ async def open_hedge(
             },
         )
 
-        # --- BUY CALL (chase) then PUT (urgent) when midprice allow-listed ---
+        # --- BUY CALL + PUT ---
+        # Midprice: parallel via execute_paired_legs (partner HOLD_SECONDS=5).
+        # Market: sequential buy_option (unchanged — call then put).
         from backend.engine.midprice_executor import (
             clamp_chase_max_seconds,
-            execute_with_midprice,
+            execute_paired_legs,
             should_use_midprice,
         )
         import time as _time_mod
@@ -844,114 +848,79 @@ async def open_hedge(
             enabled=mp_on, reason="HEDGE_ENTRY"
         )
 
-        call_open_ts = _utc_now()
-        if use_mp_entry:
-            call_result = await execute_with_midprice(
-                product_id=call_pid,
-                side="buy",
-                quantity=qty,
-                profile="chase",
-                delta_client=client,
-                reason="HEDGE_ENTRY",
-                leg_label="hedge_call",
-                symbol=call_symbol,
-                max_chase_seconds=chase_max,
-                midprice_enabled=True,
-                selected_premium=call_ask,
-                selection_ts=selection_ts,
-                entry_premium_match_tolerance_pct=entry_tol,
-            )
-        else:
-            call_result = await executor.buy_option(
-                product_id=call_pid,
-                quantity=qty,
-                delta_client=client,
-                symbol_for_fallback=call_symbol,
-            )
-        call_fill_ts = _utc_now()
-        if not call_result.success:
-            _hedge_log(
-                "HEDGE_OPEN_FAIL",
-                0,
-                {"stage": "buy_call", "reason": call_result.error or "Call buy failed"},
-                critical=True,
-            )
-            raise HedgeOpenError(
-                "buy_call",
-                call_result.error or "Call buy order failed",
-            )
-
-        await asyncio.sleep(VERIFY_PAUSE_SECONDS)
-        call_ok, call_size = await _verify_leg(
-            client, leg="call", product_id=call_pid, hedge_id=0
-        )
-        if not call_ok:
-            _hedge_log(
-                "HEDGE_OPEN_FAIL",
-                0,
-                {
-                    "stage": "verify_call",
-                    "reason": f"Call not on Delta product_id={call_pid}",
-                },
-                critical=True,
-            )
-            raise HedgeOpenError(
-                "verify_call",
-                f"Call buy filled but position not found on Delta "
-                f"(product_id={call_pid})",
-            )
-
-        call_fill = float(call_result.filled_price or 0)
-        call_fee = float(call_result.commission or 0)
-        call_order_id = (
-            str(call_result.order_id) if call_result.order_id is not None else None
-        )
-
-        # --- BUY PUT ---
-        put_open_ts = _utc_now()
-        if use_mp_entry:
-            put_result = await execute_with_midprice(
-                product_id=put_pid,
-                side="buy",
-                quantity=qty,
-                profile="urgent",
-                delta_client=client,
-                reason="HEDGE_ENTRY",
-                leg_label="hedge_put",
-                symbol=put_symbol,
-                max_chase_seconds=chase_max,
-                midprice_enabled=True,
-                selected_premium=put_ask,
-                selection_ts=selection_ts,
-                entry_premium_match_tolerance_pct=entry_tol,
-            )
-        else:
-            put_result = await executor.buy_option(
-                product_id=put_pid,
-                quantity=qty,
-                delta_client=client,
-                symbol_for_fallback=put_symbol,
-            )
-        put_fill_ts = _utc_now()
-        put_ok = False
+        call_fill = 0.0
+        call_fee = 0.0
+        call_order_id: str | None = None
+        call_size = 0.0
         put_fill = 0.0
         put_fee = 0.0
         put_order_id: str | None = None
-        put_fail_reason = ""
+        put_ok = False
+        call_ok = False
 
-        if not put_result.success:
-            put_fail_reason = put_result.error or "Put buy order failed"
-        else:
-            await asyncio.sleep(VERIFY_PAUSE_SECONDS)
-            put_ok, _put_size = await _verify_leg(
-                client, leg="put", product_id=put_pid, hedge_id=0
+        if use_mp_entry:
+            call_open_ts = _utc_now()
+            put_open_ts = call_open_ts
+            pair_results = await execute_paired_legs(
+                legs=[
+                    {
+                        "product_id": call_pid,
+                        "side": "buy",
+                        "quantity": qty,
+                        "symbol": call_symbol,
+                        "leg_label": "hedge_call",
+                        "selected_premium": call_ask,
+                    },
+                    {
+                        "product_id": put_pid,
+                        "side": "buy",
+                        "quantity": qty,
+                        "symbol": put_symbol,
+                        "leg_label": "hedge_put",
+                        "selected_premium": put_ask,
+                    },
+                ],
+                delta_client=client,
+                reason="HEDGE_ENTRY",
+                midprice_enabled=True,
+                max_chase_seconds=chase_max,
+                entry_premium_match_tolerance_pct=entry_tol,
+                selection_ts=selection_ts,
+                phase="hedge_entry",
             )
-            if not put_ok:
-                put_fail_reason = (
-                    f"Put buy filled but position not found on Delta "
-                    f"(product_id={put_pid})"
+            call_result = pair_results[0]
+            put_result = pair_results[1]
+            call_fill_ts = _utc_now()
+            put_fill_ts = call_fill_ts
+
+            call_order_ok = bool(call_result.success)
+            put_order_ok = bool(put_result.success)
+
+            # One settle pause, then verify both (never verify mid-pair).
+            await asyncio.sleep(VERIFY_PAUSE_SECONDS)
+            call_verified = False
+            put_verified = False
+            if call_order_ok:
+                call_verified, call_size = await _verify_leg(
+                    client, leg="call", product_id=call_pid, hedge_id=0
                 )
-            else:
+            if put_order_ok:
+                put_verified, _put_size = await _verify_leg(
+                    client, leg="put", product_id=put_pid, hedge_id=0
+                )
+
+            call_ok = call_order_ok and call_verified
+            put_ok = put_order_ok and put_verified
+
+            if call_ok:
+                call_fill = float(call_result.filled_price or 0)
+                call_fee = float(call_result.commission or 0)
+                call_order_id = (
+                    str(call_result.order_id)
+                    if call_result.order_id is not None
+                    else None
+                )
+            if put_ok:
                 put_fill = float(put_result.filled_price or 0)
                 put_fee = float(put_result.commission or 0)
                 put_order_id = (
@@ -960,78 +929,282 @@ async def open_hedge(
                     else None
                 )
 
-        if not put_ok:
-            _hedge_log(
-                "HEDGE_OPEN_FAIL",
-                0,
-                {"stage": "buy_put", "reason": put_fail_reason},
-                critical=True,
-            )
-            flat, unwind_oid = await _unwind_long(
-                client,
-                product_id=call_pid,
-                quantity=qty,
-                symbol=call_symbol,
-                hedge_id=0,
-                leg="call",
-            )
-            err_msg = put_fail_reason
-            if not flat:
-                err_msg = (
-                    f"{put_fail_reason}; CRITICAL: call unwind incomplete "
-                    f"(product_id={call_pid}, order_id={unwind_oid}) — "
-                    f"check Delta manually"
-                )
+            if not (call_ok and put_ok):
+                call_err = ""
+                if not call_order_ok:
+                    call_err = call_result.error or "Call buy order failed"
+                elif not call_verified:
+                    call_err = (
+                        f"Call buy filled but position not found on Delta "
+                        f"(product_id={call_pid})"
+                    )
+                put_err = ""
+                if not put_order_ok:
+                    put_err = put_result.error or "Put buy order failed"
+                elif not put_verified:
+                    put_err = (
+                        f"Put buy filled but position not found on Delta "
+                        f"(product_id={put_pid})"
+                    )
+                fail_reason = "; ".join(
+                    p for p in (call_err, put_err) if p
+                ) or "Hedge pair entry failed"
+
                 _hedge_log(
                     "HEDGE_OPEN_FAIL",
                     0,
                     {
-                        "stage": "unwind_call",
-                        "reason": "still_open",
-                        "product_id": call_pid,
-                        "order_id": unwind_oid,
-                        "verified_flat": False,
+                        "stage": "buy_pair",
+                        "call_ok": call_ok,
+                        "put_ok": put_ok,
+                        "reason": fail_reason,
                     },
                     critical=True,
                 )
 
-            hedge_row = HedgePosition(
-                account_id=int(account.id),
-                underlying=und,
-                expiry_date=expiry,
-                strike=float(atm),
+                # Four outcomes: ok/ok (above), ok/fail, fail/ok, fail/fail
+                unwind_leg: str | None = None
+                unwind_pid = 0
+                unwind_sym = ""
+                if call_ok and not put_ok:
+                    unwind_leg = "call"
+                    unwind_pid = call_pid
+                    unwind_sym = call_symbol
+                elif put_ok and not call_ok:
+                    unwind_leg = "put"
+                    unwind_pid = put_pid
+                    unwind_sym = put_symbol
+
+                err_msg = fail_reason
+                if unwind_leg is not None:
+                    flat, unwind_oid = await _unwind_long(
+                        client,
+                        product_id=unwind_pid,
+                        quantity=qty,
+                        symbol=unwind_sym,
+                        hedge_id=0,
+                        leg=unwind_leg,
+                    )
+                    if not flat:
+                        err_msg = (
+                            f"{fail_reason}; CRITICAL: {unwind_leg} unwind "
+                            f"incomplete (product_id={unwind_pid}, "
+                            f"order_id={unwind_oid}) — check Delta manually"
+                        )
+                        _hedge_log(
+                            "HEDGE_OPEN_FAIL",
+                            0,
+                            {
+                                "stage": f"unwind_{unwind_leg}",
+                                "call_ok": call_ok,
+                                "put_ok": put_ok,
+                                "reason": "still_open",
+                                "product_id": unwind_pid,
+                                "order_id": unwind_oid,
+                                "verified_flat": False,
+                            },
+                            critical=True,
+                        )
+
+                hedge_row = HedgePosition(
+                    account_id=int(account.id),
+                    underlying=und,
+                    expiry_date=expiry,
+                    strike=float(atm),
+                    quantity=qty,
+                    status="error",
+                    call_product_id=call_pid,
+                    call_symbol=call_symbol,
+                    call_order_id=call_order_id,
+                    call_fill_price=call_fill if call_fill > 0 else None,
+                    call_entry_fee_usd=call_fee if call_fee > 0 else None,
+                    put_product_id=put_pid,
+                    put_symbol=put_symbol,
+                    put_order_id=put_order_id,
+                    put_fill_price=put_fill if put_fill > 0 else None,
+                    put_entry_fee_usd=put_fee if put_fee > 0 else None,
+                    entry_time=_utc_now(),
+                    target_usd=(
+                        float(settings.hedge_target_usd)
+                        if getattr(settings, "hedge_target_usd", None) is not None
+                        else None
+                    ),
+                    stoploss_usd=(
+                        float(settings.hedge_stoploss_usd)
+                        if getattr(settings, "hedge_stoploss_usd", None)
+                        is not None
+                        else None
+                    ),
+                    entry_total_theta=entry_total_theta,
+                    entry_call_iv=call_iv if call_iv > 0 else None,
+                    entry_put_iv=put_iv if put_iv > 0 else None,
+                    order_margin_per_lot=None,
+                    is_bot_managed=True,
+                    last_error=err_msg[:500],
+                )
+                db.add(hedge_row)
+                db.commit()
+                db.refresh(hedge_row)
+                raise HedgeOpenError("buy_pair", err_msg, hedge=hedge_row)
+
+        else:
+            # Market-order path — sequential call then put (unchanged).
+            call_open_ts = _utc_now()
+            call_result = await executor.buy_option(
+                product_id=call_pid,
                 quantity=qty,
-                status="error",
-                call_product_id=call_pid,
-                call_symbol=call_symbol,
-                call_order_id=call_order_id,
-                call_fill_price=call_fill if call_fill > 0 else None,
-                call_entry_fee_usd=call_fee if call_fee > 0 else None,
-                put_product_id=put_pid,
-                put_symbol=put_symbol,
-                put_order_id=put_order_id,
-                entry_time=_utc_now(),
-                target_usd=(
-                    float(settings.hedge_target_usd)
-                    if getattr(settings, "hedge_target_usd", None) is not None
-                    else None
-                ),
-                stoploss_usd=(
-                    float(settings.hedge_stoploss_usd)
-                    if getattr(settings, "hedge_stoploss_usd", None) is not None
-                    else None
-                ),
-                entry_total_theta=entry_total_theta,
-                entry_call_iv=call_iv if call_iv > 0 else None,
-                entry_put_iv=put_iv if put_iv > 0 else None,
-                order_margin_per_lot=None,
-                is_bot_managed=True,
-                last_error=err_msg[:500],
+                delta_client=client,
+                symbol_for_fallback=call_symbol,
             )
-            db.add(hedge_row)
-            db.commit()
-            db.refresh(hedge_row)
-            raise HedgeOpenError("buy_put", err_msg, hedge=hedge_row)
+            call_fill_ts = _utc_now()
+            if not call_result.success:
+                _hedge_log(
+                    "HEDGE_OPEN_FAIL",
+                    0,
+                    {
+                        "stage": "buy_call",
+                        "reason": call_result.error or "Call buy failed",
+                    },
+                    critical=True,
+                )
+                raise HedgeOpenError(
+                    "buy_call",
+                    call_result.error or "Call buy order failed",
+                )
+
+            await asyncio.sleep(VERIFY_PAUSE_SECONDS)
+            call_ok, call_size = await _verify_leg(
+                client, leg="call", product_id=call_pid, hedge_id=0
+            )
+            if not call_ok:
+                _hedge_log(
+                    "HEDGE_OPEN_FAIL",
+                    0,
+                    {
+                        "stage": "verify_call",
+                        "reason": f"Call not on Delta product_id={call_pid}",
+                    },
+                    critical=True,
+                )
+                raise HedgeOpenError(
+                    "verify_call",
+                    f"Call buy filled but position not found on Delta "
+                    f"(product_id={call_pid})",
+                )
+
+            call_fill = float(call_result.filled_price or 0)
+            call_fee = float(call_result.commission or 0)
+            call_order_id = (
+                str(call_result.order_id)
+                if call_result.order_id is not None
+                else None
+            )
+
+            put_open_ts = _utc_now()
+            put_result = await executor.buy_option(
+                product_id=put_pid,
+                quantity=qty,
+                delta_client=client,
+                symbol_for_fallback=put_symbol,
+            )
+            put_fill_ts = _utc_now()
+            put_fail_reason = ""
+
+            if not put_result.success:
+                put_fail_reason = put_result.error or "Put buy order failed"
+            else:
+                await asyncio.sleep(VERIFY_PAUSE_SECONDS)
+                put_ok, _put_size = await _verify_leg(
+                    client, leg="put", product_id=put_pid, hedge_id=0
+                )
+                if not put_ok:
+                    put_fail_reason = (
+                        f"Put buy filled but position not found on Delta "
+                        f"(product_id={put_pid})"
+                    )
+                else:
+                    put_fill = float(put_result.filled_price or 0)
+                    put_fee = float(put_result.commission or 0)
+                    put_order_id = (
+                        str(put_result.order_id)
+                        if put_result.order_id is not None
+                        else None
+                    )
+
+            if not put_ok:
+                _hedge_log(
+                    "HEDGE_OPEN_FAIL",
+                    0,
+                    {"stage": "buy_put", "reason": put_fail_reason},
+                    critical=True,
+                )
+                flat, unwind_oid = await _unwind_long(
+                    client,
+                    product_id=call_pid,
+                    quantity=qty,
+                    symbol=call_symbol,
+                    hedge_id=0,
+                    leg="call",
+                )
+                err_msg = put_fail_reason
+                if not flat:
+                    err_msg = (
+                        f"{put_fail_reason}; CRITICAL: call unwind incomplete "
+                        f"(product_id={call_pid}, order_id={unwind_oid}) — "
+                        f"check Delta manually"
+                    )
+                    _hedge_log(
+                        "HEDGE_OPEN_FAIL",
+                        0,
+                        {
+                            "stage": "unwind_call",
+                            "reason": "still_open",
+                            "product_id": call_pid,
+                            "order_id": unwind_oid,
+                            "verified_flat": False,
+                        },
+                        critical=True,
+                    )
+
+                hedge_row = HedgePosition(
+                    account_id=int(account.id),
+                    underlying=und,
+                    expiry_date=expiry,
+                    strike=float(atm),
+                    quantity=qty,
+                    status="error",
+                    call_product_id=call_pid,
+                    call_symbol=call_symbol,
+                    call_order_id=call_order_id,
+                    call_fill_price=call_fill if call_fill > 0 else None,
+                    call_entry_fee_usd=call_fee if call_fee > 0 else None,
+                    put_product_id=put_pid,
+                    put_symbol=put_symbol,
+                    put_order_id=put_order_id,
+                    entry_time=_utc_now(),
+                    target_usd=(
+                        float(settings.hedge_target_usd)
+                        if getattr(settings, "hedge_target_usd", None)
+                        is not None
+                        else None
+                    ),
+                    stoploss_usd=(
+                        float(settings.hedge_stoploss_usd)
+                        if getattr(settings, "hedge_stoploss_usd", None)
+                        is not None
+                        else None
+                    ),
+                    entry_total_theta=entry_total_theta,
+                    entry_call_iv=call_iv if call_iv > 0 else None,
+                    entry_put_iv=put_iv if put_iv > 0 else None,
+                    order_margin_per_lot=None,
+                    is_bot_managed=True,
+                    last_error=err_msg[:500],
+                )
+                db.add(hedge_row)
+                db.commit()
+                db.refresh(hedge_row)
+                raise HedgeOpenError("buy_put", err_msg, hedge=hedge_row)
 
         cost_usd = (call_fill + put_fill) * qty * CONTRACT_SIZE
         hedge_row = HedgePosition(
