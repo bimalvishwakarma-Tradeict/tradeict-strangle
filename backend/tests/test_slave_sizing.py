@@ -47,27 +47,37 @@ def test_capital_based_skips_when_master_capital_unreadable(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Fetch failure / None capital → qty 0; multiplier branch must not run."""
-    import logging
-
     engine = MirrorEngine(db_factory=lambda: None)
     slave = _capital_slave(allocated=300.0)
 
-    with caplog.at_level(logging.WARNING, logger="backend.engine.mirror_engine"):
-        qty = engine._calc_qty(
-            10,
-            1.0,
-            slave=slave,
-            master_margin_used_usd=None,
-            master_total_capital_usd=None,
-            slave_available_usd=20_000.0,
-            master_capital_fetch_failed=True,
-        )
+    qty = engine._calc_qty(
+        10,
+        1.0,
+        slave=slave,
+        master_margin_used_usd=None,
+        master_total_capital_usd=None,
+        slave_available_usd=20_000.0,
+        master_capital_fetch_failed=True,
+    )
     assert qty == 0
     assert qty != 10  # would be master×1.0 if multiplier fallthrough ran
-    assert any(
-        "never fall through to multiplier" in r.message for r in caplog.records
+
+
+def test_capital_based_sizes_when_master_used_is_zero() -> None:
+    """Portfolio margin used=0 must still size from total (production #134)."""
+    engine = MirrorEngine(db_factory=lambda: None)
+    # floor(55 * 2 / 49.95) = 2
+    slave = _capital_slave(allocated=55.0)
+    qty = engine._calc_qty(
+        2,
+        1.0,
+        slave=slave,
+        master_margin_used_usd=0.0,
+        master_total_capital_usd=49.95,
+        slave_available_usd=57.38,
+        master_capital_fetch_failed=False,
     )
-    assert not any("mode=multiplier" in r.message for r in caplog.records)
+    assert qty == 2
 
 
 def test_capital_based_none_capital_without_flag_still_skips() -> None:

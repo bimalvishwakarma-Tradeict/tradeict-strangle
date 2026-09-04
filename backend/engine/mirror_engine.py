@@ -464,105 +464,77 @@ class MirrorEngine:
         """
         Fetch master total/used capital for capital-based basket sizing.
 
-        Race: basket legs just placed → Delta wallet/WS can still report
-        used=$0 for ~1–2s while positions are open. Retry when that
-        inconsistency appears rather than sizing slaves to qty=0.
-        Prefer REST position_margin (+ order_margin) as used when present;
-        else total − available.
+        Portfolio-margin accounts often report used/position_margin = 0 (or
+        even available > balance) while many options are open — that is a
+        valid Delta response, not a race. Sizing uses total only
+        (qty = floor(effective * mq / total)); used is audit-only.
+
+        Failure: only when total <= 0 (or the request raises).
         """
-        # Brief waits — margin usually lands within 1–2s after fills.
-        max_attempts = 3
-        retry_delay_s = 1.5
-        last: dict[str, Any] = {
-            "total": 0.0,
-            "used": 0.0,
-            "available": 0.0,
-            "position_margin": 0.0,
-            "open_position_count": 0,
-            "failed": True,
-            "fail_reason": "not_fetched",
+        wallet = await master_client.get_wallet_balance()
+        total = float(wallet.get("balance_usdt", 0) or 0)
+        available = float(wallet.get("available_balance", 0) or 0)
+        pos_margin = float(wallet.get("position_margin", 0) or 0)
+        order_margin = float(wallet.get("order_margin", 0) or 0)
+        # Prefer exchange-reported blocked margin; else total − available.
+        used = max(0.0, pos_margin + order_margin)
+        if used <= 0:
+            used = max(0.0, total - available)
+
+        open_count = await self._count_open_option_positions(master_client)
+        result: dict[str, Any] = {
+            "total": total,
+            "used": used,
+            "available": available,
+            "position_margin": pos_margin,
+            "open_position_count": open_count,
+            "failed": False,
+            "fail_reason": "",
             "retries": 0,
         }
 
-        for attempt in range(1, max_attempts + 1):
-            wallet = await master_client.get_wallet_balance()
-            total = float(wallet.get("balance_usdt", 0) or 0)
-            available = float(wallet.get("available_balance", 0) or 0)
-            pos_margin = float(wallet.get("position_margin", 0) or 0)
-            order_margin = float(wallet.get("order_margin", 0) or 0)
-            # Prefer exchange-reported blocked margin (survives WS available lag).
-            used = max(0.0, pos_margin + order_margin)
-            if used <= 0:
-                used = max(0.0, total - available)
-
-            open_count = await self._count_open_option_positions(master_client)
-            last = {
-                "total": total,
-                "used": used,
-                "available": available,
-                "position_margin": pos_margin,
-                "open_position_count": open_count,
-                "failed": False,
-                "fail_reason": "",
-                "retries": attempt - 1,
-            }
-
-            if total > 0 and used > 0:
-                logger.info(
-                    "Master capital: total=$%.2f available=$%.2f "
-                    "used=$%.2f (attempt=%s)",
-                    total,
-                    available,
-                    used,
-                    attempt,
-                )
-                return last
-
-            # used==0 with open positions → stale margin snapshot (race)
-            if open_count > 0 and used <= 0:
-                log_and_buffer(
-                    "MASTER_CAPITAL_STALE",
-                    int(master_trade_id or 0),
-                    {
-                        "total": round(total, 4),
-                        "used": round(used, 4),
-                        "available": round(available, 4),
-                        "position_margin": round(pos_margin, 4),
-                        "open_position_count": open_count,
-                        "attempt": attempt,
-                        "will_retry": attempt < max_attempts,
-                        "note": (
-                            "open positions but used=0 — margin not yet "
-                            "reflected after recent fills"
-                        ),
-                    },
-                )
-                last["failed"] = True
-                last["fail_reason"] = "master_capital_stale_used_zero"
-                if attempt < max_attempts:
-                    await asyncio.sleep(retry_delay_s)
-                    continue
-                return last
-
-            # No open positions / genuinely empty — not a race
-            last["failed"] = True
-            last["fail_reason"] = (
-                "master_capital_unusable"
-                if total <= 0
-                else "master_margin_used_zero_no_positions"
-            )
+        if total <= 0:
+            result["failed"] = True
+            result["fail_reason"] = "master_capital_unusable"
             logger.warning(
-                "Master capital fetch returned unusable values for "
+                "Master capital fetch returned unusable total for "
                 "capital-based sizing (total=$%.2f used=$%.2f "
-                "open_positions=%s attempt=%s)",
+                "open_positions=%s)",
                 total,
                 used,
                 open_count,
-                attempt,
             )
-            return last
+            return result
 
-        return last
+        if open_count > 0 and used <= 0:
+            # Portfolio margin: defined-risk structures often show used=0.
+            # Expected — do not fail or retry.
+            log_and_buffer(
+                "MASTER_CAPITAL_ZERO_MARGIN",
+                int(master_trade_id or 0),
+                {
+                    "total": round(total, 4),
+                    "available": round(available, 4),
+                    "portfolio_margin": round(pos_margin, 4),
+                    "order_margin": round(order_margin, 4),
+                    "used": round(used, 4),
+                    "open_position_count": open_count,
+                    "note": (
+                        "portfolio margin — used=0 is expected, "
+                        "sizing does not depend on it"
+                    ),
+                },
+            )
+
+        logger.info(
+            "Master capital: total=$%.2f available=$%.2f used=$%.2f "
+            "open_positions=%s",
+            total,
+            available,
+            used,
+            open_count,
+        )
+        return result
 
     def _calc_qty(
         self,
@@ -607,8 +579,6 @@ class MirrorEngine:
         if capital_based:
             capital_readable = (
                 not master_capital_fetch_failed
-                and master_margin_used_usd is not None
-                and master_margin_used_usd > 0
                 and master_total_capital_usd is not None
                 and master_total_capital_usd > 0
                 and mq > 0
@@ -622,8 +592,7 @@ class MirrorEngine:
                 else:
                     reason = (
                         "master_capital_unreadable "
-                        f"(used={master_margin_used_usd!r} "
-                        f"total={master_total_capital_usd!r} mq={mq})"
+                        f"(total={master_total_capital_usd!r} mq={mq})"
                     )
                 self._log_slave_sizing_zero(
                     reason=reason,
@@ -683,31 +652,30 @@ class MirrorEngine:
                 )
                 return 0
 
-            master_ratio = master_margin_used_usd / master_total_capital_usd
-            per_lot_cost_usd = master_margin_used_usd / mq
-            slave_margin_to_use = effective_capital * master_ratio
-
-            if per_lot_cost_usd <= 0:
-                calculated_qty = 0
-            else:
-                # Floor — never round UP into the customer's capital
-                calculated_qty = int(slave_margin_to_use / per_lot_cost_usd)
+            # qty = floor(effective * mq / master_total)
+            # master_used cancels out of the old ratio formula — do not divide
+            # by it (portfolio margin often reports used=0).
+            calculated_qty = int(
+                effective_capital * mq / float(master_total_capital_usd)
+            )
 
             # Do NOT force max(1, ...) — insufficient capital must skip
             final_qty = max(0, min(calculated_qty, max_qty))
             logger.info(
-                "[SLAVE_SIZING] account_id=%s allocated=%.2f "
-                "live_balance=%.2f effective=%.2f "
-                "master_used=%.2f per_lot=%.4f → final_qty=%s "
-                "(raw=%s cap=%s)",
+                "[SLAVE_SIZING] account_id=%s effective=%.2f "
+                "master_qty=%s master_total=%.2f calculated_qty=%s "
+                "final_qty=%s master_used=%.2f "
+                "(audit only — not used in sizing) "
+                "allocated=%.2f live_balance=%.2f cap=%s",
                 getattr(slave, "id", None),
+                effective_capital,
+                mq,
+                float(master_total_capital_usd),
+                calculated_qty,
+                final_qty,
+                float(master_margin_used_usd or 0),
                 user_allocated,
                 live,
-                effective_capital,
-                master_margin_used_usd,
-                per_lot_cost_usd,
-                final_qty,
-                calculated_qty,
                 max_qty,
             )
             if final_qty <= 0:
@@ -722,7 +690,9 @@ class MirrorEngine:
                         "mode": "capital_based",
                         "user_allocated": user_allocated,
                         "effective_capital": effective_capital,
-                        "per_lot_cost_usd": per_lot_cost_usd,
+                        "master_total_capital": float(
+                            master_total_capital_usd
+                        ),
                         "raw_qty": calculated_qty,
                     },
                 )
@@ -1366,9 +1336,7 @@ class MirrorEngine:
             }
             if zero_reason in (
                 "master_capital_fetch_failed",
-                "master_capital_stale_used_zero",
                 "master_capital_unusable",
-                "master_margin_used_zero_no_positions",
                 "no_active_master_account",
             ) or zero_reason.startswith("master_capital"):
                 msg = (
@@ -1378,7 +1346,7 @@ class MirrorEngine:
                     f"master_open_positions={master_open_position_count} "
                     f"slave_live=${live_for_margin:.2f} "
                     f"allocated=${allocated:.2f} master_qty={int(master_call_qty)} "
-                    f"(NOT under-funded — master margin unreadable / stale)"
+                    f"(NOT under-funded — master capital unreadable)"
                 )
             elif zero_reason in underfunded_reasons:
                 msg = (
