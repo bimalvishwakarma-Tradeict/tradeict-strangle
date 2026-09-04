@@ -977,6 +977,7 @@ def _migrate_schema() -> None:
             ("midprice_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
             ("midprice_chase_max_seconds", "INTEGER NOT NULL DEFAULT 120"),
             ("midprice_hold_seconds", "INTEGER NOT NULL DEFAULT 30"),
+            ("midprice_partner_window_seconds", "INTEGER NOT NULL DEFAULT 5"),
         ]
         for col_name, col_type in hedge_setting_cols:
             if col_name not in at_cols:

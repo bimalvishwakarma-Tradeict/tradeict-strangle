@@ -1480,6 +1480,7 @@ class AutoTradeEngine:
             from backend.engine.midprice_executor import (
                 clamp_chase_max_seconds,
                 clamp_hold_seconds,
+                clamp_partner_window_seconds,
                 execute_paired_legs,
                 should_use_midprice,
             )
@@ -1491,6 +1492,9 @@ class AutoTradeEngine:
             )
             hold_s = clamp_hold_seconds(
                 getattr(settings, "midprice_hold_seconds", None)
+            )
+            partner_win_s = clamp_partner_window_seconds(
+                getattr(settings, "midprice_partner_window_seconds", None)
             )
             entry_tol = float(
                 getattr(settings, "entry_premium_match_tolerance_pct", None)
@@ -1590,6 +1594,7 @@ class AutoTradeEngine:
                         midprice_enabled=True,
                         max_chase_seconds=chase_max,
                         hold_seconds=hold_s,
+                        partner_window_seconds=partner_win_s,
                         entry_premium_match_tolerance_pct=entry_tol,
                         selection_ts=selection_ts,
                         phase=phase,

@@ -30,9 +30,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOLD_SECONDS = 30.0
 HOLD_SECONDS_MIN = 5.0
 HOLD_SECONDS_MAX = 120.0
-# After one paired leg fills, the other gets this short window then market.
-# Must stay short — naked side must not linger 30s.
+# After one paired leg fills: one final mid attempt holds this long, then market.
+# Overridable via AutoTradeSettings.midprice_partner_window_seconds.
 PARTNER_WINDOW_SECONDS = 5.0
+PARTNER_WINDOW_SECONDS_MIN = 2.0
+PARTNER_WINDOW_SECONDS_MAX = 30.0
 POST_CANCEL_SETTLE_SECONDS = 2.0
 # Bound how long we wait for Delta to leave _OPEN_STATES after cancel.
 # Never treat "open" as cancelled — that spawned duplicate GTCs / over-fills.
@@ -162,6 +164,19 @@ def clamp_hold_seconds(value: float | None) -> float:
     return max(HOLD_SECONDS_MIN, min(HOLD_SECONDS_MAX, raw))
 
 
+def clamp_partner_window_seconds(value: float | None) -> float:
+    """Clamp second-leg final mid hold (seconds). None → PARTNER_WINDOW_SECONDS."""
+    raw = (
+        PARTNER_WINDOW_SECONDS
+        if value is None
+        else float(value)
+    )
+    return max(
+        PARTNER_WINDOW_SECONDS_MIN,
+        min(PARTNER_WINDOW_SECONDS_MAX, raw),
+    )
+
+
 def compute_mid(bid: float, ask: float) -> float | None:
     if bid <= 0 or ask <= 0 or ask < bid:
         return None
@@ -285,11 +300,19 @@ async def _poll_order_until_hold(
     poll_every: float = 0.5,
     trade_id: int | None = None,
     leg_label: str = "",
+    partner_event: asyncio.Event | None = None,
 ) -> dict[str, Any]:
-    """Hold up to hold_seconds, polling Delta order status (source of truth)."""
+    """
+    Hold up to hold_seconds, polling Delta order status (source of truth).
+
+    If partner_event is set mid-hold, return immediately so the resting
+    order can be cancelled — do not wait out the full hold.
+    """
     deadline = time.monotonic() + float(hold_seconds)
     last: dict[str, Any] = {}
     while True:
+        if partner_event is not None and partner_event.is_set():
+            return last
         try:
             last = await delta_client.get_order(order_id)
         except Exception as exc:
@@ -304,6 +327,8 @@ async def _poll_order_until_hold(
                 },
             )
             last = last or {}
+        if partner_event is not None and partner_event.is_set():
+            return last
         state = _order_state(last)
         if state in _FILLED_STATES:
             return last
@@ -593,7 +618,7 @@ async def _place_market(
         except (TypeError, ValueError):
             pass
         _mid_log(
-            "ORDER_RESTING",
+            "ORDER_MARKET_SENT",
             trade_id,
             {
                 "order_id": oid,
@@ -825,6 +850,7 @@ async def execute_with_midprice(
     selection_ts: float | None = None,
     entry_premium_match_tolerance_pct: float = 15.0,
     hold_seconds: float = DEFAULT_HOLD_SECONDS,
+    partner_window_seconds: float = PARTNER_WINDOW_SECONDS,
     sleep_fn: Any = None,
     monotonic_fn: Any = None,
     check_position_size: bool = True,
@@ -880,6 +906,9 @@ async def execute_with_midprice(
         partner_final_mid_attempt_armed = False
         partner_market_fallback_done = False
         last_order_was_partner_final_attempt = False
+        partner_window_s = float(
+            clamp_partner_window_seconds(partner_window_seconds)
+        )
 
         while remaining > 0:
             elapsed = now() - started
@@ -891,32 +920,23 @@ async def execute_with_midprice(
                 and partner_mode_started_at is None
                 and partner_filled_event.is_set()
             ):
+                # Partner filled — arm final mid attempt immediately.
+                # PARTNER_WINDOW_SECONDS is the final attempt's hold, not a wait.
                 partner_mode_started_at = float(now())
+                partner_final_mid_attempt_armed = True
                 log_and_buffer(
                     "PARTNER_SIGNAL_RECEIVED",
                     trade_id or 0,
                     {"leg": leg_label, "attempt": attempt},
                 )
-                partner_final_mid_attempt_armed = False
-
-            if (
-                partner_mode_started_at is not None
-                and not partner_final_mid_attempt_armed
-                and (now() - partner_mode_started_at) >= float(
-                    PARTNER_WINDOW_SECONDS
-                )
-            ):
-                partner_final_mid_attempt_armed = True
                 log_and_buffer(
                     "PARTNER_FINAL_ATTEMPT_ARMED",
                     trade_id or 0,
                     {
                         "leg": leg_label,
                         "attempt": attempt,
-                        "window_elapsed": round(
-                            float(now() - partner_mode_started_at),
-                            3,
-                        ),
+                        "seconds_since_partner_fill": 0.0,
+                        "final_hold_seconds": round(partner_window_s, 3),
                     },
                 )
 
@@ -1247,9 +1267,23 @@ async def execute_with_midprice(
             after = await _poll_order_until_hold(
                 delta_client,
                 last_oid,
-                hold_seconds=float(hold_seconds),
+                hold_seconds=(
+                    float(partner_window_s)
+                    if last_order_was_partner_final_attempt
+                    else float(hold_seconds)
+                ),
                 trade_id=trade_id,
                 leg_label=leg_label,
+                # Interrupt normal rest when partner fills; final attempt
+                # already uses the short partner hold — no further interrupt.
+                partner_event=(
+                    partner_filled_event
+                    if (
+                        partner_filled_event is not None
+                        and partner_mode_started_at is None
+                    )
+                    else None
+                ),
             )
             got = _filled_size_from_order(after, requested=remaining)
             state = _order_state(after)
@@ -1629,6 +1663,7 @@ async def execute_paired_legs(
     midprice_enabled: bool,
     max_chase_seconds: int | None = None,
     hold_seconds: float | None = None,
+    partner_window_seconds: float | None = None,
     entry_premium_match_tolerance_pct: float = 15.0,
     selection_ts: float | None = None,
     trade_id: int | None = None,
@@ -1643,6 +1678,7 @@ async def execute_paired_legs(
     """
     ts = selection_ts if selection_ts is not None else time.monotonic()
     hold_s = clamp_hold_seconds(hold_seconds)
+    partner_win_s = clamp_partner_window_seconds(partner_window_seconds)
     if len(legs) != 2:
         # Safety fallback: keep existing sequential behavior for non-2-leg inputs.
         results: list[OrderResult] = []
@@ -1659,6 +1695,7 @@ async def execute_paired_legs(
                 symbol=str(leg.get("symbol") or ""),
                 max_chase_seconds=max_chase_seconds,
                 hold_seconds=hold_s,
+                partner_window_seconds=partner_win_s,
                 reduce_only=bool(leg.get("reduce_only", False)),
                 midprice_enabled=midprice_enabled,
                 bracket_sl_price=leg.get("bracket_sl_price"),
@@ -1696,6 +1733,7 @@ async def execute_paired_legs(
             symbol=str(_leg.get("symbol") or ""),
             max_chase_seconds=max_chase_seconds,
             hold_seconds=hold_s,
+            partner_window_seconds=partner_win_s,
             reduce_only=bool(_leg.get("reduce_only", False)),
             midprice_enabled=False if is_stoploss else midprice_enabled,
             bracket_sl_price=_leg.get("bracket_sl_price"),

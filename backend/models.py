@@ -545,6 +545,9 @@ class AutoTradeSettings(Base):
     midprice_hold_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, default=30, server_default="30"
     )
+    midprice_partner_window_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5, server_default="5"
+    )
 
     # Demo/virtual mode — places virtual trades without real Delta orders
     is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

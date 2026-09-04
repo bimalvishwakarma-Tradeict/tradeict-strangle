@@ -176,6 +176,13 @@ function applyStatusToForm(data, setters) {
       data.midprice_hold_seconds != null ? data.midprice_hold_seconds : 30
     )
   )
+  setters.setMidpricePartnerWindowSeconds(
+    String(
+      data.midprice_partner_window_seconds != null
+        ? data.midprice_partner_window_seconds
+        : 5
+    )
+  )
   setters.setWingStrikeMode(data.wing_strike_mode || 'points')
   setters.setWingPointsAway(String(data.wing_points_away ?? 2000))
   setters.setWingDeltaMin(String(data.wing_delta_min ?? 0.05))
@@ -327,6 +334,8 @@ export default function AutoTrade() {
   const [midpriceChaseMaxSeconds, setMidpriceChaseMaxSeconds] =
     useState('120')
   const [midpriceHoldSeconds, setMidpriceHoldSeconds] = useState('30')
+  const [midpricePartnerWindowSeconds, setMidpricePartnerWindowSeconds] =
+    useState('5')
   const [wingStrikeMode, setWingStrikeMode] = useState('points')
   const [wingPointsAway, setWingPointsAway] = useState('2000')
   const [wingDeltaMin, setWingDeltaMin] = useState('0.05')
@@ -420,6 +429,7 @@ export default function AutoTrade() {
       setMidpriceEnabled,
       setMidpriceChaseMaxSeconds,
       setMidpriceHoldSeconds,
+      setMidpricePartnerWindowSeconds,
       setWingStrikeMode,
       setWingPointsAway,
       setWingDeltaMin,
@@ -731,6 +741,10 @@ export default function AutoTrade() {
       midprice_hold_seconds: Math.max(
         5,
         Math.min(120, Number(midpriceHoldSeconds) || 30)
+      ),
+      midprice_partner_window_seconds: Math.max(
+        2,
+        Math.min(30, Number(midpricePartnerWindowSeconds) || 5)
       ),
       wing_strike_mode: wingStrikeMode || 'points',
       wing_points_away: Math.max(1, Number(wingPointsAway) || 2000),
@@ -2448,9 +2462,31 @@ export default function AutoTrade() {
                 />
                 <span className="mt-1 block text-xs text-gray-500">
                   Har mid order kitni der rest karega (5–120). Kam value =
-                  zyada order aur zyada API load. Ek side bharne ke baad
-                  doosri side ko hamesha 5 second milte hain — wo alag hai
-                  aur badalta nahi.
+                  zyada order aur zyada API load. Second-leg window neeche
+                  alag setting hai.
+                </span>
+              </label>
+              <label
+                className={`mt-3 block text-sm text-gray-300 ${
+                  midpriceEnabled ? '' : 'pointer-events-none opacity-40'
+                }`}
+              >
+                Second leg window (sec)
+                <input
+                  type="number"
+                  min={2}
+                  max={30}
+                  value={midpricePartnerWindowSeconds}
+                  onChange={(e) =>
+                    setMidpricePartnerWindowSeconds(e.target.value)
+                  }
+                  disabled={!midpriceEnabled}
+                  className="mt-1 w-full rounded border border-gray-700 bg-gray-900 px-3 py-2 text-white"
+                />
+                <span className="mt-1 block text-xs text-gray-500">
+                  Ek leg bharne ke baad doosri leg ko itne second ka ek
+                  aakhri mid attempt milega, phir turant market order. Kam
+                  rakho — doosri side tab tak naked rehti hai.
                 </span>
               </label>
           </div>

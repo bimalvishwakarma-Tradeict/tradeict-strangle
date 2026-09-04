@@ -832,6 +832,7 @@ async def open_hedge(
         from backend.engine.midprice_executor import (
             clamp_chase_max_seconds,
             clamp_hold_seconds,
+            clamp_partner_window_seconds,
             execute_paired_legs,
             should_use_midprice,
         )
@@ -843,6 +844,9 @@ async def open_hedge(
         )
         hold_s = clamp_hold_seconds(
             getattr(settings, "midprice_hold_seconds", None)
+        )
+        partner_win_s = clamp_partner_window_seconds(
+            getattr(settings, "midprice_partner_window_seconds", None)
         )
         entry_tol = float(
             getattr(settings, "entry_premium_match_tolerance_pct", None) or 15.0
@@ -889,6 +893,7 @@ async def open_hedge(
                 midprice_enabled=True,
                 max_chase_seconds=chase_max,
                 hold_seconds=hold_s,
+                partner_window_seconds=partner_win_s,
                 entry_premium_match_tolerance_pct=entry_tol,
                 selection_ts=selection_ts,
                 phase="hedge_entry",
