@@ -1479,6 +1479,7 @@ class AutoTradeEngine:
 
             from backend.engine.midprice_executor import (
                 clamp_chase_max_seconds,
+                clamp_hold_seconds,
                 execute_with_midprice,
                 profile_for_group_leg,
                 should_use_midprice,
@@ -1488,6 +1489,9 @@ class AutoTradeEngine:
             mp_on = bool(getattr(settings, "midprice_enabled", False))
             chase_max = clamp_chase_max_seconds(
                 getattr(settings, "midprice_chase_max_seconds", None)
+            )
+            hold_s = clamp_hold_seconds(
+                getattr(settings, "midprice_hold_seconds", None)
             )
             entry_tol = float(
                 getattr(settings, "entry_premium_match_tolerance_pct", None)
@@ -1543,6 +1547,7 @@ class AutoTradeEngine:
                             leg_label=str(_spec.role),
                             symbol=str(_spec.symbol),
                             max_chase_seconds=chase_max,
+                            hold_seconds=hold_s,
                             midprice_enabled=True,
                             bracket_sl_price=_spec.bracket_sl_price,
                             bracket_sl_limit=_spec.bracket_sl_limit,

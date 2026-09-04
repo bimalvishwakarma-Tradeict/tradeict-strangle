@@ -451,6 +451,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "PARTNER_MARKET_FALLBACK_TRIGGERED",
         "ORDER_RESTING",
         "ORDER_RESTING_CLEARED",
+        "ORDER_CANCEL_SENT",
         "SLAVE_CLOSE_SKIP_ZERO_QTY",
     ):
         bot_log.info(msg)

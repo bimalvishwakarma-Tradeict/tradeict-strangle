@@ -133,6 +133,7 @@ class AutoTradeSettingsSchema(BaseModel):
     # Mid-price execution (default OFF)
     midprice_enabled: bool = False
     midprice_chase_max_seconds: int = Field(default=120, ge=10, le=600)
+    midprice_hold_seconds: int = Field(default=30, ge=5, le=120)
 
     @field_validator("trade_type")
     @classmethod
@@ -663,6 +664,11 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             if getattr(s, "midprice_chase_max_seconds", None) is not None
             else 120
         ),
+        "midprice_hold_seconds": int(
+            getattr(s, "midprice_hold_seconds", None)
+            if getattr(s, "midprice_hold_seconds", None) is not None
+            else 30
+        ),
         # Placeholder until Step 4 supplies live order margin
         "order_margin_per_lot": None,
         "capital_per_lot": None,
@@ -998,6 +1004,8 @@ async def update_auto_trade_settings(
     settings.midprice_enabled = bool(payload.midprice_enabled)
     chase_sec = int(payload.midprice_chase_max_seconds)
     settings.midprice_chase_max_seconds = max(10, min(600, chase_sec))
+    hold_sec = int(payload.midprice_hold_seconds)
+    settings.midprice_hold_seconds = max(5, min(120, hold_sec))
 
     settings.updated_at = get_utc_now()
     # Do NOT change is_enabled here

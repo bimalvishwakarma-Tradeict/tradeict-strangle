@@ -827,10 +827,11 @@ async def open_hedge(
         )
 
         # --- BUY CALL + PUT ---
-        # Midprice: parallel via execute_paired_legs (partner HOLD_SECONDS=5).
+        # Midprice: parallel via execute_paired_legs (partner window=5s fixed).
         # Market: sequential buy_option (unchanged — call then put).
         from backend.engine.midprice_executor import (
             clamp_chase_max_seconds,
+            clamp_hold_seconds,
             execute_paired_legs,
             should_use_midprice,
         )
@@ -839,6 +840,9 @@ async def open_hedge(
         mp_on = bool(getattr(settings, "midprice_enabled", False))
         chase_max = clamp_chase_max_seconds(
             getattr(settings, "midprice_chase_max_seconds", None)
+        )
+        hold_s = clamp_hold_seconds(
+            getattr(settings, "midprice_hold_seconds", None)
         )
         entry_tol = float(
             getattr(settings, "entry_premium_match_tolerance_pct", None) or 15.0
@@ -884,6 +888,7 @@ async def open_hedge(
                 reason="HEDGE_ENTRY",
                 midprice_enabled=True,
                 max_chase_seconds=chase_max,
+                hold_seconds=hold_s,
                 entry_premium_match_tolerance_pct=entry_tol,
                 selection_ts=selection_ts,
                 phase="hedge_entry",

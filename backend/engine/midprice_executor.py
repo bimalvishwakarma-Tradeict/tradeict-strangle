@@ -25,7 +25,14 @@ from backend.strategies.base_strategy import OrderResult
 
 logger = logging.getLogger(__name__)
 
-HOLD_SECONDS = 5.0
+# Normal chase: how long each mid order rests before cancel+replace.
+# Overridable via AutoTradeSettings.midprice_hold_seconds (clamped).
+DEFAULT_HOLD_SECONDS = 30.0
+HOLD_SECONDS_MIN = 5.0
+HOLD_SECONDS_MAX = 120.0
+# After one paired leg fills, the other gets this short window then market.
+# Must stay short — naked side must not linger 30s.
+PARTNER_WINDOW_SECONDS = 5.0
 POST_CANCEL_SETTLE_SECONDS = 2.0
 # Bound how long we wait for Delta to leave _OPEN_STATES after cancel.
 # Never treat "open" as cancelled — that spawned duplicate GTCs / over-fills.
@@ -143,6 +150,16 @@ def clamp_chase_max_seconds(value: int | None) -> int:
         else int(value)
     )
     return max(CHASE_MAX_SECONDS_MIN, min(CHASE_MAX_SECONDS_MAX, raw))
+
+
+def clamp_hold_seconds(value: float | None) -> float:
+    """Clamp mid-order rest time (seconds). None → DEFAULT_HOLD_SECONDS."""
+    raw = (
+        DEFAULT_HOLD_SECONDS
+        if value is None
+        else float(value)
+    )
+    return max(HOLD_SECONDS_MIN, min(HOLD_SECONDS_MAX, raw))
 
 
 def compute_mid(bid: float, ask: float) -> float | None:
@@ -264,7 +281,7 @@ async def _poll_order_until_hold(
     delta_client: Any,
     order_id: int | str,
     *,
-    hold_seconds: float = HOLD_SECONDS,
+    hold_seconds: float = DEFAULT_HOLD_SECONDS,
     poll_every: float = 0.5,
     trade_id: int | None = None,
     leg_label: str = "",
@@ -807,7 +824,7 @@ async def execute_with_midprice(
     selected_premium: float | None = None,
     selection_ts: float | None = None,
     entry_premium_match_tolerance_pct: float = 15.0,
-    hold_seconds: float = HOLD_SECONDS,
+    hold_seconds: float = DEFAULT_HOLD_SECONDS,
     sleep_fn: Any = None,
     monotonic_fn: Any = None,
     check_position_size: bool = True,
@@ -885,7 +902,9 @@ async def execute_with_midprice(
             if (
                 partner_mode_started_at is not None
                 and not partner_final_mid_attempt_armed
-                and (now() - partner_mode_started_at) >= float(HOLD_SECONDS)
+                and (now() - partner_mode_started_at) >= float(
+                    PARTNER_WINDOW_SECONDS
+                )
             ):
                 partner_final_mid_attempt_armed = True
                 log_and_buffer(
@@ -1609,6 +1628,7 @@ async def execute_paired_legs(
     reason: str,
     midprice_enabled: bool,
     max_chase_seconds: int | None = None,
+    hold_seconds: float | None = None,
     entry_premium_match_tolerance_pct: float = 15.0,
     selection_ts: float | None = None,
     trade_id: int | None = None,
@@ -1622,6 +1642,7 @@ async def execute_paired_legs(
                    reduce_only?, bracket_sl_price?, selected_premium?
     """
     ts = selection_ts if selection_ts is not None else time.monotonic()
+    hold_s = clamp_hold_seconds(hold_seconds)
     if len(legs) != 2:
         # Safety fallback: keep existing sequential behavior for non-2-leg inputs.
         results: list[OrderResult] = []
@@ -1637,6 +1658,7 @@ async def execute_paired_legs(
                 leg_label=str(leg.get("leg_label") or f"leg{i}"),
                 symbol=str(leg.get("symbol") or ""),
                 max_chase_seconds=max_chase_seconds,
+                hold_seconds=hold_s,
                 reduce_only=bool(leg.get("reduce_only", False)),
                 midprice_enabled=midprice_enabled,
                 bracket_sl_price=leg.get("bracket_sl_price"),
@@ -1673,6 +1695,7 @@ async def execute_paired_legs(
             leg_label=str(_leg.get("leg_label") or f"leg{_idx}"),
             symbol=str(_leg.get("symbol") or ""),
             max_chase_seconds=max_chase_seconds,
+            hold_seconds=hold_s,
             reduce_only=bool(_leg.get("reduce_only", False)),
             midprice_enabled=False if is_stoploss else midprice_enabled,
             bracket_sl_price=_leg.get("bracket_sl_price"),

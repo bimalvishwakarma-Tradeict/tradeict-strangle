@@ -171,6 +171,11 @@ function applyStatusToForm(data, setters) {
         : 120
     )
   )
+  setters.setMidpriceHoldSeconds(
+    String(
+      data.midprice_hold_seconds != null ? data.midprice_hold_seconds : 30
+    )
+  )
   setters.setWingStrikeMode(data.wing_strike_mode || 'points')
   setters.setWingPointsAway(String(data.wing_points_away ?? 2000))
   setters.setWingDeltaMin(String(data.wing_delta_min ?? 0.05))
@@ -321,6 +326,7 @@ export default function AutoTrade() {
   const [midpriceEnabled, setMidpriceEnabled] = useState(false)
   const [midpriceChaseMaxSeconds, setMidpriceChaseMaxSeconds] =
     useState('120')
+  const [midpriceHoldSeconds, setMidpriceHoldSeconds] = useState('30')
   const [wingStrikeMode, setWingStrikeMode] = useState('points')
   const [wingPointsAway, setWingPointsAway] = useState('2000')
   const [wingDeltaMin, setWingDeltaMin] = useState('0.05')
@@ -413,6 +419,7 @@ export default function AutoTrade() {
       setBasketWingsEnabled,
       setMidpriceEnabled,
       setMidpriceChaseMaxSeconds,
+      setMidpriceHoldSeconds,
       setWingStrikeMode,
       setWingPointsAway,
       setWingDeltaMin,
@@ -481,18 +488,18 @@ export default function AutoTrade() {
 
   const fetchExpiries = useCallback(
     async (und, preferredDate = null, preferredDte = null) => {
-      const u = und || 'BTC'
-      setExpiryLoading(true)
-      setExpiryError(null)
-      try {
+    const u = und || 'BTC'
+    setExpiryLoading(true)
+    setExpiryError(null)
+    try {
         const data = await getExpiries(u, { limit: 60 })
-        const rows = Array.isArray(data) ? data : []
-        setExpiryOptions(rows)
-        setSelectedExpiryDate((prev) => {
-          const saved = preferredDate || prev
-          if (saved && rows.find((e) => e.date === saved)) {
-            return saved
-          }
+      const rows = Array.isArray(data) ? data : []
+      setExpiryOptions(rows)
+      setSelectedExpiryDate((prev) => {
+        const saved = preferredDate || prev
+        if (saved && rows.find((e) => e.date === saved)) {
+          return saved
+        }
           // Daily DTE settings have no date override — match by days-to-expiry
           if (
             preferredDte != null &&
@@ -509,16 +516,16 @@ export default function AutoTrade() {
             })
             if (match) return match.date
           }
-          if (rows.length > 0) {
-            return rows[0].date
-          }
-          return null
-        })
-      } catch {
-        setExpiryError('Could not load expiries from Delta Exchange')
-      } finally {
-        setExpiryLoading(false)
-      }
+        if (rows.length > 0) {
+          return rows[0].date
+        }
+        return null
+      })
+    } catch {
+      setExpiryError('Could not load expiries from Delta Exchange')
+    } finally {
+      setExpiryLoading(false)
+    }
     },
     [],
   )
@@ -647,7 +654,7 @@ export default function AutoTrade() {
         : {
             expiry_dte: dteDays,
             expiry_date_override: selectedExpiryDate || null,
-          }
+    }
     return {
       underlying,
       ...payloadExpiry,
@@ -720,6 +727,10 @@ export default function AutoTrade() {
       midprice_chase_max_seconds: Math.max(
         10,
         Math.min(600, Number(midpriceChaseMaxSeconds) || 120)
+      ),
+      midprice_hold_seconds: Math.max(
+        5,
+        Math.min(120, Number(midpriceHoldSeconds) || 30)
       ),
       wing_strike_mode: wingStrikeMode || 'points',
       wing_points_away: Math.max(1, Number(wingPointsAway) || 2000),
@@ -1466,29 +1477,29 @@ export default function AutoTrade() {
           {/* A — Trade Setup */}
           <SectionCard id="trade-setup" icon="📊" title="Trade Setup">
             <div className="grid gap-4 sm:grid-cols-2">
-              <div>
+        <div>
                 <FieldLabel tooltip="Which crypto asset's options to trade">
                   Underlying
                 </FieldLabel>
                 <div className="mt-2 flex flex-wrap gap-2">
-                  {UNDERLYINGS.map((u) => (
-                    <button
-                      key={u}
-                      type="button"
-                      onClick={() => setUnderlying(u)}
-                      className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                        underlying === u
-                          ? 'bg-blue-500 text-white'
+            {UNDERLYINGS.map((u) => (
+              <button
+                key={u}
+                type="button"
+                onClick={() => setUnderlying(u)}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                  underlying === u
+                    ? 'bg-blue-500 text-white'
                           : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                      }`}
-                    >
-                      {u}
-                    </button>
-                  ))}
-                </div>
-              </div>
+                }`}
+              >
+                {u}
+              </button>
+            ))}
+          </div>
+        </div>
 
-              <div>
+        <div>
                 <FieldLabel tooltip="Straddle = ATM Call + premium-matched Put at same/nearby strike. Strangle = OTM Call + OTM Put, strikes chosen by premium target">
                   Trade Type
                 </FieldLabel>
@@ -1524,40 +1535,40 @@ export default function AutoTrade() {
                 Expiry
               </FieldLabel>
               <div className="mt-2 flex max-w-full items-center gap-2">
-                <select
-                  value={selectedExpiryDate || ''}
-                  onChange={(e) => setSelectedExpiryDate(e.target.value || null)}
-                  disabled={expiryLoading}
+            <select
+              value={selectedExpiryDate || ''}
+              onChange={(e) => setSelectedExpiryDate(e.target.value || null)}
+              disabled={expiryLoading}
                   className="w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
-                >
-                  {expiryLoading && (
-                    <option value="">Loading expiries...</option>
-                  )}
-                  {!expiryLoading && expiryOptions.length === 0 && (
-                    <option value="">No expiries available</option>
-                  )}
-                  {expiryOptions.map((opt) => (
-                    <option key={opt.date} value={opt.date}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => fetchExpiries(underlying, selectedExpiryDate)}
-                  title="Refresh expiries"
-                  className="shrink-0 px-2 text-sm text-gray-400 hover:text-white"
-                >
-                  ↻
-                </button>
-              </div>
-              {expiryError && (
-                <p className="mt-1 text-xs text-red-400">{expiryError}</p>
+            >
+              {expiryLoading && (
+                <option value="">Loading expiries...</option>
               )}
-              {!expiryLoading && !expiryError && (
-                <p className="mt-1 text-xs text-gray-500">Live from Delta Exchange</p>
+              {!expiryLoading && expiryOptions.length === 0 && (
+                <option value="">No expiries available</option>
               )}
-            </div>
+              {expiryOptions.map((opt) => (
+                <option key={opt.date} value={opt.date}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => fetchExpiries(underlying, selectedExpiryDate)}
+              title="Refresh expiries"
+              className="shrink-0 px-2 text-sm text-gray-400 hover:text-white"
+            >
+              ↻
+            </button>
+          </div>
+          {expiryError && (
+            <p className="mt-1 text-xs text-red-400">{expiryError}</p>
+          )}
+          {!expiryLoading && !expiryError && (
+            <p className="mt-1 text-xs text-gray-500">Live from Delta Exchange</p>
+          )}
+        </div>
 
             <label
               className={`block ${
@@ -1565,29 +1576,29 @@ export default function AutoTrade() {
               }`}
             >
               <FieldLabel tooltip="Lots per basket. Not used in % of hedge mode — basket qty is derived from hedge">
-                Quantity
+          Quantity
               </FieldLabel>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={quantity}
-                onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={quantity}
+            onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}
                 className="mt-2 w-full max-w-xs rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
-              />
+          />
               {pctOfHedgeSizingActive && (
                 <p className="mt-1 text-xs text-gray-500">
                   Not used in % of hedge mode.
                 </p>
               )}
-            </label>
+        </label>
 
             {tradeType === 'strangle' && (
               <div className="rounded-lg border border-purple-500/30 bg-gray-700/40 p-4 space-y-3">
                 <FieldLabel>Target Premium per Side</FieldLabel>
                 <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
+            <button
+              type="button"
                     onClick={() => setStranglePremiumMode('fixed')}
                     className={`rounded-md px-3 py-1.5 text-sm font-medium ${
                       stranglePremiumMode === 'fixed'
@@ -1596,9 +1607,9 @@ export default function AutoTrade() {
                     }`}
                   >
                     Fixed $
-                  </button>
-                  <button
-                    type="button"
+            </button>
+            <button
+              type="button"
                     onClick={() =>
                       hedgeEnabled && setStranglePremiumMode('pct_of_hedge')
                     }
@@ -1610,8 +1621,8 @@ export default function AutoTrade() {
                     } disabled:cursor-not-allowed disabled:opacity-40`}
                   >
                     % of hedge
-                  </button>
-                </div>
+            </button>
+          </div>
                 {!hedgeEnabled && stranglePremiumMode === 'pct_of_hedge' && (
                   <p className="text-xs text-amber-400/90">
                     Requires Hedge Mode — falls back to fixed $ on entry.
@@ -1619,19 +1630,19 @@ export default function AutoTrade() {
                 )}
                 {stranglePremiumMode === 'fixed' ? (
                   <>
-                    <input
-                      type="number"
-                      value={targetPremium}
-                      onChange={(e) =>
-                        setTargetPremium(parseFloat(e.target.value) || 0)
-                      }
+            <input
+              type="number"
+              value={targetPremium}
+              onChange={(e) =>
+                setTargetPremium(parseFloat(e.target.value) || 0)
+              }
                       className="w-full max-w-xs rounded-md bg-gray-700 px-3 py-2 text-white"
-                      placeholder="e.g. 150"
-                      min={1}
-                      max={10000}
-                    />
+              placeholder="e.g. 150"
+              min={1}
+              max={10000}
+            />
                     <p className="text-xs text-gray-500">
-                      Bot finds OTM Call & Put where premium ≈ ${targetPremium}
+              Bot finds OTM Call & Put where premium ≈ ${targetPremium}
                     </p>
                   </>
                 ) : (
@@ -1683,8 +1694,8 @@ export default function AutoTrade() {
                     )}
                   </>
                 )}
-              </div>
-            )}
+          </div>
+        )}
           </SectionCard>
 
           {/* B — Basket Sizing */}
@@ -1738,7 +1749,7 @@ export default function AutoTrade() {
           )}
           {pctOfHedgeSizingActive && (
             <div className="space-y-3 border-t border-gray-700/60 pt-3">
-              <label className="block text-sm text-gray-300">
+        <label className="block text-sm text-gray-300">
                 Hedge quantity (lots)
                 <input
                   type="number"
@@ -2107,74 +2118,74 @@ export default function AutoTrade() {
             <label className="block text-sm text-gray-300">
               <FieldLabel>Re-entry delay (min)</FieldLabel>
               <div className="mt-2 flex max-w-xs items-center gap-2">
-                <input
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={reEntryDelay}
-                  onChange={(e) =>
-                    setReEntryDelay(Math.max(0, Number(e.target.value) || 0))
-                  }
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={reEntryDelay}
+              onChange={(e) =>
+                setReEntryDelay(Math.max(0, Number(e.target.value) || 0))
+              }
                   className="w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
-                />
-                <span className="shrink-0 text-gray-400">minutes</span>
-              </div>
-            </label>
+            />
+            <span className="shrink-0 text-gray-400">minutes</span>
+          </div>
+        </label>
           </SectionCard>
         </div>
 
         <div className="space-y-6">
           <SectionCard id="risk-target" icon="🎯" title="Risk & Target">
             <div className="grid gap-4 sm:grid-cols-2">
-              <label className="text-sm text-gray-300">
+          <label className="text-sm text-gray-300">
                 <FieldLabel>Profit Target % of max premium</FieldLabel>
-                <input
-                  type="number"
-                  min={1}
-                  max={500}
-                  step={1}
-                  value={tpPct}
-                  onChange={(e) => setTpPct(e.target.value)}
+            <input
+              type="number"
+              min={1}
+              max={500}
+              step={1}
+              value={tpPct}
+              onChange={(e) => setTpPct(e.target.value)}
                   className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
-                />
-              </label>
-              <label className="text-sm text-gray-300">
+            />
+          </label>
+          <label className="text-sm text-gray-300">
                 <FieldLabel>Stop Loss % of max premium</FieldLabel>
-                <input
-                  type="number"
-                  min={1}
-                  max={1000}
-                  step={1}
-                  value={slPct}
-                  onChange={(e) => setSlPct(e.target.value)}
+            <input
+              type="number"
+              min={1}
+              max={1000}
+              step={1}
+              value={slPct}
+              onChange={(e) => setSlPct(e.target.value)}
                   className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
-                />
-              </label>
-              <label className="text-sm text-gray-300">
+            />
+          </label>
+          <label className="text-sm text-gray-300">
                 <FieldLabel>Delta SL (%)</FieldLabel>
-                <input
-                  type="number"
-                  min={100}
-                  max={1000}
-                  step={1}
-                  value={universalSlPct}
-                  onChange={(e) => setUniversalSlPct(e.target.value)}
+            <input
+              type="number"
+              min={100}
+              max={1000}
+              step={1}
+              value={universalSlPct}
+              onChange={(e) => setUniversalSlPct(e.target.value)}
                   className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
-                />
-              </label>
-              <label className="text-sm text-gray-300">
+            />
+          </label>
+          <label className="text-sm text-gray-300">
                 <FieldLabel>Slippage Est (%)</FieldLabel>
-                <input
-                  type="number"
-                  min={0}
-                  max={10}
-                  step={0.1}
-                  value={slippagePct}
-                  onChange={(e) => setSlippagePct(e.target.value)}
+            <input
+              type="number"
+              min={0}
+              max={10}
+              step={0.1}
+              value={slippagePct}
+              onChange={(e) => setSlippagePct(e.target.value)}
                   className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
-                />
-              </label>
-            </div>
+            />
+          </label>
+        </div>
             <SectionDivider>Premium Decay Exit</SectionDivider>
             <div className="space-y-3">
               <label className="flex cursor-pointer items-start gap-3">
@@ -2363,22 +2374,22 @@ export default function AutoTrade() {
             icon="🛡"
             title="BASKET WINGS (tail protection)"
           >
-            <label className="flex cursor-pointer items-start gap-3">
-              <input
-                type="checkbox"
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
                 checked={basketWingsEnabled}
                 onChange={(e) => setBasketWingsEnabled(e.target.checked)}
                 className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500"
-              />
-              <span className="text-sm text-gray-300">
+          />
+          <span className="text-sm text-gray-300">
                 Enable wings
                 <span className="mt-1 block text-xs text-gray-500">
                   Adds a long far-OTM call + put to every basket. Turns the
                   short strangle into a defined-risk condor so a gap or spike
                   cannot run unbounded.
                 </span>
-              </span>
-            </label>
+          </span>
+        </label>
 
             <div className="mt-6 border-t border-gray-800 pt-4">
               <label className="flex cursor-pointer items-start gap-3">
@@ -2397,19 +2408,19 @@ export default function AutoTrade() {
                     exits always stay market.
                   </span>
                 </span>
-              </label>
+            </label>
               <label
                 className={`mt-3 block text-sm text-gray-300 ${
                   midpriceEnabled ? '' : 'pointer-events-none opacity-40'
                 }`}
               >
                 Chase max seconds
-                <input
-                  type="number"
-                  min={10}
+            <input
+              type="number"
+              min={10}
                   max={600}
                   value={midpriceChaseMaxSeconds}
-                  onChange={(e) =>
+              onChange={(e) =>
                     setMidpriceChaseMaxSeconds(e.target.value)
                   }
                   disabled={!midpriceEnabled}
@@ -2420,7 +2431,29 @@ export default function AutoTrade() {
                   abort.
                 </span>
               </label>
-            </div>
+              <label
+                className={`mt-3 block text-sm text-gray-300 ${
+                  midpriceEnabled ? '' : 'pointer-events-none opacity-40'
+                }`}
+              >
+                Mid-price hold seconds
+                <input
+                  type="number"
+                  min={5}
+                  max={120}
+                  value={midpriceHoldSeconds}
+                  onChange={(e) => setMidpriceHoldSeconds(e.target.value)}
+                  disabled={!midpriceEnabled}
+                  className="mt-1 w-full rounded border border-gray-700 bg-gray-900 px-3 py-2 text-white"
+                />
+                <span className="mt-1 block text-xs text-gray-500">
+                  Har mid order kitni der rest karega (5–120). Kam value =
+                  zyada order aur zyada API load. Ek side bharne ke baad
+                  doosri side ko hamesha 5 second milte hain — wo alag hai
+                  aur badalta nahi.
+                </span>
+              </label>
+          </div>
 
             <div
               className={`mt-4 space-y-4 ${
