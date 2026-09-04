@@ -84,13 +84,18 @@ def to_utc_for_db(
     dt: datetime | None,
     *,
     context: str = "",
+    source: str = "app",
 ) -> datetime | None:
     """
     Coerce a datetime to timezone-aware UTC for DB storage.
 
     - None → None
     - Aware non-UTC → convert to UTC (IST writes counted as writers_ist)
-    - Naive → ERROR log, treat wall-clock as UTC, count naive_blocked
+    - Naive → count naive_blocked; log level depends on ``source``:
+        * ``orm_flush`` — SQLite loads DateTime(timezone=True) as naive;
+          before_flush re-stamps them on every dirty flush. Expected → DEBUG.
+        * ``app`` (default) — application code handed us a naive datetime
+          (real bug risk) → WARNING.
     """
     global _writers_ist, _naive_blocked
     if dt is None:
@@ -99,8 +104,13 @@ def to_utc_for_db(
         return dt  # type: ignore[return-value]
     if dt.tzinfo is None:
         _naive_blocked += 1
-        logger.error(
-            "[TZ_NAIVE] coerced naive datetime to UTC | context=%s | value=%s",
+        # ORM flush path = expected SQLite TZ-less read; app path = suspect write.
+        src = str(source or "app").lower().strip()
+        log_fn = logger.debug if src == "orm_flush" else logger.warning
+        log_fn(
+            "[TZ_NAIVE] coerced naive datetime to UTC | source=%s | "
+            "context=%s | value=%s",
+            src,
             context or "unknown",
             dt.isoformat(sep=" ", timespec="seconds"),
         )

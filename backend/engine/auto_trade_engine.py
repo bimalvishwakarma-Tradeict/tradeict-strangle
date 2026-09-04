@@ -1051,6 +1051,7 @@ class AutoTradeEngine:
                         entry_premium_match_tolerance_pct=(
                             float(tol) if tol is not None else None
                         ),
+                        log_phase="entry",
                     )
                 except HedgeThetaError as exc:
                     raise RuntimeError(

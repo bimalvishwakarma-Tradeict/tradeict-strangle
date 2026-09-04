@@ -57,7 +57,9 @@ def _guard_orm_datetimes_are_utc(
                 continue
             if not isinstance(val, datetime):
                 continue
-            coerced = to_utc_for_db(val, context=f"{table}.{key}")
+            coerced = to_utc_for_db(
+                val, context=f"{table}.{key}", source="orm_flush"
+            )
             if coerced is not None and coerced is not val:
                 setattr(obj, key, coerced)
 

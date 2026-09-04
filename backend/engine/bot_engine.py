@@ -2718,6 +2718,9 @@ class BotEngine:
         # Step 1–2: Delta UPL @offer for ALL open legs (shorts + long hedge)
         call_mtm = 0.0
         put_mtm = 0.0
+        wing_call_mtm = 0.0
+        wing_put_mtm = 0.0
+        wing_upnl = 0.0
         hedge_upnl = 0.0
         delta_upnl = 0.0
         mtm_available = False
@@ -2747,6 +2750,8 @@ class BotEngine:
             delta_upnl = 0.0
             hedge_upnl = 0.0
             wing_upnl = 0.0
+            wing_call_mtm = 0.0
+            wing_put_mtm = 0.0
             call_mtm = 0.0
             put_mtm = 0.0
             for leg in all_open_legs:
@@ -2781,7 +2786,11 @@ class BotEngine:
                     put_mtm = leg_upnl
                     put_premium = px
                     put_offer = px
-                elif lt in ("wing_call", "wing_put"):
+                elif lt == "wing_call":
+                    wing_call_mtm = leg_upnl
+                    wing_upnl += leg_upnl
+                elif lt == "wing_put":
+                    wing_put_mtm = leg_upnl
                     wing_upnl += leg_upnl
                 elif is_long:
                     hedge_upnl += leg_upnl
@@ -2796,6 +2805,8 @@ class BotEngine:
                     "put_mark": round(put_premium, 2),
                     "call_upnl": round(call_mtm, 4),
                     "put_upnl": round(put_mtm, 4),
+                    "wing_call_upnl": round(wing_call_mtm, 4),
+                    "wing_put_upnl": round(wing_put_mtm, 4),
                     "wing_upnl": round(wing_upnl, 4),
                     "hedge_upnl": round(hedge_upnl, 4),
                     "delta_upnl": round(delta_upnl, 4),
@@ -2824,6 +2835,8 @@ class BotEngine:
                     upnl_data = await self.delta_client.get_positions_upnl(pids)
                     any_hit = False
                     wing_upnl = 0.0
+                    wing_call_mtm = 0.0
+                    wing_put_mtm = 0.0
                     for leg in all_open_legs:
                         pid = int(leg.product_id)
                         row = upnl_data.get(pid) or {}
@@ -2846,7 +2859,13 @@ class BotEngine:
                                 put_offer = best
                                 put_premium = put_offer
                                 self._live_prices[str(leg.symbol)] = put_premium
-                        elif lt in ("wing_call", "wing_put"):
+                        elif lt == "wing_call":
+                            wing_call_mtm = leg_upnl
+                            wing_upnl += leg_upnl
+                            if best > 0:
+                                self._live_prices[str(leg.symbol)] = best
+                        elif lt == "wing_put":
+                            wing_put_mtm = leg_upnl
                             wing_upnl += leg_upnl
                             if best > 0:
                                 self._live_prices[str(leg.symbol)] = best
@@ -2902,6 +2921,9 @@ class BotEngine:
             hedge_upnl = 0.0
             call_mtm = 0.0
             put_mtm = 0.0
+            wing_call_mtm = 0.0
+            wing_put_mtm = 0.0
+            wing_upnl = 0.0
             for leg in all_open_legs:
                 lt = str(leg.leg_type or "").lower()
                 is_long = bool(getattr(leg, "is_long", False)) or lt.startswith(
@@ -2939,8 +2961,12 @@ class BotEngine:
                 elif lt == "put":
                     put_mtm = leg_upnl
                     put_premium = px
-                elif lt in ("wing_call", "wing_put"):
-                    pass  # included in delta_upnl already
+                elif lt == "wing_call":
+                    wing_call_mtm = leg_upnl
+                    wing_upnl += leg_upnl
+                elif lt == "wing_put":
+                    wing_put_mtm = leg_upnl
+                    wing_upnl += leg_upnl
                 elif is_long:
                     hedge_upnl += leg_upnl
                 self._live_prices[str(leg.symbol)] = px
@@ -3028,6 +3054,9 @@ class BotEngine:
             "delta_upnl": round(delta_upnl, 4),
             "call_upnl": round(call_mtm, 4),
             "put_upnl": round(put_mtm, 4),
+            "wing_call_upnl": round(wing_call_mtm, 4),
+            "wing_put_upnl": round(wing_put_mtm, 4),
+            "wing_upnl": round(wing_upnl, 4),
             "gross_mtm": round(total_pnl, 4),
             "gross_mtm_for_stoploss": round(gross_mtm_for_stoploss, 4),
             "entry_spread_for_sl": round(entry_spread_for_sl, 4),

@@ -728,6 +728,7 @@ def select_theta_based_strikes(
     log_hedge_id: int = 0,
     log_trade_id: int = 0,
     entry_premium_match_tolerance_pct: float | None = None,
+    log_phase: str = "entry",
 ) -> dict[str, Any]:
     """
     Call-by-premium / put-by-premium-match on the SHORT expiry chain.
@@ -743,6 +744,10 @@ def select_theta_based_strikes(
     When no OTM call premium meets the floor, falls back to the nearest OTM
     call and logs [PREMIUM_TARGET_UNREACHABLE]. [THETA_FALLBACK] still fires
     when the numeric target exceeds max |theta| on the chain (observability).
+
+    log_phase: which caller invoked selection — preview_theta / preview_target /
+    preview_wing / entry. Both UI previews and live entry are required; phase
+    disambiguates duplicate ENTRY_STRIKE_SELECT lines (not a duplicate bug).
     """
     from backend.core.bot_logger import log_and_buffer
 
@@ -961,7 +966,8 @@ def select_theta_based_strikes(
             )
 
     select_summary = (
-        f"[ENTRY_STRIKE_SELECT] trade={trade_ref} | method=premium | "
+        f"[ENTRY_STRIKE_SELECT] trade={trade_ref} | phase={log_phase} | "
+        f"method=premium | "
         f"spot={round(float(spot), 2)} | "
         f"hedge_call_theta={round(hct, 4)} | "
         f"multiplier={round(mult, 4)} | "
@@ -986,6 +992,7 @@ def select_theta_based_strikes(
             trade_ref,
             {
                 "trade": trade_ref,
+                "phase": str(log_phase or "entry"),
                 "method": "premium",
                 "spot": round(float(spot), 2),
                 "hedge_call_theta": round(hct, 4),

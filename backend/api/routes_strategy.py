@@ -491,6 +491,7 @@ async def theta_preview(
                 hedge_call_theta=hedge_call_theta,
                 theta_multiplier=multiplier,
                 log_hedge_id=_active_hedge_id(db),
+                log_phase="preview_theta",
             )
         except HedgeThetaError as exc:
             return {
@@ -710,6 +711,7 @@ async def target_preview(
                 hedge_call_theta=hedge_call_theta,
                 theta_multiplier=multiplier,
                 log_hedge_id=_active_hedge_id(db),
+                log_phase="preview_target",
             )
         except HedgeThetaError as exc:
             return {
@@ -1194,6 +1196,7 @@ async def wing_preview(
                     hedge_call_theta=abs(float(hedge["call_theta"])),
                     theta_multiplier=multiplier,
                     log_hedge_id=_active_hedge_id(db),
+                    log_phase="preview_wing",
                 )
                 short_call = {
                     "strike": float(picks["call"]["strike"]),
