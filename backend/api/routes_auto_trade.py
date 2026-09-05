@@ -130,6 +130,7 @@ class AutoTradeSettingsSchema(BaseModel):
     wing_delta_min: float = Field(default=0.05, gt=0, lt=1)
     wing_delta_max: float = Field(default=0.07, gt=0, lt=1)
     wing_pct_of_premium: float = Field(default=20.0, gt=0, lt=100)
+    wing_roll_with_short_enabled: bool = True
     # Mid-price execution (default OFF)
     midprice_enabled: bool = False
     midprice_chase_max_seconds: int = Field(default=120, ge=10, le=600)
@@ -659,6 +660,9 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             if getattr(s, "wing_pct_of_premium", None) is not None
             else 20.0
         ),
+        "wing_roll_with_short_enabled": bool(
+            getattr(s, "wing_roll_with_short_enabled", True)
+        ),
         "midprice_enabled": bool(getattr(s, "midprice_enabled", False)),
         "midprice_chase_max_seconds": int(
             getattr(s, "midprice_chase_max_seconds", None)
@@ -1007,6 +1011,9 @@ async def update_auto_trade_settings(
     settings.wing_delta_min = float(payload.wing_delta_min)
     settings.wing_delta_max = float(payload.wing_delta_max)
     settings.wing_pct_of_premium = float(payload.wing_pct_of_premium)
+    settings.wing_roll_with_short_enabled = bool(
+        payload.wing_roll_with_short_enabled
+    )
     settings.midprice_enabled = bool(payload.midprice_enabled)
     chase_sec = int(payload.midprice_chase_max_seconds)
     settings.midprice_chase_max_seconds = max(10, min(600, chase_sec))

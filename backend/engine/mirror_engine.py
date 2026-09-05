@@ -2503,12 +2503,18 @@ class MirrorEngine:
         master_qty: int,
         universal_sl_pct: float | None = None,
         master_bracket_sl: float | None = None,
+        wing_roll: bool = False,
+        old_wing_product_id: int | None = None,
+        new_wing_product_id: int | None = None,
+        new_wing_symbol: str | None = None,
+        new_wing_strike: float | None = None,
     ) -> None:
         """
         Mirror an adjustment on all slaves.
         Close old leg, open new leg — atomic verify-close-verify.
 
         master_bracket_sl: absolute stop from master's new-leg fill (verbatim).
+        wing_roll: when True, also roll the same-side wing (master strikes).
         """
         with self.db_factory() as db:
             uni_sl = float(universal_sl_pct) if universal_sl_pct else 0.0
@@ -2530,15 +2536,17 @@ class MirrorEngine:
                 {
                     "slaves_found": len(slave_trades),
                     "master_bracket_sl": master_bracket_sl,
+                    "wing_roll": bool(wing_roll),
                 },
             )
             logger.info(
                 "[MIRROR_ADJ_ENGINE] Trade#%s slaves found=%s uni_sl=%.1f%% "
-                "master_bracket_sl=%s",
+                "master_bracket_sl=%s wing_roll=%s",
                 master_trade_id,
                 len(slave_trades),
                 uni_sl,
                 master_bracket_sl,
+                wing_roll,
             )
 
             if not slave_trades:
@@ -2549,12 +2557,13 @@ class MirrorEngine:
 
             logger.info(
                 "Mirroring adjustment to %s slaves: leg=%s new_product=%s "
-                "(master_qty=%s symbol=%s)",
+                "(master_qty=%s symbol=%s wing_roll=%s)",
                 len(slave_trades),
                 triggered_leg_type,
                 new_product_id,
                 master_qty,
                 new_symbol,
+                wing_roll,
             )
 
             for slave_trade in slave_trades:
@@ -2582,6 +2591,11 @@ class MirrorEngine:
                         db=db,
                         universal_sl_pct=uni_sl,
                         master_bracket_sl=master_bracket_sl,
+                        wing_roll=bool(wing_roll),
+                        old_wing_product_id=old_wing_product_id,
+                        new_wing_product_id=new_wing_product_id,
+                        new_wing_symbol=new_wing_symbol,
+                        new_wing_strike=new_wing_strike,
                     )
 
     def _master_universal_sl_pct(
@@ -3022,6 +3036,11 @@ class MirrorEngine:
         db: Any,
         universal_sl_pct: float = 200.0,
         master_bracket_sl: float | None = None,
+        wing_roll: bool = False,
+        old_wing_product_id: int | None = None,
+        new_wing_product_id: int | None = None,
+        new_wing_symbol: str | None = None,
+        new_wing_strike: float | None = None,
     ) -> None:
         # Caller MUST hold the per-slave lock.
         # Virtual mode: track adjustment in DB but don't place real orders
@@ -3092,6 +3111,60 @@ class MirrorEngine:
                         st.put_product_id = int(new_product_id)
                         st.put_symbol = str(new_symbol or "")
                         st.put_strike = float(new_strike or 0)
+                    if (
+                        wing_roll
+                        and new_wing_product_id
+                        and int(new_wing_product_id) > 0
+                    ):
+                        wing_role = (
+                            "wing_call" if leg == "call" else "wing_put"
+                        )
+                        try:
+                            record_slave_adjustment(
+                                virt_db,
+                                slave_trade=st,
+                                slave_account_id=int(slave.id),
+                                master_trade=master_row,
+                                triggered_leg=wing_role,
+                                new_product_id=int(new_wing_product_id),
+                                new_symbol=str(new_wing_symbol or ""),
+                                new_strike=float(new_wing_strike or 0),
+                                new_order_id="VIRTUAL",
+                                reason="WING_ROLL",
+                                old_leg_closed_at=virt_adj_close_ts,
+                                new_leg_opened_at=virt_adj_close_ts,
+                                old_leg_fill_at=virt_adj_close_ts,
+                                new_leg_fill_at=virt_adj_close_ts,
+                            )
+                        except Exception as wing_led_exc:
+                            logger.error(
+                                "virtual slave wing roll ledger failed: %s",
+                                wing_led_exc,
+                                exc_info=True,
+                            )
+                        if leg == "call":
+                            st.wing_call_product_id = int(new_wing_product_id)
+                            st.wing_call_symbol = str(new_wing_symbol or "")
+                            st.wing_call_strike = float(new_wing_strike or 0)
+                            st.wing_call_order_id = "VIRTUAL"
+                        else:
+                            st.wing_put_product_id = int(new_wing_product_id)
+                            st.wing_put_symbol = str(new_wing_symbol or "")
+                            st.wing_put_strike = float(new_wing_strike or 0)
+                            st.wing_put_order_id = "VIRTUAL"
+                        log_and_buffer(
+                            "SLAVE_WING_ROLL",
+                            int(st.master_trade_id or 0),
+                            {
+                                "slave": slave.name,
+                                "leg": leg,
+                                "old_wing": old_wing_product_id,
+                                "new_wing": new_wing_product_id,
+                                "qty": int(st.actual_quantity or 1),
+                                "net_credit_usd": 0.0,
+                                "virtual": True,
+                            },
+                        )
                     virt_db.commit()
             return
 
@@ -3336,8 +3409,209 @@ class MirrorEngine:
                     qty_exc,
                 )
 
+            # ── Slave wing roll (same 4-step order as master; master strikes) ──
+            do_wing_roll = bool(
+                wing_roll
+                and old_wing_product_id
+                and int(old_wing_product_id) > 0
+                and new_wing_product_id
+                and int(new_wing_product_id) > 0
+            )
+            old_wing_pid = int(old_wing_product_id or 0)
+            new_wing_pid = int(new_wing_product_id or 0)
+            wing_exit_fill = 0.0
+            wing_entry_fill = 0.0
+            if do_wing_roll:
+                # Resolve old wing pid from slave columns if master id mismatch
+                slave_old_wing = (
+                    int(getattr(slave_trade, "wing_call_product_id", 0) or 0)
+                    if leg == "call"
+                    else int(getattr(slave_trade, "wing_put_product_id", 0) or 0)
+                )
+                if slave_old_wing > 0:
+                    old_wing_pid = slave_old_wing
+
+                live_after_short = await client.get_option_positions()
+                wing_live = self._position_size_for_product(
+                    live_after_short, old_wing_pid
+                )
+                if wing_live is not None and abs(float(wing_live)) > 0:
+                    ok_w, w_order, w_err = await self._close_with_reduce_only(
+                        client=client,
+                        slave=slave,
+                        product_id=old_wing_pid,
+                        signed_size=float(wing_live),
+                        master_trade_id=int(slave_trade.master_trade_id or 0),
+                        path="mirror_adjustment_wing_close",
+                    )
+                    try:
+                        wing_exit_fill = float(
+                            await client.resolve_fill_price(
+                                w_order,
+                                symbol_for_fallback=(
+                                    str(
+                                        getattr(
+                                            slave_trade,
+                                            "wing_call_symbol"
+                                            if leg == "call"
+                                            else "wing_put_symbol",
+                                            None,
+                                        )
+                                        or ""
+                                    )
+                                ),
+                            )
+                            or 0
+                        )
+                    except Exception:
+                        wing_exit_fill = 0.0
+                    if not ok_w:
+                        logger.critical(
+                            "[SLAVE_WING_ROLL] slave='%s' old wing close "
+                            "failed pid=%s err=%s — abort new short",
+                            slave.name,
+                            old_wing_pid,
+                            w_err,
+                        )
+                        log_and_buffer(
+                            "WING_ROLL_ABORT",
+                            int(slave_trade.master_trade_id or 0),
+                            {
+                                "stage": "slave_old_wing_close",
+                                "slave": slave.name,
+                                "leg": leg,
+                                "error": str(w_err or "")[:200],
+                            },
+                        )
+                        slave_trade.last_error = (
+                            f"SLAVE_WING_ROLL old wing close failed: {w_err}"
+                        )[:500]
+                        slave_trade.error_count = (
+                            int(slave_trade.error_count or 0) + 1
+                        )
+                        db.commit()
+                        return
+
+                wing_role = "wing_call" if leg == "call" else "wing_put"
+                record_slave_adjustment_close(
+                    db,
+                    slave_account_id=int(slave.id),
+                    master_trade=master_row,
+                    triggered_leg=wing_role,
+                    reason="WING_ROLL",
+                    old_leg_closed_at=get_utc_now(),
+                    old_product_id=old_wing_pid,
+                )
+                db.commit()
+
+                # Buy new wing BEFORE new short (protection first)
+                try:
+                    wing_buy = await client.place_order(
+                        product_id=new_wing_pid,
+                        size=int(entry_qty),
+                        side="buy",
+                    )
+                    wing_entry_fill = float(
+                        await client.resolve_fill_price(
+                            wing_buy,
+                            symbol_for_fallback=str(new_wing_symbol or ""),
+                        )
+                        or 0
+                    )
+                    wing_buy_oid = self._order_id(wing_buy)
+                except Exception as wing_buy_exc:
+                    logger.critical(
+                        "[SLAVE_WING_ROLL] slave='%s' new wing buy FAILED: %s "
+                        "— side left flat (no new short)",
+                        slave.name,
+                        wing_buy_exc,
+                    )
+                    log_and_buffer(
+                        "WING_ROLL_ABORT",
+                        int(slave_trade.master_trade_id or 0),
+                        {
+                            "stage": "new_wing_entry",
+                            "slave": slave.name,
+                            "leg": leg,
+                            "wanted_strike": new_wing_strike,
+                            "error": str(wing_buy_exc)[:200],
+                        },
+                    )
+                    slave_trade.last_error = (
+                        f"SLAVE_WING_ROLL new wing failed: {wing_buy_exc}"
+                    )[:500]
+                    slave_trade.error_count = (
+                        int(slave_trade.error_count or 0) + 1
+                    )
+                    # Clear old wing columns — closed; no new wing
+                    if leg == "call":
+                        slave_trade.wing_call_product_id = None
+                        slave_trade.wing_call_symbol = None
+                        slave_trade.wing_call_strike = None
+                        slave_trade.wing_call_order_id = None
+                        slave_trade.wing_call_fill_price = None
+                    else:
+                        slave_trade.wing_put_product_id = None
+                        slave_trade.wing_put_symbol = None
+                        slave_trade.wing_put_strike = None
+                        slave_trade.wing_put_order_id = None
+                        slave_trade.wing_put_fill_price = None
+                    db.commit()
+                    return
+
+                record_slave_adjustment_open(
+                    db,
+                    slave_trade=slave_trade,
+                    slave_account_id=int(slave.id),
+                    master_trade=master_row,
+                    triggered_leg=wing_role,
+                    new_product_id=new_wing_pid,
+                    new_symbol=str(new_wing_symbol or ""),
+                    new_strike=float(new_wing_strike or 0),
+                    new_order_id=str(wing_buy_oid) if wing_buy_oid else None,
+                    reason="WING_ROLL",
+                    new_leg_opened_at=get_utc_now(),
+                    new_leg_fill_at=get_utc_now(),
+                    quantity=int(entry_qty),
+                )
+                if leg == "call":
+                    slave_trade.wing_call_product_id = new_wing_pid
+                    slave_trade.wing_call_symbol = str(new_wing_symbol or "")
+                    slave_trade.wing_call_strike = float(new_wing_strike or 0)
+                    slave_trade.wing_call_order_id = (
+                        str(wing_buy_oid) if wing_buy_oid else None
+                    )
+                    slave_trade.wing_call_fill_price = wing_entry_fill or None
+                else:
+                    slave_trade.wing_put_product_id = new_wing_pid
+                    slave_trade.wing_put_symbol = str(new_wing_symbol or "")
+                    slave_trade.wing_put_strike = float(new_wing_strike or 0)
+                    slave_trade.wing_put_order_id = (
+                        str(wing_buy_oid) if wing_buy_oid else None
+                    )
+                    slave_trade.wing_put_fill_price = wing_entry_fill or None
+                db.commit()
+
+                net_credit = (
+                    (wing_exit_fill - wing_entry_fill)
+                    * float(entry_qty)
+                    * _CONTRACT_SIZE
+                )
+                log_and_buffer(
+                    "SLAVE_WING_ROLL",
+                    int(slave_trade.master_trade_id or 0),
+                    {
+                        "slave": slave.name,
+                        "leg": leg,
+                        "old_wing": old_wing_pid,
+                        "new_wing": new_wing_pid,
+                        "qty": entry_qty,
+                        "net_credit_usd": round(net_credit, 4),
+                        "new_wing_strike": new_wing_strike,
+                    },
+                )
+
             # --- d. Open new leg; bracket SL = master's absolute stop ---
-            # Wings are NEVER closed or resized on adjustment.
             new_sl = None
             new_sl_limit = None
             if master_bracket_sl is not None and float(master_bracket_sl) > 0:

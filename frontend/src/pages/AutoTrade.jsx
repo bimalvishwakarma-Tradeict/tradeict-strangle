@@ -163,6 +163,9 @@ function applyStatusToForm(data, setters) {
       : Boolean(data.hedge_close_at_expiry_enabled),
   )
   setters.setBasketWingsEnabled(Boolean(data.basket_wings_enabled))
+  setters.setWingRollWithShortEnabled(
+    data.wing_roll_with_short_enabled !== false
+  )
   setters.setMidpriceEnabled(Boolean(data.midprice_enabled))
   setters.setMidpriceChaseMaxSeconds(
     String(
@@ -330,6 +333,7 @@ export default function AutoTrade() {
   const [hedgeCloseAtExpiryEnabled, setHedgeCloseAtExpiryEnabled] =
     useState(true)
   const [basketWingsEnabled, setBasketWingsEnabled] = useState(false)
+  const [wingRollWithShortEnabled, setWingRollWithShortEnabled] = useState(true)
   const [midpriceEnabled, setMidpriceEnabled] = useState(false)
   const [midpriceChaseMaxSeconds, setMidpriceChaseMaxSeconds] =
     useState('120')
@@ -426,6 +430,7 @@ export default function AutoTrade() {
       setHedgeForceRollEnabled,
       setHedgeCloseAtExpiryEnabled,
       setBasketWingsEnabled,
+      setWingRollWithShortEnabled,
       setMidpriceEnabled,
       setMidpriceChaseMaxSeconds,
       setMidpriceHoldSeconds,
@@ -733,6 +738,7 @@ export default function AutoTrade() {
       hedge_force_roll_enabled: Boolean(hedgeForceRollEnabled),
       hedge_close_at_expiry_enabled: Boolean(hedgeCloseAtExpiryEnabled),
       basket_wings_enabled: Boolean(basketWingsEnabled),
+      wing_roll_with_short_enabled: Boolean(wingRollWithShortEnabled),
       midprice_enabled: Boolean(midpriceEnabled),
       midprice_chase_max_seconds: Math.max(
         10,
@@ -2383,6 +2389,29 @@ export default function AutoTrade() {
                   short strangle into a defined-risk condor so a gap or spike
                   cannot run unbounded.
                 </span>
+          </span>
+        </label>
+
+        <label
+          className={`mt-4 flex cursor-pointer items-start gap-3 ${
+            basketWingsEnabled ? '' : 'pointer-events-none opacity-40'
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={wingRollWithShortEnabled}
+            onChange={(e) => setWingRollWithShortEnabled(e.target.checked)}
+            disabled={!basketWingsEnabled}
+            className="mt-1 h-4 w-4 rounded border-gray-600 bg-gray-900 text-emerald-500"
+          />
+          <span className="text-sm text-gray-300">
+            Roll wing with short
+            <span className="mt-1 block text-xs text-gray-500">
+              Jab adjustment ka naya short strike wing ke paar jaata hai, to us
+              side ka wing bhi band karke naye short se utni hi door dobara
+              khareeda jaata hai. OFF par short ko wing ke andar clamp kar diya
+              jaata hai.
+            </span>
           </span>
         </label>
 

@@ -34,6 +34,10 @@ class AdjustmentPlan:
     new_symbol: str
     target_premium: float  # premium we expect to collect on new leg
     other_leg_premium: float  # opposite leg mark used for matching
+    # When True: new short crosses the open wing — roll wing with short
+    # (skip clamp). Executor closes old wing + buys new wing before new short.
+    wing_roll: bool = False
+    wing_old_strike: float | None = None
 
 
 @dataclass
@@ -84,6 +88,12 @@ class AdjustmentResult:
     # Absolute bracket SL from master fill — slaves must use verbatim
     master_bracket_sl: float | None = None
     master_bracket_sl_limit: float | None = None
+    # Wing roll with short (mirror to slaves)
+    wing_roll: bool = False
+    old_wing_product_id: int | None = None
+    new_wing_product_id: int | None = None
+    new_wing_symbol: str | None = None
+    new_wing_strike: float | None = None
 
 
 class BaseStrategy(ABC):

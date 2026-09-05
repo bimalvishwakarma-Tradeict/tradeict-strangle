@@ -5523,6 +5523,34 @@ class BotEngine:
                                     )
                                     else None
                                 ),
+                                wing_roll=bool(
+                                    getattr(result, "wing_roll", False)
+                                ),
+                                old_wing_product_id=(
+                                    int(result.old_wing_product_id)
+                                    if getattr(
+                                        result, "old_wing_product_id", None
+                                    )
+                                    else None
+                                ),
+                                new_wing_product_id=(
+                                    int(result.new_wing_product_id)
+                                    if getattr(
+                                        result, "new_wing_product_id", None
+                                    )
+                                    else None
+                                ),
+                                new_wing_symbol=(
+                                    str(result.new_wing_symbol)
+                                    if getattr(result, "new_wing_symbol", None)
+                                    else None
+                                ),
+                                new_wing_strike=(
+                                    float(result.new_wing_strike)
+                                    if getattr(result, "new_wing_strike", None)
+                                    is not None
+                                    else None
+                                ),
                             )
                             log_and_buffer(
                                 "MIRROR_ADJ_CALLED",

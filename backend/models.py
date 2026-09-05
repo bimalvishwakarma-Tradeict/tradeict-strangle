@@ -535,6 +535,10 @@ class AutoTradeSettings(Base):
     wing_pct_of_premium: Mapped[float] = mapped_column(
         Float, nullable=False, default=20.0, server_default="20.0"
     )
+    # When adjustment short would cross its wing: roll wing with short (default ON)
+    wing_roll_with_short_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
     # Mid-price chase / urgent ladder (default OFF — safe rollout)
     midprice_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"

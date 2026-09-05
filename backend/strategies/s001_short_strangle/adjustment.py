@@ -1329,6 +1329,163 @@ class AdjustmentExecutor:
                     leg_type=triggered_leg_type,
                 )
 
+            # ── Wing roll prep (before any close) ──
+            # When plan.wing_roll: select new wing via entry wing_select, then
+            # close short → close wing → buy wing → sell short (market only).
+            wing_roll_active = bool(getattr(plan, "wing_roll", False))
+            wing_leg: Any | None = None
+            wing_pick: dict[str, Any] | None = None
+            wing_exit_result: OrderResult | None = None
+            wing_entry_result: OrderResult | None = None
+            old_wing_closed_ts = None
+            old_wing_close_fill_ts = None
+            new_wing_open_ts = None
+            new_wing_fill_ts = None
+            new_wing_leg: Any | None = None
+            if wing_roll_active:
+                wing_lt = (
+                    "wing_call"
+                    if str(triggered_leg_type).lower() == "call"
+                    else "wing_put"
+                )
+                wing_leg = (
+                    db_session.query(Leg)
+                    .filter(
+                        Leg.trade_id == trade_id_lookup,
+                        Leg.leg_type == wing_lt,
+                        Leg.status == "open",
+                        Leg.is_bot_managed.is_(True),
+                    )
+                    .first()
+                )
+                if wing_leg is None:
+                    logger.warning(
+                        "[WING_ROLL] flagged but no open %s — skip roll",
+                        wing_lt,
+                    )
+                    wing_roll_active = False
+                else:
+                    from backend.config import OPTIONS_CONTRACT_VALUE
+                    from backend.strategies.s001_short_strangle.wing_select import (
+                        resolve_wing_strikes,
+                    )
+
+                    expiry_date = trade.expiry_date
+                    if hasattr(expiry_date, "isoformat"):
+                        expiry_str = expiry_date.isoformat()
+                    else:
+                        expiry_str = str(expiry_date)
+                    und_key = str(trade.underlying).upper()
+                    und_sym = UNDERLYING_SYMBOLS.get(und_key, und_key)
+                    chain = await delta_client.get_option_chain(
+                        underlying=und_sym,
+                        expiry_date=expiry_str,
+                    )
+                    short_call_k = (
+                        float(plan.new_strike)
+                        if str(triggered_leg_type).lower() == "call"
+                        else float(other_leg.strike)
+                    )
+                    short_put_k = (
+                        float(plan.new_strike)
+                        if str(triggered_leg_type).lower() == "put"
+                        else float(other_leg.strike)
+                    )
+                    # Premium hint for pct mode: use expected short ask
+                    short_call_prem = float(plan.target_premium or 0)
+                    short_put_prem = float(plan.target_premium or 0)
+                    if str(triggered_leg_type).lower() == "call":
+                        short_call_prem = float(
+                            new_strike_ask or plan.target_premium or 0
+                        )
+                        short_put_prem = float(other_old_baseline or 0)
+                    else:
+                        short_put_prem = float(
+                            new_strike_ask or plan.target_premium or 0
+                        )
+                        short_call_prem = float(other_old_baseline or 0)
+                    wc_pick, wp_pick = resolve_wing_strikes(
+                        chain=chain or [],
+                        short_call_strike=short_call_k,
+                        short_put_strike=short_put_k,
+                        short_call_premium=short_call_prem,
+                        short_put_premium=short_put_prem,
+                        mode=str(
+                            getattr(adj_cfg, "wing_strike_mode", None)
+                            or "points"
+                        ),
+                        points_away=float(
+                            getattr(adj_cfg, "wing_points_away", None) or 2000
+                        ),
+                        delta_min=float(
+                            getattr(adj_cfg, "wing_delta_min", None) or 0.05
+                        ),
+                        delta_max=float(
+                            getattr(adj_cfg, "wing_delta_max", None) or 0.07
+                        ),
+                        pct_of_premium=float(
+                            getattr(adj_cfg, "wing_pct_of_premium", None)
+                            or 20.0
+                        ),
+                    )
+                    wing_pick = (
+                        wc_pick
+                        if str(triggered_leg_type).lower() == "call"
+                        else wp_pick
+                    )
+                    if wing_pick is None or int(wing_pick.get("product_id") or 0) <= 0:
+                        log_and_buffer(
+                            "WING_ROLL_ABORT",
+                            int(trade.id),
+                            {
+                                "stage": "wing_select",
+                                "leg": str(triggered_leg_type),
+                                "wanted_strike": float(plan.new_strike),
+                                "error": "no_wing_strike_beyond_new_short",
+                            },
+                        )
+                        logger.critical(
+                            "[WING_ROLL_ABORT] stage=wing_select trade=%s leg=%s",
+                            trade.id,
+                            triggered_leg_type,
+                        )
+                        return AdjustmentResult(
+                            success=False,
+                            error_message=(
+                                "WING_ROLL_ABORT: no wing strike beyond new short"
+                            ),
+                        )
+                    if str(wing_pick.get("picked_by") or "") == "chain_end":
+                        log_and_buffer(
+                            "WING_ROLL_LAST_STRIKE",
+                            int(trade.id),
+                            {
+                                "leg": str(triggered_leg_type),
+                                "wanted": float(
+                                    getattr(plan, "wing_old_strike", 0) or 0
+                                ),
+                                "picked": float(wing_pick["strike"]),
+                                "reason": "chain_exhausted",
+                                "new_short": float(plan.new_strike),
+                            },
+                        )
+                    roll_gap = abs(
+                        float(wing_pick["strike"]) - float(plan.new_strike)
+                    )
+                    log_and_buffer(
+                        "WING_ROLL_START",
+                        int(trade.id),
+                        {
+                            "leg": str(triggered_leg_type),
+                            "old_short": float(triggered_leg.strike),
+                            "new_short": float(plan.new_strike),
+                            "old_wing": float(wing_leg.strike),
+                            "new_wing": float(wing_pick["strike"]),
+                            "gap": round(roll_gap, 2),
+                            "qty": int(new_qty),
+                        },
+                    )
+
             # Step 3→4: Close triggered leg
             # If this leg was protected by a legacy *separate* SL order
             # (delta_sl_order_id exists), cancel it before/around the close so
@@ -1407,6 +1564,134 @@ class AdjustmentExecutor:
                 else:
                     logger.info("[AUDIT] Triggered leg closed on Delta")
 
+            # ── Wing roll steps 2–3 (after short flat, before new short) ──
+            if wing_roll_active and wing_leg is not None and wing_pick is not None:
+                from backend.config import OPTIONS_CONTRACT_VALUE
+
+                # Step 2: close old wing (SELL reduce_only)
+                if trade_is_demo:
+                    old_wing_closed_ts = get_utc_now()
+                    wing_exit_result = await _demo_mark_order_result(
+                        delta_client,
+                        str(wing_leg.symbol),
+                        float(wing_leg.initial_premium or 0),
+                    )
+                else:
+                    old_wing_closed_ts = get_utc_now()
+                    wing_exit_result = await order_executor.close_long_position(
+                        product_id=int(wing_leg.product_id),
+                        quantity=int(wing_leg.quantity or new_qty),
+                        delta_client=delta_client,
+                        symbol_for_fallback=str(wing_leg.symbol),
+                    )
+                old_wing_close_fill_ts = get_utc_now()
+                if not wing_exit_result.success:
+                    log_and_buffer(
+                        "WING_ROLL_ABORT",
+                        int(trade.id),
+                        {
+                            "stage": "old_wing_close",
+                            "leg": str(triggered_leg_type),
+                            "wanted_strike": float(wing_pick["strike"]),
+                            "error": str(wing_exit_result.error or "close_failed")[
+                                :200
+                            ],
+                        },
+                    )
+                    logger.critical(
+                        "[WING_ROLL_ABORT] stage=old_wing_close trade=%s — "
+                        "short closed, wing still open; manual check",
+                        trade.id,
+                    )
+                    self._mark_leg_closed_partial(
+                        triggered_leg, exit_result, db_session
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        is_partial=True,
+                        old_strike=float(triggered_leg.strike),
+                        error_message=(
+                            "WING_ROLL_ABORT: old wing close failed after "
+                            "short exit — short flat, wing still open"
+                        ),
+                    )
+
+                # Step 3: buy new wing (protection before new short)
+                wing_qty = int(new_qty)
+                if trade_is_demo:
+                    new_wing_open_ts = get_utc_now()
+                    wing_entry_result = await _demo_mark_order_result(
+                        delta_client,
+                        str(wing_pick.get("symbol") or ""),
+                        float(wing_pick.get("premium") or 0),
+                    )
+                else:
+                    new_wing_open_ts = get_utc_now()
+                    wing_entry_result = await order_executor.buy_option(
+                        product_id=int(wing_pick["product_id"]),
+                        quantity=wing_qty,
+                        delta_client=delta_client,
+                        symbol_for_fallback=str(wing_pick.get("symbol") or ""),
+                    )
+                new_wing_fill_ts = get_utc_now()
+                if not wing_entry_result.success:
+                    # Short + old wing both flat — leave side flat, no new short
+                    log_and_buffer(
+                        "WING_ROLL_ABORT",
+                        int(trade.id),
+                        {
+                            "stage": "new_wing_entry",
+                            "leg": str(triggered_leg_type),
+                            "wanted_strike": float(wing_pick["strike"]),
+                            "error": str(
+                                wing_entry_result.error or "buy_failed"
+                            )[:200],
+                        },
+                    )
+                    logger.critical(
+                        "[WING_ROLL_ABORT] stage=new_wing_entry trade=%s leg=%s "
+                        "wanted_strike=%s — side left flat (no naked short)",
+                        trade.id,
+                        triggered_leg_type,
+                        wing_pick["strike"],
+                    )
+                    now_abort = get_utc_now()
+                    triggered_leg.exit_premium = float(
+                        exit_result.filled_price or 0
+                    )
+                    triggered_leg.exit_time = now_abort
+                    triggered_leg.status = "closed"
+                    if exit_result.order_id is not None:
+                        triggered_leg.exit_order_id = str(exit_result.order_id)
+                    if exit_result.commission is not None:
+                        triggered_leg.exit_fee_usd = abs(
+                            float(exit_result.commission)
+                        )
+                    wing_leg.exit_premium = float(
+                        wing_exit_result.filled_price or 0
+                    )
+                    wing_leg.exit_time = now_abort
+                    wing_leg.status = "closed"
+                    if wing_exit_result.order_id is not None:
+                        wing_leg.exit_order_id = str(wing_exit_result.order_id)
+                    if wing_exit_result.commission is not None:
+                        wing_leg.exit_fee_usd = abs(
+                            float(wing_exit_result.commission)
+                        )
+                    db_session.commit()
+                    return AdjustmentResult(
+                        success=False,
+                        is_partial=True,
+                        old_strike=float(triggered_leg.strike),
+                        new_strike=float(plan.new_strike),
+                        error_message=(
+                            "WING_ROLL_ABORT: new wing entry failed — "
+                            "triggered side left flat"
+                        ),
+                        wing_roll=True,
+                        old_wing_product_id=int(wing_leg.product_id),
+                    )
+
             if is_condor_trade(has_wing_legs=_open_wing_count > 0):
                 log_sequence_step(
                     trade_id=trade_id_lookup,
@@ -1466,15 +1751,83 @@ class AdjustmentExecutor:
                 self._mark_leg_closed_partial(
                     triggered_leg, exit_result, db_session
                 )
-                logger.critical(
-                    "PARTIAL ADJUSTMENT: %s closed at %s but new entry FAILED. "
-                    "Trade %s now ONE-LEGGED. Other leg (%s) still open. "
-                    "Manual intervention required!",
-                    triggered_leg_type,
-                    exit_result.filled_price,
-                    trade.id,
-                    other_leg_type,
-                )
+                if wing_roll_active and wing_entry_result is not None:
+                    # New wing is long and open — no naked short risk, but
+                    # structure is incomplete (wing without matching short).
+                    logger.critical(
+                        "PARTIAL ADJUSTMENT after WING_ROLL: %s closed, new "
+                        "wing open at %s, new short FAILED. Trade %s — "
+                        "manual intervention. Other leg (%s) still open.",
+                        triggered_leg_type,
+                        wing_pick.get("strike") if wing_pick else "?",
+                        trade.id,
+                        other_leg_type,
+                    )
+                    # Persist closed old wing + open new wing so DB matches book
+                    try:
+                        now_uw = get_utc_now()
+                        if wing_leg is not None and wing_exit_result is not None:
+                            wing_leg.exit_premium = float(
+                                wing_exit_result.filled_price or 0
+                            )
+                            wing_leg.exit_time = now_uw
+                            wing_leg.status = "closed"
+                            if wing_exit_result.order_id is not None:
+                                wing_leg.exit_order_id = str(
+                                    wing_exit_result.order_id
+                                )
+                        if wing_pick is not None and wing_entry_result is not None:
+                            orphan_wing = Leg(
+                                trade_id=trade.id,
+                                leg_type=(
+                                    "wing_call"
+                                    if str(triggered_leg_type).lower() == "call"
+                                    else "wing_put"
+                                ),
+                                strike=float(wing_pick["strike"]),
+                                symbol=str(wing_pick.get("symbol") or ""),
+                                product_id=int(wing_pick["product_id"]),
+                                initial_premium=float(
+                                    wing_entry_result.filled_price
+                                    or wing_pick.get("premium")
+                                    or 0
+                                ),
+                                trigger_baseline_premium=None,
+                                trigger_premium=None,
+                                quantity=int(new_qty),
+                                entry_time=now_uw,
+                                status="open",
+                                is_long=True,
+                                is_bot_managed=True,
+                                entry_fee_usd=(
+                                    abs(float(wing_entry_result.commission))
+                                    if wing_entry_result.commission is not None
+                                    else None
+                                ),
+                                delta_order_id=(
+                                    str(wing_entry_result.order_id)
+                                    if wing_entry_result.order_id is not None
+                                    else None
+                                ),
+                            )
+                            db_session.add(orphan_wing)
+                        db_session.commit()
+                    except Exception as wing_db_exc:
+                        logger.error(
+                            "wing roll partial DB update failed: %s",
+                            wing_db_exc,
+                            exc_info=True,
+                        )
+                else:
+                    logger.critical(
+                        "PARTIAL ADJUSTMENT: %s closed at %s but new entry FAILED. "
+                        "Trade %s now ONE-LEGGED. Other leg (%s) still open. "
+                        "Manual intervention required!",
+                        triggered_leg_type,
+                        exit_result.filled_price,
+                        trade.id,
+                        other_leg_type,
+                    )
                 return AdjustmentResult(
                     success=False,
                     is_partial=True,
@@ -1483,6 +1836,27 @@ class AdjustmentExecutor:
                         f"PARTIAL: {triggered_leg_type} closed at "
                         f"{exit_result.filled_price}, new entry failed. "
                         "One-legged position remains."
+                    ),
+                    wing_roll=wing_roll_active,
+                    old_wing_product_id=(
+                        int(wing_leg.product_id)
+                        if wing_leg is not None
+                        else None
+                    ),
+                    new_wing_product_id=(
+                        int(wing_pick["product_id"])
+                        if wing_pick is not None
+                        else None
+                    ),
+                    new_wing_symbol=(
+                        str(wing_pick.get("symbol") or "")
+                        if wing_pick is not None
+                        else None
+                    ),
+                    new_wing_strike=(
+                        float(wing_pick["strike"])
+                        if wing_pick is not None
+                        else None
                     ),
                 )
 
@@ -1811,6 +2185,74 @@ class AdjustmentExecutor:
                 reason="adjustment",
                 leg=str(triggered_leg.leg_type),
             )
+
+            # Wing roll DB: close old wing + open new wing (1:1 with new_qty)
+            if (
+                wing_roll_active
+                and wing_leg is not None
+                and wing_pick is not None
+                and wing_exit_result is not None
+                and wing_entry_result is not None
+            ):
+                from backend.config import OPTIONS_CONTRACT_VALUE
+
+                wing_exit_px = float(wing_exit_result.filled_price or 0)
+                wing_entry_px = float(
+                    wing_entry_result.filled_price
+                    or wing_pick.get("premium")
+                    or 0
+                )
+                wing_leg.exit_premium = wing_exit_px
+                wing_leg.exit_time = now_utc
+                wing_leg.status = "closed"
+                if wing_exit_result.order_id is not None:
+                    wing_leg.exit_order_id = str(wing_exit_result.order_id)
+                if wing_exit_result.commission is not None:
+                    wing_leg.exit_fee_usd = abs(
+                        float(wing_exit_result.commission)
+                    )
+                new_wing_leg = Leg(
+                    trade_id=trade.id,
+                    leg_type=str(wing_leg.leg_type),
+                    strike=float(wing_pick["strike"]),
+                    symbol=str(wing_pick.get("symbol") or ""),
+                    product_id=int(wing_pick["product_id"]),
+                    initial_premium=wing_entry_px,
+                    trigger_baseline_premium=None,
+                    trigger_premium=None,
+                    quantity=int(new_qty),
+                    entry_time=now_utc,
+                    status="open",
+                    is_long=True,
+                    is_bot_managed=True,
+                    entry_fee_usd=(
+                        abs(float(wing_entry_result.commission))
+                        if wing_entry_result.commission is not None
+                        else None
+                    ),
+                    delta_order_id=(
+                        str(wing_entry_result.order_id)
+                        if wing_entry_result.order_id is not None
+                        else None
+                    ),
+                )
+                db_session.add(new_wing_leg)
+                net_credit = (
+                    (wing_exit_px - wing_entry_px)
+                    * float(new_qty)
+                    * float(OPTIONS_CONTRACT_VALUE)
+                )
+                log_and_buffer(
+                    "WING_ROLL_DONE",
+                    int(trade.id),
+                    {
+                        "leg": str(triggered_leg_type),
+                        "old_wing_exit_price": round(wing_exit_px, 4),
+                        "new_wing_fill_price": round(wing_entry_px, 4),
+                        "net_credit_usd": round(net_credit, 4),
+                        "new_wing_strike": float(wing_pick["strike"]),
+                    },
+                )
 
             # Untouched leg: KEEP original entry; ONLY reset trigger baseline
             # to Best Offer (ask). Soft fallback: mid, then keep existing.
@@ -2161,6 +2603,22 @@ class AdjustmentExecutor:
                     old_leg_fill_at=old_leg_close_fill_ts,
                     new_leg_fill_at=new_leg_fill_ts,
                 )
+                if (
+                    wing_roll_active
+                    and wing_leg is not None
+                    and new_wing_leg is not None
+                ):
+                    record_master_adjustment(
+                        db_session,
+                        trade,
+                        old_leg=wing_leg,
+                        new_leg=new_wing_leg,
+                        reason="WING_ROLL",
+                        old_leg_closed_at=old_wing_closed_ts or old_leg_closed_ts,
+                        new_leg_opened_at=new_wing_open_ts or new_leg_open_ts,
+                        old_leg_fill_at=old_wing_close_fill_ts,
+                        new_leg_fill_at=new_wing_fill_ts,
+                    )
                 db_session.commit()
             except Exception as ledger_exc:
                 logger.error(
@@ -2208,6 +2666,23 @@ class AdjustmentExecutor:
                 quantity=committed_triggered_qty,
                 master_bracket_sl=committed_bracket_sl,
                 master_bracket_sl_limit=committed_bracket_sl_limit,
+                wing_roll=bool(wing_roll_active),
+                old_wing_product_id=(
+                    int(wing_leg.product_id) if wing_leg is not None else None
+                ),
+                new_wing_product_id=(
+                    int(wing_pick["product_id"])
+                    if wing_pick is not None
+                    else None
+                ),
+                new_wing_symbol=(
+                    str(wing_pick.get("symbol") or "")
+                    if wing_pick is not None
+                    else None
+                ),
+                new_wing_strike=(
+                    float(wing_pick["strike"]) if wing_pick is not None else None
+                ),
             )
         except AdjustmentError as exc:
             logger.error("Adjustment failed trade=%s: %s", getattr(trade, "id", "?"), exc)

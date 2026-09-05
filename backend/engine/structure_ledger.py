@@ -1109,7 +1109,18 @@ def record_master_adjustment(
             return
         basket_seq = getattr(trade, "basket_seq_in_structure", None)
         lt = str(getattr(old_leg, "leg_type", "") or "").lower()
-        role = ROLE_BASKET_CALL if lt == "call" else ROLE_BASKET_PUT
+        if lt == "wing_call":
+            role = ROLE_BASKET_WING_CALL
+            side = "BUY"
+        elif lt == "wing_put":
+            role = ROLE_BASKET_WING_PUT
+            side = "BUY"
+        elif lt == "call":
+            role = ROLE_BASKET_CALL
+            side = "SELL"
+        else:
+            role = ROLE_BASKET_PUT
+            side = "SELL"
         old_pid = int(getattr(old_leg, "product_id", 0) or 0)
         open_row = find_open_leg(
             db,
@@ -1138,7 +1149,7 @@ def record_master_adjustment(
             structure=struct,
             leg_role=role,
             product_id=int(new_leg.product_id),
-            side="SELL",
+            side=side,
             quantity=abs(int(getattr(new_leg, "quantity", 0) or 0)),
             symbol=getattr(new_leg, "symbol", None),
             strike=getattr(new_leg, "strike", None),
@@ -1208,7 +1219,14 @@ def record_slave_adjustment_close(
         basket_seq = getattr(master_trade, "basket_seq_in_structure", None)
         bs = int(basket_seq) if basket_seq is not None else None
         leg = str(triggered_leg or "").lower()
-        role = ROLE_BASKET_CALL if leg == "call" else ROLE_BASKET_PUT
+        if leg == "wing_call":
+            role = ROLE_BASKET_WING_CALL
+        elif leg == "wing_put":
+            role = ROLE_BASKET_WING_PUT
+        elif leg == "call":
+            role = ROLE_BASKET_CALL
+        else:
+            role = ROLE_BASKET_PUT
         old_pid = int(old_product_id or 0)
         open_row = None
         if old_pid > 0:
@@ -1301,7 +1319,18 @@ def record_slave_adjustment_open(
         basket_seq = getattr(master_trade, "basket_seq_in_structure", None)
         bs = int(basket_seq) if basket_seq is not None else None
         leg = str(triggered_leg or "").lower()
-        role = ROLE_BASKET_CALL if leg == "call" else ROLE_BASKET_PUT
+        if leg == "wing_call":
+            role = ROLE_BASKET_WING_CALL
+            side = "BUY"
+        elif leg == "wing_put":
+            role = ROLE_BASKET_WING_PUT
+            side = "BUY"
+        elif leg == "call":
+            role = ROLE_BASKET_CALL
+            side = "SELL"
+        else:
+            role = ROLE_BASKET_PUT
+            side = "SELL"
         adj = _next_adj_seq(
             db,
             structure_id=int(struct.id),
@@ -1318,7 +1347,7 @@ def record_slave_adjustment_open(
             structure=struct,
             leg_role=role,
             product_id=int(new_product_id),
-            side="SELL",
+            side=side,
             quantity=qty,
             symbol=new_symbol,
             strike=float(new_strike) if new_strike is not None else None,

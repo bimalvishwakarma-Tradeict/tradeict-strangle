@@ -37,6 +37,11 @@ _IMPORTANT_EVENTS = frozenset(
         "WING_CROSS_GUARD",
         "WING_CROSS_GUARD_TOLERANCE_BYPASS",
         "WING_CROSS_GUARD_ABORT",
+        "WING_ROLL_START",
+        "WING_ROLL_DONE",
+        "WING_ROLL_ABORT",
+        "WING_ROLL_LAST_STRIKE",
+        "SLAVE_WING_ROLL",
         "ENTRY_PREMIUM_MISS",
         "THETA_SELECT_SUBOPTIMAL",
         "NEW_STRIKE_SELECTED",
@@ -296,6 +301,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "HEDGE_LEGS_UNBALANCED",
         "ORDER_CANCEL_UNCONFIRMED",
         "WING_CROSS_GUARD_ABORT",
+        "WING_ROLL_ABORT",
     ):
         bot_log.critical(msg)
     elif event_type == "ORPHAN_SL_SWEEP":
@@ -398,6 +404,10 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "PNL_SANITY_FAIL",
         "PARTIAL_ENTRY_CLEANUP",
         "RECONCILE_DEFERRED",
+        "WING_ROLL_START",
+        "WING_ROLL_DONE",
+        "WING_ROLL_LAST_STRIKE",
+        "SLAVE_WING_ROLL",
         "MIRROR_ADJ_DEBUG",
         "MIRROR_ADJ_PRE",
         "MIRROR_ADJ_CALLED",
