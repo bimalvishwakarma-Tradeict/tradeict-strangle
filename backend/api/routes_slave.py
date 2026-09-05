@@ -225,13 +225,19 @@ def _build_pnl_block(
     closed_basket: float,
     computed_at: str | None,
     stale_seconds: float | None,
+    hedge_missing: bool = False,
 ) -> dict[str, Any]:
     short_net, wing_net = _split_basket_net(basket_net, short_gross, wing_gross)
-    h_net = float(hedge_net) if hedge_net is not None else 0.0
+    # Missing hedge → treat as 0 for structure sum, but flag it explicitly
+    h_net = 0.0 if hedge_missing or hedge_net is None else float(hedge_net)
     closed = float(closed_basket or 0.0)
     structure_net = round(h_net + closed + float(basket_net or 0.0), 4)
-    return {
-        "hedge_net": round(h_net, 4) if hedge_net is not None else None,
+    out: dict[str, Any] = {
+        "hedge_net": (
+            0.0
+            if hedge_missing
+            else (round(float(hedge_net), 4) if hedge_net is not None else None)
+        ),
         "short_net": short_net,
         "wing_net": wing_net,
         "basket_net": round(float(basket_net or 0.0), 4),
@@ -239,6 +245,9 @@ def _build_pnl_block(
         "computed_at": computed_at,
         "stale_seconds": stale_seconds,
     }
+    if hedge_missing:
+        out["hedge_missing"] = True
+    return out
 
 
 def _leg_dict(
@@ -445,35 +454,203 @@ def _role_gross(legs: list[dict[str, Any]], prefix: str) -> float:
     return round(total, 4)
 
 
+def _hedge_legs(
+    row: Any,
+    *,
+    call_now: float | None,
+    put_now: float | None,
+) -> list[dict[str, Any]]:
+    """hedge_call / hedge_put rows — LONG: (now − entry) × qty × CV."""
+    from backend.engine.hedge_lifecycle import CONTRACT_SIZE
+
+    qty = max(1, int(getattr(row, "quantity", 1) or 1))
+    strike = getattr(row, "strike", None)
+    call_entry = float(getattr(row, "call_fill_price", None) or 0)
+    put_entry = float(getattr(row, "put_fill_price", None) or 0)
+    legs: list[dict[str, Any]] = []
+    if call_entry > 0:
+        call_px = float(call_now or 0)
+        call_pnl = (
+            (call_px - call_entry) * qty * float(CONTRACT_SIZE)
+            if call_px > 0
+            else 0.0
+        )
+        legs.append(
+            _leg_dict(
+                role="hedge_call",
+                strike=strike,
+                entry_price=call_entry,
+                current_price=call_px if call_px > 0 else None,
+                quantity=qty,
+                leg_pnl=round(float(call_pnl), 4),
+                status=str(getattr(row, "status", "open") or "open"),
+            )
+        )
+    if put_entry > 0:
+        put_px = float(put_now or 0)
+        put_pnl = (
+            (put_px - put_entry) * qty * float(CONTRACT_SIZE)
+            if put_px > 0
+            else 0.0
+        )
+        legs.append(
+            _leg_dict(
+                role="hedge_put",
+                strike=strike,
+                entry_price=put_entry,
+                current_price=put_px if put_px > 0 else None,
+                quantity=qty,
+                leg_pnl=round(float(put_pnl), 4),
+                status=str(getattr(row, "status", "open") or "open"),
+            )
+        )
+    return legs
+
+
+async def _fetch_hedge_bids(
+    client: DeltaClient | None,
+    call_symbol: str | None,
+    put_symbol: str | None,
+) -> tuple[float | None, float | None]:
+    """Same bid source as [HEDGE_PNL] — L2/ticker best bid, no entry fallback."""
+    from backend.engine.hedge_lifecycle import _fetch_strict_bid
+
+    if client is None:
+        return None, None
+    call_bid = None
+    put_bid = None
+    call_sym = str(call_symbol or "").strip()
+    put_sym = str(put_symbol or "").strip()
+    if call_sym:
+        try:
+            call_bid = await _fetch_strict_bid(client, call_sym)
+        except Exception as exc:
+            logger.warning("overview hedge call bid failed %s: %s", call_sym, exc)
+    if put_sym:
+        try:
+            put_bid = await _fetch_strict_bid(client, put_sym)
+        except Exception as exc:
+            logger.warning("overview hedge put bid failed %s: %s", put_sym, exc)
+    if call_bid is not None and call_bid <= 0:
+        call_bid = None
+    if put_bid is not None and put_bid <= 0:
+        put_bid = None
+    return call_bid, put_bid
+
+
+async def _compute_hedge_net_for_row(
+    row: Any,
+    *,
+    call_bid: float,
+    put_bid: float,
+    client: DeltaClient | None,
+    db: Session,
+) -> float | None:
+    """
+    Per-account hedge net from THAT row's fills/fees/qty + live bids.
+
+    Uses compute_hedge_net_mtm_fields — same formula as master HEDGE_PNL.
+    """
+    from backend.core.fees import estimate_option_trading_fee
+    from backend.core.spread_utils import estimate_and_log_exit_spread_usd
+    from backend.database import get_or_create_auto_settings
+    from backend.engine.hedge_lifecycle import compute_hedge_net_mtm_fields
+
+    call_entry = float(getattr(row, "call_fill_price", None) or 0)
+    put_entry = float(getattr(row, "put_fill_price", None) or 0)
+    qty = max(1, int(getattr(row, "quantity", 1) or 1))
+    if call_entry <= 0 or put_entry <= 0 or call_bid <= 0 or put_bid <= 0:
+        return None
+
+    entry_fees = float(getattr(row, "call_entry_fee_usd", None) or 0) + float(
+        getattr(row, "put_entry_fee_usd", None) or 0
+    )
+    entry_spread = float(getattr(row, "entry_spread_usd", None) or 0)
+
+    btc = 0.0
+    if client is not None:
+        try:
+            btc = float(await client.get_btc_index_price() or 0)
+        except Exception:
+            btc = 0.0
+    est_exit = 0.0
+    if btc > 0:
+        est_exit += estimate_option_trading_fee(
+            option_price=float(call_bid),
+            quantity_lots=qty,
+            btc_index_price=btc,
+        )
+        est_exit += estimate_option_trading_fee(
+            option_price=float(put_bid),
+            quantity_lots=qty,
+            btc_index_price=btc,
+        )
+
+    est_slip = 0.0
+    try:
+        spread_settings = get_or_create_auto_settings(db)
+        hid = int(getattr(row, "id", 0) or 0)
+        call_sym = str(getattr(row, "call_symbol", "") or "")
+        put_sym = str(getattr(row, "put_symbol", "") or "")
+        if call_sym:
+            est_slip += await estimate_and_log_exit_spread_usd(
+                symbol=call_sym,
+                offer_price=float(call_bid),
+                quantity=qty,
+                settings=spread_settings,
+                kind="hedge",
+                client=client,
+                log_id=hid,
+            )
+        if put_sym:
+            est_slip += await estimate_and_log_exit_spread_usd(
+                symbol=put_sym,
+                offer_price=float(put_bid),
+                quantity=qty,
+                settings=spread_settings,
+                kind="hedge",
+                client=client,
+                log_id=hid,
+            )
+    except Exception as exc:
+        logger.warning(
+            "overview hedge exit-spread estimate failed row=%s: %s",
+            getattr(row, "id", None),
+            exc,
+        )
+        est_slip = 0.0
+
+    mtm = compute_hedge_net_mtm_fields(
+        call_bid=float(call_bid),
+        put_bid=float(put_bid),
+        call_entry=call_entry,
+        put_entry=put_entry,
+        quantity=qty,
+        entry_fees=entry_fees,
+        estimated_exit_fees=est_exit,
+        entry_spread_usd=entry_spread,
+        hedge_est_exit_slippage_usd=float(est_slip),
+    )
+    return round(float(mtm["hedge_net_mtm"]), 4)
+
+
 def _hedge_payload(
     *,
     hedge: HedgePosition | None = None,
     slave_hedge: SlaveHedgePosition | None = None,
-    bot_engine: Any | None = None,
+    call_now: float | None = None,
+    put_now: float | None = None,
     hedge_net_mtm: float | None = None,
 ) -> dict[str, Any] | None:
-    """Build hedge block from master HedgePosition or SlaveHedgePosition."""
+    """Build hedge block — call_now/put_now must be live bids (never entry echo)."""
     row: Any = slave_hedge if slave_hedge is not None else hedge
     if row is None:
         return None
     call_entry = float(getattr(row, "call_fill_price", None) or 0) or None
     put_entry = float(getattr(row, "put_fill_price", None) or 0) or None
-    call_sym = getattr(row, "call_symbol", None)
-    put_sym = getattr(row, "put_symbol", None)
-    call_now = (
-        _live_px(bot_engine, call_sym, float(call_entry or 0))
-        if bot_engine is not None
-        else None
-    )
-    put_now = (
-        _live_px(bot_engine, put_sym, float(put_entry or 0))
-        if bot_engine is not None
-        else None
-    )
-    if call_now is not None and call_now <= 0:
-        call_now = None
-    if put_now is not None and put_now <= 0:
-        put_now = None
+    # Never fall back to entry — null if bid unavailable
+    c_now = float(call_now) if call_now is not None and float(call_now) > 0 else None
+    p_now = float(put_now) if put_now is not None and float(put_now) > 0 else None
     expiry = getattr(row, "expiry_date", None)
     return {
         "hedge_id": int(row.id),
@@ -482,12 +659,47 @@ def _hedge_payload(
         "quantity": int(row.quantity or 0),
         "call_entry": call_entry,
         "put_entry": put_entry,
-        "call_now": call_now,
-        "put_now": put_now,
+        "call_now": c_now,
+        "put_now": p_now,
         "hedge_net_mtm": (
             round(float(hedge_net_mtm), 4) if hedge_net_mtm is not None else None
         ),
     }
+
+
+def _audit_slave_hedge_pnl_suspect(
+    *,
+    slave_id: int,
+    slave_hedge: SlaveHedgePosition,
+    master_hedge: HedgePosition | None,
+    slave_net: float,
+    master_net: float | None,
+) -> None:
+    """WARNING when slave hedge_net equals master but entries differ."""
+    if master_hedge is None or master_net is None:
+        return
+    if abs(float(slave_net) - float(master_net)) > 0.0001:
+        return
+    s_call = float(getattr(slave_hedge, "call_fill_price", None) or 0)
+    s_put = float(getattr(slave_hedge, "put_fill_price", None) or 0)
+    m_call = float(getattr(master_hedge, "call_fill_price", None) or 0)
+    m_put = float(getattr(master_hedge, "put_fill_price", None) or 0)
+    if abs(s_call - m_call) < 0.01 and abs(s_put - m_put) < 0.01:
+        return
+    from backend.core.bot_logger import log_and_buffer
+
+    log_and_buffer(
+        "SLAVE_HEDGE_PNL_SUSPECT",
+        int(getattr(master_hedge, "id", 0) or 0),
+        {
+            "slave": int(slave_id),
+            "slave_hedge_id": int(slave_hedge.id),
+            "master_hedge_id": int(master_hedge.id),
+            "slave_entries": [round(s_call, 4), round(s_put, 4)],
+            "master_entries": [round(m_call, 4), round(m_put, 4)],
+            "value": round(float(slave_net), 6),
+        },
+    )
 
 
 def _active_trade_count(db: Session, slave_id: int) -> int:
@@ -1333,6 +1545,29 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         int(s.trade_id): s for s in master_states
     }
 
+    # Shared bid client/cache for hedge live prices (HEDGE_PNL source)
+    bid_client: DeltaClient | None = None
+    bid_cache: dict[str, float | None] = {}
+    master_call_bid: float | None = None
+    master_put_bid: float | None = None
+    if active_hedge_row is not None and master_account is not None:
+        try:
+            bid_client = DeltaClient(
+                decrypt(master_account.api_key_encrypted),
+                decrypt(master_account.api_secret_encrypted),
+            )
+            master_call_bid, master_put_bid = await _fetch_hedge_bids(
+                bid_client,
+                getattr(active_hedge_row, "call_symbol", None),
+                getattr(active_hedge_row, "put_symbol", None),
+            )
+            if getattr(active_hedge_row, "call_symbol", None):
+                bid_cache[str(active_hedge_row.call_symbol)] = master_call_bid
+            if getattr(active_hedge_row, "put_symbol", None):
+                bid_cache[str(active_hedge_row.put_symbol)] = master_put_bid
+        except Exception as exc:
+            logger.warning("overview master hedge bid fetch failed: %s", exc)
+
     def _tracker_mtm_fields(state: Any) -> dict[str, Any]:
         """Net/gross from basket_net_mtm_snapshot stored on the tracker."""
         from backend.core.fees import basket_net_mtm_snapshot
@@ -1400,11 +1635,20 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             if active_hedge_row is not None
             else 0.0
         )
+
         master_hedge_block = _hedge_payload(
             hedge=active_hedge_row,
-            bot_engine=bot_engine,
+            call_now=master_call_bid,
+            put_now=master_put_bid,
             hedge_net_mtm=master_hedge_net,
         )
+        if active_hedge_row is not None:
+            basket_legs = list(basket_legs) + _hedge_legs(
+                active_hedge_row,
+                call_now=master_call_bid,
+                put_now=master_put_bid,
+            )
+
         master_trade_data = {
             "trade_id": state.trade_id,
             "underlying": getattr(state.trade, "underlying", None),
@@ -1442,6 +1686,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 closed_basket=master_closed,
                 computed_at=mtm_fields.get("computed_at"),
                 stale_seconds=mtm_fields.get("stale_seconds"),
+                hedge_missing=active_hedge_row is None,
             ),
         }
 
@@ -1704,31 +1949,112 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             )
             slave_hedge_net: float | None = None
             slave_closed = 0.0
-            if slave_hedge_row is not None and active_hedge_row is not None:
-                mq = max(1, int(active_hedge_row.quantity or 1))
-                sq = max(1, int(slave_hedge_row.quantity or 1))
-                # Live hedge MTM not stored on SlaveHedgePosition — scale master
-                # hedge_net by lot ratio (same contracts, different size).
-                slave_hedge_net = round(
-                    float(getattr(active_hedge_row, "hedge_net_mtm", 0) or 0)
-                    * (sq / mq),
-                    4,
-                )
-                slave_closed = round(
-                    float(
-                        getattr(active_hedge_row, "cum_closed_basket_pnl", 0) or 0
+            slave_hedge_missing = slave_hedge_row is None
+            slave_call_bid: float | None = None
+            slave_put_bid: float | None = None
+
+            if slave_hedge_row is not None:
+                call_sym = str(getattr(slave_hedge_row, "call_symbol", "") or "")
+                put_sym = str(getattr(slave_hedge_row, "put_symbol", "") or "")
+                # Reuse cached bids when symbols match (same market)
+                if call_sym and call_sym in bid_cache:
+                    slave_call_bid = bid_cache[call_sym]
+                if put_sym and put_sym in bid_cache:
+                    slave_put_bid = bid_cache[put_sym]
+                if (
+                    (slave_call_bid is None or slave_put_bid is None)
+                    and bid_client is not None
+                ):
+                    fetched_c, fetched_p = await _fetch_hedge_bids(
+                        bid_client,
+                        call_sym or None,
+                        put_sym or None,
                     )
-                    * (sq / mq),
-                    4,
+                    if slave_call_bid is None:
+                        slave_call_bid = fetched_c
+                    if slave_put_bid is None:
+                        slave_put_bid = fetched_p
+                    if call_sym:
+                        bid_cache[call_sym] = slave_call_bid
+                    if put_sym:
+                        bid_cache[put_sym] = slave_put_bid
+                # Fall back to this slave's own Delta client for bids
+                if (
+                    (slave_call_bid is None or slave_put_bid is None)
+                    and not is_virtual
+                    and slave.api_key_encrypted
+                    and slave.api_secret_encrypted
+                ):
+                    slave_bid_client: DeltaClient | None = None
+                    try:
+                        slave_bid_client = DeltaClient(
+                            decrypt(slave.api_key_encrypted),
+                            decrypt(slave.api_secret_encrypted),
+                        )
+                        fetched_c, fetched_p = await _fetch_hedge_bids(
+                            slave_bid_client,
+                            call_sym or None,
+                            put_sym or None,
+                        )
+                        if slave_call_bid is None:
+                            slave_call_bid = fetched_c
+                        if slave_put_bid is None:
+                            slave_put_bid = fetched_p
+                    except Exception as exc:
+                        logger.warning(
+                            "overview slave=%s hedge bid fetch failed: %s",
+                            slave.id,
+                            exc,
+                        )
+                    finally:
+                        if slave_bid_client is not None:
+                            try:
+                                await slave_bid_client.close()
+                            except Exception:
+                                pass
+
+                compute_client = bid_client
+                if (
+                    slave_call_bid is not None
+                    and slave_put_bid is not None
+                    and slave_call_bid > 0
+                    and slave_put_bid > 0
+                ):
+                    slave_hedge_net = await _compute_hedge_net_for_row(
+                        slave_hedge_row,
+                        call_bid=float(slave_call_bid),
+                        put_bid=float(slave_put_bid),
+                        client=compute_client,
+                        db=db,
+                    )
+                # Never copy master hedge_net — null if we cannot compute
+                master_net_for_audit = (
+                    float(getattr(active_hedge_row, "hedge_net_mtm", 0) or 0)
+                    if active_hedge_row is not None
+                    else None
                 )
-            elif slave_hedge_row is not None:
-                slave_hedge_net = 0.0
+                if slave_hedge_net is not None:
+                    _audit_slave_hedge_pnl_suspect(
+                        slave_id=int(slave.id),
+                        slave_hedge=slave_hedge_row,
+                        master_hedge=active_hedge_row,
+                        slave_net=float(slave_hedge_net),
+                        master_net=master_net_for_audit,
+                    )
 
             slave_hedge_block = _hedge_payload(
                 slave_hedge=slave_hedge_row,
-                bot_engine=bot_engine,
+                call_now=slave_call_bid,
+                put_now=slave_put_bid,
                 hedge_net_mtm=slave_hedge_net,
             )
+            if slave_hedge_row is not None:
+                slave_legs = list(slave_legs) + _hedge_legs(
+                    slave_hedge_row,
+                    call_now=slave_call_bid,
+                    put_now=slave_put_bid,
+                )
+
             slave_stale = None
             slave_computed = last_updated_iso
             if linked_master:
@@ -1738,13 +2064,14 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             slave_trade_data["legs"] = slave_legs
             slave_trade_data["hedge"] = slave_hedge_block
             slave_trade_data["pnl"] = _build_pnl_block(
-                hedge_net=slave_hedge_net,
+                hedge_net=0.0 if slave_hedge_missing else slave_hedge_net,
                 short_gross=slave_short_gross,
                 wing_gross=slave_wing_gross,
                 basket_net=float(slave_net_mtm),
                 closed_basket=slave_closed,
                 computed_at=slave_computed,
                 stale_seconds=slave_stale,
+                hedge_missing=slave_hedge_missing,
             )
 
         slaves_data.append(
@@ -1814,7 +2141,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             .count()
         )
 
-    return {
+    result = {
         "usd_inr_rate": rate,
         "auto_trade_enabled": bool(settings.is_enabled),
         "has_slaves": len(slaves) > 0,
@@ -1844,3 +2171,9 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         },
         "slaves": slaves_data,
     }
+    if bid_client is not None:
+        try:
+            await bid_client.close()
+        except Exception:
+            pass
+    return result
