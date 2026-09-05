@@ -44,6 +44,7 @@ class TradeState:
     last_mtm_snapshot: dict[str, Any] | None = None
     last_updated: datetime | None = None
     is_adjusting: bool = False  # lock — monitoring loop must skip when True
+    is_exiting: bool = False  # lock — qty reconciler must skip when True
 
 
 class PositionTracker:
@@ -248,3 +249,16 @@ class PositionTracker:
             logger.warning("set_adjusting: trade_id=%s not in tracker", trade_id)
             return
         state.is_adjusting = value
+
+    def set_exiting(self, trade_id: int, value: bool) -> None:
+        """
+        Set exit lock.
+
+        When True, qty reconciler MUST skip this trade (race prevention).
+        Always clear to False in a finally block after exit completes/fails.
+        """
+        state = self._positions.get(trade_id)
+        if state is None:
+            logger.warning("set_exiting: trade_id=%s not in tracker", trade_id)
+            return
+        state.is_exiting = value

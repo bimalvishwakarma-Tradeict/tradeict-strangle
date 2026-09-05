@@ -1232,6 +1232,23 @@ class BotEngine:
         from backend.strategies.s001_short_strangle.logic import leg_entry_phase
 
         trade_id = int(trade.id)
+        # Re-read from tracker so we never use a stale is_exiting/is_adjusting=False.
+        live = self.position_tracker.get(trade_id)
+        if live is not None and getattr(live, "is_exiting", False):
+            log_and_buffer(
+                "RECONCILE_DEFERRED",
+                trade_id,
+                {"reason": "exit_in_progress", "trade_id": trade_id},
+            )
+            return
+        if live is not None and getattr(live, "is_adjusting", False):
+            log_and_buffer(
+                "RECONCILE_DEFERRED",
+                trade_id,
+                {"reason": "adjustment_in_progress", "trade_id": trade_id},
+            )
+            return
+
         legs = (
             db.query(Leg)
             .filter(
@@ -1425,6 +1442,20 @@ class BotEngine:
                 return
 
             if delta_qty > intended_qty:
+                # Guard immediately before order (same as add_missing loop).
+                if is_placing_order():
+                    log_and_buffer(
+                        "RECONCILE_DEFERRED",
+                        trade_id,
+                        {
+                            "reason": "orders_in_flight",
+                            "in_flight_count": get_in_flight_order_count(),
+                            "trade_id": trade_id,
+                            "product_id": pid,
+                            "action": "reduce_excess",
+                        },
+                    )
+                    return
                 excess_qty = delta_qty - intended_qty
                 live_now = abs(
                     int(round(float(await get_live_position_size(self.delta_client, pid))))
@@ -1472,6 +1503,14 @@ class BotEngine:
                             "delta_qty": delta_qty,
                             "strategy_expected_qty": intended_qty,
                             "corrected_qty": excess_qty,
+                            "order_id": (
+                                str(result.order_id)
+                                if result.order_id is not None
+                                else None
+                            ),
+                            "filled_qty": getattr(result, "filled_size", None),
+                            "fill_price": result.filled_price,
+                            "commission": result.commission,
                         },
                     )
                 else:
@@ -1494,6 +1533,14 @@ class BotEngine:
                             "strategy_expected_qty": intended_qty,
                             "strikes": strikes,
                             "error": str(result.error or "correction_failed"),
+                            "order_id": (
+                                str(result.order_id)
+                                if result.order_id is not None
+                                else None
+                            ),
+                            "filled_qty": getattr(result, "filled_size", None),
+                            "fill_price": result.filled_price,
+                            "commission": result.commission,
                         },
                     )
                 continue
@@ -1533,6 +1580,51 @@ class BotEngine:
             leg_type = str(getattr(leg, "leg_type", "") or "")
             phase_name = leg_entry_phase(leg_type)
             db_qty = abs(int(getattr(leg, "quantity", 0) or 0))
+            # Live Delta size — never re-open a leg that went to zero (exit/close).
+            live_delta = abs(
+                int(
+                    round(
+                        float(
+                            await get_live_position_size(
+                                self.delta_client, pid
+                            )
+                        )
+                    )
+                )
+            )
+            if live_delta == 0:
+                log_and_buffer(
+                    "QTY_RECONCILE_ZERO_LEG",
+                    trade_id,
+                    {
+                        "product_id": pid,
+                        "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                        "action": "refused_reopen_from_zero",
+                        "phase": phase_name,
+                        "sequence_position": phase_index + 1,
+                        "db_qty": db_qty,
+                        "delta_qty": 0,
+                        "strategy_expected_qty": intended_qty,
+                        "missing_qty": missing_qty,
+                    },
+                )
+                await self._broadcast_qty_mismatch(
+                    trade_id=trade_id,
+                    leg=leg,
+                    db_qty=db_qty,
+                    delta_qty=0,
+                    reason="refused_reopen_from_zero",
+                    strategy_expected_qty=intended_qty,
+                )
+                continue
+            if live_delta >= intended_qty:
+                self._clear_reconcile_failure(
+                    trade_id=trade_id,
+                    product_id=pid,
+                )
+                continue
+            # Genuine partial: 0 < live_delta < intended_qty
+            top_up_qty = intended_qty - live_delta
             reason = (
                 "CONDOR_ENTRY"
                 if phase_name == "wing"
@@ -1542,7 +1634,7 @@ class BotEngine:
             result = await execute_with_midprice(
                 product_id=pid,
                 side=side,
-                quantity=missing_qty,
+                quantity=top_up_qty,
                 profile="chase",
                 delta_client=self.delta_client,
                 reason=reason,
@@ -1574,9 +1666,17 @@ class BotEngine:
                         "phase": phase_name,
                         "sequence_position": phase_index + 1,
                         "db_qty": db_qty,
-                        "delta_qty": intended_qty - missing_qty,
+                        "delta_qty": live_delta,
                         "strategy_expected_qty": intended_qty,
-                        "corrected_qty": missing_qty,
+                        "corrected_qty": top_up_qty,
+                        "order_id": (
+                            str(result.order_id)
+                            if result.order_id is not None
+                            else None
+                        ),
+                        "filled_qty": getattr(result, "filled_size", None),
+                        "fill_price": result.filled_price,
+                        "commission": result.commission,
                     },
                 )
                 continue
@@ -1586,7 +1686,7 @@ class BotEngine:
                 product_id=pid,
                 action="add_missing",
                 db_qty=intended_qty,
-                delta_qty=intended_qty - missing_qty,
+                delta_qty=live_delta,
             )
             log_and_buffer(
                 "QTY_RECONCILE_FAIL",
@@ -1598,10 +1698,18 @@ class BotEngine:
                     "phase": phase_name,
                     "sequence_position": phase_index + 1,
                     "db_qty": db_qty,
-                    "delta_qty": intended_qty - missing_qty,
+                    "delta_qty": live_delta,
                     "strategy_expected_qty": intended_qty,
                     "strikes": strikes,
                     "error": str(result.error or "correction_failed"),
+                    "order_id": (
+                        str(result.order_id)
+                        if result.order_id is not None
+                        else None
+                    ),
+                    "filled_qty": getattr(result, "filled_size", None),
+                    "fill_price": result.filled_price,
+                    "commission": result.commission,
                 },
             )
             break
@@ -2130,6 +2238,17 @@ class BotEngine:
     async def _handle_manual_close(self, trade_state: TradeState) -> None:
         """Both legs gone on Delta — cancel orphan SLs and mark trade closed."""
         trade_id = trade_state.trade_id
+        self.position_tracker.set_exiting(int(trade_id), True)
+        try:
+            await self._handle_manual_close_unlocked(trade_state)
+        finally:
+            self.position_tracker.set_exiting(int(trade_id), False)
+
+    async def _handle_manual_close_unlocked(
+        self, trade_state: TradeState
+    ) -> None:
+        """Inner manual-close body; caller holds is_exiting."""
+        trade_id = trade_state.trade_id
         logger.warning(
             "[MANUAL_CLOSE] Handling manual close for trade %s",
             trade_id,
@@ -2244,8 +2363,24 @@ class BotEngine:
             )
             return
 
+        self.position_tracker.set_exiting(int(trade_id), True)
+        try:
+            await self._emergency_close_remaining_leg_unlocked(
+                trade_state, leg_to_close
+            )
+        finally:
+            self.position_tracker.set_exiting(int(trade_id), False)
+
+    async def _emergency_close_remaining_leg_unlocked(
+        self, trade_state: TradeState, leg_to_close: str
+    ) -> None:
+        """Inner emergency close; caller holds is_exiting."""
+        trade_id = trade_state.trade_id
+        remaining = str(leg_to_close).lower().strip()
+        missing = "put" if remaining == "call" else "call"
+
         # DIAGNOSTIC — remove after is_adjusting race root-caused
-        _live_c = live if live is not None else self.position_tracker.get(trade_id)
+        _live_c = self.position_tracker.get(trade_id)
         logger.warning(
             "[DIAG_IS_ADJUSTING] (c) BEFORE EMERGENCY_CLOSE trade_id=%s "
             "closing=%s missing=%s | tracker.is_adjusting=%s "
@@ -3755,19 +3890,23 @@ class BotEngine:
                             "skipped": 1,
                         }
 
-            return await self._close_master_trade_locked(
-                trade_id=tid,
-                reason=reason,
-                db=db,
-                skip_master_legs=skip_master_legs,
-                trade_state=trade_state,
-                total_pnl=total_pnl,
-                gross_mtm=gross_mtm,
-                fees_paid=fees_paid,
-                est_exit_fees=est_exit_fees,
-                slippage_amount=slippage_amount,
-                net_mtm=net_mtm,
-            )
+            self.position_tracker.set_exiting(tid, True)
+            try:
+                return await self._close_master_trade_locked(
+                    trade_id=tid,
+                    reason=reason,
+                    db=db,
+                    skip_master_legs=skip_master_legs,
+                    trade_state=trade_state,
+                    total_pnl=total_pnl,
+                    gross_mtm=gross_mtm,
+                    fees_paid=fees_paid,
+                    est_exit_fees=est_exit_fees,
+                    slippage_amount=slippage_amount,
+                    net_mtm=net_mtm,
+                )
+            finally:
+                self.position_tracker.set_exiting(tid, False)
 
     async def _close_master_trade_locked(
         self,
@@ -4777,20 +4916,25 @@ class BotEngine:
         net_mtm: float | None = None,
     ) -> None:
         """Exit a trade via the single close_master_trade funnel (identical behaviour)."""
-        with self.db_factory() as db:
-            await self.close_master_trade(
-                trade_id=int(trade_state.trade_id),
-                reason=reason,
-                db=db,
-                skip_master_legs=False,
-                trade_state=trade_state,
-                total_pnl=total_pnl,
-                gross_mtm=gross_mtm,
-                fees_paid=fees_paid,
-                est_exit_fees=est_exit_fees,
-                slippage_amount=slippage_amount,
-                net_mtm=net_mtm,
-            )
+        tid = int(trade_state.trade_id)
+        self.position_tracker.set_exiting(tid, True)
+        try:
+            with self.db_factory() as db:
+                await self.close_master_trade(
+                    trade_id=tid,
+                    reason=reason,
+                    db=db,
+                    skip_master_legs=False,
+                    trade_state=trade_state,
+                    total_pnl=total_pnl,
+                    gross_mtm=gross_mtm,
+                    fees_paid=fees_paid,
+                    est_exit_fees=est_exit_fees,
+                    slippage_amount=slippage_amount,
+                    net_mtm=net_mtm,
+                )
+        finally:
+            self.position_tracker.set_exiting(tid, False)
 
     async def maybe_close_orphaned_wings(
         self,
@@ -4842,6 +4986,36 @@ class BotEngine:
             )
             return {"closed": False, "reason": "no_client"}
 
+        self.position_tracker.set_exiting(tid, True)
+        try:
+            return await self._maybe_close_orphaned_wings_unlocked(
+                trade_id=tid,
+                db=db,
+                trade=trade,
+                wings=wings,
+                exit_reason=exit_reason,
+            )
+        finally:
+            self.position_tracker.set_exiting(tid, False)
+
+    async def _maybe_close_orphaned_wings_unlocked(
+        self,
+        *,
+        trade_id: int,
+        db: Any,
+        trade: Any,
+        wings: list[Any],
+        exit_reason: str,
+    ) -> dict[str, Any]:
+        """Inner orphan-wing close; caller holds is_exiting."""
+        from backend.engine.wing_exit import close_basket_legs
+        from backend.engine.trade_reconcile import (
+            book_leg_close,
+            recompute_trade_realized_pnl,
+        )
+        from backend.core.ws_manager import ws_manager as _ws
+
+        tid = int(trade_id)
         bundle = await close_basket_legs(
             trade=trade,
             reason=exit_reason,

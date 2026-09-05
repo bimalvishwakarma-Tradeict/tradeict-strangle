@@ -45,6 +45,7 @@ _IMPORTANT_EVENTS = frozenset(
         "ENTRY_PREMIUM_MISS",
         "ADJ_QTY_DECREASE",
         "QTY_RECONCILE_CORRECTED",
+        "QTY_RECONCILE_ZERO_LEG",
         "THETA_SELECT_SUBOPTIMAL",
         "NEW_STRIKE_SELECTED",
         "ADJUSTMENT_DELTA_VERIFY",
@@ -304,6 +305,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ORDER_CANCEL_UNCONFIRMED",
         "WING_CROSS_GUARD_ABORT",
         "WING_ROLL_ABORT",
+        "QTY_RECONCILE_ZERO_LEG",
     ):
         bot_log.critical(msg)
     elif (
