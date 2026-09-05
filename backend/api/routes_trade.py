@@ -101,7 +101,6 @@ def _upsert_setting(db: Session, trade_id: int, key: str, value: Any) -> None:
 
 
 def _leg_snapshot(leg: Any, current_premium: float) -> dict[str, Any]:
-    from backend.config import OPTIONS_CONTRACT_VALUE
     from backend.core.delta_client import compute_signed_upnl
 
     initial = float(leg.initial_premium)
@@ -1068,7 +1067,6 @@ async def initiate_trade(
         # --- Step 7–8: Save to DB ---
         logger.info("Step 7: Saving to DB%s...", " (DEMO)" if is_demo else "")
         from backend.config import ENTRY_SETTLING_SECONDS
-        from backend.database import get_or_create_auto_settings
 
         _entry_secs = int(ENTRY_SETTLING_SECONDS)
         try:
@@ -1372,7 +1370,6 @@ async def register_existing_trade(
     await _ensure_no_active_trade(db, account, underlying)
 
     from backend.config import ENTRY_SETTLING_SECONDS
-    from backend.database import get_or_create_auto_settings
 
     _entry_secs = int(ENTRY_SETTLING_SECONDS)
     try:
@@ -1922,7 +1919,6 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             get_entry_spread_for_sl,
         )
         from backend.core.spread_utils import get_exit_spread_pct
-        from backend.database import get_or_create_auto_settings
 
         expected_exit_spread = 0.0
         spread_settings = get_or_create_auto_settings(db)
@@ -2621,12 +2617,7 @@ async def close_single_leg(
     are closed, ``maybe_close_orphaned_wings`` auto-closes wings
     (reason WINGS_ORPHANED). Emergency full exit uses POST /exit instead.
     """
-    from backend.core.bot_logger import log_and_buffer
     from backend.engine.wing_exit import close_basket_legs
-    from backend.engine.trade_reconcile import (
-        book_leg_close,
-        recompute_trade_realized_pnl,
-    )
 
     leg_key = leg_type.lower().strip()
     if leg_key not in {"call", "put"}:
