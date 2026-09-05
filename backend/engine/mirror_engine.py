@@ -7752,8 +7752,14 @@ class MirrorEngine:
         product_id: int | None,
         symbol: str | None,
         upnl_map: dict[int, dict[str, Any]] | None,
+        is_long: bool = False,
     ) -> float:
-        """Best offer (ask) for a short leg — same close reference as master UPL@Offer."""
+        """
+        Close-ref price for a slave leg.
+
+        Shorts: best ask (UPL@Offer). Longs/wings: best bid via get_long_exit_price
+        when not already in the positions upnl map.
+        """
         pid = int(product_id or 0)
         if upnl_map and pid > 0:
             row = upnl_map.get(pid) or {}
@@ -7766,6 +7772,8 @@ class MirrorEngine:
         sym = str(symbol or "").strip()
         if sym:
             try:
+                if is_long:
+                    return float(await client.get_long_exit_price(sym) or 0)
                 return float(await client.get_short_exit_price(sym) or 0)
             except Exception:
                 try:
@@ -7782,15 +7790,19 @@ class MirrorEngine:
         slip_pct: float,
         settings: Any,
         master_trade_id: int,
-    ) -> dict[str, float] | None:
+    ) -> dict[str, Any] | None:
         """
         Slave basket MTM from OWN fills + live offers (master conventions).
 
-        gross = Σ (entry − offer) × qty × CV
-        net   = compute_net_mtm(gross, fees_paid, est_exit, slip, exit_spread)
+        Shorts: (fill − offer) × qty × CV
+        Wings (long): (offer − fill) × qty × CV
+        net = basket_net_mtm_snapshot → compute_net_mtm (same helper as master)
         """
         from backend.config import OPTIONS_CONTRACT_VALUE
-        from backend.core.fees import compute_net_mtm, estimate_option_trading_fee
+        from backend.core.fees import (
+            basket_net_mtm_snapshot,
+            estimate_option_trading_fee,
+        )
         from backend.core.spread_utils import estimate_and_log_exit_spread_usd
 
         call_pid = getattr(slave_trade, "call_product_id", None)
@@ -7804,7 +7816,19 @@ class MirrorEngine:
         if qty <= 0 or call_fill <= 0 or put_fill <= 0:
             return None
 
+        wc_pid_raw = getattr(slave_trade, "wing_call_product_id", None)
+        wp_pid_raw = getattr(slave_trade, "wing_put_product_id", None)
+        wc_fill = float(getattr(slave_trade, "wing_call_fill_price", None) or 0)
+        wp_fill = float(getattr(slave_trade, "wing_put_fill_price", None) or 0)
+        # Include each wing only when product id + fill are both present
+        has_wing_call = bool(wc_pid_raw) and wc_fill > 0
+        has_wing_put = bool(wp_pid_raw) and wp_fill > 0
+
         pids = [int(call_pid), int(put_pid)]
+        if has_wing_call:
+            pids.append(int(wc_pid_raw))
+        if has_wing_put:
+            pids.append(int(wp_pid_raw))
         try:
             upnl_map = await client.get_positions_upnl(pids)
         except Exception:
@@ -7825,10 +7849,46 @@ class MirrorEngine:
         if call_offer <= 0 or put_offer <= 0:
             return None
 
+        wing_call_offer = 0.0
+        wing_put_offer = 0.0
+        if has_wing_call:
+            wing_call_offer = await self._fetch_slave_leg_offer(
+                client,
+                product_id=int(wc_pid_raw),
+                symbol=getattr(slave_trade, "wing_call_symbol", None),
+                upnl_map=upnl_map,
+                is_long=True,
+            )
+            if wing_call_offer <= 0:
+                return None
+        if has_wing_put:
+            wing_put_offer = await self._fetch_slave_leg_offer(
+                client,
+                product_id=int(wp_pid_raw),
+                symbol=getattr(slave_trade, "wing_put_symbol", None),
+                upnl_map=upnl_map,
+                is_long=True,
+            )
+            if wing_put_offer <= 0:
+                return None
+
         cv = float(OPTIONS_CONTRACT_VALUE)
-        call_gross = (call_fill - call_offer) * qty * cv
-        put_gross = (put_fill - put_offer) * qty * cv
-        gross_mtm = float(call_gross + put_gross)
+        # Shorts: credit when offer drops; wings (long): credit when mark rises
+        short_call_gross = (call_fill - call_offer) * qty * cv
+        short_put_gross = (put_fill - put_offer) * qty * cv
+        wing_call_gross = 0.0
+        wing_put_gross = 0.0
+        if has_wing_call:
+            wing_call_gross = (wing_call_offer - wc_fill) * qty * cv
+        if has_wing_put:
+            wing_put_gross = (wing_put_offer - wp_fill) * qty * cv
+        gross_mtm = float(
+            short_call_gross
+            + short_put_gross
+            + wing_call_gross
+            + wing_put_gross
+        )
+        leg_count = 2 + (1 if has_wing_call else 0) + (1 if has_wing_put else 0)
 
         fees_paid = max(
             0.0,
@@ -7842,6 +7902,21 @@ class MirrorEngine:
         except Exception:
             btc = 0.0
 
+        # No wing fee columns on SlaveTrade — estimate entry fees from fills
+        if btc > 0:
+            if has_wing_call:
+                fees_paid += estimate_option_trading_fee(
+                    option_price=wc_fill,
+                    quantity_lots=qty,
+                    btc_index_price=btc,
+                )
+            if has_wing_put:
+                fees_paid += estimate_option_trading_fee(
+                    option_price=wp_fill,
+                    quantity_lots=qty,
+                    btc_index_price=btc,
+                )
+
         est_exit = 0.0
         if btc > 0:
             est_exit += estimate_option_trading_fee(
@@ -7854,12 +7929,39 @@ class MirrorEngine:
                 quantity_lots=qty,
                 btc_index_price=btc,
             )
+            if has_wing_call:
+                est_exit += estimate_option_trading_fee(
+                    option_price=wing_call_offer,
+                    quantity_lots=qty,
+                    btc_index_price=btc,
+                )
+            if has_wing_put:
+                est_exit += estimate_option_trading_fee(
+                    option_price=wing_put_offer,
+                    quantity_lots=qty,
+                    btc_index_price=btc,
+                )
 
         expected_exit_spread = 0.0
-        for sym, offer in (
+        spread_legs: list[tuple[str, float]] = [
             (str(getattr(slave_trade, "call_symbol", "") or ""), call_offer),
             (str(getattr(slave_trade, "put_symbol", "") or ""), put_offer),
-        ):
+        ]
+        if has_wing_call:
+            spread_legs.append(
+                (
+                    str(getattr(slave_trade, "wing_call_symbol", "") or ""),
+                    wing_call_offer,
+                )
+            )
+        if has_wing_put:
+            spread_legs.append(
+                (
+                    str(getattr(slave_trade, "wing_put_symbol", "") or ""),
+                    wing_put_offer,
+                )
+            )
+        for sym, offer in spread_legs:
             if offer > 0 and sym:
                 expected_exit_spread += await estimate_and_log_exit_spread_usd(
                     symbol=sym,
@@ -7871,7 +7973,7 @@ class MirrorEngine:
                     log_id=int(master_trade_id),
                 )
 
-        slip_fields = compute_net_mtm(
+        mtm_snap = basket_net_mtm_snapshot(
             gross_mtm=gross_mtm,
             fees_paid=fees_paid,
             est_exit_fees=est_exit,
@@ -7883,9 +7985,16 @@ class MirrorEngine:
             "fees_paid": round(fees_paid, 6),
             "est_exit_fees": round(float(est_exit), 6),
             "expected_exit_spread_usd": round(float(expected_exit_spread), 6),
-            "net_mtm": float(slip_fields["net_mtm"]),
+            "net_mtm": float(mtm_snap["net_mtm"]),
             "call_offer": call_offer,
             "put_offer": put_offer,
+            "short_call_gross": round(float(short_call_gross), 4),
+            "short_put_gross": round(float(short_put_gross), 4),
+            "wing_call_gross": round(float(wing_call_gross), 4),
+            "wing_put_gross": round(float(wing_put_gross), 4),
+            "leg_count": int(leg_count),
+            "stale_seconds": float(mtm_snap.get("stale_seconds") or 0),
+            "computed_at_iso": mtm_snap.get("computed_at_iso"),
         }
 
     async def update_all_slave_mtm(
@@ -8022,33 +8131,56 @@ class MirrorEngine:
                     else:
                         divergence_pct = 0.0 if abs(net) < 1e-9 else 100.0
 
-                    log_and_buffer(
-                        "SLAVE_MTM",
-                        mid,
-                        {
-                            "slave": int(slave.id),
-                            "slave_trade": int(slave_trade.id),
-                            "gross": round(gross, 4),
-                            "fees": round(fees, 6),
-                            "spread": round(spread, 6),
-                            "net_mtm": round(net, 4),
-                            "master_net_mtm": round(float(master_net), 4),
-                            "divergence_pct": round(divergence_pct, 4),
-                        },
+                    mtm_details = {
+                        "slave": int(slave.id),
+                        "slave_trade": int(slave_trade.id),
+                        "short_call_gross": float(
+                            computed.get("short_call_gross") or 0
+                        ),
+                        "short_put_gross": float(
+                            computed.get("short_put_gross") or 0
+                        ),
+                        "wing_call_gross": float(
+                            computed.get("wing_call_gross") or 0
+                        ),
+                        "wing_put_gross": float(
+                            computed.get("wing_put_gross") or 0
+                        ),
+                        "leg_count": int(computed.get("leg_count") or 2),
+                        "gross": round(gross, 4),
+                        "fees": round(fees, 6),
+                        "spread": round(spread, 6),
+                        "net_mtm": round(net, 4),
+                        "master_net_mtm": round(float(master_net), 4),
+                        "divergence_pct": round(divergence_pct, 4),
+                    }
+                    log_and_buffer("SLAVE_MTM", mid, mtm_details)
+                    mtm_line = (
+                        "[SLAVE_MTM] slave=%s | slave_trade=%s | "
+                        "short_call_gross=%s | short_put_gross=%s | "
+                        "wing_call_gross=%s | wing_put_gross=%s | "
+                        "leg_count=%s | gross=%s | fees=%s | spread=%s | "
+                        "net_mtm=%s | master_net_mtm=%s | divergence_pct=%s"
+                        % (
+                            slave.id,
+                            slave_trade.id,
+                            mtm_details["short_call_gross"],
+                            mtm_details["short_put_gross"],
+                            mtm_details["wing_call_gross"],
+                            mtm_details["wing_put_gross"],
+                            mtm_details["leg_count"],
+                            mtm_details["gross"],
+                            mtm_details["fees"],
+                            mtm_details["spread"],
+                            mtm_details["net_mtm"],
+                            mtm_details["master_net_mtm"],
+                            mtm_details["divergence_pct"],
+                        )
                     )
-                    logger.info(
-                        "[SLAVE_MTM] slave=%s | slave_trade=%s | gross=%s | "
-                        "fees=%s | spread=%s | net_mtm=%s | master_net_mtm=%s | "
-                        "divergence_pct=%s",
-                        slave.id,
-                        slave_trade.id,
-                        round(gross, 4),
-                        round(fees, 6),
-                        round(spread, 6),
-                        round(net, 4),
-                        round(float(master_net), 4),
-                        round(divergence_pct, 4),
-                    )
+                    if abs(divergence_pct) > 50.0:
+                        logger.warning(mtm_line)
+                    else:
+                        logger.info(mtm_line)
                 except Exception as exc:
                     logger.warning(
                         "Slave '%s' MTM compute failed: %s",
