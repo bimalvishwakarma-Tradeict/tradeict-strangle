@@ -63,8 +63,14 @@ def _log_leg(
     action: str,
     order_placed_at: datetime,
     fill_at: Any = None,
+    qty_override: int | None = None,
 ) -> None:
     kind = str(structure.account_kind or "")
+    qty_val = (
+        abs(int(qty_override))
+        if qty_override is not None
+        else abs(int(leg.quantity or 0))
+    )
     details = {
         "structure": int(structure.id),
         "kind": kind,
@@ -73,7 +79,7 @@ def _log_leg(
         "product_id": int(leg.product_id),
         "symbol": leg.symbol,
         "side": leg.side,
-        "qty": int(leg.quantity),
+        "qty": qty_val,
         "action": action,
         "at": _iso(order_placed_at),
         "order_placed_at": _iso(order_placed_at),
@@ -94,7 +100,7 @@ def _log_leg(
         leg.product_id,
         leg.symbol,
         leg.side,
-        leg.quantity,
+        qty_val,
         action,
         details["at"],
         details["order_placed_at"],
@@ -284,10 +290,14 @@ def close_leg(
     closed_at: Any,
     structure: Structure | None = None,
     fill_at: Any = None,
+    close_quantity: int | None = None,
 ) -> None:
     if leg.closed_at is not None:
         return
     at = _require_ts(closed_at, field="leg.closed_at")
+    # Persist actual closed size for StructureLegPnl / Earner billing.
+    if close_quantity is not None and int(close_quantity) > 0:
+        leg.quantity = abs(int(close_quantity))
     leg.closed_at = at
     leg.close_reason = str(reason or "")[:50]
     db.flush()
@@ -305,7 +315,62 @@ def close_leg(
             action="close",
             order_placed_at=at,
             fill_at=fill_at,
+            qty_override=int(leg.quantity or 0),
         )
+
+
+def update_open_basket_leg_quantity(
+    db: Session,
+    *,
+    trade: Any,
+    leg_type: str,
+    quantity: int,
+    product_id: int = 0,
+) -> bool:
+    """
+    Sync StructureLeg.quantity when a short is partially reduced
+    (decrease_step untested side) without a full close/reopen.
+    """
+    try:
+        hid = getattr(trade, "hedge_position_id", None)
+        if hid is None:
+            return False
+        struct = get_active_structure(
+            db, hedge_position_id=int(hid), account_kind=KIND_MASTER
+        )
+        if struct is None:
+            return False
+        lt = str(leg_type or "").lower()
+        if lt == "wing_call":
+            role = ROLE_BASKET_WING_CALL
+        elif lt == "wing_put":
+            role = ROLE_BASKET_WING_PUT
+        elif lt == "call":
+            role = ROLE_BASKET_CALL
+        else:
+            role = ROLE_BASKET_PUT
+        basket_seq = getattr(trade, "basket_seq_in_structure", None)
+        bs = int(basket_seq) if basket_seq is not None else None
+        pid = int(product_id or 0)
+        open_row = find_open_leg(
+            db,
+            structure_id=int(struct.id),
+            leg_role=role,
+            basket_seq=bs,
+            product_id=pid if pid > 0 else None,
+        )
+        if open_row is None:
+            return False
+        open_row.quantity = abs(int(quantity))
+        db.flush()
+        return True
+    except Exception as exc:
+        logger.warning(
+            "update_open_basket_leg_quantity failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return False
 
 
 def close_open_legs(
@@ -1137,6 +1202,10 @@ def record_master_adjustment(
                 closed_at=old_leg_closed_at,
                 structure=struct,
                 fill_at=old_leg_fill_at,
+                close_quantity=abs(
+                    int(getattr(old_leg, "quantity", 0) or 0)
+                )
+                or None,
             )
         adj = _next_adj_seq(
             db,
@@ -1178,6 +1247,7 @@ def record_slave_adjustment_close(
     old_leg_closed_at: Any,
     old_leg_fill_at: Any = None,
     old_product_id: int | None = None,
+    close_quantity: int | None = None,
 ) -> bool:
     """
     Close the open basket leg window for the triggered side.
@@ -1253,6 +1323,11 @@ def record_slave_adjustment_close(
             closed_at=old_leg_closed_at,
             structure=struct,
             fill_at=old_leg_fill_at,
+            close_quantity=(
+                abs(int(close_quantity))
+                if close_quantity is not None and int(close_quantity) > 0
+                else None
+            ),
         )
         db.flush()
         return True

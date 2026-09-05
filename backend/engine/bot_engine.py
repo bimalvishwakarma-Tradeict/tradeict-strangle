@@ -5473,6 +5473,15 @@ class BotEngine:
                         qty = int(
                             getattr(result, "quantity", None) or master_qty or 1
                         )
+                        # Prefer live new-leg qty after reload (actual fill size)
+                        try:
+                            live_new_qty = int(
+                                getattr(new_leg, "quantity", 0) or 0
+                            )
+                            if live_new_qty > 0:
+                                qty = live_new_qty
+                        except (TypeError, ValueError):
+                            pass
                         log_and_buffer(
                             "MIRROR_ADJ_PRE",
                             trade_id,
@@ -5480,6 +5489,7 @@ class BotEngine:
                                 "new_pid": new_pid,
                                 "old_pid": old_pid,
                                 "new_sym": new_sym,
+                                "qty": qty,
                                 "me": me is not None,
                             },
                         )

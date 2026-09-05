@@ -3341,6 +3341,11 @@ class MirrorEngine:
                 old_leg_closed_at=old_leg_closed_ts,
                 old_leg_fill_at=old_leg_close_fill_ts,
                 old_product_id=old_pid,
+                close_quantity=(
+                    max(1, abs(int(live_size)))
+                    if live_size is not None and live_size != 0
+                    else stored_qty
+                ),
             )
             db.commit()
 

@@ -43,6 +43,8 @@ _IMPORTANT_EVENTS = frozenset(
         "WING_ROLL_LAST_STRIKE",
         "SLAVE_WING_ROLL",
         "ENTRY_PREMIUM_MISS",
+        "ADJ_QTY_DECREASE",
+        "QTY_RECONCILE_CORRECTED",
         "THETA_SELECT_SUBOPTIMAL",
         "NEW_STRIKE_SELECTED",
         "ADJUSTMENT_DELTA_VERIFY",
@@ -304,6 +306,12 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "WING_ROLL_ABORT",
     ):
         bot_log.critical(msg)
+    elif (
+        event_type == "QTY_RECONCILE_CORRECTED"
+        and str(details.get("action") or "") == "reduce_excess"
+    ):
+        # Safety-net only — means adjustment failed to step qty down itself
+        bot_log.warning(msg)
     elif event_type == "ORPHAN_SL_SWEEP":
         # Normal path = INFO; finally-after-exception = WARNING (exit broke)
         if details.get("via_finally_after_exception"):
@@ -408,6 +416,8 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "WING_ROLL_DONE",
         "WING_ROLL_LAST_STRIKE",
         "SLAVE_WING_ROLL",
+        "ADJ_QTY_DECREASE",
+        "QTY_RECONCILE_CORRECTED",
         "MIRROR_ADJ_DEBUG",
         "MIRROR_ADJ_PRE",
         "MIRROR_ADJ_CALLED",

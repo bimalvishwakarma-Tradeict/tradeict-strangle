@@ -153,23 +153,52 @@ def resolve_adjustment_basket_qty(
             decrease_pct=pct,
         )
         if close_basket or new_qty is None:
+            try:
+                from backend.core.bot_logger import log_and_buffer
+
+                log_and_buffer(
+                    "ADJ_QTY_DECREASE",
+                    int(trade_id) if trade_id is not None else 0,
+                    {
+                        "original": orig,
+                        "adj_n": adj_n,
+                        "pct": pct,
+                        "new_qty": "close",
+                        "note": "remaining<=0",
+                    },
+                )
+            except Exception:
+                logger.info(
+                    "[ADJ_QTY_DECREASE] trade=%s original=%s adj_n=%s pct=%s "
+                    "new_qty=close remaining<=0",
+                    trade_id if trade_id is not None else "?",
+                    orig,
+                    adj_n,
+                    pct,
+                )
+            return base_qty, True
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "ADJ_QTY_DECREASE",
+                int(trade_id) if trade_id is not None else 0,
+                {
+                    "original": orig,
+                    "adj_n": adj_n,
+                    "pct": pct,
+                    "new_qty": int(new_qty),
+                },
+            )
+        except Exception:
             logger.info(
-                "[ADJ_QTY_DECREASE] trade=%s original=%s adj_n=%s pct=%s "
-                "new_qty=close remaining<=0",
+                "[ADJ_QTY_DECREASE] trade=%s original=%s adj_n=%s pct=%s new_qty=%s",
                 trade_id if trade_id is not None else "?",
                 orig,
                 adj_n,
                 pct,
+                new_qty,
             )
-            return base_qty, True
-        logger.info(
-            "[ADJ_QTY_DECREASE] trade=%s original=%s adj_n=%s pct=%s new_qty=%s",
-            trade_id if trade_id is not None else "?",
-            orig,
-            adj_n,
-            pct,
-            new_qty,
-        )
         return int(new_qty), False
 
     if mode != "increase_dynamic":
