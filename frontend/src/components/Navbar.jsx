@@ -177,7 +177,9 @@ export default function Navbar() {
     <header className="sticky top-0 z-30 border-b border-gray-700 bg-gray-900">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
         <div className="flex items-center gap-4 md:gap-6">
-          <div className="text-lg font-semibold text-white">🤖 Delta Bot</div>
+          <div className="text-lg font-semibold text-white">
+            🤖 Tradeict Delta Bot
+          </div>
           <nav className="hidden items-center gap-1 md:flex">{navLinks}</nav>
         </div>
 

@@ -845,10 +845,11 @@ export default function PositionCard({
   const initialMax = n(trade.initial_max_profit)
   const tpPctLocked = n(trade.tp_pct || 50)
   const slPctLocked = n(trade.sl_pct || 100)
-  const progressPct =
-    target > 0 ? Math.min(100, Math.abs((totalMtm / target) * 100)) : 0
-  const progressPositive = totalMtm >= 0
-  const displayPct = target > 0 ? Math.round(Math.abs((totalMtm / target) * 100)) : 0
+  // Signed % of target (may exceed ±100). Bar width is clamped separately.
+  const displayPct =
+    target > 0 ? Math.round((totalMtm / target) * 100) : 0
+  const progressPct = Math.min(100, Math.abs(displayPct))
+  const progressPositive = displayPct >= 0
 
   // Bot Monitoring Plan — entry vs trigger baseline are separate
   const triggerMode = String(trade.trigger_mode || 'slab').toLowerCase()
@@ -1122,12 +1123,8 @@ export default function PositionCard({
       ? Math.min(100, Math.max(0, (-grossMtmForSl / stoploss) * 100))
       : 0
 
+  // Net stack only — matches backend compute_net_mtm (no entry spread).
   const basketDeductions = [
-    {
-      label: 'Entry spread',
-      amount: entrySpreadForSl ?? 0,
-      title: 'Entry spread deducted from gross for net',
-    },
     {
       label: 'Fees',
       amount: feesPaid + estExitFees,
@@ -1302,6 +1299,7 @@ export default function PositionCard({
               targetUsd={target}
               slPct={slConsumedPct}
               slUsd={stoploss}
+              entrySpread={entrySpreadForSl}
             />
           </div>
 
@@ -1681,14 +1679,7 @@ export default function PositionCard({
               {fmtSignedMoney(grossDisplay)}
             </span>
           </div>
-          <div className="flex justify-between text-yellow-300">
-            <span>Entry Spread (for SL)</span>
-            <span>
-              {entrySpreadForSl == null
-                ? '--'
-                : `-${fmtMoney(Math.abs(entrySpreadForSl))}`}
-            </span>
-          </div>
+          <div className="my-1 border-t border-gray-600" />
           <div
             className={`flex justify-between font-bold ${
               nearSl ? 'text-red-400' : 'text-white'
@@ -1751,7 +1742,13 @@ export default function PositionCard({
             style={{ width: `${progressPct}%` }}
           />
         </div>
-        <div className="text-xs text-gray-400">{displayPct}% of target</div>
+        <div
+          className={`text-xs ${
+            progressPositive ? 'text-gray-400' : 'text-red-400'
+          }`}
+        >
+          {displayPct}% of target
+        </div>
         <div className="mt-2 space-y-1.5 rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2.5">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <span className="text-sm text-green-400">🎯 Target</span>
@@ -1794,6 +1791,33 @@ export default function PositionCard({
               <span className="ml-2 text-xs text-gray-400">
                 [{fmtMoney(slPctLocked)}% of ${fmtMoney(initialMax)} max]
               </span>
+            </span>
+          </div>
+          <div className="flex flex-wrap items-baseline justify-between gap-2 text-gray-400">
+            <span
+              className="text-sm"
+              title="Included in the stop-loss basis, not in net MTM"
+            >
+              Entry spread (SL basis only)
+            </span>
+            <span className="text-right text-sm">
+              {entrySpreadForSl == null
+                ? '--'
+                : `-${fmtMoney(Math.abs(entrySpreadForSl))}`}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-baseline justify-between gap-2 text-gray-500">
+            <span
+              className="text-xs"
+              title="Stop-loss triggers on gross MTM + entry spread. Target triggers on net MTM."
+            >
+              SL consumed (gross basis)
+            </span>
+            <span className="text-right text-xs">
+              {fmtMoney(slConsumedPct)}%
+              {grossMtmForSl != null
+                ? ` · ${fmtSignedMoney(grossMtmForSl)}`
+                : ''}
             </span>
           </div>
           <div className="flex flex-wrap items-baseline justify-between gap-2 border-t border-gray-700 pt-1.5">
