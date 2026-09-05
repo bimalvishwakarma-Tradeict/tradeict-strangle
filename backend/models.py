@@ -790,6 +790,9 @@ class HedgePosition(Base):
     # (calculation + logging only — no exit triggers use these yet)
     entry_spread_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     hedge_net_mtm: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    hedge_mtm_computed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     hedge_gross_for_sl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     hedge_est_exit_slippage_usd: Mapped[float] = mapped_column(
         Float, nullable=False, default=0.0
@@ -885,6 +888,13 @@ class SlaveHedgePosition(Base):
     # Half-spread at open (scaled from master) + total debit paid
     entry_spread_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     entry_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Live hedge net MTM — persisted on master hedge monitor cadence (same
+    # compute_hedge_net_mtm_fields as HedgePosition.hedge_net_mtm). Never copy master.
+    hedge_net_mtm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hedge_mtm_computed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     is_bot_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)

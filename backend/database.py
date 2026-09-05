@@ -740,6 +740,7 @@ def _migrate_schema() -> None:
                         order_margin_per_lot FLOAT,
                         entry_spread_usd FLOAT NOT NULL DEFAULT 0.0,
                         hedge_net_mtm FLOAT NOT NULL DEFAULT 0.0,
+                        hedge_mtm_computed_at DATETIME,
                         hedge_gross_for_sl FLOAT NOT NULL DEFAULT 0.0,
                         hedge_est_exit_slippage_usd FLOAT NOT NULL DEFAULT 0.0,
                         structure_gross_for_sl FLOAT NOT NULL DEFAULT 0.0,
@@ -759,6 +760,7 @@ def _migrate_schema() -> None:
         hedge_pnl_cols = [
             ("entry_spread_usd", "FLOAT NOT NULL DEFAULT 0.0"),
             ("hedge_net_mtm", "FLOAT NOT NULL DEFAULT 0.0"),
+            ("hedge_mtm_computed_at", "DATETIME"),
             ("hedge_gross_for_sl", "FLOAT NOT NULL DEFAULT 0.0"),
             ("hedge_est_exit_slippage_usd", "FLOAT NOT NULL DEFAULT 0.0"),
             ("structure_gross_for_sl", "FLOAT NOT NULL DEFAULT 0.0"),
@@ -817,6 +819,8 @@ def _migrate_schema() -> None:
                         order_margin_per_lot FLOAT,
                         entry_spread_usd FLOAT NOT NULL DEFAULT 0.0,
                         entry_cost_usd FLOAT,
+                        hedge_net_mtm FLOAT,
+                        hedge_mtm_computed_at DATETIME,
                         is_bot_managed BOOLEAN NOT NULL DEFAULT 1,
                         last_error VARCHAR(500),
                         allocated_capital FLOAT,
@@ -834,6 +838,8 @@ def _migrate_schema() -> None:
         for col_name, col_type in (
             ("entry_spread_usd", "FLOAT NOT NULL DEFAULT 0.0"),
             ("entry_cost_usd", "FLOAT"),
+            ("hedge_net_mtm", "FLOAT"),
+            ("hedge_mtm_computed_at", "DATETIME"),
         ):
             if col_name not in sh_cols:
                 with engine.begin() as conn:

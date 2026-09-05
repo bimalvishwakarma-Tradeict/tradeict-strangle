@@ -2405,6 +2405,135 @@ def compute_hedge_net_mtm_fields(
     }
 
 
+async def persist_slave_hedges_mtm(
+    master_hedge: HedgePosition,
+    db: Session,
+    *,
+    call_bid: float,
+    put_bid: float,
+    btc_index: float,
+    client: Any | None = None,
+) -> int:
+    """
+    Persist hedge_net_mtm on every active SlaveHedgePosition for this master.
+
+    Same compute_hedge_net_mtm_fields as master — slave's own fills/fees/qty.
+    Uses the same live bids as this monitor cycle (market is shared).
+    Returns count of rows updated.
+    """
+    from backend.core.fees import estimate_option_trading_fee
+    from backend.core.spread_utils import estimate_and_log_exit_spread_usd
+    from backend.core.time_utils import get_utc_now
+    from backend.database import get_or_create_auto_settings
+    from backend.models import SlaveHedgePosition
+
+    hid = int(master_hedge.id)
+    rows = (
+        db.query(SlaveHedgePosition)
+        .filter(
+            SlaveHedgePosition.master_hedge_id == hid,
+            SlaveHedgePosition.status.in_(("active", "pending_close")),
+        )
+        .all()
+    )
+    if not rows:
+        return 0
+
+    updated = 0
+    try:
+        spread_settings = get_or_create_auto_settings(db)
+    except Exception:
+        spread_settings = None
+    btc = float(btc_index or 0)
+    now = get_utc_now()
+
+    for sh in rows:
+        call_entry = float(getattr(sh, "call_fill_price", None) or 0)
+        put_entry = float(getattr(sh, "put_fill_price", None) or 0)
+        qty = max(1, int(getattr(sh, "quantity", 1) or 1))
+        if call_entry <= 0 or put_entry <= 0:
+            continue
+        entry_fees = float(getattr(sh, "call_entry_fee_usd", None) or 0) + float(
+            getattr(sh, "put_entry_fee_usd", None) or 0
+        )
+        entry_spread = float(getattr(sh, "entry_spread_usd", None) or 0)
+
+        est_exit = 0.0
+        if btc > 0:
+            est_exit += estimate_option_trading_fee(
+                option_price=float(call_bid),
+                quantity_lots=qty,
+                btc_index_price=btc,
+            )
+            est_exit += estimate_option_trading_fee(
+                option_price=float(put_bid),
+                quantity_lots=qty,
+                btc_index_price=btc,
+            )
+
+        est_slip = 0.0
+        if spread_settings is not None:
+            try:
+                call_sym = str(getattr(sh, "call_symbol", "") or "")
+                put_sym = str(getattr(sh, "put_symbol", "") or "")
+                sid = int(getattr(sh, "id", 0) or 0)
+                if call_sym:
+                    est_slip += await estimate_and_log_exit_spread_usd(
+                        symbol=call_sym,
+                        offer_price=float(call_bid),
+                        quantity=qty,
+                        settings=spread_settings,
+                        kind="hedge",
+                        client=client,
+                        log_id=sid,
+                    )
+                if put_sym:
+                    est_slip += await estimate_and_log_exit_spread_usd(
+                        symbol=put_sym,
+                        offer_price=float(put_bid),
+                        quantity=qty,
+                        settings=spread_settings,
+                        kind="hedge",
+                        client=client,
+                        log_id=sid,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[SLAVE_HEDGE_MTM] exit-spread estimate failed "
+                    "slave_hedge=%s: %s",
+                    getattr(sh, "id", None),
+                    exc,
+                )
+                est_slip = 0.0
+
+        mtm = compute_hedge_net_mtm_fields(
+            call_bid=float(call_bid),
+            put_bid=float(put_bid),
+            call_entry=call_entry,
+            put_entry=put_entry,
+            quantity=qty,
+            entry_fees=entry_fees,
+            estimated_exit_fees=est_exit,
+            entry_spread_usd=entry_spread,
+            hedge_est_exit_slippage_usd=float(est_slip),
+        )
+        sh.hedge_net_mtm = float(mtm["hedge_net_mtm"])
+        sh.hedge_mtm_computed_at = now
+        updated += 1
+
+    if updated:
+        db.commit()
+        logger.info(
+            "[SLAVE_HEDGE_MTM] master_hedge=%s updated %s slave hedge(s) "
+            "call_bid=%.4f put_bid=%.4f",
+            hid,
+            updated,
+            float(call_bid),
+            float(put_bid),
+        )
+    return updated
+
+
 async def persist_structure_pnl(
     hedge: HedgePosition,
     db: Session,
@@ -2499,6 +2628,12 @@ async def persist_structure_pnl(
     hedge.structure_gross_for_sl = float(structure_gross_sl)
     hedge.cum_closed_basket_pnl = float(cum_closed)
     hedge.structure_pnl = float(structure)
+    try:
+        from backend.core.time_utils import get_utc_now
+
+        hedge.hedge_mtm_computed_at = get_utc_now()
+    except Exception:
+        pass
     db.commit()
     db.refresh(hedge)
 
@@ -2639,6 +2774,24 @@ async def evaluate_and_maybe_close_hedge(
     except Exception as exc:
         logger.warning(
             "[STRUCTURE_PNL] persist failed hedge_id=%s: %s",
+            hid,
+            exc,
+            exc_info=True,
+        )
+
+    # Same cycle — persist each slave hedge's own net MTM (never copy master)
+    try:
+        await persist_slave_hedges_mtm(
+            hedge,
+            db,
+            call_bid=float(call_bid),
+            put_bid=float(put_bid),
+            btc_index=float(btc_index or btc or 0),
+            client=client,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[SLAVE_HEDGE_MTM] persist failed master_hedge=%s: %s",
             hid,
             exc,
             exc_info=True,

@@ -8115,21 +8115,44 @@ class MirrorEngine:
                     slave_trade.last_updated = get_utc_now()
                     db.commit()
 
-                    if abs(float(master_net)) > 1e-9:
-                        # Scale master by this slave's multiplier so 0% ≈ still-copied
-                        master_scaled = float(master_net) * float(
-                            slave.qty_multiplier or 1.0
-                        )
-                        if abs(master_scaled) > 1e-9:
-                            divergence_pct = (
-                                (net - master_scaled) / abs(master_scaled)
-                            ) * 100.0
-                        else:
-                            divergence_pct = (
-                                0.0 if abs(net) < 1e-9 else 100.0
+                    # Scale master by slave/master lot ratio (not bare multiplier)
+                    slave_qty = max(1, int(slave_trade.actual_quantity or 1))
+                    master_qty = 1
+                    try:
+                        from backend.models import Leg
+
+                        m_leg = (
+                            db.query(Leg)
+                            .filter(
+                                Leg.trade_id == mid,
+                                Leg.leg_type == "call",
+                                Leg.status == "active",
                             )
+                            .first()
+                        )
+                        if m_leg is not None:
+                            master_qty = max(1, int(m_leg.quantity or 1))
+                        else:
+                            mult = float(slave.qty_multiplier or 1.0)
+                            if mult > 0:
+                                master_qty = max(
+                                    1, int(round(slave_qty / mult))
+                                )
+                    except Exception:
+                        mult = float(slave.qty_multiplier or 1.0)
+                        if mult > 0:
+                            master_qty = max(1, int(round(slave_qty / mult)))
+
+                    master_net_scaled = float(master_net) * (
+                        float(slave_qty) / float(master_qty)
+                    )
+                    if abs(master_net_scaled) > 1e-9:
+                        divergence_pct = (
+                            (net - master_net_scaled) / abs(master_net_scaled)
+                        ) * 100.0
                     else:
                         divergence_pct = 0.0 if abs(net) < 1e-9 else 100.0
+                    abs_diff = abs(float(net) - float(master_net_scaled))
 
                     mtm_details = {
                         "slave": int(slave.id),
@@ -8152,7 +8175,9 @@ class MirrorEngine:
                         "spread": round(spread, 6),
                         "net_mtm": round(net, 4),
                         "master_net_mtm": round(float(master_net), 4),
+                        "master_net_scaled": round(float(master_net_scaled), 4),
                         "divergence_pct": round(divergence_pct, 4),
+                        "abs_diff": round(abs_diff, 6),
                     }
                     log_and_buffer("SLAVE_MTM", mid, mtm_details)
                     mtm_line = (
@@ -8160,7 +8185,8 @@ class MirrorEngine:
                         "short_call_gross=%s | short_put_gross=%s | "
                         "wing_call_gross=%s | wing_put_gross=%s | "
                         "leg_count=%s | gross=%s | fees=%s | spread=%s | "
-                        "net_mtm=%s | master_net_mtm=%s | divergence_pct=%s"
+                        "net_mtm=%s | master_net_mtm=%s | "
+                        "master_net_scaled=%s | divergence_pct=%s"
                         % (
                             slave.id,
                             slave_trade.id,
@@ -8174,10 +8200,12 @@ class MirrorEngine:
                             mtm_details["spread"],
                             mtm_details["net_mtm"],
                             mtm_details["master_net_mtm"],
+                            mtm_details["master_net_scaled"],
                             mtm_details["divergence_pct"],
                         )
                     )
-                    if abs(divergence_pct) > 50.0:
+                    # Warn only on real $ gap AND large % — avoid near-zero master noise
+                    if abs_diff > 0.05 and abs(divergence_pct) > 50.0:
                         logger.warning(mtm_line)
                     else:
                         logger.info(mtm_line)

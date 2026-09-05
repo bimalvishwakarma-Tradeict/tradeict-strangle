@@ -641,6 +641,8 @@ def _hedge_payload(
     call_now: float | None = None,
     put_now: float | None = None,
     hedge_net_mtm: float | None = None,
+    source: str | None = None,
+    hedge_computed_at: Any | None = None,
 ) -> dict[str, Any] | None:
     """Build hedge block — call_now/put_now must be live bids (never entry echo)."""
     row: Any = slave_hedge if slave_hedge is not None else hedge
@@ -652,6 +654,18 @@ def _hedge_payload(
     c_now = float(call_now) if call_now is not None and float(call_now) > 0 else None
     p_now = float(put_now) if put_now is not None and float(put_now) > 0 else None
     expiry = getattr(row, "expiry_date", None)
+    computed_iso: str | None = None
+    stale: float | None = None
+    at = hedge_computed_at
+    if at is None:
+        at = getattr(row, "hedge_mtm_computed_at", None)
+    if at is not None:
+        try:
+            computed_iso = at.isoformat() if hasattr(at, "isoformat") else str(at)
+            stale = round(max(0.0, (get_utc_now() - at).total_seconds()), 1)
+        except Exception:
+            computed_iso = str(at) if at is not None else None
+            stale = None
     return {
         "hedge_id": int(row.id),
         "strike": float(row.strike) if row.strike is not None else None,
@@ -664,6 +678,9 @@ def _hedge_payload(
         "hedge_net_mtm": (
             round(float(hedge_net_mtm), 4) if hedge_net_mtm is not None else None
         ),
+        "source": source,
+        "hedge_computed_at": computed_iso,
+        "hedge_stale_seconds": stale,
     }
 
 
@@ -1635,12 +1652,21 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             if active_hedge_row is not None
             else 0.0
         )
+        master_hedge_source = (
+            "stored" if active_hedge_row is not None else None
+        )
 
         master_hedge_block = _hedge_payload(
             hedge=active_hedge_row,
             call_now=master_call_bid,
             put_now=master_put_bid,
             hedge_net_mtm=master_hedge_net,
+            source=master_hedge_source,
+            hedge_computed_at=(
+                getattr(active_hedge_row, "hedge_mtm_computed_at", None)
+                if active_hedge_row is not None
+                else None
+            ),
         )
         if active_hedge_row is not None:
             basket_legs = list(basket_legs) + _hedge_legs(
@@ -1948,6 +1974,8 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 .first()
             )
             slave_hedge_net: float | None = None
+            slave_hedge_source: str | None = None
+            slave_hedge_computed_at: Any | None = None
             slave_closed = 0.0
             slave_hedge_missing = slave_hedge_row is None
             slave_call_bid: float | None = None
@@ -2013,20 +2041,30 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                             except Exception:
                                 pass
 
-                compute_client = bid_client
-                if (
-                    slave_call_bid is not None
-                    and slave_put_bid is not None
-                    and slave_call_bid > 0
-                    and slave_put_bid > 0
-                ):
-                    slave_hedge_net = await _compute_hedge_net_for_row(
-                        slave_hedge_row,
-                        call_bid=float(slave_call_bid),
-                        put_bid=float(slave_put_bid),
-                        client=compute_client,
-                        db=db,
-                    )
+                # Prefer monitor-persisted snapshot; fresh compute only before first write
+                stored_net = getattr(slave_hedge_row, "hedge_net_mtm", None)
+                stored_at = getattr(slave_hedge_row, "hedge_mtm_computed_at", None)
+                if stored_net is not None:
+                    slave_hedge_net = float(stored_net)
+                    slave_hedge_source = "stored"
+                    slave_hedge_computed_at = stored_at
+                else:
+                    compute_client = bid_client
+                    if (
+                        slave_call_bid is not None
+                        and slave_put_bid is not None
+                        and slave_call_bid > 0
+                        and slave_put_bid > 0
+                    ):
+                        slave_hedge_net = await _compute_hedge_net_for_row(
+                            slave_hedge_row,
+                            call_bid=float(slave_call_bid),
+                            put_bid=float(slave_put_bid),
+                            client=compute_client,
+                            db=db,
+                        )
+                        if slave_hedge_net is not None:
+                            slave_hedge_source = "computed"
                 # Never copy master hedge_net — null if we cannot compute
                 master_net_for_audit = (
                     float(getattr(active_hedge_row, "hedge_net_mtm", 0) or 0)
@@ -2047,6 +2085,8 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 call_now=slave_call_bid,
                 put_now=slave_put_bid,
                 hedge_net_mtm=slave_hedge_net,
+                source=slave_hedge_source,
+                hedge_computed_at=slave_hedge_computed_at,
             )
             if slave_hedge_row is not None:
                 slave_legs = list(slave_legs) + _hedge_legs(
