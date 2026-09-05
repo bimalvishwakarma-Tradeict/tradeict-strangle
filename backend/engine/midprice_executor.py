@@ -97,6 +97,79 @@ def _mid_log(
     log_and_buffer(event_type, int(trade_id or 0), details)
 
 
+def _commission_from_mapping(src: dict[str, Any]) -> float | None:
+    """Positive paid_commission/commission from a dict, else None (never 0.0)."""
+    for field in ("paid_commission", "commission"):
+        try:
+            val = abs(float(src.get(field) or 0))
+        except (TypeError, ValueError):
+            val = 0.0
+        if val > 0:
+            return val
+    return None
+
+
+async def _resolve_order_commission(
+    delta_client: Any,
+    *,
+    place_result: dict[str, Any] | None = None,
+    order_id: int | str | None = None,
+) -> float | None:
+    """
+    Same pattern as order_executor close_long / place path:
+    place response paid_commission|commission first, else get_order_commission.
+    Unknown → None (do not write 0.0 — fee-unknown ≠ fee-zero).
+    """
+    if isinstance(place_result, dict):
+        raw = (
+            place_result.get("raw")
+            if isinstance(place_result.get("raw"), dict)
+            else {}
+        )
+        for src in (place_result, raw):
+            if isinstance(src, dict):
+                found = _commission_from_mapping(src)
+                if found is not None:
+                    return found
+        if order_id is None:
+            order_id = place_result.get("order_id") or place_result.get("id")
+
+    if order_id is None:
+        return None
+    try:
+        val = abs(float(await delta_client.get_order_commission(order_id)))
+    except Exception as fee_exc:
+        logger.warning(
+            "Could not fetch commission for order %s: %s",
+            order_id,
+            fee_exc,
+        )
+        return None
+    return val if val > 0 else None
+
+
+def _log_entry_fee_missing(
+    *,
+    trade_id: int | None,
+    leg: str,
+    order_id: int | str | None,
+    product_id: int | None,
+    filled_size: int | float | None,
+    reason: str,
+) -> None:
+    log_and_buffer(
+        "ENTRY_FEE_MISSING",
+        int(trade_id or 0),
+        {
+            "leg": leg,
+            "order_id": order_id,
+            "product_id": product_id,
+            "filled_size": filled_size,
+            "reason": reason,
+        },
+    )
+
+
 @asynccontextmanager
 async def order_placement_guard(
     *,
@@ -633,12 +706,27 @@ async def _place_market(
                 "reduce_only": bool(reduce_only),
             },
         )
+        commission = await _resolve_order_commission(
+            delta_client,
+            place_result=raw if isinstance(raw, dict) else None,
+            order_id=oid,
+        )
+        if commission is None and filled > 0:
+            _log_entry_fee_missing(
+                trade_id=trade_id,
+                leg=leg_label or "market",
+                order_id=oid,
+                product_id=int(product_id),
+                filled_size=filled,
+                reason="market_place_commission_unavailable",
+            )
         return OrderResult(
             success=True,
             order_id=int(oid) if oid is not None else None,
             filled_price=fill_px if fill_px > 0 else None,
             filled_size=filled,
             fill_type="market",
+            commission=commission,
         )
     except Exception as exc:
         return OrderResult(success=False, error=str(exc), fill_type="market")
@@ -901,6 +989,10 @@ async def execute_with_midprice(
         attempt = 0
         mid_at_start: float | None = None
         fill_type_used = "market"
+        # Sum commissions across every order that filled this leg (never 0.0)
+        commission_sum = 0.0
+        commission_have = False
+        commission_resolved_oids: set[int] = set()
         urgent_types = ("mid", "best", "best", "market")
         partner_mode_started_at: float | None = None
         partner_final_mid_attempt_armed = False
@@ -909,6 +1001,51 @@ async def execute_with_midprice(
         partner_window_s = float(
             clamp_partner_window_seconds(partner_window_seconds)
         )
+
+        async def _finalize_oid_fees(
+            oid: int | None,
+            *,
+            filled_hint: int,
+            reason: str,
+        ) -> None:
+            """Resolve commission once per order_id when that order is done."""
+            nonlocal commission_sum, commission_have
+            if oid is None:
+                return
+            try:
+                oid_i = int(oid)
+            except (TypeError, ValueError):
+                return
+            if oid_i in commission_resolved_oids:
+                return
+            commission_resolved_oids.add(oid_i)
+            fee = await _resolve_order_commission(
+                delta_client, order_id=oid_i
+            )
+            if fee is not None:
+                commission_sum += float(fee)
+                commission_have = True
+                return
+            if filled_hint > 0:
+                _log_entry_fee_missing(
+                    trade_id=trade_id,
+                    leg=leg_label,
+                    order_id=oid_i,
+                    product_id=int(product_id),
+                    filled_size=filled_hint,
+                    reason=reason,
+                )
+
+        def _absorb_market_fees(mkt: OrderResult) -> None:
+            nonlocal commission_sum, commission_have
+            if mkt.order_id is not None:
+                try:
+                    commission_resolved_oids.add(int(mkt.order_id))
+                except (TypeError, ValueError):
+                    pass
+            if mkt.commission is not None:
+                commission_sum += float(mkt.commission)
+                commission_have = True
 
         while remaining > 0:
             elapsed = now() - started
@@ -1006,6 +1143,7 @@ async def execute_with_midprice(
                     last_oid = mkt.order_id
                     fill_type_used = "market"
                     remaining = 0
+                    _absorb_market_fees(mkt)
                 else:
                     return OrderResult(
                         success=False,
@@ -1015,6 +1153,9 @@ async def execute_with_midprice(
                         fill_attempt=attempt,
                         fill_type="market",
                         mid_at_start=mid_at_start,
+                        commission=(
+                            commission_sum if commission_have else None
+                        ),
                     )
                 break
 
@@ -1096,6 +1237,7 @@ async def execute_with_midprice(
                     last_oid = mkt.order_id
                     fill_type_used = "market"
                     remaining = 0
+                    _absorb_market_fees(mkt)
                 else:
                     return OrderResult(
                         success=False,
@@ -1105,6 +1247,9 @@ async def execute_with_midprice(
                         fill_attempt=attempt,
                         fill_type="market",
                         mid_at_start=mid_at_start,
+                        commission=(
+                            commission_sum if commission_have else None
+                        ),
                     )
                 break
 
@@ -1293,6 +1438,11 @@ async def execute_with_midprice(
                 filled_total += remaining
                 fill_price_sum += px * remaining
                 fill_type_used = order_kind
+                await _finalize_oid_fees(
+                    last_oid,
+                    filled_hint=remaining,
+                    reason="mid_full_fill_commission_unavailable",
+                )
                 _mid_log(
                     "MIDPRICE_FILL",
                     trade_id,
@@ -1375,6 +1525,11 @@ async def execute_with_midprice(
                 fill_type_used = order_kind
 
             if remaining <= 0:
+                await _finalize_oid_fees(
+                    last_oid,
+                    filled_hint=filled_total,
+                    reason="mid_cancel_fill_commission_unavailable",
+                )
                 _mid_log(
                     "MIDPRICE_FILL",
                     trade_id,
@@ -1401,6 +1556,7 @@ async def execute_with_midprice(
                 # GTC is still live — that is the duplicate-fill / over-fill
                 # bug. Wait on the same order until it fills or leaves open;
                 # market only after cancel is confirmed.
+                # Do NOT finalize commission yet — more fills may land.
                 od_wait = after_cancel
                 wait_deadline = now() + float(CANCEL_CONFIRM_TIMEOUT_SECONDS)
                 while remaining > 0 and now() < wait_deadline:
@@ -1427,11 +1583,21 @@ async def execute_with_midprice(
                         break
 
                 if remaining <= 0:
+                    await _finalize_oid_fees(
+                        last_oid,
+                        filled_hint=filled_total,
+                        reason="mid_still_open_wait_commission_unavailable",
+                    )
                     break
 
                 st_final = _order_state(od_wait)
                 if st_final in _OPEN_STATES or not st_final:
                     # Still live — fail closed, no new order.
+                    await _finalize_oid_fees(
+                        last_oid,
+                        filled_hint=filled_total,
+                        reason="cancel_unconfirmed_commission_unavailable",
+                    )
                     return OrderResult(
                         success=False,
                         error="cancel_unconfirmed_order_still_open",
@@ -1440,7 +1606,18 @@ async def execute_with_midprice(
                         fill_attempt=attempt,
                         fill_type=fill_type_used,
                         mid_at_start=mid_at_start,
+                        commission=(
+                            commission_sum if commission_have else None
+                        ),
                     )
+
+                # Confirmed off-book with remainder — resolve this GTC's fees
+                # before market (same oid will not receive more fills).
+                await _finalize_oid_fees(
+                    last_oid,
+                    filled_hint=max(got, new_fills, order_filled),
+                    reason="still_open_then_market_prior_commission_unavailable",
+                )
 
                 # Confirmed off-book with remainder — existing market fallback.
                 if await _pre_place_position_check(
@@ -1476,6 +1653,7 @@ async def execute_with_midprice(
                     last_oid = mkt.order_id
                     fill_type_used = "market"
                     remaining = 0
+                    _absorb_market_fees(mkt)
                     break
                 return OrderResult(
                     success=False,
@@ -1485,10 +1663,16 @@ async def execute_with_midprice(
                     fill_attempt=attempt,
                     fill_type="market",
                     mid_at_start=mid_at_start,
+                    commission=commission_sum if commission_have else None,
                 )
 
             if outcome == "unknown":
                 # Could not read order after cancel — do not stack another limit.
+                await _finalize_oid_fees(
+                    last_oid,
+                    filled_hint=filled_total,
+                    reason="cancel_confirm_unknown_commission_unavailable",
+                )
                 return OrderResult(
                     success=False,
                     error="cancel_confirm_unknown",
@@ -1497,9 +1681,18 @@ async def execute_with_midprice(
                     fill_attempt=attempt,
                     fill_type=fill_type_used,
                     mid_at_start=mid_at_start,
+                    commission=commission_sum if commission_have else None,
                 )
 
             # outcome in {cancelled, filled} with remaining > 0:
+            # this GTC is done — take its commission before the next attempt.
+            if got > 0 or new_fills > 0:
+                await _finalize_oid_fees(
+                    last_oid,
+                    filled_hint=max(got, new_fills),
+                    reason="mid_partial_order_commission_unavailable",
+                )
+
             # settle already happened inside _cancel_confirm (before decision).
 
             if (
@@ -1552,6 +1745,7 @@ async def execute_with_midprice(
                     last_oid = mkt.order_id
                     fill_type_used = "market"
                     remaining = 0
+                    _absorb_market_fees(mkt)
                     break
 
                 return OrderResult(
@@ -1562,6 +1756,7 @@ async def execute_with_midprice(
                     fill_attempt=attempt,
                     fill_type="market",
                     mid_at_start=mid_at_start,
+                    commission=commission_sum if commission_have else None,
                 )
 
             if prof == "urgent" and attempt >= 4:
@@ -1578,6 +1773,24 @@ async def execute_with_midprice(
             except Exception:
                 saved = None
 
+        # Any leftover order id not yet fee-resolved (e.g. position_already_filled)
+        if last_oid is not None and filled_total > 0:
+            await _finalize_oid_fees(
+                last_oid,
+                filled_hint=filled_total,
+                reason="leg_complete_commission_unavailable",
+            )
+
+        if success and filled_total > 0 and not commission_have:
+            _log_entry_fee_missing(
+                trade_id=trade_id,
+                leg=leg_label,
+                order_id=last_oid,
+                product_id=int(product_id),
+                filled_size=filled_total,
+                reason="leg_filled_but_all_commissions_missing",
+            )
+
         result = OrderResult(
             success=success,
             order_id=last_oid,
@@ -1591,6 +1804,7 @@ async def execute_with_midprice(
             selected_premium=(
                 float(selected_premium) if selected_premium is not None else None
             ),
+            commission=commission_sum if commission_have else None,
         )
 
         if (
