@@ -78,6 +78,11 @@ def is_placing_order() -> bool:
     return _IN_FLIGHT_ORDER_COUNT > 0
 
 
+def get_in_flight_order_count() -> int:
+    """How many mid-price execute_* scopes currently hold the placement guard."""
+    return int(_IN_FLIGHT_ORDER_COUNT)
+
+
 def _safe_dump(obj: Any) -> Any:
     """JSON-ish dump of a Delta payload for audit logs."""
     if isinstance(obj, dict):

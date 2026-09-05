@@ -755,15 +755,19 @@ class BotEngine:
             await asyncio.sleep(30)
 
     async def _run_qty_reconciliation_tick(self) -> None:
-        from backend.engine.midprice_executor import is_placing_order
+        from backend.engine.midprice_executor import (
+            get_in_flight_order_count,
+            is_placing_order,
+        )
 
         if is_placing_order():
             log_and_buffer(
-                "QTY_RECONCILE_SKIP",
+                "RECONCILE_DEFERRED",
                 0,
                 {
-                    "reason": "is_placing_order",
-                    "is_placing_order": True,
+                    "reason": "orders_in_flight",
+                    "in_flight_count": get_in_flight_order_count(),
+                    "trade_id": None,
                 },
             )
             return
@@ -875,6 +879,7 @@ class BotEngine:
         """
         from backend.engine.midprice_executor import (
             execute_with_midprice,
+            get_in_flight_order_count,
             get_live_position_size,
             is_placing_order,
         )
@@ -940,12 +945,14 @@ class BotEngine:
                 return
             if is_placing_order():
                 log_and_buffer(
-                    "QTY_RECONCILE_SKIP",
+                    "RECONCILE_DEFERRED",
                     hedge_id,
                     {
-                        "reason": "is_placing_order_mid_tick",
-                        "product_id": heavy_pid,
+                        "reason": "orders_in_flight",
+                        "in_flight_count": get_in_flight_order_count(),
+                        "trade_id": hedge_id,
                         "scope": "hedge",
+                        "product_id": heavy_pid,
                     },
                 )
                 return
@@ -1217,6 +1224,7 @@ class BotEngine:
     ) -> None:
         from backend.engine.midprice_executor import (
             execute_with_midprice,
+            get_in_flight_order_count,
             get_live_position_size,
             is_placing_order,
         )
@@ -1405,10 +1413,12 @@ class BotEngine:
 
             if is_placing_order():
                 log_and_buffer(
-                    "QTY_RECONCILE_SKIP",
+                    "RECONCILE_DEFERRED",
                     trade_id,
                     {
-                        "reason": "is_placing_order_mid_tick",
+                        "reason": "orders_in_flight",
+                        "in_flight_count": get_in_flight_order_count(),
+                        "trade_id": trade_id,
                         "product_id": pid,
                     },
                 )
@@ -1508,11 +1518,14 @@ class BotEngine:
                 continue
             if is_placing_order():
                 log_and_buffer(
-                    "QTY_RECONCILE_SKIP",
+                    "RECONCILE_DEFERRED",
                     trade_id,
                     {
-                        "reason": "is_placing_order_mid_tick",
+                        "reason": "orders_in_flight",
+                        "in_flight_count": get_in_flight_order_count(),
+                        "trade_id": trade_id,
                         "product_id": pid,
+                        "action": "add_missing",
                     },
                 )
                 return
@@ -5311,6 +5324,26 @@ class BotEngine:
         self, trade_state: TradeState, triggered_leg_type: str
     ) -> None:
         trade_id = trade_state.trade_id
+        from backend.engine.midprice_executor import (
+            get_in_flight_order_count,
+            is_placing_order,
+        )
+
+        # Never start an adjustment while mid-price orders are resting on the
+        # book — next monitor tick will re-evaluate the trigger.
+        if is_placing_order():
+            log_and_buffer(
+                "ADJUSTMENT_DEFERRED",
+                int(trade_id),
+                {
+                    "reason": "orders_in_flight",
+                    "in_flight_count": get_in_flight_order_count(),
+                    "trade_id": int(trade_id),
+                    "triggered_leg": triggered_leg_type,
+                },
+            )
+            return
+
         # Lock FIRST — before any async work — so integrity monitor cannot
         # emergency-close a mid-adjustment naked leg (INTEGRITY_NAKED race).
         self.position_tracker.set_adjusting(trade_id, True)
