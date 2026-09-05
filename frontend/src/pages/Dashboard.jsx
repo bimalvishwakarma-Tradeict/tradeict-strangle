@@ -321,10 +321,11 @@ function ForceCloseSlaveAction({ slave, onComplete }) {
   const [error, setError] = useState(null)
   const [lastResult, setLastResult] = useState(null)
 
-  const structureClosed = Boolean(slave.structure_closed_at)
+  const hasActiveTrade = Boolean(slave.active_slave_trade)
+  const structureClosed = Boolean(slave.structure_closed_at) && !hasActiveTrade
   const canForceClose =
     !structureClosed &&
-    (slave.active_slave_trade ||
+    (hasActiveTrade ||
       slave.is_active ||
       slave.connection_status === 'error')
 
@@ -422,6 +423,219 @@ function ForceCloseSlaveAction({ slave, onComplete }) {
   )
 }
 
+function overviewRoleLabel(role) {
+  switch (String(role || '').trim().toLowerCase()) {
+    case 'short_call':
+      return 'Short Call'
+    case 'short_put':
+      return 'Short Put'
+    case 'wing_call':
+      return 'Wing Call'
+    case 'wing_put':
+      return 'Wing Put'
+    case 'hedge_call':
+      return 'Hedge Call'
+    case 'hedge_put':
+      return 'Hedge Put'
+    default:
+      return String(role || '—').replace(/_/g, ' ')
+  }
+}
+
+function overviewLegGroup(role) {
+  const r = String(role || '').trim().toLowerCase()
+  if (r.startsWith('short_')) return 'short'
+  if (r.startsWith('wing_')) return 'protection'
+  if (r.startsWith('hedge_')) return 'hedge'
+  return 'other'
+}
+
+function overviewGroupMeta(id) {
+  switch (id) {
+    case 'short':
+      return { title: 'SHORT LEGS', hint: 'premium collected' }
+    case 'protection':
+      return { title: 'PROTECTION', hint: 'wings — long, tail cover' }
+    case 'hedge':
+      return { title: 'HEDGE', hint: 'long straddle' }
+    default:
+      return { title: 'OTHER', hint: '' }
+  }
+}
+
+function sumLegGross(legs) {
+  let total = 0
+  let any = false
+  for (const leg of legs || []) {
+    const n = Number(leg?.leg_pnl)
+    if (Number.isFinite(n)) {
+      total += n
+      any = true
+    }
+  }
+  return any ? total : null
+}
+
+function formatStaleUpdated(staleSeconds) {
+  const n = Number(staleSeconds)
+  if (!Number.isFinite(n) || n <= 15) return null
+  const secs = Math.max(0, Math.round(n))
+  return `updated ${secs}s ago`
+}
+
+/** Expand panel: 6 legs in 3 groups + Hedge/Basket/Structure strip from pnl. */
+function StructureOverviewExpand({ trade, emptyLabel = 'No open structure' }) {
+  if (!trade) {
+    return <span className="text-gray-500">{emptyLabel}</span>
+  }
+
+  const legs = Array.isArray(trade.legs) ? trade.legs : []
+  const pnl = trade.pnl || null
+  const staleLabel = formatStaleUpdated(pnl?.stale_seconds)
+
+  const ordered = ['short', 'protection', 'hedge', 'other']
+  const groups = ordered
+    .map((id) => {
+      const rows = legs.filter((l) => overviewLegGroup(l.role) === id)
+      return {
+        id,
+        meta: overviewGroupMeta(id),
+        rows,
+        gross: sumLegGross(rows),
+      }
+    })
+    .filter((g) => g.rows.length > 0)
+
+  if (groups.length === 0) {
+    return <span className="text-gray-500">{emptyLabel}</span>
+  }
+
+  return (
+    <div className="space-y-3 text-xs">
+      {pnl ? (
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 font-mono text-[11px]">
+          <span className="text-gray-500">
+            Hedge{' '}
+            <span className={`tabular-nums font-medium ${mtmClass(pnl.hedge_net)}`}>
+              {formatSignedMoney(pnl.hedge_net)}
+            </span>
+          </span>
+          <span className="text-gray-500">
+            Basket{' '}
+            <span className={`tabular-nums font-medium ${mtmClass(pnl.basket_net)}`}>
+              {formatSignedMoney(pnl.basket_net)}
+            </span>
+          </span>
+          <span className="text-gray-500">
+            Structure{' '}
+            <span className={`tabular-nums font-semibold ${mtmClass(pnl.structure_net)}`}>
+              {formatSignedMoney(pnl.structure_net)}
+            </span>
+          </span>
+          {staleLabel ? (
+            <span className="text-[10px] text-gray-500">{staleLabel}</span>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="overflow-x-auto rounded border border-gray-700/80">
+        <table className="min-w-full font-mono text-[11px]">
+          <thead className="bg-gray-800/80 text-[10px] uppercase tracking-wide text-gray-500">
+            <tr>
+              <th className="px-2 py-1.5 text-left font-medium">Leg</th>
+              <th className="px-2 py-1.5 text-right font-medium tabular-nums">Strike</th>
+              <th className="px-2 py-1.5 text-right font-medium tabular-nums">Entry</th>
+              <th className="px-2 py-1.5 text-right font-medium tabular-nums">Current</th>
+              <th className="px-2 py-1.5 text-right font-medium tabular-nums">Qty</th>
+              <th className="min-w-[5.5rem] px-2 py-1.5 text-right font-medium tabular-nums">
+                P&amp;L (gross)
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.flatMap((group) => {
+              const header = (
+                <tr
+                  key={`g-${group.id}`}
+                  className="border-t border-gray-700 bg-gray-800/50"
+                >
+                  <td colSpan={5} className="px-2 py-1.5">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-300">
+                      {group.meta.title}
+                    </span>
+                    {group.meta.hint ? (
+                      <span className="ml-2 text-[10px] font-normal normal-case tracking-normal text-gray-500">
+                        ({group.meta.hint})
+                      </span>
+                    ) : null}
+                    <span className="ml-2 text-[10px] font-normal normal-case text-gray-500">
+                      gross (legs)
+                    </span>
+                  </td>
+                  <td
+                    className={`min-w-[5.5rem] px-2 py-1.5 text-right text-[11px] font-semibold tabular-nums ${mtmClass(group.gross)}`}
+                  >
+                    {formatSignedMoney(group.gross)}
+                  </td>
+                </tr>
+              )
+              const body = group.rows.map((leg, i) => {
+                const closed = String(leg.status || '').toLowerCase() === 'closed'
+                const isWing = overviewLegGroup(leg.role) === 'protection'
+                const isHedge = overviewLegGroup(leg.role) === 'hedge'
+                return (
+                  <tr
+                    key={`${group.id}-${leg.role}-${i}`}
+                    className={`border-t border-gray-800/80 ${
+                      isWing
+                        ? 'bg-violet-950/20'
+                        : isHedge
+                          ? 'bg-sky-950/20'
+                          : ''
+                    } ${closed ? 'opacity-50' : ''}`}
+                  >
+                    <td
+                      className={`px-2 py-1.5 text-left ${
+                        closed ? 'text-gray-500 line-through' : 'text-gray-200'
+                      }`}
+                    >
+                      {overviewRoleLabel(leg.role)}
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-white">
+                      {leg.strike != null && Number.isFinite(Number(leg.strike))
+                        ? `$${fmtStrike(leg.strike)}`
+                        : '—'}
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-gray-300">
+                      {leg.entry_price != null
+                        ? `$${fmtMoney(leg.entry_price)}`
+                        : '—'}
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-gray-300">
+                      {leg.current_price != null
+                        ? `$${fmtMoney(leg.current_price)}`
+                        : '—'}
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-gray-300">
+                      {leg.quantity != null ? leg.quantity : '—'}
+                    </td>
+                    <td
+                      className={`min-w-[5.5rem] px-2 py-1.5 text-right font-medium tabular-nums ${mtmClass(leg.leg_pnl)}`}
+                    >
+                      {formatSignedMoney(leg.leg_pnl)}
+                    </td>
+                  </tr>
+                )
+              })
+              return [header, ...body]
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function growthClass(v) {
   const n = Number(v)
   if (!Number.isFinite(n)) return 'text-gray-500'
@@ -480,7 +694,7 @@ function AccountOverviewRow({
   netMtm,
   mtmLabel,
   mtmSource,
-  mtmSyncIso,
+  staleSeconds,
   targetUsd,
   isExpanded,
   onToggle,
@@ -488,9 +702,7 @@ function AccountOverviewRow({
   dimmed,
   expandContent,
 }) {
-  const syncAge = formatSyncAge(mtmSyncIso)
-  const syncSecs = syncAgeSeconds(mtmSyncIso)
-  const syncStale = syncSecs != null && syncSecs > 60
+  const staleLabel = formatStaleUpdated(staleSeconds)
   const blockedHigh =
     actualBalance != null &&
     blockedAmount != null &&
@@ -569,21 +781,15 @@ function AccountOverviewRow({
             '—'
           ) : (
             <>
-              <div>{formatSignedMoney(netMtm)}</div>
+              <div className="tabular-nums">{formatSignedMoney(netMtm)}</div>
               {mtmLabel ? (
                 <div className="text-[10px] font-normal text-gray-500">{mtmLabel}</div>
               ) : null}
               {mtmSource === 'copied' ? (
                 <div className="text-[10px] font-normal text-yellow-300">copied</div>
               ) : null}
-              {syncAge ? (
-                <div
-                  className={`text-[10px] font-normal ${
-                    syncStale ? 'text-yellow-300' : 'text-gray-500'
-                  }`}
-                >
-                  {syncStale ? '⚠️ ' : ''}{syncAge}
-                </div>
+              {staleLabel ? (
+                <div className="text-[10px] font-normal text-gray-500">{staleLabel}</div>
               ) : null}
             </>
           )}
@@ -613,34 +819,50 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
 
   const master = overview.master || {}
   const slaves = overview.slaves || []
+  const masterTrade = master.active_trade
 
-  const masterStructureMtm =
-    master.structure_net_mtm != null &&
-    Number.isFinite(Number(master.structure_net_mtm))
-      ? Number(master.structure_net_mtm)
-      : activeHedge?.structure_pnl != null &&
-          Number.isFinite(Number(activeHedge.structure_pnl))
-        ? Number(activeHedge.structure_pnl)
-        : null
+  const masterStructureMtm = (() => {
+    const fromPnl = masterTrade?.pnl?.structure_net
+    if (fromPnl != null && Number.isFinite(Number(fromPnl))) return Number(fromPnl)
+    if (
+      master.structure_net_mtm != null &&
+      Number.isFinite(Number(master.structure_net_mtm))
+    ) {
+      return Number(master.structure_net_mtm)
+    }
+    if (
+      activeHedge?.structure_pnl != null &&
+      Number.isFinite(Number(activeHedge.structure_pnl))
+    ) {
+      return Number(activeHedge.structure_pnl)
+    }
+    return null
+  })()
 
   let combined = Number(
-    overview.combined_structure_mtm ?? overview.combined_mtm ?? 0,
+    overview.combined_structure_mtm ?? overview.combined_mtm ?? NaN,
   )
   if (!Number.isFinite(combined)) {
     combined = 0
-    if (masterStructureMtm != null) combined += masterStructureMtm
-    for (const s of slaves) {
-      const st = s.active_slave_trade
-      const m = st?.net_mtm ?? st?.last_mtm
-      if (m != null && Number.isFinite(Number(m))) combined += Number(m)
+    let any = false
+    if (masterStructureMtm != null) {
+      combined += masterStructureMtm
+      any = true
     }
+    for (const s of slaves) {
+      const sn = s.active_slave_trade?.pnl?.structure_net
+      if (sn != null && Number.isFinite(Number(sn))) {
+        combined += Number(sn)
+        any = true
+      }
+    }
+    if (!any) combined = 0
   }
 
   const toggle = (key) => {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
-  const masterTrade = master.active_trade
   let masterStatus = 'offline'
   let masterStatusText = ''
   if (!master.connected) {
@@ -651,35 +873,11 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
     masterStatus = 'ready'
   }
 
-  const masterExpand = masterTrade ? (
-    <div className="space-y-1.5 text-xs">
-      <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px] text-gray-400 pb-0.5 border-b border-gray-700">
-        <span>LEG</span><span>STRIKE</span><span>QTY</span><span>ENTRY $</span><span>OFFER $</span>
-      </div>
-      <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px]">
-        <span className={masterTrade.call_status === 'closed' ? 'text-gray-500 line-through' : 'text-red-300'}>CALL</span>
-        <span className="text-white">${fmtStrike(masterTrade.call_strike)}</span>
-        <span className="text-gray-300">{masterTrade.call_quantity ?? '—'}</span>
-        <span className="text-gray-300">${fmtMoney(masterTrade.call_entry)}</span>
-        <span className={pnlColor(masterTrade.call_entry - masterTrade.call_premium)}>${fmtMoney(masterTrade.call_premium)}</span>
-      </div>
-      <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px]">
-        <span className={masterTrade.put_status === 'closed' ? 'text-gray-500 line-through' : 'text-blue-300'}>PUT</span>
-        <span className="text-white">${fmtStrike(masterTrade.put_strike)}</span>
-        <span className="text-gray-300">{masterTrade.put_quantity ?? '—'}</span>
-        <span className="text-gray-300">${fmtMoney(masterTrade.put_entry)}</span>
-        <span className={pnlColor(masterTrade.put_entry - masterTrade.put_premium)}>${fmtMoney(masterTrade.put_premium)}</span>
-      </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-0.5 pt-1 text-[11px] text-gray-400">
-        <span>Gross MTM: <span className={mtmClass(masterTrade.gross_mtm)}>{formatSignedMoney(masterTrade.gross_mtm)}</span></span>
-        <span>Net MTM: <span className={mtmClass(masterTrade.net_mtm)}>{formatSignedMoney(masterTrade.net_mtm)}</span></span>
-        <span>Target: ${fmtMoney(masterTrade.profit_target_usd)}</span>
-        <span>SL: ${fmtMoney(masterTrade.stoploss_usd)}</span>
-        {masterTrade.expiry_date && <span>Expiry: {masterTrade.expiry_date}</span>}
-      </div>
-    </div>
-  ) : (
-    <span className="text-gray-500">No active master trade</span>
+  const masterExpand = (
+    <StructureOverviewExpand
+      trade={masterTrade}
+      emptyLabel="No open structure"
+    />
   )
 
   return (
@@ -719,7 +917,7 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                 Free Cash
               </HeaderCell>
               <HeaderCell tooltip="vs yesterday 12pm IST">Daily Δ%</HeaderCell>
-              <HeaderCell tooltip="Master = Hedge + All Baskets | Slave = Active Basket only">
+              <HeaderCell tooltip="Hedge + closed baskets + open basket (structure_net from overview)">
                 Structure MTM
               </HeaderCell>
               <HeaderCell>Target</HeaderCell>
@@ -742,8 +940,9 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                 master.available_inr
               }
               dailyGrowthPct={master.daily_growth_pct}
-              netMtm={masterStructureMtm}
+              netMtm={masterTrade ? masterStructureMtm : null}
               mtmLabel="Structure MTM"
+              staleSeconds={masterTrade?.pnl?.stale_seconds ?? masterTrade?.stale_seconds}
               targetUsd={master.target ?? masterTrade?.profit_target_usd ?? null}
               isExpanded={Boolean(expanded.master)}
               onToggle={() => toggle('master')}
@@ -766,61 +965,22 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
               }
 
               const key = `slave-${slave.id}`
-              const slaveMtm =
-                st?.net_mtm ?? st?.last_mtm ?? null
-              const slaveMtmUpdated =
-                st?.last_mtm_updated || st?.net_mtm_updated || st?.last_updated
-              const syncAge = formatSyncAge(slaveMtmUpdated)
-              const syncSecs = syncAgeSeconds(slaveMtmUpdated)
-              const syncStale = syncSecs != null && syncSecs > 60
-
-              const expand = st ? (
-                <div className="space-y-1.5 text-xs">
-                  <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px] text-gray-400 pb-0.5 border-b border-gray-700">
-                    <span>LEG</span><span>STRIKE</span><span>QTY</span><span>FILL $</span><span>OFFER $</span>
-                  </div>
-                  <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px]">
-                    <span className="text-red-300">CALL</span>
-                    <span className="text-white">${fmtStrike(st.call_strike)}</span>
-                    <span className="text-gray-300">{st.actual_quantity}</span>
-                    <span className="text-gray-300">${fmtMoney(st.call_fill_price)}</span>
-                    <span className={st.call_premium != null ? pnlColor(st.call_fill_price - st.call_premium) : 'text-gray-500'}>
-                      {st.call_premium != null ? `$${fmtMoney(st.call_premium)}` : '—'}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-5 gap-x-4 font-mono text-[11px]">
-                    <span className="text-blue-300">PUT</span>
-                    <span className="text-white">${fmtStrike(st.put_strike)}</span>
-                    <span className="text-gray-300">{st.actual_quantity}</span>
-                    <span className="text-gray-300">${fmtMoney(st.put_fill_price)}</span>
-                    <span className={st.put_premium != null ? pnlColor(st.put_fill_price - st.put_premium) : 'text-gray-500'}>
-                      {st.put_premium != null ? `$${fmtMoney(st.put_premium)}` : '—'}
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-0.5 pt-1 text-[11px] text-gray-400">
-                    <span>Gross MTM: <span className={mtmClass(st.gross_mtm)}>{formatSignedMoney(st.gross_mtm)}</span></span>
-                    <span>
-                      Net MTM:{' '}
-                      <span className={mtmClass(slaveMtm)}>{formatSignedMoney(slaveMtm)}</span>
-                      {st.mtm_source === 'computed' ? (
-                        <span className="ml-1 text-gray-500">computed</span>
-                      ) : st.mtm_source === 'copied' ? (
-                        <span className="ml-1 text-yellow-300">copied (legacy row)</span>
-                      ) : null}
-                    </span>
-                    {syncAge && <span className={syncStale ? 'text-yellow-300' : 'text-gray-500'}>sync: {syncAge}{syncStale ? ' ⚠️' : ''}</span>}
-                    {st.expiry_date && <span>Expiry: {st.expiry_date}</span>}
-                  </div>
-                </div>
-              ) : (
-                <span className="text-gray-500">
-                  {slave.is_active ? 'No active mirrored trade' : 'Account paused — not mirroring'}
-                </span>
-              )
+              const slaveStructureMtm =
+                st?.pnl?.structure_net != null &&
+                Number.isFinite(Number(st.pnl.structure_net))
+                  ? Number(st.pnl.structure_net)
+                  : null
 
               const expandWithActions = (
                 <div className="space-y-0">
-                  {expand}
+                  <StructureOverviewExpand
+                    trade={st}
+                    emptyLabel={
+                      slave.is_active
+                        ? 'No open structure'
+                        : 'Account paused — not mirroring'
+                    }
+                  />
                   <ForceCloseSlaveAction
                     slave={slave}
                     onComplete={onRefresh}
@@ -871,10 +1031,10 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                         slave.available_inr
                   }
                   dailyGrowthPct={slave.daily_growth_pct}
-                  netMtm={slaveMtm}
-                  mtmLabel="Basket MTM"
+                  netMtm={st ? slaveStructureMtm : null}
+                  mtmLabel="Structure MTM"
                   mtmSource={st?.mtm_source ?? null}
-                  mtmSyncIso={slaveMtmUpdated}
+                  staleSeconds={st?.pnl?.stale_seconds ?? st?.stale_seconds}
                   targetUsd={st?.profit_target_usd ?? null}
                   isExpanded={Boolean(expanded[key])}
                   onToggle={() => toggle(key)}
@@ -899,7 +1059,7 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
               </td>
               <td
                 colSpan={2}
-                className={`px-2 py-2.5 text-right text-sm font-bold ${mtmClass(combined)}`}
+                className={`px-2 py-2.5 text-right text-sm font-bold tabular-nums ${mtmClass(combined)}`}
               >
                 {formatSignedMoney(combined)}
               </td>
