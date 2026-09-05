@@ -227,10 +227,48 @@ async def list_structures(
             is_active = str(trade.status).lower() == TradeStatus.ACTIVE.value
             state = bot_engine.position_tracker.get(int(trade.id))
             net_mtm = None
-            if state is not None and getattr(state, "last_net_mtm", None) is not None:
+            computed_at = None
+            stale_seconds = None
+            if state is not None and getattr(state, "last_mtm_snapshot", None):
+                from backend.core.fees import basket_net_mtm_snapshot
+
+                snap = state.last_mtm_snapshot
+                refreshed = basket_net_mtm_snapshot(
+                    gross_mtm=float(snap.get("gross_mtm", state.last_pnl) or 0),
+                    fees_paid=float(snap.get("fees_paid", 0) or 0),
+                    est_exit_fees=float(snap.get("est_exit_fees", 0) or 0),
+                    slippage_pct=float(snap.get("slippage_pct", 0) or 0),
+                    expected_exit_spread_usd=float(
+                        snap.get("expected_exit_spread_usd", 0) or 0
+                    ),
+                    computed_at=getattr(state, "last_net_mtm_computed_at", None),
+                )
+                net_mtm = float(refreshed["net_mtm"])
+                computed_at = refreshed.get("computed_at_iso")
+                stale_seconds = refreshed.get("stale_seconds")
+            elif state is not None and getattr(state, "last_net_mtm", None) is not None:
                 net_mtm = float(state.last_net_mtm)
+                at = getattr(state, "last_net_mtm_computed_at", None)
+                if at is not None:
+                    from backend.core.time_utils import get_utc_now
+
+                    computed_at = at.isoformat()
+                    stale_seconds = round(
+                        max(0.0, (get_utc_now() - at).total_seconds()), 1
+                    )
             elif not is_active and trade.realized_pnl is not None:
-                net_mtm = float(trade.realized_pnl)
+                from backend.core.fees import basket_net_mtm_snapshot
+
+                closed_snap = basket_net_mtm_snapshot(
+                    gross_mtm=float(trade.realized_pnl),
+                    fees_paid=0.0,
+                    est_exit_fees=0.0,
+                    slippage_pct=0.0,
+                    expected_exit_spread_usd=0.0,
+                )
+                net_mtm = float(closed_snap["net_mtm"])
+                computed_at = closed_snap.get("computed_at_iso")
+                stale_seconds = closed_snap.get("stale_seconds")
 
             seq = getattr(trade, "basket_seq_in_structure", None)
             pnl_breakdown = basket_realized_breakdown(legs, trade)
@@ -266,6 +304,8 @@ async def list_structures(
                         else None
                     ),
                     "net_mtm": net_mtm,
+                    "computed_at": computed_at,
+                    "stale_seconds": stale_seconds,
                     **pnl_breakdown,
                     "legs": [
                         {
@@ -291,6 +331,25 @@ async def list_structures(
                     "adjustments": adj_rows,
                 }
             )
+
+        open_basket_computed_at = None
+        open_basket_stale_seconds = None
+        if hedge_status != "closed" and has_active_basket:
+            from backend.core.time_utils import get_utc_now
+
+            now_utc = get_utc_now()
+            for t in baskets_orm:
+                if str(t.status or "").lower() != TradeStatus.ACTIVE.value:
+                    continue
+                st = bot_engine.position_tracker.get(int(t.id))
+                at = getattr(st, "last_net_mtm_computed_at", None) if st else None
+                if at is None:
+                    continue
+                open_basket_computed_at = at.isoformat()
+                open_basket_stale_seconds = round(
+                    max(0.0, (now_utc - at).total_seconds()), 1
+                )
+                break
 
         structures.append(
             {
@@ -323,6 +382,8 @@ async def list_structures(
                 },
                 "cum_closed_basket_pnl": cum_closed,
                 "open_basket_net_mtm": open_basket,
+                "open_basket_computed_at": open_basket_computed_at,
+                "open_basket_stale_seconds": open_basket_stale_seconds,
                 "structure_pnl": structure,
                 "basket_count": len(baskets_out),
                 "baskets": baskets_out,

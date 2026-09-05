@@ -471,6 +471,7 @@ def log_event(event_type: str, trade_id: int, details: dict[str, Any]) -> str:
         "ENTRY_PREMIUM_MISS",
         "THETA_SELECT_SUBOPTIMAL",
         "HEDGE_SL_FIRE",
+        "MTM_SOURCE_MISMATCH",
     ):
         bot_log.warning(msg)
     else:

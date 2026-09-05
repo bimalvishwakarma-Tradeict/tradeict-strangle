@@ -995,6 +995,51 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
     master_by_id: dict[int, Any] = {
         int(s.trade_id): s for s in master_states
     }
+
+    def _tracker_mtm_fields(state: Any) -> dict[str, Any]:
+        """Net/gross from basket_net_mtm_snapshot stored on the tracker."""
+        from backend.core.fees import basket_net_mtm_snapshot
+        from backend.core.time_utils import get_utc_now
+
+        snap = getattr(state, "last_mtm_snapshot", None)
+        if snap is not None:
+            refreshed = basket_net_mtm_snapshot(
+                gross_mtm=float(snap.get("gross_mtm", state.last_pnl) or 0),
+                fees_paid=float(snap.get("fees_paid", 0) or 0),
+                est_exit_fees=float(snap.get("est_exit_fees", 0) or 0),
+                slippage_pct=float(snap.get("slippage_pct", 0) or 0),
+                expected_exit_spread_usd=float(
+                    snap.get("expected_exit_spread_usd", 0) or 0
+                ),
+                computed_at=getattr(state, "last_net_mtm_computed_at", None)
+                or get_utc_now(),
+            )
+            return {
+                "gross_mtm": float(refreshed["gross_mtm"]),
+                "net_mtm": float(refreshed["net_mtm"]),
+                "computed_at": refreshed.get("computed_at_iso"),
+                "stale_seconds": refreshed.get("stale_seconds", 0.0),
+            }
+        gross_mtm = float(getattr(state, "last_pnl", 0) or 0)
+        _raw_net = getattr(state, "last_net_mtm", None)
+        net_mtm = (
+            float(_raw_net)
+            if _raw_net is not None and _raw_net != 0.0
+            else gross_mtm
+        )
+        at = getattr(state, "last_net_mtm_computed_at", None)
+        stale = None
+        computed_iso = None
+        if at is not None:
+            computed_iso = at.isoformat()
+            stale = round(max(0.0, (get_utc_now() - at).total_seconds()), 1)
+        return {
+            "gross_mtm": gross_mtm,
+            "net_mtm": net_mtm,
+            "computed_at": computed_iso,
+            "stale_seconds": stale,
+        }
+
     master_trade_data: dict[str, Any] | None = None
     if master_states:
         state = master_states[0]
@@ -1004,20 +1049,16 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         put_entry = float(getattr(put_leg, "initial_premium", 0) or 0)
         call_curr = float(getattr(state, "last_call_premium", 0) or 0)
         put_curr = float(getattr(state, "last_put_premium", 0) or 0)
-        gross_mtm = float(getattr(state, "last_pnl", 0) or 0)
-        _raw_net = getattr(state, "last_net_mtm", None)
-        if _raw_net is not None and _raw_net != 0.0:
-            net_mtm = float(_raw_net)
-        else:
-            # last_net_mtm not yet populated (first tick) — use gross as temp
-            net_mtm = gross_mtm
+        mtm_fields = _tracker_mtm_fields(state)
         master_trade_data = {
             "trade_id": state.trade_id,
             "underlying": getattr(state.trade, "underlying", None),
             "basket_number": getattr(state.trade, "basket_number", None),
             "is_demo": bool(getattr(state.trade, "is_demo", False)),
-            "net_mtm": net_mtm,
-            "gross_mtm": gross_mtm,
+            "net_mtm": mtm_fields["net_mtm"],
+            "gross_mtm": mtm_fields["gross_mtm"],
+            "computed_at": mtm_fields.get("computed_at"),
+            "stale_seconds": mtm_fields.get("stale_seconds"),
             "realized_pnl": float(getattr(state.trade, "realized_pnl", 0) or 0),
             "profit_target_usd": float(
                 getattr(state.trade, "profit_target_usd", 0) or 0
@@ -1045,20 +1086,16 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             return None
         call_leg = state.call_leg
         put_leg = state.put_leg
-        gross_mtm = float(getattr(state, "last_pnl", 0) or 0)
-        _raw_net = getattr(state, "last_net_mtm", None)
-        net_mtm = (
-            float(_raw_net)
-            if _raw_net is not None and _raw_net != 0.0
-            else gross_mtm
-        )
+        mtm_fields = _tracker_mtm_fields(state)
         return {
             "trade_id": state.trade_id,
             "underlying": getattr(state.trade, "underlying", None),
             "basket_number": getattr(state.trade, "basket_number", None),
             "is_demo": bool(getattr(state.trade, "is_demo", False)),
-            "net_mtm": net_mtm,
-            "gross_mtm": gross_mtm,
+            "net_mtm": mtm_fields["net_mtm"],
+            "gross_mtm": mtm_fields["gross_mtm"],
+            "computed_at": mtm_fields.get("computed_at"),
+            "stale_seconds": mtm_fields.get("stale_seconds"),
             "profit_target_usd": float(
                 getattr(state.trade, "profit_target_usd", 0) or 0
             ),

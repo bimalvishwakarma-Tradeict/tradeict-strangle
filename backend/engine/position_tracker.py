@@ -40,6 +40,8 @@ class TradeState:
     last_pnl: float = 0.0  # calculated PnL / gross MTM (logic only)
     last_delta_mtm: float = 0.0  # Delta official gross UPNL (frontend display)
     last_net_mtm: float = 0.0   # Net MTM after fees + slippage (overview display)
+    last_net_mtm_computed_at: datetime | None = None
+    last_mtm_snapshot: dict[str, Any] | None = None
     last_updated: datetime | None = None
     is_adjusting: bool = False  # lock — monitoring loop must skip when True
 
@@ -204,13 +206,30 @@ class PositionTracker:
         state.last_delta_mtm = delta_mtm
         state.last_updated = datetime.now(timezone.utc)
 
-    def update_net_mtm(self, trade_id: int, net_mtm: float) -> None:
-        """Store Net MTM (after fees + slippage) for overview display."""
+    def update_net_mtm(
+        self,
+        trade_id: int,
+        net_mtm: float,
+        *,
+        computed_at: datetime | None = None,
+        snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        """Store Net MTM from basket_net_mtm_snapshot (one source for all UIs)."""
         state = self._positions.get(trade_id)
         if state is None:
             logger.warning("update_net_mtm: trade_id=%s not in tracker", trade_id)
             return
-        state.last_net_mtm = net_mtm
+        at = computed_at
+        if at is None and snapshot is not None:
+            at = snapshot.get("computed_at")
+        if at is None:
+            at = datetime.now(timezone.utc)
+        elif getattr(at, "tzinfo", None) is None:
+            at = at.replace(tzinfo=timezone.utc)
+        state.last_net_mtm = float(net_mtm)
+        state.last_net_mtm_computed_at = at
+        if snapshot is not None:
+            state.last_mtm_snapshot = dict(snapshot)
         state.last_updated = datetime.now(timezone.utc)
 
     def mark_closed(self, trade_id: int) -> None:

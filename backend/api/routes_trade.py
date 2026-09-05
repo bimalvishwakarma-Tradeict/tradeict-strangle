@@ -1916,12 +1916,16 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
         est_exit = float(fee_fields["est_exit_fees"])
         total_fees = float(fee_fields["total_expected_fees"])
         from backend.core.fees import (
-            compute_net_mtm,
+            audit_mtm_source_mismatch,
+            basket_net_mtm_snapshot,
             estimate_expected_exit_spread_usd,
             get_entry_spread_for_sl,
         )
+        from backend.core.spread_utils import get_exit_spread_pct
+        from backend.database import get_or_create_auto_settings
 
         expected_exit_spread = 0.0
+        spread_settings = get_or_create_auto_settings(db)
         for leg in all_legs:
             if str(getattr(leg, "status", "") or "").lower() != "open":
                 continue
@@ -1937,22 +1941,52 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             else:
                 offer = float(getattr(leg, "initial_premium", 0) or 0)
             if offer > 0:
+                # Same exit-spread basis as monitor loop (settings pct, not fixed 0.5%)
+                try:
+                    pct, _src = await get_exit_spread_pct(
+                        str(leg.symbol or ""),
+                        spread_settings,
+                        "basket",
+                        client=client,
+                    )
+                    spread_factor = float(pct) / 100.0
+                except Exception:
+                    spread_factor = 0.005
                 expected_exit_spread += estimate_expected_exit_spread_usd(
                     offer_price=offer,
                     quantity=int(leg.quantity or 0),
+                    spread_factor=spread_factor,
                 )
 
         entry_spread_for_sl = get_entry_spread_for_sl(state.trade)
         gross_mtm_for_stoploss = float(gross_mtm) + entry_spread_for_sl
 
-        slip_fields = compute_net_mtm(
+        mtm_snap = basket_net_mtm_snapshot(
             gross_mtm=gross_mtm,
             fees_paid=fees_paid,
             est_exit_fees=est_exit,
             slippage_pct=getattr(state.trade, "slippage_pct", None) or 2.0,
             expected_exit_spread_usd=expected_exit_spread,
         )
-        net_mtm = float(slip_fields["net_mtm"])
+        net_mtm = float(mtm_snap["net_mtm"])
+        slip_fields = mtm_snap
+
+        # Keep tracker in lockstep with API so top-card / slave overview match
+        tracker_net = float(getattr(state, "last_net_mtm", 0.0) or 0.0)
+        if getattr(state, "last_net_mtm_computed_at", None) is not None:
+            audit_mtm_source_mismatch(
+                int(state.trade_id),
+                "api_trade_active",
+                net_mtm,
+                "position_tracker",
+                tracker_net,
+            )
+        bot_engine.position_tracker.update_net_mtm(
+            int(state.trade_id),
+            net_mtm,
+            computed_at=mtm_snap.get("computed_at"),
+            snapshot=mtm_snap,
+        )
 
         plan = bot_engine.build_bot_plan_fields(
             state,
@@ -2086,6 +2120,8 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             "slippage_amount": float(slip_fields["slippage_amount"]),
             "total_deductions": float(slip_fields["total_deductions"]),
             "net_mtm": net_mtm,
+            "computed_at": mtm_snap.get("computed_at_iso"),
+            "stale_seconds": mtm_snap.get("stale_seconds", 0.0),
         }
         logger.info(
             "/active trade=%s slippage_pct=%s slippage_amount=%s net_mtm=%s",
@@ -2170,11 +2206,55 @@ async def get_trade_history(
                 except Exception as exc:
                     logger.warning("History fee backfill trade=%s: %s", trade.id, exc)
 
-            from backend.core.fees import basket_fees_paid_from_legs
+            from backend.core.fees import (
+                basket_fees_paid_from_legs,
+                basket_net_mtm_snapshot,
+            )
 
             fees_paid = basket_fees_paid_from_legs(orm_legs)
             is_closed = str(trade.status).lower() != TradeStatus.ACTIVE.value
             gross = float(trade.realized_pnl or closed_realized or 0.0)
+            # Closed: no forward exit cushions; slip=0 so helper net equals
+            # realized gross minus fees_paid (same helper as live baskets).
+            if is_closed:
+                mtm_snap = basket_net_mtm_snapshot(
+                    gross_mtm=gross,
+                    fees_paid=fees_paid,
+                    est_exit_fees=0.0,
+                    slippage_pct=0.0,
+                    expected_exit_spread_usd=0.0,
+                )
+            else:
+                state = bot_engine.position_tracker.get(int(trade.id))
+                if (
+                    state is not None
+                    and getattr(state, "last_mtm_snapshot", None) is not None
+                ):
+                    mtm_snap = dict(state.last_mtm_snapshot)
+                    # Refresh stale_seconds for this response
+                    mtm_snap = basket_net_mtm_snapshot(
+                        gross_mtm=float(mtm_snap.get("gross_mtm", gross) or gross),
+                        fees_paid=float(mtm_snap.get("fees_paid", fees_paid) or fees_paid),
+                        est_exit_fees=float(mtm_snap.get("est_exit_fees", 0) or 0),
+                        slippage_pct=float(mtm_snap.get("slippage_pct", 0) or 0),
+                        expected_exit_spread_usd=float(
+                            mtm_snap.get("expected_exit_spread_usd", 0) or 0
+                        ),
+                        computed_at=state.last_net_mtm_computed_at,
+                    )
+                else:
+                    mtm_snap = basket_net_mtm_snapshot(
+                        gross_mtm=float(getattr(state, "last_pnl", None) or gross),
+                        fees_paid=fees_paid,
+                        est_exit_fees=0.0,
+                        slippage_pct=float(
+                            getattr(trade, "slippage_pct", None) or 2.0
+                        ),
+                        expected_exit_spread_usd=0.0,
+                        computed_at=getattr(state, "last_net_mtm_computed_at", None)
+                        if state is not None
+                        else None,
+                    )
             baskets.append(
                 {
                     "trade_id": trade.id,
@@ -2188,10 +2268,12 @@ async def get_trade_history(
                     "realized_pnl": gross,
                     "total_premium_collected": float(trade.total_premium_collected or 0.0),
                     "fees_paid": fees_paid,
-                    "est_exit_fees": 0.0 if is_closed else None,
+                    "est_exit_fees": 0.0 if is_closed else mtm_snap.get("est_exit_fees"),
                     "total_expected_fees": fees_paid if is_closed else None,
-                    "gross_mtm": gross,
-                    "net_mtm": gross - fees_paid,
+                    "gross_mtm": float(mtm_snap.get("gross_mtm", gross)),
+                    "net_mtm": float(mtm_snap["net_mtm"]),
+                    "computed_at": mtm_snap.get("computed_at_iso"),
+                    "stale_seconds": mtm_snap.get("stale_seconds", 0.0),
                     "legs": legs,
                     "adjustments": adj_rows,
                 }

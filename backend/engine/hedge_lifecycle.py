@@ -2281,8 +2281,15 @@ def _open_basket_net_mtm(
     hedge_id: int,
     position_tracker: Any | None,
 ) -> float:
-    """Sum last_net_mtm of active baskets under this hedge (0 if none / unknown)."""
+    """
+    Sum net MTM of active baskets under this hedge.
+
+    Uses position_tracker values written only via basket_net_mtm_snapshot
+    (monitor / /api/trade/active) so this matches dashboard cards.
+    """
     from backend.config import TradeStatus
+    from backend.core.fees import audit_mtm_source_mismatch, basket_net_mtm_snapshot
+    from backend.core.time_utils import get_utc_now
 
     if position_tracker is None:
         return 0.0
@@ -2299,7 +2306,31 @@ def _open_basket_net_mtm(
         state = position_tracker.get(int(trade.id))
         if state is None:
             continue
-        total += float(getattr(state, "last_net_mtm", 0.0) or 0.0)
+        snap = getattr(state, "last_mtm_snapshot", None)
+        if snap is not None:
+            # Re-stamp stale_seconds; net_mtm itself is the helper value
+            refreshed = basket_net_mtm_snapshot(
+                gross_mtm=float(snap.get("gross_mtm", state.last_pnl) or 0),
+                fees_paid=float(snap.get("fees_paid", 0) or 0),
+                est_exit_fees=float(snap.get("est_exit_fees", 0) or 0),
+                slippage_pct=float(snap.get("slippage_pct", 0) or 0),
+                expected_exit_spread_usd=float(
+                    snap.get("expected_exit_spread_usd", 0) or 0
+                ),
+                computed_at=getattr(state, "last_net_mtm_computed_at", None)
+                or get_utc_now(),
+            )
+            net_val = float(refreshed["net_mtm"])
+            audit_mtm_source_mismatch(
+                int(trade.id),
+                "open_basket_helper",
+                net_val,
+                "position_tracker",
+                float(getattr(state, "last_net_mtm", 0) or 0),
+            )
+            total += net_val
+        else:
+            total += float(getattr(state, "last_net_mtm", 0.0) or 0.0)
     return float(total)
 
 
@@ -2360,7 +2391,7 @@ def compute_hedge_net_mtm_fields(
     fees_paid = max(0.0, float(entry_fees or 0.0))
     est_exit = max(0.0, float(estimated_exit_fees or 0.0))
     est_slip = max(0.0, float(hedge_est_exit_slippage_usd or 0.0))
-    hedge_net = gross - fees_paid - est_exit - est_slip
+    hedge_net = float(gross) - (fees_paid + est_exit + est_slip)
     entry_spread = max(0.0, float(entry_spread_usd or 0.0))
     hedge_gross_sl = hedge_net + entry_spread
     return {

@@ -2980,7 +2980,7 @@ class BotEngine:
         # Net MTM for exit decisions (same as frontend display)
         from backend.core.fees import (
             basket_fees_paid_from_legs,
-            compute_net_mtm,
+            basket_net_mtm_snapshot,
             estimate_option_trading_fee,
             get_entry_spread_for_sl,
         )
@@ -3039,15 +3039,16 @@ class BotEngine:
         entry_spread_for_sl = get_entry_spread_for_sl(trade)
         gross_mtm_for_stoploss = total_pnl + entry_spread_for_sl
 
-        slip_fields = compute_net_mtm(
+        mtm_snap = basket_net_mtm_snapshot(
             gross_mtm=total_pnl,
             fees_paid=fees_paid,
             est_exit_fees=est_exit,
             slippage_pct=slip_pct,
             expected_exit_spread_usd=expected_exit_spread,
         )
-        net_mtm_val = float(slip_fields["net_mtm"])
-        slippage_amount = float(slip_fields["slippage_amount"])
+        net_mtm_val = float(mtm_snap["net_mtm"])
+        slippage_amount = float(mtm_snap["slippage_amount"])
+        slip_fields = mtm_snap
 
         pnl_log: dict[str, Any] = {
             "realized_pnl": round(realized, 4),
@@ -3076,6 +3077,7 @@ class BotEngine:
             ),
             "mtm_source": "delta_position" if mtm_available else "computed_fallback",
             "contract_value": OPTIONS_CONTRACT_VALUE,
+            "computed_at": mtm_snap.get("computed_at_iso"),
         }
         if bool(getattr(trade, "in_conversion_mode", False)):
             pnl_log["hedge_upnl"] = round(hedge_upnl, 4)
@@ -3245,7 +3247,12 @@ class BotEngine:
             total_pnl,
         )
         self.position_tracker.update_delta_mtm(trade_id, delta_upnl)
-        self.position_tracker.update_net_mtm(trade_id, net_mtm_val)
+        self.position_tracker.update_net_mtm(
+            trade_id,
+            net_mtm_val,
+            computed_at=mtm_snap.get("computed_at"),
+            snapshot=mtm_snap,
+        )
 
         call_repl, put_repl = await self._estimate_replacements(
             trade_state, call_premium, put_premium
@@ -6575,7 +6582,7 @@ class BotEngine:
         # Fees from DB legs + slippage for Net MTM on TRADE_UPDATE
         from backend.core.fees import (
             basket_fees_paid_from_legs,
-            compute_net_mtm,
+            basket_net_mtm_snapshot,
             estimate_option_trading_fee,
             get_entry_spread_for_sl,
         )
@@ -6686,17 +6693,23 @@ class BotEngine:
         entry_spread_for_sl = get_entry_spread_for_sl(trade_state.trade)
         gross_mtm_for_stoploss = float(display_total) + entry_spread_for_sl
 
-        slip_fields = compute_net_mtm(
+        mtm_snap = basket_net_mtm_snapshot(
             gross_mtm=display_total,
             fees_paid=fees_paid,
             est_exit_fees=est_exit,
             slippage_pct=getattr(trade_state.trade, "slippage_pct", None),
             expected_exit_spread_usd=expected_exit_spread,
         )
-        slip_pct = float(slip_fields["slippage_pct"])
-        slip_amt = float(slip_fields["slippage_amount"])
-        net_mtm_out = float(slip_fields["net_mtm"])
-        total_deductions = float(slip_fields["total_deductions"])
+        slip_pct = float(mtm_snap["slippage_pct"])
+        slip_amt = float(mtm_snap["slippage_amount"])
+        net_mtm_out = float(mtm_snap["net_mtm"])
+        total_deductions = float(mtm_snap["total_deductions"])
+        self.position_tracker.update_net_mtm(
+            int(trade_state.trade_id),
+            net_mtm_out,
+            computed_at=mtm_snap.get("computed_at"),
+            snapshot=mtm_snap,
+        )
 
         plan = self.build_bot_plan_fields(
             trade_state,
@@ -6775,6 +6788,8 @@ class BotEngine:
             "slippage_amount": slip_amt,
             "total_deductions": total_deductions,
             "net_mtm": net_mtm_out,
+            "computed_at": mtm_snap.get("computed_at_iso"),
+            "stale_seconds": mtm_snap.get("stale_seconds", 0.0),
             "in_conversion_mode": bool(
                 getattr(trade_state.trade, "in_conversion_mode", False)
             ),

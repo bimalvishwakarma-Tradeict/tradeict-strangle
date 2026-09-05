@@ -234,6 +234,104 @@ def compute_net_mtm(
     }
 
 
+# Max allowed divergence between any two net-MTM producers before audit fires.
+MTM_SOURCE_MISMATCH_USD = 0.005
+
+
+def basket_net_mtm_snapshot(
+    *,
+    gross_mtm: float,
+    fees_paid: float = 0.0,
+    est_exit_fees: float = 0.0,
+    slippage_pct: float | None = 2.0,
+    expected_exit_spread_usd: float = 0.0,
+    computed_at: Any | None = None,
+    now: Any | None = None,
+) -> dict[str, Any]:
+    """
+    Single source for basket net MTM + full deduction breakdown.
+
+    Wraps compute_net_mtm (formula unchanged). Adds computed_at / stale_seconds
+    so every API/UI producer can show freshness without local clock math.
+    """
+    from datetime import datetime, timezone
+
+    from backend.core.time_utils import get_utc_now
+
+    at = computed_at if computed_at is not None else get_utc_now()
+    if isinstance(at, datetime) and at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    ref = now if now is not None else get_utc_now()
+    if isinstance(ref, datetime) and ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+
+    slip_fields = compute_net_mtm(
+        gross_mtm=gross_mtm,
+        fees_paid=fees_paid,
+        est_exit_fees=est_exit_fees,
+        slippage_pct=slippage_pct,
+        expected_exit_spread_usd=expected_exit_spread_usd,
+    )
+    fees = abs_execution_cost_usd(fees_paid)
+    est_exit = abs_execution_cost_usd(est_exit_fees)
+    stale = 0.0
+    if isinstance(at, datetime) and isinstance(ref, datetime):
+        stale = max(0.0, (ref - at).total_seconds())
+
+    return {
+        "gross_mtm": round(float(gross_mtm or 0.0), 4),
+        "fees_paid": round(fees, 4),
+        "est_exit_fees": round(est_exit, 4),
+        "slippage_pct": float(slip_fields["slippage_pct"]),
+        "slippage_amount": float(slip_fields["slippage_amount"]),
+        "expected_exit_spread_usd": float(slip_fields["expected_exit_spread_usd"]),
+        "total_deductions": float(slip_fields["total_deductions"]),
+        "net_mtm": float(slip_fields["net_mtm"]),
+        "computed_at": at,
+        "computed_at_iso": at.isoformat() if isinstance(at, datetime) else str(at),
+        "stale_seconds": round(float(stale), 1),
+    }
+
+
+def audit_mtm_source_mismatch(
+    trade_id: int,
+    source_a: str,
+    value_a: float,
+    source_b: str,
+    value_b: float,
+) -> None:
+    """Log WARNING when two net-MTM producers disagree by more than $0.005."""
+    diff = abs(float(value_a or 0.0) - float(value_b or 0.0))
+    if diff <= MTM_SOURCE_MISMATCH_USD:
+        return
+    try:
+        from backend.core.bot_logger import log_and_buffer
+
+        log_and_buffer(
+            "MTM_SOURCE_MISMATCH",
+            int(trade_id),
+            {
+                "trade_id": int(trade_id),
+                "source_a": str(source_a),
+                "value_a": round(float(value_a or 0.0), 6),
+                "source_b": str(source_b),
+                "value_b": round(float(value_b or 0.0), 6),
+                "diff": round(diff, 6),
+            },
+        )
+    except Exception:
+        logger.warning(
+            "[MTM_SOURCE_MISMATCH] trade_id=%s source_a=%s value_a=%s "
+            "source_b=%s value_b=%s diff=%s",
+            trade_id,
+            source_a,
+            value_a,
+            source_b,
+            value_b,
+            round(diff, 6),
+        )
+
+
 def build_fee_summary(
     *,
     legs: list[Any],
