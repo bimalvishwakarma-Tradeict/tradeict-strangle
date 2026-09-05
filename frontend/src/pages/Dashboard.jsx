@@ -1548,12 +1548,62 @@ export default function Dashboard() {
       }
     }
     loadStructures()
-    const id = setInterval(loadStructures, 30000)
+    const id = setInterval(loadStructures, 10000)
     return () => {
       cancelled = true
       clearInterval(id)
     }
   }, [trades, adjustments, activeHedge])
+
+  const topStructureCards = useMemo(() => {
+    if (!activeHedge) return null
+
+    const hedgeNetPnl =
+      activeHedge.hedge_net_mtm != null &&
+      Number.isFinite(Number(activeHedge.hedge_net_mtm))
+        ? Number(activeHedge.hedge_net_mtm)
+        : Number(activeHedge.net_pnl) || 0
+
+    const closedBasketPnl = Number(activeHedge.cum_closed_basket_pnl ?? 0) || 0
+
+    // Same live net_mtm source as the basket PositionCard (WS /poll trades).
+    // Structures payload open_basket_net_mtm is only a fallback.
+    const liveTrades = Array.isArray(trades) ? trades : []
+    let openBasketNetPnl
+    let openBasketStaleSeconds = null
+    if (liveTrades.length > 0) {
+      openBasketNetPnl = liveTrades.reduce((sum, t) => {
+        const n = t?.net_mtm != null ? Number(t.net_mtm) : 0
+        return sum + (Number.isFinite(n) ? n : 0)
+      }, 0)
+      const stales = liveTrades
+        .map((t) =>
+          t?.stale_seconds != null ? Number(t.stale_seconds) : null,
+        )
+        .filter((n) => n != null && Number.isFinite(n))
+      if (stales.length > 0) {
+        openBasketStaleSeconds = Math.max(...stales)
+      }
+    } else {
+      openBasketNetPnl = Number(activeHedge.open_basket_net_mtm ?? 0) || 0
+      if (
+        activeHedge.open_basket_stale_seconds != null &&
+        Number.isFinite(Number(activeHedge.open_basket_stale_seconds))
+      ) {
+        openBasketStaleSeconds = Number(activeHedge.open_basket_stale_seconds)
+      }
+    }
+
+    const structurePnl = hedgeNetPnl + closedBasketPnl + openBasketNetPnl
+
+    return {
+      hedgeNetPnl,
+      closedBasketPnl,
+      openBasketNetPnl,
+      structurePnl,
+      openBasketStaleSeconds,
+    }
+  }, [activeHedge, trades])
 
   const wsLabel = useMemo(() => {
     if (wsStatus === 'connected') return { text: 'connected', className: 'text-green-400' }
@@ -1635,17 +1685,13 @@ export default function Dashboard() {
 
       <LiveExecPanel execEvents={execEvents} />
 
-      {!loading && activeHedge && (
+      {!loading && topStructureCards && (
         <StructurePnlBar
-          hedgeNetPnl={
-            activeHedge.hedge_net_mtm != null &&
-            Number.isFinite(Number(activeHedge.hedge_net_mtm))
-              ? Number(activeHedge.hedge_net_mtm)
-              : activeHedge.net_pnl
-          }
-          closedBasketPnl={activeHedge.cum_closed_basket_pnl ?? 0}
-          openBasketNetPnl={activeHedge.open_basket_net_mtm ?? 0}
-          structurePnl={activeHedge.structure_pnl ?? 0}
+          hedgeNetPnl={topStructureCards.hedgeNetPnl}
+          closedBasketPnl={topStructureCards.closedBasketPnl}
+          openBasketNetPnl={topStructureCards.openBasketNetPnl}
+          structurePnl={topStructureCards.structurePnl}
+          openBasketStaleSeconds={topStructureCards.openBasketStaleSeconds}
         />
       )}
 

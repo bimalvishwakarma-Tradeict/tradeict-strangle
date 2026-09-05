@@ -31,6 +31,7 @@ export default function StructurePnlBar({
   closedBasketPnl,
   openBasketNetPnl,
   structurePnl,
+  openBasketStaleSeconds = null,
 }) {
   const values = {
     hedgeNetPnl,
@@ -38,6 +39,15 @@ export default function StructurePnlBar({
     openBasketNetPnl,
     structurePnl,
   }
+
+  const staleN =
+    openBasketStaleSeconds != null && Number.isFinite(Number(openBasketStaleSeconds))
+      ? Number(openBasketStaleSeconds)
+      : null
+  const showStale = staleN != null && staleN > 15
+  const staleLabel = showStale
+    ? `updated ${Math.round(staleN)}s ago`
+    : null
 
   return (
     <div
@@ -47,6 +57,9 @@ export default function StructurePnlBar({
     >
       {COLUMNS.map(({ key, label, emphasize }) => {
         const value = values[key]
+        const showStaleUnder =
+          staleLabel &&
+          (key === 'openBasketNetPnl' || key === 'structurePnl')
         return (
           <div
             key={key}
@@ -66,6 +79,9 @@ export default function StructurePnlBar({
             >
               {fmtUsd(value)}
             </span>
+            {showStaleUnder ? (
+              <span className="mt-1 text-[10px] text-gray-500">{staleLabel}</span>
+            ) : null}
           </div>
         )
       })}
