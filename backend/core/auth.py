@@ -6,10 +6,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import bcrypt
 import jwt
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from backend.config import AUTH_SECRET_KEY
@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 12
 _SEED_PASSWORD = "123456789"
+# bcrypt input limit — never truncate; reject at API boundary instead
+BCRYPT_MAX_PASSWORD_BYTES = 72
 
 _SEED_USERS: tuple[tuple[str, str], ...] = (
     ("bimal.vishwakarma@gmail.com", "admin"),
@@ -28,7 +30,6 @@ _SEED_USERS: tuple[tuple[str, str], ...] = (
     ("anshul@tradeictearner.online", "user"),
 )
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _bearer = HTTPBearer(auto_error=False)
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
@@ -45,14 +46,22 @@ def get_auth_secret() -> str:
     return secret
 
 
+def password_byte_length(plain: str) -> int:
+    """UTF-8 byte length of a password (bcrypt limit is 72 bytes)."""
+    return len(plain.encode("utf-8"))
+
+
 def hash_password(plain: str) -> str:
     """Hash a plain password with bcrypt. Never log the plain value."""
-    return _pwd_context.hash(plain)
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-def verify_password(plain: str, password_hash: str) -> bool:
-    """Verify plain password against stored bcrypt hash."""
-    return _pwd_context.verify(plain, password_hash)
+def verify_password(plain: str, hashed: str) -> bool:
+    """Verify plain password against a stored bcrypt hash ($2b$ compatible)."""
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
 
 
 def create_access_token(*, user_id: int, email: str, role: str) -> str:

@@ -10,9 +10,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from backend.core.auth import (
+    BCRYPT_MAX_PASSWORD_BYTES,
     count_active_admins,
     create_access_token,
     hash_password,
+    password_byte_length,
     require_admin,
     require_user,
     user_to_public_dict,
@@ -24,6 +26,20 @@ from backend.models import AppUser
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+_PASSWORD_TOO_LONG = (
+    f"Password cannot be longer than {BCRYPT_MAX_PASSWORD_BYTES} bytes "
+    "(bcrypt limit). Shorten the password — it will not be truncated."
+)
+
+
+def _reject_oversized_password(plain: str, *, field: str = "password") -> None:
+    """Raise 422 if password exceeds bcrypt's 72-byte input limit. Never truncate."""
+    if password_byte_length(plain) > BCRYPT_MAX_PASSWORD_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field}: {_PASSWORD_TOO_LONG}",
+        )
 
 
 class LoginRequest(BaseModel):
@@ -128,6 +144,7 @@ async def login(
 ) -> dict[str, Any]:
     """Authenticate with email/password and return a JWT (never log credentials)."""
     try:
+        _reject_oversized_password(payload.password, field="password")
         email = payload.email.strip().lower()
         user = db.query(AppUser).filter(AppUser.email == email).first()
         if user is None or not user.is_active:
@@ -174,6 +191,10 @@ async def change_password(
 ) -> dict[str, Any]:
     """Change password; clears must_change_password on success."""
     try:
+        _reject_oversized_password(
+            payload.current_password, field="current_password"
+        )
+        _reject_oversized_password(payload.new_password, field="new_password")
         if not verify_password(payload.current_password, user.password_hash):
             raise HTTPException(
                 status_code=401, detail="Current password is incorrect."
@@ -219,6 +240,7 @@ async def create_user(
 ) -> dict[str, Any]:
     """Admin: create a user."""
     try:
+        _reject_oversized_password(payload.password, field="password")
         existing = (
             db.query(AppUser).filter(AppUser.email == payload.email).first()
         )
@@ -285,6 +307,9 @@ async def patch_user(
             target.is_active = payload.is_active
 
         if payload.new_password is not None:
+            _reject_oversized_password(
+                payload.new_password, field="new_password"
+            )
             target.password_hash = hash_password(payload.new_password)
             target.must_change_password = True
 
