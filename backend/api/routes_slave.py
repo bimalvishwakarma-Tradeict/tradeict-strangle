@@ -12,7 +12,15 @@ from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt, encrypt
 from backend.core.time_utils import get_utc_now
 from backend.database import get_db, get_or_create_auto_settings, get_usd_inr_rate
-from backend.models import Account, HedgePosition, SlaveAccount, SlaveTrade, Structure, Trade
+from backend.models import (
+    Account,
+    HedgePosition,
+    SlaveAccount,
+    SlaveHedgePosition,
+    SlaveTrade,
+    Structure,
+    Trade,
+)
 from backend.schemas import (
     SlaveAccountCreate,
     SlaveAccountResponse,
@@ -151,6 +159,335 @@ def _iso(dt: Any) -> str | None:
         return dt.isoformat()
     except Exception:
         return str(dt)
+
+
+def _live_px(bot_engine: Any, symbol: str | None, fallback: float = 0.0) -> float:
+    """Current mark from bot_engine._live_prices, else fallback."""
+    sym = str(symbol or "").strip()
+    if not sym:
+        return float(fallback or 0.0)
+    try:
+        prices = getattr(bot_engine, "_live_prices", None) or {}
+        px = float(prices.get(sym) or 0.0)
+        if px > 0:
+            return px
+    except (TypeError, ValueError):
+        pass
+    return float(fallback or 0.0)
+
+
+def _leg_pnl_usd(
+    *,
+    entry: float,
+    current: float,
+    quantity: int,
+    is_long: bool,
+) -> float:
+    """Same signed UPNL as master UPL@Offer (short size negative, long positive)."""
+    from backend.core.delta_client import compute_signed_upnl
+
+    entry_f = float(entry or 0.0)
+    curr_f = float(current or 0.0)
+    qty = abs(int(quantity or 0))
+    if entry_f <= 0 or curr_f <= 0 or qty <= 0:
+        return 0.0
+    size = float(qty) if is_long else -float(qty)
+    return round(float(compute_signed_upnl(entry_f, curr_f, size)), 4)
+
+
+def _split_basket_net(
+    basket_net: float,
+    short_gross: float,
+    wing_gross: float,
+) -> tuple[float, float]:
+    """
+    Partition basket_net into short_net + wing_net (= basket_net exactly).
+
+    Uses gross leg contribution as weights; no new fee math.
+    """
+    basket = float(basket_net or 0.0)
+    sg = float(short_gross or 0.0)
+    wg = float(wing_gross or 0.0)
+    total = sg + wg
+    if abs(total) < 1e-12:
+        return round(basket, 4), 0.0
+    short_net = round(basket * (sg / total), 4)
+    wing_net = round(basket - short_net, 4)
+    return short_net, wing_net
+
+
+def _build_pnl_block(
+    *,
+    hedge_net: float | None,
+    short_gross: float,
+    wing_gross: float,
+    basket_net: float,
+    closed_basket: float,
+    computed_at: str | None,
+    stale_seconds: float | None,
+) -> dict[str, Any]:
+    short_net, wing_net = _split_basket_net(basket_net, short_gross, wing_gross)
+    h_net = float(hedge_net) if hedge_net is not None else 0.0
+    closed = float(closed_basket or 0.0)
+    structure_net = round(h_net + closed + float(basket_net or 0.0), 4)
+    return {
+        "hedge_net": round(h_net, 4) if hedge_net is not None else None,
+        "short_net": short_net,
+        "wing_net": wing_net,
+        "basket_net": round(float(basket_net or 0.0), 4),
+        "structure_net": structure_net,
+        "computed_at": computed_at,
+        "stale_seconds": stale_seconds,
+    }
+
+
+def _leg_dict(
+    *,
+    role: str,
+    strike: float | None,
+    entry_price: float | None,
+    current_price: float | None,
+    quantity: int,
+    leg_pnl: float,
+    status: str,
+) -> dict[str, Any]:
+    return {
+        "role": role,
+        "strike": float(strike) if strike is not None else None,
+        "entry_price": float(entry_price) if entry_price is not None else None,
+        "current_price": float(current_price) if current_price is not None else None,
+        "quantity": int(quantity),
+        "leg_pnl": round(float(leg_pnl), 4),
+        "status": str(status or "open"),
+    }
+
+
+def _master_basket_legs(state: Any, bot_engine: Any) -> list[dict[str, Any]]:
+    """short_call, short_put, then wings only when present — no placeholders."""
+    legs: list[dict[str, Any]] = []
+    call_leg = state.call_leg
+    put_leg = state.put_leg
+    call_curr = float(getattr(state, "last_call_premium", 0) or 0)
+    put_curr = float(getattr(state, "last_put_premium", 0) or 0)
+    if call_curr <= 0:
+        call_curr = _live_px(
+            bot_engine,
+            getattr(call_leg, "symbol", None),
+            float(getattr(call_leg, "initial_premium", 0) or 0),
+        )
+    if put_curr <= 0:
+        put_curr = _live_px(
+            bot_engine,
+            getattr(put_leg, "symbol", None),
+            float(getattr(put_leg, "initial_premium", 0) or 0),
+        )
+
+    call_entry = float(getattr(call_leg, "initial_premium", 0) or 0)
+    put_entry = float(getattr(put_leg, "initial_premium", 0) or 0)
+    call_qty = abs(int(getattr(call_leg, "quantity", 1) or 1))
+    put_qty = abs(int(getattr(put_leg, "quantity", 1) or 1))
+
+    legs.append(
+        _leg_dict(
+            role="short_call",
+            strike=getattr(call_leg, "strike", None),
+            entry_price=call_entry,
+            current_price=call_curr if call_curr > 0 else None,
+            quantity=call_qty,
+            leg_pnl=_leg_pnl_usd(
+                entry=call_entry, current=call_curr, quantity=call_qty, is_long=False
+            ),
+            status=str(getattr(call_leg, "status", "open") or "open"),
+        )
+    )
+    legs.append(
+        _leg_dict(
+            role="short_put",
+            strike=getattr(put_leg, "strike", None),
+            entry_price=put_entry,
+            current_price=put_curr if put_curr > 0 else None,
+            quantity=put_qty,
+            leg_pnl=_leg_pnl_usd(
+                entry=put_entry, current=put_curr, quantity=put_qty, is_long=False
+            ),
+            status=str(getattr(put_leg, "status", "open") or "open"),
+        )
+    )
+
+    wc = getattr(state, "wing_call_leg", None)
+    if wc is not None and str(getattr(wc, "status", "") or "").lower() == "open":
+        wc_entry = float(getattr(wc, "initial_premium", 0) or 0)
+        wc_curr = _live_px(bot_engine, getattr(wc, "symbol", None), wc_entry)
+        wc_qty = abs(int(getattr(wc, "quantity", 1) or 1))
+        legs.append(
+            _leg_dict(
+                role="wing_call",
+                strike=getattr(wc, "strike", None),
+                entry_price=wc_entry if wc_entry > 0 else None,
+                current_price=wc_curr if wc_curr > 0 else None,
+                quantity=wc_qty,
+                leg_pnl=_leg_pnl_usd(
+                    entry=wc_entry, current=wc_curr, quantity=wc_qty, is_long=True
+                ),
+                status=str(getattr(wc, "status", "open") or "open"),
+            )
+        )
+
+    wp = getattr(state, "wing_put_leg", None)
+    if wp is not None and str(getattr(wp, "status", "") or "").lower() == "open":
+        wp_entry = float(getattr(wp, "initial_premium", 0) or 0)
+        wp_curr = _live_px(bot_engine, getattr(wp, "symbol", None), wp_entry)
+        wp_qty = abs(int(getattr(wp, "quantity", 1) or 1))
+        legs.append(
+            _leg_dict(
+                role="wing_put",
+                strike=getattr(wp, "strike", None),
+                entry_price=wp_entry if wp_entry > 0 else None,
+                current_price=wp_curr if wp_curr > 0 else None,
+                quantity=wp_qty,
+                leg_pnl=_leg_pnl_usd(
+                    entry=wp_entry, current=wp_curr, quantity=wp_qty, is_long=True
+                ),
+                status=str(getattr(wp, "status", "open") or "open"),
+            )
+        )
+    return legs
+
+
+def _slave_basket_legs(
+    slave_trade: SlaveTrade,
+    *,
+    call_now: float | None,
+    put_now: float | None,
+    wing_call_now: float | None,
+    wing_put_now: float | None,
+) -> list[dict[str, Any]]:
+    """Slave legs from SlaveTrade fills + live prices (usually master's marks)."""
+    qty = abs(int(slave_trade.actual_quantity or 1))
+    legs: list[dict[str, Any]] = []
+
+    call_fill = float(slave_trade.call_fill_price or 0)
+    put_fill = float(slave_trade.put_fill_price or 0)
+    call_px = float(call_now or 0)
+    put_px = float(put_now or 0)
+
+    legs.append(
+        _leg_dict(
+            role="short_call",
+            strike=getattr(slave_trade, "call_strike", None),
+            entry_price=call_fill if call_fill > 0 else None,
+            current_price=call_px if call_px > 0 else None,
+            quantity=qty,
+            leg_pnl=_leg_pnl_usd(
+                entry=call_fill, current=call_px, quantity=qty, is_long=False
+            ),
+            status="open",
+        )
+    )
+    legs.append(
+        _leg_dict(
+            role="short_put",
+            strike=getattr(slave_trade, "put_strike", None),
+            entry_price=put_fill if put_fill > 0 else None,
+            current_price=put_px if put_px > 0 else None,
+            quantity=qty,
+            leg_pnl=_leg_pnl_usd(
+                entry=put_fill, current=put_px, quantity=qty, is_long=False
+            ),
+            status="open",
+        )
+    )
+
+    wc_pid = getattr(slave_trade, "wing_call_product_id", None)
+    wc_fill = float(getattr(slave_trade, "wing_call_fill_price", None) or 0)
+    if wc_pid and wc_fill > 0:
+        wc_px = float(wing_call_now or 0)
+        legs.append(
+            _leg_dict(
+                role="wing_call",
+                strike=getattr(slave_trade, "wing_call_strike", None),
+                entry_price=wc_fill,
+                current_price=wc_px if wc_px > 0 else None,
+                quantity=qty,
+                leg_pnl=_leg_pnl_usd(
+                    entry=wc_fill, current=wc_px, quantity=qty, is_long=True
+                ),
+                status="open",
+            )
+        )
+
+    wp_pid = getattr(slave_trade, "wing_put_product_id", None)
+    wp_fill = float(getattr(slave_trade, "wing_put_fill_price", None) or 0)
+    if wp_pid and wp_fill > 0:
+        wp_px = float(wing_put_now or 0)
+        legs.append(
+            _leg_dict(
+                role="wing_put",
+                strike=getattr(slave_trade, "wing_put_strike", None),
+                entry_price=wp_fill,
+                current_price=wp_px if wp_px > 0 else None,
+                quantity=qty,
+                leg_pnl=_leg_pnl_usd(
+                    entry=wp_fill, current=wp_px, quantity=qty, is_long=True
+                ),
+                status="open",
+            )
+        )
+    return legs
+
+
+def _role_gross(legs: list[dict[str, Any]], prefix: str) -> float:
+    total = 0.0
+    for leg in legs:
+        role = str(leg.get("role") or "")
+        if role.startswith(prefix):
+            total += float(leg.get("leg_pnl") or 0.0)
+    return round(total, 4)
+
+
+def _hedge_payload(
+    *,
+    hedge: HedgePosition | None = None,
+    slave_hedge: SlaveHedgePosition | None = None,
+    bot_engine: Any | None = None,
+    hedge_net_mtm: float | None = None,
+) -> dict[str, Any] | None:
+    """Build hedge block from master HedgePosition or SlaveHedgePosition."""
+    row: Any = slave_hedge if slave_hedge is not None else hedge
+    if row is None:
+        return None
+    call_entry = float(getattr(row, "call_fill_price", None) or 0) or None
+    put_entry = float(getattr(row, "put_fill_price", None) or 0) or None
+    call_sym = getattr(row, "call_symbol", None)
+    put_sym = getattr(row, "put_symbol", None)
+    call_now = (
+        _live_px(bot_engine, call_sym, float(call_entry or 0))
+        if bot_engine is not None
+        else None
+    )
+    put_now = (
+        _live_px(bot_engine, put_sym, float(put_entry or 0))
+        if bot_engine is not None
+        else None
+    )
+    if call_now is not None and call_now <= 0:
+        call_now = None
+    if put_now is not None and put_now <= 0:
+        put_now = None
+    expiry = getattr(row, "expiry_date", None)
+    return {
+        "hedge_id": int(row.id),
+        "strike": float(row.strike) if row.strike is not None else None,
+        "expiry_date": str(expiry) if expiry is not None else None,
+        "quantity": int(row.quantity or 0),
+        "call_entry": call_entry,
+        "put_entry": put_entry,
+        "call_now": call_now,
+        "put_now": put_now,
+        "hedge_net_mtm": (
+            round(float(hedge_net_mtm), 4) if hedge_net_mtm is not None else None
+        ),
+    }
 
 
 def _active_trade_count(db: Session, slave_id: int) -> int:
@@ -1050,6 +1387,24 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
         call_curr = float(getattr(state, "last_call_premium", 0) or 0)
         put_curr = float(getattr(state, "last_put_premium", 0) or 0)
         mtm_fields = _tracker_mtm_fields(state)
+        basket_legs = _master_basket_legs(state, bot_engine)
+        short_gross = _role_gross(basket_legs, "short_")
+        wing_gross = _role_gross(basket_legs, "wing_")
+        master_hedge_net = (
+            float(getattr(active_hedge_row, "hedge_net_mtm", 0.0) or 0.0)
+            if active_hedge_row is not None
+            else None
+        )
+        master_closed = (
+            float(getattr(active_hedge_row, "cum_closed_basket_pnl", 0.0) or 0.0)
+            if active_hedge_row is not None
+            else 0.0
+        )
+        master_hedge_block = _hedge_payload(
+            hedge=active_hedge_row,
+            bot_engine=bot_engine,
+            hedge_net_mtm=master_hedge_net,
+        )
         master_trade_data = {
             "trade_id": state.trade_id,
             "underlying": getattr(state.trade, "underlying", None),
@@ -1077,6 +1432,17 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
             "expiry_date": str(getattr(state.trade, "expiry_date", "") or ""),
             "slippage_pct": float(getattr(state.trade, "slippage_pct", 2) or 2),
             "status": "live",
+            "legs": basket_legs,
+            "hedge": master_hedge_block,
+            "pnl": _build_pnl_block(
+                hedge_net=master_hedge_net,
+                short_gross=short_gross,
+                wing_gross=wing_gross,
+                basket_net=float(mtm_fields["net_mtm"]),
+                closed_basket=master_closed,
+                computed_at=mtm_fields.get("computed_at"),
+                stale_seconds=mtm_fields.get("stale_seconds"),
+            ),
         }
 
     def _master_snapshot(trade_id: int) -> dict[str, Any] | None:
@@ -1275,6 +1641,111 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                     else ""
                 ),
             }
+
+            # Full structure: legs + own slave hedge + per-role pnl
+            master_state = master_by_id.get(int(active_st.master_trade_id))
+            wc_now = None
+            wp_now = None
+            if master_state is not None:
+                wc_leg = getattr(master_state, "wing_call_leg", None)
+                wp_leg = getattr(master_state, "wing_put_leg", None)
+                if wc_leg is not None:
+                    wc_now = _live_px(
+                        bot_engine,
+                        getattr(wc_leg, "symbol", None),
+                        float(getattr(wc_leg, "initial_premium", 0) or 0),
+                    )
+                if wp_leg is not None:
+                    wp_now = _live_px(
+                        bot_engine,
+                        getattr(wp_leg, "symbol", None),
+                        float(getattr(wp_leg, "initial_premium", 0) or 0),
+                    )
+            # Prefer slave's own wing symbols for live px when set
+            if getattr(active_st, "wing_call_symbol", None):
+                wc_now = _live_px(
+                    bot_engine,
+                    active_st.wing_call_symbol,
+                    float(wc_now or 0),
+                )
+            if getattr(active_st, "wing_put_symbol", None):
+                wp_now = _live_px(
+                    bot_engine,
+                    active_st.wing_put_symbol,
+                    float(wp_now or 0),
+                )
+
+            slave_legs = _slave_basket_legs(
+                active_st,
+                call_now=(
+                    float(slave_trade_data["call_premium"])
+                    if slave_trade_data.get("call_premium") is not None
+                    else None
+                ),
+                put_now=(
+                    float(slave_trade_data["put_premium"])
+                    if slave_trade_data.get("put_premium") is not None
+                    else None
+                ),
+                wing_call_now=wc_now,
+                wing_put_now=wp_now,
+            )
+            slave_short_gross = _role_gross(slave_legs, "short_")
+            slave_wing_gross = _role_gross(slave_legs, "wing_")
+
+            slave_hedge_row = (
+                db.query(SlaveHedgePosition)
+                .filter(
+                    SlaveHedgePosition.slave_account_id == int(slave.id),
+                    SlaveHedgePosition.status.in_(("active", "pending_close")),
+                )
+                .order_by(SlaveHedgePosition.id.desc())
+                .first()
+            )
+            slave_hedge_net: float | None = None
+            slave_closed = 0.0
+            if slave_hedge_row is not None and active_hedge_row is not None:
+                mq = max(1, int(active_hedge_row.quantity or 1))
+                sq = max(1, int(slave_hedge_row.quantity or 1))
+                # Live hedge MTM not stored on SlaveHedgePosition — scale master
+                # hedge_net by lot ratio (same contracts, different size).
+                slave_hedge_net = round(
+                    float(getattr(active_hedge_row, "hedge_net_mtm", 0) or 0)
+                    * (sq / mq),
+                    4,
+                )
+                slave_closed = round(
+                    float(
+                        getattr(active_hedge_row, "cum_closed_basket_pnl", 0) or 0
+                    )
+                    * (sq / mq),
+                    4,
+                )
+            elif slave_hedge_row is not None:
+                slave_hedge_net = 0.0
+
+            slave_hedge_block = _hedge_payload(
+                slave_hedge=slave_hedge_row,
+                bot_engine=bot_engine,
+                hedge_net_mtm=slave_hedge_net,
+            )
+            slave_stale = None
+            slave_computed = last_updated_iso
+            if linked_master:
+                slave_stale = linked_master.get("stale_seconds")
+                slave_computed = linked_master.get("computed_at") or slave_computed
+
+            slave_trade_data["legs"] = slave_legs
+            slave_trade_data["hedge"] = slave_hedge_block
+            slave_trade_data["pnl"] = _build_pnl_block(
+                hedge_net=slave_hedge_net,
+                short_gross=slave_short_gross,
+                wing_gross=slave_wing_gross,
+                basket_net=float(slave_net_mtm),
+                closed_basket=slave_closed,
+                computed_at=slave_computed,
+                stale_seconds=slave_stale,
+            )
 
         slaves_data.append(
             {
