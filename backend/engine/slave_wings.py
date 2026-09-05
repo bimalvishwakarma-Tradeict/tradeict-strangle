@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -235,107 +236,241 @@ def ledger_role_for_slave_leg(leg_name: str) -> tuple[str, str]:
     return "", ""
 
 
+def _append_filled_or_partial(
+    *,
+    filled: list[FilledEntryLeg],
+    spec: EntryLegSpec,
+    result: OrderResult,
+    opened_at: Any,
+) -> None:
+    """Append FilledEntryLeg when result has any size; used before unwind raise."""
+    partial_size = 0
+    if result.success:
+        try:
+            partial_size = int(getattr(result, "filled_size", 0) or 0)
+        except (TypeError, ValueError):
+            partial_size = 0
+    if partial_size <= 0 and is_full_fill(result, int(spec.quantity)):
+        partial_size = int(spec.quantity)
+    if partial_size <= 0:
+        return
+    filled.append(
+        FilledEntryLeg(
+            role=spec.role,
+            product_id=int(spec.product_id),
+            symbol=str(spec.symbol),
+            strike=float(spec.strike),
+            requested_qty=int(spec.quantity),
+            filled_size=partial_size,
+            fill_price=float(result.filled_price or spec.mark_premium),
+            order_id=(
+                str(result.order_id) if result.order_id is not None else None
+            ),
+            commission=(
+                abs(float(result.commission))
+                if result.commission is not None
+                else None
+            ),
+            is_long=bool(spec.is_long),
+            mark_premium=float(spec.mark_premium),
+            opened_at=opened_at,
+        )
+    )
+
+
 async def place_slave_plan_legs(
     *,
     plan: list[EntryLegSpec],
     place_fn_for_spec: Callable[[EntryLegSpec], PlaceOrderFn],
     slave_name: str,
     max_attempts: int = ENTRY_LEG_MAX_ATTEMPTS,
+    delta_client: Any | None = None,
+    master_trade_id: int | None = None,
 ) -> list[FilledEntryLeg]:
     """
-    Place every leg in plan with retries. On incomplete fill after retries:
-    raise EntryPartialUnwind with filled_legs so far.
+    Place plan legs in role-based consecutive groups (master 090ce05 pattern):
+      wings ON  -> [[wing_call, wing_put], [call, put]]
+      wings OFF -> [[call, put]]
+    Groups are SEQUENTIAL (margin); legs inside a group are paired via
+    execute_paired_legs when mid-price is allowed. Market path keeps
+    place_leg_with_retries per leg.
 
-    Logs [SLAVE_WING_ENTRY] for each successful wing fill.
+    On incomplete fill after retries / pair: raise EntryPartialUnwind with
+    filled_legs so far. Logs [SLAVE_WING_ENTRY] for each successful wing fill.
     """
-    filled: list[FilledEntryLeg] = []
-    for spec in plan:
-        place_fn = place_fn_for_spec(spec)
-        # RULE 8 / structure_ledger: opened_at MUST be pre-placement, not
-        # post-fill — otherwise entry cashflows miss the attribution window.
-        leg_opened_at = get_utc_now()
-        result = await place_leg_with_retries(
-            role=spec.role,
-            requested=int(spec.quantity),
-            place_fn=place_fn,
-            max_attempts=max_attempts,
-        )
-        if not is_full_fill(result, int(spec.quantity)):
-            partial_size = 0
-            if result.success:
-                try:
-                    partial_size = int(getattr(result, "filled_size", 0) or 0)
-                except (TypeError, ValueError):
-                    partial_size = 0
-            if partial_size > 0:
-                filled.append(
-                    FilledEntryLeg(
-                        role=spec.role,
-                        product_id=int(spec.product_id),
-                        symbol=str(spec.symbol),
-                        strike=float(spec.strike),
-                        requested_qty=int(spec.quantity),
-                        filled_size=partial_size,
-                        fill_price=float(
-                            result.filled_price or spec.mark_premium
-                        ),
-                        order_id=(
-                            str(result.order_id)
-                            if result.order_id is not None
-                            else None
-                        ),
-                        commission=(
-                            abs(float(result.commission))
-                            if result.commission is not None
-                            else None
-                        ),
-                        is_long=bool(spec.is_long),
-                        mark_premium=float(spec.mark_premium),
-                        opened_at=leg_opened_at,
-                    )
-                )
-            raise EntryPartialUnwind(
-                f"Slave entry leg {spec.role} incomplete: "
-                f"{result.error or 'partial_fill'}",
-                filled_legs=list(filled),
-                failed_role=spec.role,
-            )
+    from backend.database import SessionLocal, get_or_create_auto_settings
+    from backend.engine.midprice_executor import (
+        clamp_chase_max_seconds,
+        clamp_hold_seconds,
+        clamp_partner_window_seconds,
+        execute_paired_legs,
+        should_use_midprice,
+    )
 
-        fill_px = float(result.filled_price or 0.0) or float(spec.mark_premium)
-        oid = str(result.order_id) if result.order_id is not None else None
-        fee = (
-            abs(float(result.commission))
-            if result.commission is not None
-            else None
-        )
-        filled_size = int(
-            getattr(result, "filled_size", None) or spec.quantity
-        )
-        filled.append(
-            FilledEntryLeg(
-                role=spec.role,
-                product_id=int(spec.product_id),
-                symbol=str(spec.symbol),
-                strike=float(spec.strike),
-                requested_qty=int(spec.quantity),
-                filled_size=filled_size,
-                fill_price=fill_px,
-                order_id=oid,
-                commission=fee,
-                is_long=bool(spec.is_long),
-                mark_premium=float(spec.mark_premium),
-                opened_at=leg_opened_at,
+    filled: list[FilledEntryLeg] = []
+    wings_on = any(str(s.role).startswith("wing") for s in plan)
+    entry_reason = (
+        "SLAVE_CONDOR_ENTRY" if wings_on else "SLAVE_BASKET_ENTRY"
+    )
+
+    mp_on = False
+    chase_max = None
+    hold_s = None
+    partner_win_s = None
+    entry_tol = 15.0
+    try:
+        with SessionLocal() as _db:
+            settings = get_or_create_auto_settings(_db)
+            mp_on = bool(getattr(settings, "midprice_enabled", False))
+            chase_max = clamp_chase_max_seconds(
+                getattr(settings, "midprice_chase_max_seconds", None)
             )
-        )
-        if spec.role.startswith("wing"):
-            logger.info(
-                "[SLAVE_WING_ENTRY] slave=%s leg=%s strike=%s qty=%s fill=%s",
-                slave_name,
-                spec.role,
-                spec.strike,
-                filled_size,
-                fill_px,
+            hold_s = clamp_hold_seconds(
+                getattr(settings, "midprice_hold_seconds", None)
             )
+            partner_win_s = clamp_partner_window_seconds(
+                getattr(settings, "midprice_partner_window_seconds", None)
+            )
+            entry_tol = float(
+                getattr(settings, "entry_premium_match_tolerance_pct", None)
+                or 15.0
+            )
+    except Exception as exc:
+        logger.warning(
+            "slave midprice settings load failed slave=%s: %s — market path",
+            slave_name,
+            exc,
+        )
+        mp_on = False
+
+    use_mp = bool(
+        delta_client is not None
+        and should_use_midprice(enabled=mp_on, reason=entry_reason)
+    )
+    selection_ts = time.monotonic()
+
+    # Role-based consecutive groups (never by bare index)
+    _wing_roles = frozenset({"wing_call", "wing_put"})
+    entry_groups: list[tuple[str, list[EntryLegSpec]]] = []
+    for _spec in plan:
+        _gkey = "wing" if str(_spec.role) in _wing_roles else "short"
+        if not entry_groups or entry_groups[-1][0] != _gkey:
+            entry_groups.append((_gkey, [_spec]))
+        else:
+            entry_groups[-1][1].append(_spec)
+
+    for phase, group_specs in entry_groups:
+        placements: list[tuple[EntryLegSpec, OrderResult, Any]] = []
+
+        if use_mp:
+            # RULE 8: opened_at MUST be pre-placement for the whole group
+            group_open_ts = get_utc_now()
+            pair_results = await execute_paired_legs(
+                legs=[
+                    {
+                        "product_id": int(s.product_id),
+                        "side": "buy" if s.is_long else "sell",
+                        "quantity": int(s.quantity),
+                        "symbol": str(s.symbol),
+                        "leg_label": str(s.role),
+                        "selected_premium": float(s.mark_premium or 0) or None,
+                        "bracket_sl_price": s.bracket_sl_price,
+                        "bracket_sl_limit": s.bracket_sl_limit,
+                    }
+                    for s in group_specs
+                ],
+                delta_client=delta_client,
+                reason=entry_reason,
+                midprice_enabled=True,
+                max_chase_seconds=chase_max,
+                hold_seconds=hold_s,
+                partner_window_seconds=partner_win_s,
+                entry_premium_match_tolerance_pct=entry_tol,
+                selection_ts=selection_ts,
+                trade_id=master_trade_id,
+                phase=f"slave_{phase}",
+            )
+            if len(pair_results) != len(group_specs):
+                raise EntryPartialUnwind(
+                    f"Slave entry {phase} pair returned "
+                    f"{len(pair_results)} results for {len(group_specs)} legs",
+                    filled_legs=list(filled),
+                    failed_role=str(group_specs[0].role),
+                )
+            for s, res in zip(group_specs, pair_results):
+                placements.append((s, res, group_open_ts))
+        else:
+            # Market path — sequential per leg (unchanged behaviour)
+            for spec in group_specs:
+                place_fn = place_fn_for_spec(spec)
+                # RULE 8 / structure_ledger: opened_at MUST be pre-placement
+                leg_opened_at = get_utc_now()
+                result = await place_leg_with_retries(
+                    role=spec.role,
+                    requested=int(spec.quantity),
+                    place_fn=place_fn,
+                    max_attempts=max_attempts,
+                )
+                placements.append((spec, result, leg_opened_at))
+
+        # Commit every leg in this group before the next group starts.
+        for spec, result, opened_at in placements:
+            if not is_full_fill(result, int(spec.quantity)):
+                _append_filled_or_partial(
+                    filled=filled,
+                    spec=spec,
+                    result=result,
+                    opened_at=opened_at,
+                )
+                raise EntryPartialUnwind(
+                    f"Slave entry leg {spec.role} incomplete: "
+                    f"{result.error or 'partial_fill'}",
+                    filled_legs=list(filled),
+                    failed_role=spec.role,
+                )
+
+            fill_px = float(result.filled_price or 0.0) or float(
+                spec.mark_premium
+            )
+            oid = (
+                str(result.order_id) if result.order_id is not None else None
+            )
+            fee = (
+                abs(float(result.commission))
+                if result.commission is not None
+                else None
+            )
+            filled_size = int(
+                getattr(result, "filled_size", None) or spec.quantity
+            )
+            filled.append(
+                FilledEntryLeg(
+                    role=spec.role,
+                    product_id=int(spec.product_id),
+                    symbol=str(spec.symbol),
+                    strike=float(spec.strike),
+                    requested_qty=int(spec.quantity),
+                    filled_size=filled_size,
+                    fill_price=fill_px,
+                    order_id=oid,
+                    commission=fee,
+                    is_long=bool(spec.is_long),
+                    mark_premium=float(spec.mark_premium),
+                    opened_at=opened_at,
+                )
+            )
+            if spec.role.startswith("wing"):
+                logger.info(
+                    "[SLAVE_WING_ENTRY] slave=%s leg=%s strike=%s qty=%s "
+                    "fill=%s profile=%s",
+                    slave_name,
+                    spec.role,
+                    spec.strike,
+                    filled_size,
+                    fill_px,
+                    "paired_mid" if use_mp else "market",
+                )
+
     return filled
 
 

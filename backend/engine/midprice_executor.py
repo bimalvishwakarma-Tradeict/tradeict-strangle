@@ -53,6 +53,9 @@ MIDPRICE_ALLOWED_REASONS = frozenset(
         "HEDGE_TARGET",
         "HEDGE_ROLL",
         "HEDGE_MANUAL",
+        "SLAVE_HEDGE_ENTRY",
+        "SLAVE_BASKET_ENTRY",
+        "SLAVE_CONDOR_ENTRY",
     }
 )
 

@@ -1792,6 +1792,8 @@ class MirrorEngine:
                     plan=plan,
                     place_fn_for_spec=_place_fn_for,
                     slave_name=str(slave.name),
+                    delta_client=client,
+                    master_trade_id=int(master_trade_id),
                 )
             except EntryPartialUnwind as partial:
                 # NIYAM 0: if wings failed before shorts, or any leg incomplete —
@@ -4674,145 +4676,90 @@ class MirrorEngine:
         call_order_id: str | None = None
         put_order_id: str | None = None
         try:
-            # --- BUY CALL ---
-            # Captured BEFORE any order — this is an attribution window bound.
-            # See e3e6b7d: a post-fill timestamp silently drops the fill.
-            call_open_ts = get_utc_now()
-            call_result = await executor.buy_option(
-                product_id=int(call_pid),
-                quantity=int(slave_qty),
-                delta_client=client,
-                symbol_for_fallback=call_symbol or None,
+            from backend.database import get_or_create_auto_settings
+            from backend.engine.midprice_executor import (
+                clamp_chase_max_seconds,
+                clamp_hold_seconds,
+                clamp_partner_window_seconds,
+                execute_paired_legs,
+                should_use_midprice,
             )
-            if not call_result.success:
-                logger.error(
-                    "[SLAVE_HEDGE_OPEN] slave=%s CALL buy failed: %s",
-                    slave_id,
-                    call_result.error,
-                )
-                return "failed"
+            import time as _time_mod
 
-            call_fill_ts = get_utc_now()
-            await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
-            call_ok = await client.verify_position_exists(int(call_pid))
-            if not call_ok:
-                logger.error(
-                    "[SLAVE_HEDGE_OPEN] slave=%s CALL verify failed "
-                    "product=%s — attempting unwind",
-                    slave_id,
-                    call_pid,
-                )
+            settings = get_or_create_auto_settings(db)
+            mp_on = bool(getattr(settings, "midprice_enabled", False))
+            chase_max = clamp_chase_max_seconds(
+                getattr(settings, "midprice_chase_max_seconds", None)
+            )
+            hold_s = clamp_hold_seconds(
+                getattr(settings, "midprice_hold_seconds", None)
+            )
+            partner_win_s = clamp_partner_window_seconds(
+                getattr(settings, "midprice_partner_window_seconds", None)
+            )
+            entry_tol = float(
+                getattr(settings, "entry_premium_match_tolerance_pct", None)
+                or 15.0
+            )
+            selection_ts = _time_mod.monotonic()
+            use_mp_entry = should_use_midprice(
+                enabled=mp_on, reason="SLAVE_HEDGE_ENTRY"
+            )
+
+            async def _unwind_slave_hedge_long(
+                *,
+                product_id: int,
+                leg: str,
+                reason: str,
+            ) -> bool:
+                """Best-effort reduce-only close; return True if flat on Delta."""
                 unwound = False
                 try:
                     await client.close_position(
-                        product_id=int(call_pid),
+                        product_id=int(product_id),
                         size=int(slave_qty),
                         is_long=True,
                     )
                     await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
-                    still = await client.verify_position_exists(int(call_pid))
+                    still = await client.verify_position_exists(int(product_id))
                     unwound = not still
                 except Exception as uw_err:
                     logger.critical(
-                        "[SLAVE_HEDGE_UNWIND] slave=%s | leg=call | "
-                        "unwound=False | err=%s",
+                        "[SLAVE_HEDGE_UNWIND] slave=%s | leg=%s | "
+                        "unwound=False | err=%s | reason=%s",
                         slave_id,
+                        leg,
                         uw_err,
+                        reason,
                     )
                 log_and_buffer(
                     "SLAVE_HEDGE_UNWIND",
                     int(master_hedge_id),
                     {
                         "slave": slave_id,
-                        "leg": "call",
+                        "leg": leg,
                         "unwound": unwound,
-                        "reason": "call_verify_failed",
+                        "reason": str(reason)[:200],
                     },
                 )
                 logger.critical(
-                    "[SLAVE_HEDGE_UNWIND] slave=%s | leg=call | unwound=%s",
+                    "[SLAVE_HEDGE_UNWIND] slave=%s | leg=%s | unwound=%s",
                     slave_id,
+                    leg,
                     unwound,
                 )
-                return "failed"
+                return unwound
 
-            call_fill = float(call_result.filled_price or 0) or float(
-                master_call_fill or 0
-            )
-            call_fee = float(call_result.commission or 0)
-            call_order_id = (
-                str(call_result.order_id)
-                if call_result.order_id is not None
-                else None
-            )
-
-            # --- BUY PUT ---
-            # Captured BEFORE any order — this is an attribution window bound.
-            # See e3e6b7d: a post-fill timestamp silently drops the fill.
-            put_open_ts = get_utc_now()
-            put_result = await executor.buy_option(
-                product_id=int(put_pid),
-                quantity=int(slave_qty),
-                delta_client=client,
-                symbol_for_fallback=put_symbol or None,
-            )
-            put_fill_ts = get_utc_now()
-            put_ok = False
-            put_fail_reason = ""
-            if not put_result.success:
-                put_fail_reason = put_result.error or "Put buy failed"
-            else:
-                await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
-                put_ok = await client.verify_position_exists(int(put_pid))
-                if not put_ok:
-                    put_fail_reason = (
-                        f"Put not on Delta product_id={put_pid}"
-                    )
-                else:
-                    put_fill = float(put_result.filled_price or 0) or float(
-                        master_put_fill or 0
-                    )
-                    put_fee = float(put_result.commission or 0)
-                    put_order_id = (
-                        str(put_result.order_id)
-                        if put_result.order_id is not None
-                        else None
-                    )
-
-            if not put_ok:
-                unwound = False
-                try:
-                    await client.close_position(
-                        product_id=int(call_pid),
-                        size=int(slave_qty),
-                        is_long=True,
-                    )
-                    await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
-                    still = await client.verify_position_exists(int(call_pid))
-                    unwound = not still
-                except Exception as uw_err:
-                    logger.critical(
-                        "[SLAVE_HEDGE_UNWIND] slave=%s | leg=call | "
-                        "unwound=False | err=%s | put_fail=%s",
-                        slave_id,
-                        uw_err,
-                        put_fail_reason,
-                    )
-                log_and_buffer(
-                    "SLAVE_HEDGE_UNWIND",
-                    int(master_hedge_id),
-                    {
-                        "slave": slave_id,
-                        "leg": "call",
-                        "unwound": unwound,
-                        "reason": put_fail_reason[:200],
-                    },
-                )
-                logger.critical(
-                    "[SLAVE_HEDGE_UNWIND] slave=%s | leg=call | unwound=%s",
-                    slave_id,
-                    unwound,
-                )
+            def _persist_pair_error(
+                *,
+                last_error: str,
+                call_oid: str | None,
+                put_oid: str | None,
+                c_fill: float,
+                p_fill: float,
+                c_fee: float,
+                p_fee: float,
+            ) -> None:
                 err_row = SlaveHedgePosition(
                     account_id=int(master_account_id),
                     slave_account_id=slave_id,
@@ -4824,25 +4771,276 @@ class MirrorEngine:
                     status="error",
                     call_product_id=int(call_pid),
                     call_symbol=call_symbol or None,
-                    call_order_id=call_order_id,
-                    call_fill_price=call_fill if call_fill > 0 else None,
-                    call_entry_fee_usd=call_fee if call_fee > 0 else None,
+                    call_order_id=call_oid,
+                    call_fill_price=c_fill if c_fill > 0 else None,
+                    call_entry_fee_usd=c_fee if c_fee > 0 else None,
                     put_product_id=int(put_pid),
                     put_symbol=put_symbol or None,
-                    put_order_id=put_order_id,
+                    put_order_id=put_oid,
+                    put_fill_price=p_fill if p_fill > 0 else None,
+                    put_entry_fee_usd=p_fee if p_fee > 0 else None,
                     entry_time=get_utc_now(),
                     entry_spread_usd=float(entry_spread_usd),
-                    last_error=(
-                        f"put_failed:{put_fail_reason}; "
-                        f"call_unwound={unwound}"
-                    )[:500],
+                    last_error=str(last_error)[:500],
                     error_count=1,
                     is_bot_managed=True,
                 )
                 db.add(err_row)
                 db.commit()
-                return "failed"
 
+            # RULE 8: opened_at MUST be pre-placement (attribution window).
+            call_open_ts = get_utc_now()
+            put_open_ts = call_open_ts
+            call_fill_ts = call_open_ts
+            put_fill_ts = call_open_ts
+
+            if use_mp_entry:
+                # Paired mid-price: both BUY legs together (master 8511146).
+                # Four outcomes: ok/ok, ok/fail (unwind call), fail/ok
+                # (unwind put), fail/fail (no unwind).
+                pair_results = await execute_paired_legs(
+                    legs=[
+                        {
+                            "product_id": int(call_pid),
+                            "side": "buy",
+                            "quantity": int(slave_qty),
+                            "symbol": call_symbol or "",
+                            "leg_label": "slave_hedge_call",
+                            "selected_premium": (
+                                float(master_call_fill)
+                                if master_call_fill
+                                else None
+                            ),
+                        },
+                        {
+                            "product_id": int(put_pid),
+                            "side": "buy",
+                            "quantity": int(slave_qty),
+                            "symbol": put_symbol or "",
+                            "leg_label": "slave_hedge_put",
+                            "selected_premium": (
+                                float(master_put_fill)
+                                if master_put_fill
+                                else None
+                            ),
+                        },
+                    ],
+                    delta_client=client,
+                    reason="SLAVE_HEDGE_ENTRY",
+                    midprice_enabled=True,
+                    max_chase_seconds=chase_max,
+                    hold_seconds=hold_s,
+                    partner_window_seconds=partner_win_s,
+                    entry_premium_match_tolerance_pct=entry_tol,
+                    selection_ts=selection_ts,
+                    phase="slave_hedge_entry",
+                )
+                call_result = pair_results[0] if len(pair_results) > 0 else None
+                put_result = pair_results[1] if len(pair_results) > 1 else None
+                call_fill_ts = get_utc_now()
+                put_fill_ts = call_fill_ts
+
+                call_order_ok = bool(
+                    call_result is not None and call_result.success
+                )
+                put_order_ok = bool(
+                    put_result is not None and put_result.success
+                )
+
+                await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
+                call_verified = False
+                put_verified = False
+                if call_order_ok:
+                    call_verified = await client.verify_position_exists(
+                        int(call_pid)
+                    )
+                if put_order_ok:
+                    put_verified = await client.verify_position_exists(
+                        int(put_pid)
+                    )
+
+                call_ok = call_order_ok and call_verified
+                put_ok = put_order_ok and put_verified
+
+                if call_ok and call_result is not None:
+                    call_fill = float(call_result.filled_price or 0) or float(
+                        master_call_fill or 0
+                    )
+                    call_fee = float(call_result.commission or 0)
+                    call_order_id = (
+                        str(call_result.order_id)
+                        if call_result.order_id is not None
+                        else None
+                    )
+                if put_ok and put_result is not None:
+                    put_fill = float(put_result.filled_price or 0) or float(
+                        master_put_fill or 0
+                    )
+                    put_fee = float(put_result.commission or 0)
+                    put_order_id = (
+                        str(put_result.order_id)
+                        if put_result.order_id is not None
+                        else None
+                    )
+
+                if not (call_ok and put_ok):
+                    call_err = ""
+                    if call_result is None:
+                        call_err = "Call pair result missing"
+                    elif not call_order_ok:
+                        call_err = call_result.error or "Call buy order failed"
+                    elif not call_verified:
+                        call_err = (
+                            f"Call buy filled but position not found on Delta "
+                            f"(product_id={call_pid})"
+                        )
+                    put_err = ""
+                    if put_result is None:
+                        put_err = "Put pair result missing"
+                    elif not put_order_ok:
+                        put_err = put_result.error or "Put buy order failed"
+                    elif not put_verified:
+                        put_err = (
+                            f"Put buy filled but position not found on Delta "
+                            f"(product_id={put_pid})"
+                        )
+                    fail_reason = "; ".join(
+                        p for p in (call_err, put_err) if p
+                    ) or "Slave hedge pair entry failed"
+
+                    logger.error(
+                        "[SLAVE_HEDGE_OPEN] paired failed slave=%s "
+                        "call_ok=%s put_ok=%s reason=%s",
+                        slave_id,
+                        call_ok,
+                        put_ok,
+                        fail_reason,
+                    )
+
+                    unwound_note = ""
+                    if call_ok and not put_ok:
+                        unwound = await _unwind_slave_hedge_long(
+                            product_id=int(call_pid),
+                            leg="call",
+                            reason=fail_reason,
+                        )
+                        unwound_note = f"; call_unwound={unwound}"
+                    elif put_ok and not call_ok:
+                        unwound = await _unwind_slave_hedge_long(
+                            product_id=int(put_pid),
+                            leg="put",
+                            reason=fail_reason,
+                        )
+                        unwound_note = f"; put_unwound={unwound}"
+
+                    _persist_pair_error(
+                        last_error=f"{fail_reason}{unwound_note}",
+                        call_oid=call_order_id,
+                        put_oid=put_order_id,
+                        c_fill=call_fill,
+                        p_fill=put_fill,
+                        c_fee=call_fee,
+                        p_fee=put_fee,
+                    )
+                    return "failed"
+            else:
+                # Market path: sequential buy_option (unchanged).
+                # --- BUY CALL ---
+                # Captured BEFORE any order — attribution window bound.
+                call_open_ts = get_utc_now()
+                call_result = await executor.buy_option(
+                    product_id=int(call_pid),
+                    quantity=int(slave_qty),
+                    delta_client=client,
+                    symbol_for_fallback=call_symbol or None,
+                )
+                if not call_result.success:
+                    logger.error(
+                        "[SLAVE_HEDGE_OPEN] slave=%s CALL buy failed: %s",
+                        slave_id,
+                        call_result.error,
+                    )
+                    return "failed"
+
+                call_fill_ts = get_utc_now()
+                await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
+                call_ok = await client.verify_position_exists(int(call_pid))
+                if not call_ok:
+                    logger.error(
+                        "[SLAVE_HEDGE_OPEN] slave=%s CALL verify failed "
+                        "product=%s — attempting unwind",
+                        slave_id,
+                        call_pid,
+                    )
+                    await _unwind_slave_hedge_long(
+                        product_id=int(call_pid),
+                        leg="call",
+                        reason="call_verify_failed",
+                    )
+                    return "failed"
+
+                call_fill = float(call_result.filled_price or 0) or float(
+                    master_call_fill or 0
+                )
+                call_fee = float(call_result.commission or 0)
+                call_order_id = (
+                    str(call_result.order_id)
+                    if call_result.order_id is not None
+                    else None
+                )
+
+                # --- BUY PUT ---
+                put_open_ts = get_utc_now()
+                put_result = await executor.buy_option(
+                    product_id=int(put_pid),
+                    quantity=int(slave_qty),
+                    delta_client=client,
+                    symbol_for_fallback=put_symbol or None,
+                )
+                put_fill_ts = get_utc_now()
+                put_ok = False
+                put_fail_reason = ""
+                if not put_result.success:
+                    put_fail_reason = put_result.error or "Put buy failed"
+                else:
+                    await asyncio.sleep(_HEDGE_VERIFY_PAUSE_SECONDS)
+                    put_ok = await client.verify_position_exists(int(put_pid))
+                    if not put_ok:
+                        put_fail_reason = (
+                            f"Put not on Delta product_id={put_pid}"
+                        )
+                    else:
+                        put_fill = float(put_result.filled_price or 0) or float(
+                            master_put_fill or 0
+                        )
+                        put_fee = float(put_result.commission or 0)
+                        put_order_id = (
+                            str(put_result.order_id)
+                            if put_result.order_id is not None
+                            else None
+                        )
+
+                if not put_ok:
+                    unwound = await _unwind_slave_hedge_long(
+                        product_id=int(call_pid),
+                        leg="call",
+                        reason=put_fail_reason,
+                    )
+                    _persist_pair_error(
+                        last_error=(
+                            f"put_failed:{put_fail_reason}; "
+                            f"call_unwound={unwound}"
+                        ),
+                        call_oid=call_order_id,
+                        put_oid=put_order_id,
+                        c_fill=call_fill,
+                        p_fill=0.0,
+                        c_fee=call_fee,
+                        p_fee=0.0,
+                    )
+                    return "failed"
+
+            # Both filled and verified — create SlaveHedgePosition
             cost_usd = (call_fill + put_fill) * slave_qty * _CONTRACT_SIZE
             row = SlaveHedgePosition(
                 account_id=int(master_account_id),
@@ -4927,12 +5125,13 @@ class MirrorEngine:
                     "cost": round(cost_usd, 4),
                     "entry_spread": round(entry_spread_usd, 6),
                     "available_before": round(available_before, 4),
+                    "midprice": use_mp_entry,
                 },
             )
             logger.info(
                 "[SLAVE_HEDGE_OPEN] master_hedge=%s | slave=%s | qty=%s | "
                 "master_qty=%s | call_fill=%s | put_fill=%s | cost=%s | "
-                "entry_spread=%s | available_before=%s",
+                "entry_spread=%s | available_before=%s | midprice=%s",
                 master_hedge_id,
                 slave_id,
                 slave_qty,
@@ -4942,7 +5141,10 @@ class MirrorEngine:
                 round(cost_usd, 4),
                 round(entry_spread_usd, 6),
                 round(available_before, 4),
+                use_mp_entry,
             )
+            return "opened"
+
             return "opened"
 
         except Exception as exc:
