@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useNavigate } from 'react-router-dom'
+import { useAuth } from '../auth/AuthContext'
 import {
   getAccountStatus,
   getActiveTrades,
@@ -7,7 +8,6 @@ import {
 } from '../services/api'
 import { useWebSocket } from '../hooks/useWebSocket'
 
-const WS_URL = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/trades`
 const BALANCE_POLL_MS = 60000
 const AUTO_TRADE_POLL_MS = 5000
 
@@ -31,13 +31,16 @@ function formatBalanceInr(value) {
   })
 }
 
-export default function Navbar() {
-  const { status: wsStatus } = useWebSocket(WS_URL)
+export default function Navbar({ wsUrl = '' }) {
+  const { email, logout } = useAuth()
+  const navigate = useNavigate()
+  const { status: wsStatus } = useWebSocket(wsUrl)
   const [connected, setConnected] = useState(false)
   const [balanceUsd, setBalanceUsd] = useState(0)
   const [balanceInr, setBalanceInr] = useState(0)
   const [accountName, setAccountName] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
   /** null | 'active' | 'waiting' */
   const [autoTradeDot, setAutoTradeDot] = useState(null)
 
@@ -50,7 +53,6 @@ export default function Navbar() {
         setBalanceInr(Number(status?.balance_inr || 0))
         setAccountName(status?.account_name || '')
       }
-      // On failure path below: keep last known balance (no crash)
     } catch {
       // Keep last known balance / name — do not zero out
     }
@@ -97,6 +99,16 @@ export default function Navbar() {
     const interval = setInterval(refreshAutoTradeDot, AUTO_TRADE_POLL_MS)
     return () => clearInterval(interval)
   }, [refreshAutoTradeDot])
+
+  const handleLogout = async () => {
+    setLoggingOut(true)
+    try {
+      await logout()
+    } finally {
+      setLoggingOut(false)
+      navigate('/login', { replace: true })
+    }
+  }
 
   const wsDot =
     wsStatus === 'connected'
@@ -196,6 +208,22 @@ export default function Navbar() {
             )}
           </div>
 
+          {email ? (
+            <div className="hidden items-center gap-2 sm:flex">
+              <span className="max-w-[14rem] truncate text-xs text-gray-400" title={email}>
+                {email}
+              </span>
+              <button
+                type="button"
+                onClick={handleLogout}
+                disabled={loggingOut}
+                className="rounded-md border border-gray-600 px-2.5 py-1 text-xs text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+              >
+                {loggingOut ? '…' : 'Logout'}
+              </button>
+            </div>
+          ) : null}
+
           <button
             type="button"
             className="rounded-md border border-gray-600 p-2 text-gray-300 hover:bg-gray-800 md:hidden"
@@ -213,16 +241,31 @@ export default function Navbar() {
       {menuOpen && (
         <nav className="border-t border-gray-800 px-4 py-2 md:hidden">
           <div className="flex flex-col gap-1">{navLinks}</div>
-          <div className="mt-3 flex items-center gap-2 border-t border-gray-800 pt-3 text-sm text-gray-300">
-            <span className={`inline-block h-2.5 w-2.5 rounded-full ${wsDot}`} />
-            {connected ? (
-              <span className="text-green-400">
-                {wsLabel} • ${formatBalanceUsd(balanceUsd)} · ₹
-                {formatBalanceInr(balanceInr)}
-              </span>
-            ) : (
-              <span>{wsLabel}</span>
-            )}
+          <div className="mt-3 flex flex-col gap-2 border-t border-gray-800 pt-3 text-sm text-gray-300">
+            <div className="flex items-center gap-2">
+              <span className={`inline-block h-2.5 w-2.5 rounded-full ${wsDot}`} />
+              {connected ? (
+                <span className="text-green-400">
+                  {wsLabel} • ${formatBalanceUsd(balanceUsd)} · ₹
+                  {formatBalanceInr(balanceInr)}
+                </span>
+              ) : (
+                <span>{wsLabel}</span>
+              )}
+            </div>
+            {email ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate text-xs text-gray-400">{email}</span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  disabled={loggingOut}
+                  className="rounded-md border border-gray-600 px-2.5 py-1 text-xs text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+                >
+                  Logout
+                </button>
+              </div>
+            ) : null}
           </div>
         </nav>
       )}

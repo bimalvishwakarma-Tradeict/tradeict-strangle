@@ -4,6 +4,69 @@ const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
 })
 
+const AUTH_TOKEN_KEY = 'tradeict_auth_token'
+const AUTH_USER_KEY = 'tradeict_auth_user'
+
+export function getStoredToken() {
+  try {
+    return localStorage.getItem(AUTH_TOKEN_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function getStoredAuthUser() {
+  try {
+    const raw = localStorage.getItem(AUTH_USER_KEY)
+    if (!raw) return null
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+export function storeAuthSession({ token, email, role, must_change_password }) {
+  localStorage.setItem(AUTH_TOKEN_KEY, token)
+  localStorage.setItem(
+    AUTH_USER_KEY,
+    JSON.stringify({ email, role, must_change_password }),
+  )
+}
+
+export function clearAuthSession() {
+  try {
+    localStorage.removeItem(AUTH_TOKEN_KEY)
+    localStorage.removeItem(AUTH_USER_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
+api.interceptors.request.use((config) => {
+  const token = getStoredToken()
+  if (token) {
+    config.headers = config.headers || {}
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error?.response?.status
+    const url = String(error?.config?.url || '')
+    const isLoginCall = url.includes('/api/auth/login')
+    if (status === 401 && !isLoginCall) {
+      clearAuthSession()
+      if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+        window.location.assign('/login')
+      }
+    }
+    return Promise.reject(error)
+  },
+)
+
 function extractError(err, fallback) {
   const detail = err?.response?.data?.detail
   if (typeof detail === 'string') return detail
@@ -14,6 +77,85 @@ function extractError(err, fallback) {
     return JSON.stringify(detail)
   }
   return err?.message || fallback
+}
+
+export { extractError }
+
+export const login = async ({ email, password }) => {
+  try {
+    const res = await api.post('/api/auth/login', { email, password })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Login failed'))
+  }
+}
+
+export const logout = async () => {
+  try {
+    const res = await api.post('/api/auth/logout')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Logout failed'))
+  } finally {
+    clearAuthSession()
+  }
+}
+
+export const getMe = async () => {
+  try {
+    const res = await api.get('/api/auth/me')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch profile'))
+  }
+}
+
+export const changePassword = async ({ current_password, new_password }) => {
+  try {
+    const res = await api.post('/api/auth/change-password', {
+      current_password,
+      new_password,
+    })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to change password'))
+  }
+}
+
+export const listUsers = async () => {
+  try {
+    const res = await api.get('/api/auth/users')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to list users'))
+  }
+}
+
+export const createUser = async ({ email, password, role }) => {
+  try {
+    const res = await api.post('/api/auth/users', { email, password, role })
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to create user'))
+  }
+}
+
+export const patchUser = async (userId, payload) => {
+  try {
+    const res = await api.patch(`/api/auth/users/${userId}`, payload)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to update user'))
+  }
+}
+
+export const deleteUser = async (userId) => {
+  try {
+    const res = await api.delete(`/api/auth/users/${userId}`)
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to delete user'))
+  }
 }
 
 export const connectAccount = async (data) => {

@@ -7,10 +7,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes_account import router as account_router
+from backend.api.routes_auth import router as auth_router
 from backend.api.routes_auto_trade import router as auto_trade_router
 from backend.api.routes_hedge import router as hedge_router
 from backend.api.routes_logs import router as logs_router
@@ -19,6 +20,7 @@ from backend.api.routes_strategy import router as strategy_router
 from backend.api.routes_structures import router as structures_router
 from backend.api.routes_trade import router as trade_router
 from backend.api.routes_ws import router as ws_router
+from backend.core.auth import require_user, require_user_for_slave
 from backend.core.bot_logger import setup_bot_logger
 from backend.core.db_audit import verify_db_consistency
 from backend.database import init_db
@@ -46,6 +48,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db()
     setup_bot_logger()
     logger.info("Database initialized / tables ready")
+
+    from backend.core.auth import get_auth_secret, seed_users
+
+    get_auth_secret()  # refuse to start without AUTH_SECRET_KEY
+    seed_users()
+    logger.info("Auth users seeded (idempotent)")
 
     try:
         from backend.core.time_utils import log_tz_audit
@@ -187,17 +195,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(account_router)
-app.include_router(strategy_router)
-app.include_router(trade_router)
-app.include_router(auto_trade_router)
-app.include_router(hedge_router)
-app.include_router(structures_router)
-app.include_router(slave_router)
-app.include_router(logs_router)
+app.include_router(auth_router)
+app.include_router(account_router, dependencies=[Depends(require_user)])
+app.include_router(strategy_router, dependencies=[Depends(require_user)])
+app.include_router(trade_router, dependencies=[Depends(require_user)])
+app.include_router(auto_trade_router, dependencies=[Depends(require_user)])
+app.include_router(hedge_router, dependencies=[Depends(require_user)])
+app.include_router(structures_router, dependencies=[Depends(require_user)])
+app.include_router(slave_router, dependencies=[Depends(require_user_for_slave)])
+app.include_router(logs_router, dependencies=[Depends(require_user)])
 try:
     from backend.api.routes_backtest import router as backtest_router
-    app.include_router(backtest_router, prefix="/api/backtest")
+    app.include_router(
+        backtest_router,
+        prefix="/api/backtest",
+        dependencies=[Depends(require_user)],
+    )
 except ImportError:
     pass  # pandas not available in production — backtest is local only
 app.include_router(ws_router)

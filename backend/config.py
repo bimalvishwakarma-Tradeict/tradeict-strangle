@@ -13,6 +13,8 @@ _ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT_DIR / ".env")
 
 APP_SECRET_KEY: str = os.getenv("APP_SECRET_KEY", "")
+# JWT HS256 secret for dashboard auth — must be set; no hardcoded fallback
+AUTH_SECRET_KEY: str = os.getenv("AUTH_SECRET_KEY", "")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./trading_bot.db")
 BACKEND_PORT: int = int(os.getenv("BACKEND_PORT", "8000"))
 FRONTEND_PORT: int = int(os.getenv("FRONTEND_PORT", "5173"))

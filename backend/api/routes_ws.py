@@ -71,14 +71,30 @@ async def _safe_send(websocket: WebSocket, payload: dict[str, Any]) -> bool:
 
 
 @router.websocket("/ws/trades")
-async def websocket_trades(websocket: WebSocket) -> None:
+async def websocket_trades(
+    websocket: WebSocket,
+    token: str | None = Query(default=None),
+) -> None:
     """
     Live trade feed.
 
+    Requires ?token=<JWT>. Rejects with code 1008 when missing/invalid.
     On connect: send INITIAL_STATE with all active trades.
     Every 20s without client message: send ping to keep connection alive.
     Frontend may ignore ping (no pong required).
     """
+    db = SessionLocal()
+    try:
+        from backend.core.auth import authenticate_ws_token
+
+        try:
+            authenticate_ws_token(token, db)
+        except ValueError:
+            await websocket.close(code=1008)
+            return
+    finally:
+        db.close()
+
     await ws_manager.connect(websocket)
     try:
         await ws_manager.send_personal(websocket, bot_engine.get_initial_state_payload())
