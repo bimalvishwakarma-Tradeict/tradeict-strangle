@@ -78,7 +78,10 @@ async def websocket_trades(
     """
     Live trade feed.
 
-    Requires ?token=<JWT>. Rejects with code 1008 when missing/invalid.
+    Auth is query-only (?token=JWT) — browsers cannot send Authorization on the
+    WebSocket handshake. No HTTPBearer / Depends(require_user) on this route.
+    Rejects with close code 1008 when token is missing/invalid (accept first so
+    the client sees 1008, not an HTTP 403 from a pre-accept close).
     On connect: send INITIAL_STATE with all active trades.
     Every 20s without client message: send ping to keep connection alive.
     Frontend may ignore ping (no pong required).
@@ -90,6 +93,9 @@ async def websocket_trades(
         try:
             authenticate_ws_token(token, db)
         except ValueError:
+            # Must accept before close — otherwise Starlette returns HTTP 403
+            # on the upgrade and the client never sees close code 1008.
+            await websocket.accept()
             await websocket.close(code=1008)
             return
     finally:

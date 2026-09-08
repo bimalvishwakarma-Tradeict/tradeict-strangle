@@ -1804,6 +1804,7 @@ class AutoTradeEngine:
                                 provisional_limit=call_prov_limit,
                                 leg="call",
                                 trade_id=None,
+                                quantity=int(spec.quantity),
                             )
                         )
                         filled_entry_legs[-1].sl_trigger_price = (
@@ -1835,6 +1836,7 @@ class AutoTradeEngine:
                                 provisional_limit=put_prov_limit,
                                 leg="put",
                                 trade_id=None,
+                                quantity=int(spec.quantity),
                             )
                         )
                         filled_entry_legs[-1].sl_trigger_price = (

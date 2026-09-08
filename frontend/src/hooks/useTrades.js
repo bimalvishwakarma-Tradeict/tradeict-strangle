@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useAuth } from '../auth/AuthContext'
 import { getActiveHedge, getActiveTrades } from '../services/api'
 import { OPTIONS_CONTRACT_VALUE } from '../utils/contractValue'
 import { useWebSocket } from './useWebSocket'
 
-const WS_URL = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/trades`
+const WS_BASE = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/trades`
 const POLL_INTERVAL_MS = 10000
 
 /** Short-option UPNL @ offer — same formula as Delta / backend. */
@@ -72,7 +73,12 @@ function resolveCalculatedPnl(trade, deltaUpnl) {
  * Prefers WebSocket; falls back to REST polling when disconnected.
  */
 export function useTrades() {
-  const { lastMessage, status: wsStatus } = useWebSocket(WS_URL)
+  const { token } = useAuth()
+  const wsUrl = useMemo(() => {
+    if (!token) return ''
+    return `${WS_BASE}?token=${encodeURIComponent(token)}`
+  }, [token])
+  const { lastMessage, status: wsStatus } = useWebSocket(wsUrl)
   const [tradeMap, setTradeMap] = useState(() => new Map())
   const [errors, setErrors] = useState({})
   const [adjustments, setAdjustments] = useState([])

@@ -11,6 +11,7 @@ import {
 import ConfirmDialog from '../components/ui/ConfirmDialog'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
 import Toast from '../components/ui/Toast'
+import { useAuth } from '../auth/AuthContext'
 import { useWebSocket } from '../hooks/useWebSocket'
 import {
   disableAutoTrade,
@@ -28,7 +29,7 @@ import {
 } from '../services/api'
 import { formatNextEntryWait } from '../utils/nextEntryLabel'
 
-const WS_URL = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/trades`
+const WS_BASE = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/trades`
 const STATUS_POLL_MS = 5000
 const PREVIEW_POLL_MS = 30000
 const PREVIEW_DEBOUNCE_MS = 500
@@ -265,7 +266,12 @@ function applyStatusToForm(data, setters) {
 }
 
 export default function AutoTrade() {
-  const { lastMessage } = useWebSocket(WS_URL)
+  const { token } = useAuth()
+  const wsUrl = useMemo(() => {
+    if (!token) return ''
+    return `${WS_BASE}?token=${encodeURIComponent(token)}`
+  }, [token])
+  const { lastMessage } = useWebSocket(wsUrl)
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)

@@ -73,17 +73,31 @@ function avgIv(a, b) {
   return vals.reduce((s, n) => s + n, 0) / vals.length
 }
 
-function MiniProgress({ label, pct, barClass, suffix }) {
-  const width = Math.min(100, Math.max(0, Math.abs(Number(pct) || 0)))
+function MiniProgress({ label, pct, barClass, suffix, signed = false }) {
+  const pctNum = Number(pct)
+  const hasPct = Number.isFinite(pctNum)
+  // Signed % kept for display; bar width clamped 0–100 for layout only.
+  const width = hasPct
+    ? Math.min(100, Math.max(0, Math.abs(pctNum)))
+    : 0
+  const positive = !hasPct || pctNum >= 0
+  const resolvedBarClass =
+    signed && hasPct
+      ? positive
+        ? 'bg-green-500/80'
+        : 'bg-red-500/80'
+      : barClass
+  const suffixClass =
+    signed && hasPct && !positive ? 'text-red-400' : undefined
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap items-baseline justify-between gap-1 text-[11px] text-gray-400">
         <span>{label}</span>
-        {suffix ? <span>{suffix}</span> : null}
+        {suffix ? <span className={suffixClass}>{suffix}</span> : null}
       </div>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-800">
         <div
-          className={`h-full rounded-full transition-all ${barClass}`}
+          className={`h-full rounded-full transition-all ${resolvedBarClass}`}
           style={{ width: `${width}%` }}
         />
       </div>
@@ -375,6 +389,7 @@ export default function HedgePanel({ hedge, onClosed, onUpdated }) {
             <MiniProgress
               label="Target progress"
               pct={pctTarget}
+              signed
               barClass="bg-green-500/80"
               suffix={
                 pctTarget != null

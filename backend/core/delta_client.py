@@ -1057,6 +1057,48 @@ class DeltaClient:
             "raw": result if isinstance(result, dict) else {},
         }
 
+    async def place_position_bracket(
+        self,
+        product_id: int,
+        bracket_stop_loss_price: float,
+        bracket_stop_loss_limit_price: float | None = None,
+        *,
+        stop_trigger_method: str = "mark_price",
+    ) -> dict[str, Any]:
+        """
+        POST /v2/orders/bracket — attach SL to an open POSITION.
+
+        Use after a market/IOC entry fill when the parent order is already
+        closed (PUT /v2/orders/bracket with entry order id → open_order_not_found).
+        Size is omitted: Delta brackets the entire position.
+        """
+        stop_px = round(float(bracket_stop_loss_price), 2)
+        limit_px = (
+            round(float(bracket_stop_loss_limit_price), 2)
+            if bracket_stop_loss_limit_price is not None
+            else round(stop_px * 1.05, 2)
+        )
+        if stop_px <= 0:
+            raise ValueError("place_position_bracket requires stop_price > 0")
+        body: dict[str, Any] = {
+            "product_id": int(product_id),
+            "stop_loss_order": {
+                "order_type": "limit_order",
+                "stop_price": str(stop_px),
+                "limit_price": str(limit_px),
+            },
+            "bracket_stop_trigger_method": str(
+                stop_trigger_method or "mark_price"
+            ),
+        }
+        result = await self._request(
+            "POST",
+            "/v2/orders/bracket",
+            body=body,
+            timeout=ORDER_TIMEOUT_SECONDS,
+        )
+        return result if isinstance(result, dict) else {"result": result}
+
     async def edit_bracket_order(
         self,
         order_id: int | str,
@@ -1065,10 +1107,10 @@ class DeltaClient:
         bracket_stop_loss_limit_price: float | None = None,
     ) -> dict[str, Any]:
         """
-        PUT /v2/orders/bracket — amend bracket SL attached to an order/position.
+        PUT /v2/orders/bracket — amend bracket params on an still-OPEN entry order.
 
-        After an IOC market fill the parent order is often no longer editable;
-        callers must treat failure as non-fatal and keep the provisional price.
+        Do not use after market/IOC fills — the parent order is gone. Prefer
+        place_position_bracket (POST) against the resulting position.
         """
         stop_px = round(float(bracket_stop_loss_price), 2)
         limit_px = (

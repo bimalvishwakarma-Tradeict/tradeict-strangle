@@ -108,6 +108,145 @@ def compute_sl_trigger_price(baseline_premium: float, universal_sl_pct: float) -
     return stop
 
 
+async def attach_position_bracket_sl(
+    delta_client: Any,
+    *,
+    product_id: int,
+    stop_price: float,
+    stop_limit_price: float,
+    leg: str = "",
+    trade_id: int | None = None,
+    quantity: int | None = None,
+    max_attempts: int = 3,
+) -> None:
+    """
+    Attach exchange bracket SL to the open POSITION (not the entry order).
+
+    Mirrors the stop/limit pairing used by OrderExecutor.sell_option, but uses
+    POST /v2/orders/bracket so market/IOC fills (parent order already gone)
+    still receive an exchange-side stop. Retries with backoff; on total failure
+    logs BRACKET_SL_FAILED as CRITICAL and broadcasts to the frontend — never
+    closes or alters the position.
+    """
+    import asyncio
+
+    pid = int(product_id or 0)
+    stop_px = round(float(stop_price or 0.0), 2)
+    limit_px = round(float(stop_limit_price or 0.0), 2)
+    if limit_px <= 0 and stop_px > 0:
+        limit_px = round(stop_px * 1.05, 2)
+    if delta_client is None or pid <= 0 or stop_px <= 0:
+        raise ValueError(
+            f"attach_position_bracket_sl invalid args "
+            f"product_id={pid} stop={stop_px}"
+        )
+
+    last_err: Exception | None = None
+    attempts = max(1, int(max_attempts))
+    for attempt in range(1, attempts + 1):
+        try:
+            await delta_client.place_position_bracket(
+                product_id=pid,
+                bracket_stop_loss_price=stop_px,
+                bracket_stop_loss_limit_price=limit_px,
+            )
+            logger.info(
+                "[BRACKET_SL] position bracket attached leg=%s "
+                "product_id=%s stop=%.2f limit=%.2f attempt=%s",
+                leg or "?",
+                pid,
+                stop_px,
+                limit_px,
+                attempt,
+            )
+            return
+        except Exception as exc:
+            last_err = exc
+            err_text = str(exc).lower()
+            # Already bracketed (e.g. inline entry attach succeeded) — OK.
+            if any(
+                token in err_text
+                for token in (
+                    "already",
+                    "duplicate",
+                    "bracket_order_exists",
+                    "existing_bracket",
+                )
+            ):
+                logger.info(
+                    "[BRACKET_SL] position already has bracket leg=%s "
+                    "product_id=%s — treating as success (%s)",
+                    leg or "?",
+                    pid,
+                    exc,
+                )
+                return
+            logger.warning(
+                "[BRACKET_SL] position attach failed leg=%s product_id=%s "
+                "attempt=%s/%s: %s",
+                leg or "?",
+                pid,
+                attempt,
+                attempts,
+                exc,
+            )
+            if attempt < attempts:
+                await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+
+    err_msg = str(last_err) if last_err is not None else "unknown"
+    payload = {
+        "leg": leg or "?",
+        "product_id": pid,
+        "qty": int(quantity) if quantity is not None else None,
+        "stop_price": stop_px,
+        "stop_limit_price": limit_px,
+        "delta_error": err_msg[:500],
+        "summary": (
+            f"[BRACKET_SL_FAILED] CRITICAL leg={leg or '?'} "
+            f"product_id={pid} qty={quantity} err={err_msg[:200]}"
+        ),
+    }
+    logger.critical(
+        "[BRACKET_SL_FAILED] leg=%s product_id=%s qty=%s err=%s",
+        leg or "?",
+        pid,
+        quantity,
+        err_msg,
+    )
+    try:
+        from backend.core.bot_logger import log_and_buffer
+
+        log_and_buffer("BRACKET_SL_FAILED", int(trade_id or 0), payload)
+    except Exception:
+        pass
+    try:
+        from backend.core.ws_manager import ws_manager
+
+        await ws_manager.broadcast(
+            {
+                "type": "ERROR",
+                "trade_id": int(trade_id or 0),
+                "message": (
+                    f"Exchange bracket SL FAILED for {leg or 'leg'} "
+                    f"(product {pid}): {err_msg[:300]}. "
+                    f"Position left open — software stop still active. "
+                    f"Place SL manually on Delta if needed."
+                ),
+                "requires_manual_action": True,
+                "severity": "CRITICAL",
+                "event": "BRACKET_SL_FAILED",
+                "leg": leg or "?",
+                "product_id": pid,
+                "qty": quantity,
+            }
+        )
+    except Exception as push_exc:
+        logger.error(
+            "Failed to broadcast BRACKET_SL_FAILED: %s", push_exc, exc_info=True
+        )
+    # Do not raise — caller must keep the position; software SL continues.
+
+
 async def finalize_bracket_sl_after_fill(
     delta_client: Any,
     *,
@@ -120,17 +259,20 @@ async def finalize_bracket_sl_after_fill(
     provisional_limit: float,
     leg: str = "",
     trade_id: int | None = None,
+    quantity: int | None = None,
 ) -> tuple[float, float]:
     """
-    After an entry fill, prefer fill-derived bracket SL; amend if needed.
+    After a short-leg fill, ensure exchange bracket SL is on the POSITION.
 
-    Chicken-and-egg: bracket must ship WITH the opening order before any fill
-    exists, so callers attach mark × uni_sl at place time (provisional_*).
-    Once the fill is known we compute fill-derived via compute_bracket_sl and
-    try PUT /v2/orders/bracket to amend. IOC parents are often already filled
-    and not editable — on amend failure we KEEP the mark-derived provisional
-    as the canonical absolute price for master AND slaves so they still match.
+    Chicken-and-egg: callers may ship mark × uni_sl on the entry order
+    (provisional_*). Once fill is known we compute fill-derived prices and
+    attach via POST /v2/orders/bracket (same stop/limit pairing as
+    OrderExecutor.sell_option). We never PUT-amend the entry order id —
+    market/IOC parents are already gone (open_order_not_found).
+
+    entry_order_id is retained for call-site compatibility only (unused).
     """
+    _ = entry_order_id  # legacy kw; position attach does not need it
     fill_stop, fill_limit = compute_bracket_sl(
         float(fill_price or 0.0),
         float(universal_sl_pct or 200.0),
@@ -140,44 +282,50 @@ async def finalize_bracket_sl_after_fill(
     )
     prov_stop = float(provisional_stop or 0.0)
     prov_limit = float(provisional_limit or 0.0)
-    if fill_stop <= 0:
-        return prov_stop, prov_limit
-    if prov_stop <= 0 or abs(fill_stop - prov_stop) < 0.01:
-        return fill_stop, fill_limit
 
-    if entry_order_id is None or int(product_id or 0) <= 0 or delta_client is None:
-        logger.warning(
-            "[BRACKET_SL] cannot amend leg=%s — keeping mark-derived %.2f",
-            leg,
-            prov_stop,
-        )
-        return prov_stop, prov_limit
+    stop_px = fill_stop if fill_stop > 0 else prov_stop
+    limit_px = fill_limit if fill_limit > 0 else prov_limit
+    if stop_px <= 0:
+        return 0.0, 0.0
+    if limit_px <= 0:
+        limit_px = round(stop_px * 1.05, 2)
 
-    try:
-        await delta_client.edit_bracket_order(
-            order_id=entry_order_id,
-            product_id=int(product_id),
-            bracket_stop_loss_price=fill_stop,
-            bracket_stop_loss_limit_price=fill_limit,
-        )
-        logger.info(
-            "[BRACKET_SL] amended leg=%s order=%s mark_stop=%.2f → fill_stop=%.2f",
+    if int(product_id or 0) <= 0 or delta_client is None:
+        logger.critical(
+            "[BRACKET_SL_FAILED] cannot attach leg=%s — missing client/product",
             leg,
-            entry_order_id,
-            prov_stop,
-            fill_stop,
         )
-        return fill_stop, fill_limit
-    except Exception as amend_exc:
-        logger.warning(
-            "[BRACKET_SL] amend failed leg=%s order=%s (%s) — "
-            "keeping mark-derived %.2f as canonical for master+slaves",
-            leg,
-            entry_order_id,
-            amend_exc,
-            prov_stop,
-        )
-        return prov_stop, prov_limit
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "BRACKET_SL_FAILED",
+                int(trade_id or 0),
+                {
+                    "leg": leg or "?",
+                    "product_id": int(product_id or 0),
+                    "qty": quantity,
+                    "delta_error": "missing_client_or_product_id",
+                    "summary": (
+                        f"[BRACKET_SL_FAILED] CRITICAL leg={leg or '?'} "
+                        "missing client/product_id"
+                    ),
+                },
+            )
+        except Exception:
+            pass
+        return stop_px, limit_px
+
+    await attach_position_bracket_sl(
+        delta_client,
+        product_id=int(product_id),
+        stop_price=stop_px,
+        stop_limit_price=limit_px,
+        leg=leg,
+        trade_id=trade_id,
+        quantity=quantity,
+    )
+    return stop_px, limit_px
 
 
 async def cancel_leg_sl_order(
