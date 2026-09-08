@@ -377,6 +377,51 @@ class MirrorEngine:
         api_secret = decrypt(slave.api_secret_encrypted)
         return DeltaClient(api_key, api_secret)
 
+    @staticmethod
+    def _slave_is_paused(slave: SlaveAccount | None) -> bool:
+        """True when slave_accounts.is_active is False (paused)."""
+        if slave is None:
+            return True
+        return not bool(getattr(slave, "is_active", False))
+
+    def _skip_paused_open(
+        self,
+        slave: SlaveAccount | None,
+        *,
+        op: str,
+        ref_id: int = 0,
+    ) -> bool:
+        """
+        Hard gate for OPENING paths only.
+
+        Returns True when the caller must refuse to place new orders.
+        Closing existing positions must NOT call this — paused slaves may exit.
+        """
+        if not self._slave_is_paused(slave):
+            return False
+        sid = int(getattr(slave, "id", 0) or 0) if slave is not None else 0
+        sname = str(getattr(slave, "name", "") or "") if slave is not None else ""
+        log_and_buffer(
+            "SLAVE_SKIP_PAUSED",
+            int(ref_id or sid or 0),
+            {
+                "slave": sid,
+                "slave_name": sname,
+                "op": op,
+                "summary": (
+                    f"[SLAVE_SKIP_PAUSED] slave={sid} ({sname}) op={op} "
+                    "— is_active=False, no new orders"
+                ),
+            },
+        )
+        logger.warning(
+            "[SLAVE_SKIP_PAUSED] slave=%s (%s) op=%s — refused new orders",
+            sid,
+            sname,
+            op,
+        )
+        return True
+
     def _close_slave_trade(
         self,
         slave: SlaveAccount | None,
@@ -1158,6 +1203,11 @@ class MirrorEngine:
         wing_put_fill: float | None = None,
     ) -> None:
         # Caller MUST hold the per-slave lock.
+        if self._skip_paused_open(
+            slave, op="mirror_trade_entry", ref_id=int(master_trade_id)
+        ):
+            return
+
         master_hedge_id = self._resolve_master_hedge_id_for_trade(
             db, int(master_trade_id)
         )
@@ -2572,7 +2622,13 @@ class MirrorEngine:
                     .filter(SlaveAccount.id == slave_trade.slave_account_id)
                     .first()
                 )
-                if not slave or not slave.is_active:
+                if slave is None:
+                    continue
+                if self._skip_paused_open(
+                    slave,
+                    op="mirror_adjustment",
+                    ref_id=int(master_trade_id),
+                ):
                     continue
 
                 async with self._slave_op_lock(
@@ -4001,7 +4057,13 @@ class MirrorEngine:
                     .filter(SlaveAccount.id == slave_trade.slave_account_id)
                     .first()
                 )
-                if not slave or not slave.is_active:
+                if slave is None:
+                    continue
+                if self._skip_paused_open(
+                    slave,
+                    op="mirror_conversion",
+                    ref_id=int(master_trade_id),
+                ):
                     continue
 
                 async with self._slave_op_lock(
@@ -4702,6 +4764,11 @@ class MirrorEngine:
 
         Caller MUST hold the per-slave lock.
         """
+        if self._skip_paused_open(
+            slave, op="mirror_hedge_open", ref_id=int(master_hedge_id)
+        ):
+            return "skipped"
+
         slave_id = int(slave.id)
         # Any live slave hedge blocks a second open (roll race / blocked close)
         existing_any = (
@@ -5572,7 +5639,8 @@ class MirrorEngine:
                     .filter(SlaveAccount.id == sid)
                     .first()
                 )
-                if slave is None or not bool(getattr(slave, "is_active", True)):
+                # Closing must run even when paused — never trap a customer.
+                if slave is None:
                     blocked += 1
                     continue
 
@@ -6480,8 +6548,10 @@ class MirrorEngine:
                     .filter(SlaveAccount.id == slave_trade.slave_account_id)
                     .first()
                 )
-                if not slave or not slave.is_active:
+                if slave is None:
                     continue
+                # Closing conversion hedge is allowed on paused slaves.
+
                 async with self._slave_op_lock(
                     int(slave.id), "mirror_conversion_hedge_close"
                 ) as acquired:
@@ -6747,13 +6817,14 @@ class MirrorEngine:
                     .filter(SlaveAccount.id == slave_trade.slave_account_id)
                     .first()
                 )
-                if not slave or not slave.is_active:
+                if slave is None:
                     slaves_failed += 1
                     if failure_status:
                         slave_trade.status = failure_status
                         slave_trade.last_updated = get_utc_now()
                         db.commit()
                     continue
+                # Leg close is an EXIT — allowed when paused.
 
                 async with self._slave_op_lock(
                     int(slave.id), "mirror_leg_close"
@@ -8533,8 +8604,9 @@ class MirrorEngine:
                     .filter(SlaveAccount.id == slave_trade.slave_account_id)
                     .first()
                 )
-                if slave is None or not slave.is_active:
+                if slave is None:
                     continue
+                # Paused slaves with open books still need live MTM.
 
                 call_pid = getattr(slave_trade, "call_product_id", None)
                 put_pid = getattr(slave_trade, "put_product_id", None)
@@ -8920,6 +8992,9 @@ class MirrorEngine:
         with_hedge = 0
         without_hedge = 0
         baskets_open = 0
+        vanished = 0
+        diverged = 0
+        skipped_error = 0
 
         with self.db_factory() as db:
             active_slaves = get_active_slave_accounts(db)
@@ -9112,6 +9187,12 @@ class MirrorEngine:
                         getattr(refreshed, "status", None),
                     )
 
+            # Reverse direction: DB-active / Delta-flat (or reduced). Never places orders.
+            vanish_stats = await self._reconcile_vanished_slave_hedges(db)
+            vanished = int(vanish_stats.get("vanished") or 0)
+            diverged = int(vanish_stats.get("diverged") or 0)
+            skipped_error = int(vanish_stats.get("skipped_error") or 0)
+
         log_and_buffer(
             "SLAVE_HEDGE_HEALTH",
             0,
@@ -9122,16 +9203,23 @@ class MirrorEngine:
                 "baskets_open": baskets_open,
                 "orphans_found": orphans_found,
                 "orphans_closed": orphans_closed,
+                "vanished": vanished,
+                "diverged": diverged,
+                "skipped_error": skipped_error,
             },
         )
         logger.info(
             "[SLAVE_HEDGE_HEALTH] slaves_active=%s | with_hedge=%s | "
-            "without_hedge=%s | baskets_open=%s | orphans_found=%s",
+            "without_hedge=%s | baskets_open=%s | orphans_found=%s | "
+            "vanished=%s | diverged=%s | skipped_error=%s",
             slaves_active,
             with_hedge,
             without_hedge,
             baskets_open,
             orphans_found,
+            vanished,
+            diverged,
+            skipped_error,
         )
         return {
             "slaves_active": slaves_active,
@@ -9140,6 +9228,192 @@ class MirrorEngine:
             "baskets_open": baskets_open,
             "orphans_found": orphans_found,
             "orphans_closed": orphans_closed,
+            "vanished": vanished,
+            "diverged": diverged,
+            "skipped_error": skipped_error,
+        }
+
+    async def _reconcile_vanished_slave_hedges(
+        self, db: Any
+    ) -> dict[str, int]:
+        """
+        Detect slave_hedge_positions that are active in DB but flat/reduced on Delta.
+
+        ABSOLUTE RULE: never places an order — DB correction + alert only.
+        One positions fetch per slave per sweep. Skips connection_status=error.
+        """
+        vanished = 0
+        diverged = 0
+        skipped_error = 0
+
+        active_rows = (
+            db.query(SlaveHedgePosition)
+            .filter(
+                SlaveHedgePosition.status.in_(("active", "pending_close"))
+            )
+            .order_by(SlaveHedgePosition.slave_account_id.asc())
+            .all()
+        )
+        if not active_rows:
+            return {
+                "vanished": 0,
+                "diverged": 0,
+                "skipped_error": 0,
+            }
+
+        by_slave: dict[int, list[SlaveHedgePosition]] = {}
+        for sh in active_rows:
+            sid = int(sh.slave_account_id)
+            by_slave.setdefault(sid, []).append(sh)
+
+        for sid, hedges in by_slave.items():
+            slave = (
+                db.query(SlaveAccount)
+                .filter(SlaveAccount.id == sid)
+                .first()
+            )
+            if slave is None:
+                continue
+            if bool(getattr(slave, "is_virtual", False)):
+                continue
+            if str(getattr(slave, "connection_status", "") or "") == "error":
+                skipped_error += 1
+                log_and_buffer(
+                    "SLAVE_HEDGE_HEALTH",
+                    sid,
+                    {
+                        "slave": sid,
+                        "slave_name": str(getattr(slave, "name", "") or ""),
+                        "skip": "connection_status=error",
+                        "summary": (
+                            f"[SLAVE_HEDGE_HEALTH] skip vanished-check "
+                            f"slave={sid} connection_status=error"
+                        ),
+                    },
+                )
+                continue
+
+            client = self._get_slave_client(slave)
+            try:
+                try:
+                    positions = await client.get_option_positions()
+                except Exception as fetch_exc:
+                    logger.warning(
+                        "[SLAVE_HEDGE_HEALTH] positions fetch failed "
+                        "slave=%s: %s — skip this sweep",
+                        sid,
+                        fetch_exc,
+                    )
+                    continue
+
+                for sh in hedges:
+                    call_pid = int(getattr(sh, "call_product_id", 0) or 0)
+                    put_pid = int(getattr(sh, "put_product_id", 0) or 0)
+                    db_qty = max(0, int(getattr(sh, "quantity", 0) or 0))
+                    if call_pid <= 0 or put_pid <= 0 or db_qty <= 0:
+                        continue
+
+                    call_sz = abs(
+                        float(
+                            self._position_size_for_product(positions, call_pid)
+                            or 0.0
+                        )
+                    )
+                    put_sz = abs(
+                        float(
+                            self._position_size_for_product(positions, put_pid)
+                            or 0.0
+                        )
+                    )
+                    live_qty = int(round(max(call_sz, put_sz)))
+
+                    if live_qty == 0:
+                        sh.status = "closed"
+                        sh.exit_reason = "EXTERNAL_CLOSE"
+                        sh.exit_time = get_utc_now()
+                        # Never book 0.0 when fills are unavailable
+                        sh.realized_pnl = None
+                        sh.last_error = (
+                            "DB-active hedge flat on Delta "
+                            "(SLAVE_POSITION_VANISHED)"
+                        )[:500]
+                        vanished += 1
+                        log_and_buffer(
+                            "SLAVE_POSITION_VANISHED",
+                            int(getattr(sh, "id", 0) or 0),
+                            {
+                                "slave": sid,
+                                "slave_name": str(
+                                    getattr(slave, "name", "") or ""
+                                ),
+                                "slave_hedge_id": int(getattr(sh, "id", 0) or 0),
+                                "master_hedge_id": int(
+                                    getattr(sh, "master_hedge_id", 0) or 0
+                                ),
+                                "db_qty": db_qty,
+                                "call_pid": call_pid,
+                                "put_pid": put_pid,
+                                "summary": (
+                                    f"[SLAVE_POSITION_VANISHED] CRITICAL "
+                                    f"slave={sid} hedge={sh.id} db_qty={db_qty} "
+                                    f"delta=0 — marked closed, realized=NULL"
+                                ),
+                            },
+                        )
+                        logger.critical(
+                            "[SLAVE_POSITION_VANISHED] slave=%s hedge=%s "
+                            "db_qty=%s delta=0 — DB marked closed (no orders)",
+                            sid,
+                            getattr(sh, "id", None),
+                            db_qty,
+                        )
+                    elif 0 < live_qty < db_qty:
+                        sh.quantity = live_qty
+                        sh.last_error = (
+                            f"Qty corrected DB {db_qty}→{live_qty} "
+                            "(SLAVE_QTY_DIVERGED)"
+                        )[:500]
+                        diverged += 1
+                        log_and_buffer(
+                            "SLAVE_QTY_DIVERGED",
+                            int(getattr(sh, "id", 0) or 0),
+                            {
+                                "slave": sid,
+                                "slave_name": str(
+                                    getattr(slave, "name", "") or ""
+                                ),
+                                "slave_hedge_id": int(getattr(sh, "id", 0) or 0),
+                                "master_hedge_id": int(
+                                    getattr(sh, "master_hedge_id", 0) or 0
+                                ),
+                                "db_qty_was": db_qty,
+                                "delta_qty": live_qty,
+                                "call_sz": call_sz,
+                                "put_sz": put_sz,
+                                "summary": (
+                                    f"[SLAVE_QTY_DIVERGED] CRITICAL slave={sid} "
+                                    f"hedge={sh.id} db={db_qty}→delta={live_qty} "
+                                    f"— qty corrected, no orders"
+                                ),
+                            },
+                        )
+                        logger.critical(
+                            "[SLAVE_QTY_DIVERGED] slave=%s hedge=%s "
+                            "db_qty=%s→%s — corrected (no orders)",
+                            sid,
+                            getattr(sh, "id", None),
+                            db_qty,
+                            live_qty,
+                        )
+                if vanished or diverged:
+                    db.commit()
+            finally:
+                await client.close()
+
+        return {
+            "vanished": vanished,
+            "diverged": diverged,
+            "skipped_error": skipped_error,
         }
 
     async def sweep_open_slave_trades(self) -> dict[str, int]:
@@ -9751,8 +10025,9 @@ class MirrorEngine:
 
                 # Re-attempt unwind for naked / partial-entry leftovers
                 if st.status in ("partial_entry_open", "partial_adjustment"):
-                    if slave is None or not slave.is_active:
+                    if slave is None:
                         continue
+                    # Unwind leftover size is a CLOSE — allowed when paused.
                     if is_virtual_slave_trade(slave, st):
                         continue
                     async with self._slave_op_lock(
@@ -9799,7 +10074,15 @@ class MirrorEngine:
                     and "blocked_foreign" not in err
                     and "skipped_low_capital" not in err
                 )
-                if not retriable or slave is None or not slave.is_active:
+                if (
+                    not retriable
+                    or slave is None
+                    or self._skip_paused_open(
+                        slave,
+                        op="integrity_entry_retry",
+                        ref_id=int(master_trade_id),
+                    )
+                ):
                     continue
                 if is_virtual_slave_trade(slave, st):
                     continue
@@ -9894,8 +10177,9 @@ class MirrorEngine:
                     .filter(SlaveAccount.id == slave_trade.slave_account_id)
                     .first()
                 )
-                if not slave or not slave.is_active:
+                if slave is None:
                     continue
+                # Integrity may close naked leftovers — allowed when paused.
 
                 # Permanent guard: never integrity-close virtual/paper trades
                 if is_virtual_slave_trade(slave, slave_trade):

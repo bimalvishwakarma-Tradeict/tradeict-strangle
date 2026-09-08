@@ -720,7 +720,8 @@ def _audit_slave_hedge_pnl_suspect(
 
 
 def _active_trade_count(db: Session, slave_id: int) -> int:
-    return (
+    """Count open baskets + open hedges (either means the slave is not flat)."""
+    baskets = (
         db.query(SlaveTrade)
         .filter(
             SlaveTrade.slave_account_id == slave_id,
@@ -728,6 +729,20 @@ def _active_trade_count(db: Session, slave_id: int) -> int:
         )
         .count()
     )
+    hedges = (
+        db.query(SlaveHedgePosition)
+        .filter(
+            SlaveHedgePosition.slave_account_id == int(slave_id),
+            SlaveHedgePosition.status.in_(("active", "pending_close")),
+        )
+        .count()
+    )
+    return int(baskets) + int(hedges)
+
+
+def _slave_has_open_position(db: Session, slave_id: int) -> bool:
+    """True when the slave has any open basket or hedge row."""
+    return _active_trade_count(db, slave_id) > 0
 
 
 def _latest_slave_structure_close(db: Session, slave_id: int) -> dict[str, Any]:
@@ -1220,6 +1235,21 @@ async def copy_master_trade_to_slave(
         raise HTTPException(status_code=404, detail="Slave account not found")
 
     if not slave.is_active:
+        from backend.core.bot_logger import log_and_buffer
+
+        log_and_buffer(
+            "SLAVE_SKIP_PAUSED",
+            int(slave_id),
+            {
+                "slave": int(slave_id),
+                "slave_name": str(slave.name or ""),
+                "op": "copy_master_trade",
+                "summary": (
+                    f"[SLAVE_SKIP_PAUSED] slave={slave_id} "
+                    "op=copy_master_trade — is_active=False"
+                ),
+            },
+        )
         raise HTTPException(status_code=400, detail="Slave account is paused")
 
     me = mirror_module.mirror_engine
@@ -1755,14 +1785,16 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
 
     for slave in slaves:
         is_virtual = bool(getattr(slave, "is_virtual", False))
-        # Refresh balance opportunistically (skip for virtual — no real Delta)
+        has_open_position = _slave_has_open_position(db, int(slave.id))
+        # Refresh balance opportunistically (skip for virtual — no real Delta).
+        # Paused slaves WITH an open position still refresh — they must show MTM.
         bal_usd = float(slave.balance_usd or 0.0)
         avail_usd: float | None = None
         blocked_usd: float | None = None
         slave_wallet: dict[str, float] | None = None
         if (
             not is_virtual
-            and slave.is_active
+            and (slave.is_active or has_open_position)
             and slave.connection_status != "error"
         ):
             try:
@@ -2114,6 +2146,70 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 hedge_missing=slave_hedge_missing,
             )
 
+        # Hedge-only (no active basket): still expose structure for paused/live UI
+        if slave_trade_data is None:
+            hedge_only = (
+                db.query(SlaveHedgePosition)
+                .filter(
+                    SlaveHedgePosition.slave_account_id == int(slave.id),
+                    SlaveHedgePosition.status.in_(("active", "pending_close")),
+                )
+                .order_by(SlaveHedgePosition.id.desc())
+                .first()
+            )
+            if hedge_only is not None:
+                hedge_net = getattr(hedge_only, "hedge_net_mtm", None)
+                hedge_net_f = (
+                    float(hedge_net)
+                    if hedge_net is not None and str(hedge_net) != ""
+                    else None
+                )
+                hedge_at = getattr(hedge_only, "hedge_mtm_computed_at", None)
+                hedge_block = _hedge_payload(
+                    slave_hedge=hedge_only,
+                    call_now=None,
+                    put_now=None,
+                    hedge_net_mtm=hedge_net_f,
+                    source="stored" if hedge_net_f is not None else None,
+                    hedge_computed_at=hedge_at,
+                )
+                slave_trade_data = {
+                    "slave_trade_id": None,
+                    "master_trade_id": None,
+                    "actual_quantity": int(getattr(hedge_only, "quantity", 1) or 1),
+                    "hedge_only": True,
+                    "status": "active",
+                    "gross_mtm": hedge_net_f,
+                    "last_mtm": hedge_net_f,
+                    "net_mtm": hedge_net_f,
+                    "mtm_source": "hedge_only",
+                    "realized_pnl": None,
+                    "last_updated": _iso(hedge_at),
+                    "underlying": getattr(hedge_only, "underlying", None),
+                    "expiry_date": str(
+                        getattr(hedge_only, "expiry_date", "") or ""
+                    ),
+                    "call_strike": float(getattr(hedge_only, "strike", 0) or 0),
+                    "put_strike": float(getattr(hedge_only, "strike", 0) or 0),
+                    "profit_target_usd": (
+                        float(hedge_only.target_usd)
+                        if getattr(hedge_only, "target_usd", None) is not None
+                        else None
+                    ),
+                    "legs": _hedge_legs(hedge_only, call_now=None, put_now=None),
+                    "hedge": hedge_block,
+                    "pnl": _build_pnl_block(
+                        hedge_net=hedge_net_f if hedge_net_f is not None else 0.0,
+                        short_gross=0.0,
+                        wing_gross=0.0,
+                        basket_net=0.0,
+                        closed_basket=0.0,
+                        computed_at=_iso(hedge_at),
+                        stale_seconds=None,
+                        hedge_missing=False,
+                    ),
+                }
+
         slaves_data.append(
             {
                 "id": int(slave.id),
@@ -2146,7 +2242,11 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                             "available_balance": float(avail_usd or 0.0),
                             "position_margin": float(blocked_usd or 0.0),
                         }
-                        if not is_virtual and slave.is_active and bal_usd > 0
+                        if (
+                            not is_virtual
+                            and (slave.is_active or has_open_position)
+                            and bal_usd > 0
+                        )
                         else None
                     ),
                     account_id=int(slave.id),
@@ -2156,6 +2256,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "last_error": slave.last_error,
                 "last_connected_at": _iso(slave.last_connected_at),
                 "active_slave_trade": slave_trade_data,
+                "has_open_position": has_open_position,
                 **_latest_slave_structure_close(db, int(slave.id)),
             }
         )

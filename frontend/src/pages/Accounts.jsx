@@ -282,9 +282,11 @@ function SlaveCard({
   return (
     <div
       className={`rounded-xl border p-4 ${
-        paused
+        paused && !hasActiveTrade
           ? 'border-gray-700 bg-gray-900/40 opacity-70'
-          : 'border-gray-700 bg-gray-800/60'
+          : paused && hasActiveTrade
+            ? 'border-amber-700/50 bg-gray-800/60'
+            : 'border-gray-700 bg-gray-800/60'
       }`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -301,6 +303,11 @@ function SlaveCard({
                 ● Active
               </span>
             )}
+            {paused && hasActiveTrade ? (
+              <span className="rounded bg-amber-900/50 px-2 py-0.5 text-xs text-amber-200">
+                position open
+              </span>
+            ) : null}
           </div>
           <div className="mt-1 text-sm text-gray-300">
             Balance: ${formatUsd(slave.balance_usd)} · ₹
@@ -309,8 +316,10 @@ function SlaveCard({
           </div>
           <div className="mt-0.5 text-xs text-gray-500">
             {hasActiveTrade
-              ? `Active trade: ${slave.active_trade_count ?? 1}`
-              : 'No active trade'}
+              ? `Open position: ${slave.active_trade_count ?? 1}`
+              : paused
+                ? 'Paused — no open position'
+                : 'No active trade'}
           </div>
           {slave.connection_status === 'error' && slave.last_error ? (
             <div className="mt-1 text-xs text-red-400">❌ {slave.last_error}</div>

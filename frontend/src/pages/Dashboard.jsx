@@ -747,7 +747,9 @@ function AccountOverviewRow({
             </span>
           )}
           {statusKind === 'paused' && (
-            <span className="text-gray-400">⚪ Paused</span>
+            <span className="text-gray-400" title={statusText || undefined}>
+              ⚪ {statusText ? truncateName(statusText, 22) : 'Paused'}
+            </span>
           )}
           {statusKind === 'offline' && (
             <span className="text-gray-500">⚪ Offline</span>
@@ -953,10 +955,16 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
 
             {slaves.map((slave) => {
               const st = slave.active_slave_trade
+              const hasPosition = Boolean(
+                st || slave.has_open_position || slave.has_active_trade,
+              )
               let statusKind = 'ready'
               let statusText = ''
               if (!slave.is_active) {
                 statusKind = 'paused'
+                if (hasPosition) {
+                  statusText = 'PAUSED — position open'
+                }
               } else if (slave.connection_status === 'error') {
                 statusKind = 'error'
                 statusText = slave.last_error || 'Error'
@@ -965,20 +973,26 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
               }
 
               const key = `slave-${slave.id}`
+              const hideBalances =
+                statusKind === 'error' || (!slave.is_active && !hasPosition)
               const slaveStructureMtm =
                 st?.pnl?.structure_net != null &&
                 Number.isFinite(Number(st.pnl.structure_net))
                   ? Number(st.pnl.structure_net)
-                  : null
+                  : st?.net_mtm != null && Number.isFinite(Number(st.net_mtm))
+                    ? Number(st.net_mtm)
+                    : null
 
               const expandWithActions = (
                 <div className="space-y-0">
                   <StructureOverviewExpand
                     trade={st}
                     emptyLabel={
-                      slave.is_active
-                        ? 'No open structure'
-                        : 'Account paused — not mirroring'
+                      !slave.is_active && !hasPosition
+                        ? 'Paused — no open position'
+                        : slave.is_active
+                          ? 'No open structure'
+                          : 'PAUSED — showing open position'
                     }
                   />
                   <ForceCloseSlaveAction
@@ -997,41 +1011,43 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                   statusKind={statusKind}
                   statusText={statusText}
                   actualBalance={
-                    statusKind === 'error' || !slave.is_active
+                    hideBalances
                       ? null
                       : slave.actual_balance ?? slave.balance_usd
                   }
                   actualBalanceInr={
-                    statusKind === 'error' || !slave.is_active
+                    hideBalances
                       ? null
                       : slave.actual_balance_inr ?? slave.balance_inr
                   }
                   blockedAmount={
-                    statusKind === 'error' || !slave.is_active
+                    hideBalances
                       ? null
                       : slave.blocked_amount ?? slave.blocked_usd
                   }
                   blockedAmountInr={
-                    statusKind === 'error' || !slave.is_active
+                    hideBalances
                       ? null
                       : slave.blocked_amount_inr ?? slave.blocked_inr
                   }
                   freeCash={
-                    statusKind === 'error' || !slave.is_active
+                    hideBalances
                       ? null
                       : slave.free_cash ??
                         slave.available_balance ??
                         slave.available_usd
                   }
                   freeCashInr={
-                    statusKind === 'error' || !slave.is_active
+                    hideBalances
                       ? null
                       : slave.free_cash_inr ??
                         slave.available_balance_inr ??
                         slave.available_inr
                   }
-                  dailyGrowthPct={slave.daily_growth_pct}
-                  netMtm={st ? slaveStructureMtm : null}
+                  dailyGrowthPct={
+                    hideBalances ? null : slave.daily_growth_pct
+                  }
+                  netMtm={hasPosition ? slaveStructureMtm : null}
                   mtmLabel="Structure MTM"
                   mtmSource={st?.mtm_source ?? null}
                   staleSeconds={st?.pnl?.stale_seconds ?? st?.stale_seconds}
@@ -1043,7 +1059,7 @@ function MultiAccountOverview({ overview, onRefresh, activeHedge }) {
                       ? 'border-l-2 border-l-red-500'
                       : 'border-l-2 border-l-blue-500'
                   }
-                  dimmed={!slave.is_active || statusKind === 'ready'}
+                  dimmed={!slave.is_active && !hasPosition}
                   expandContent={expandWithActions}
                 />
               )
