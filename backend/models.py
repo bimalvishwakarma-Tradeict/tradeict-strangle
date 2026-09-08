@@ -789,6 +789,9 @@ class HedgePosition(Base):
     entry_put_iv: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Master margin per lot — used later for slave sizing
     order_margin_per_lot: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Frozen master wallet total for slave capital-based sizing (set once per
+    # structure before slave hedge sizing; never re-derived mid-structure).
+    slave_ref_capital_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Long-hedge MTM mirrors short-basket net_mtm / gross_mtm_for_stoploss
     # (calculation + logging only — no exit triggers use these yet)

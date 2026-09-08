@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -20,7 +22,13 @@ from backend.core.encryption import decrypt
 from backend.core.fees import compute_entry_spread_usd
 from backend.core.time_utils import get_utc_now
 from backend.database import SessionLocal, get_active_slave_accounts
-from backend.models import SlaveAccount, SlaveHedgePosition, SlaveTrade, Trade
+from backend.models import (
+    HedgePosition,
+    SlaveAccount,
+    SlaveHedgePosition,
+    SlaveTrade,
+    Trade,
+)
 from backend.config import MAX_SLAVE_QTY, OPTIONS_CONTRACT_VALUE, ExitReason, TradeStatus
 
 logger = logging.getLogger(__name__)
@@ -512,7 +520,7 @@ class MirrorEngine:
         Portfolio-margin accounts often report used/position_margin = 0 (or
         even available > balance) while many options are open — that is a
         valid Delta response, not a race. Sizing uses total only
-        (qty = floor(effective * mq / total)); used is audit-only.
+        (qty = round_half_up(effective * mq / total)); used is audit-only.
 
         Failure: only when total <= 0 (or the request raises).
         """
@@ -580,6 +588,102 @@ class MirrorEngine:
             open_count,
         )
         return result
+
+    @staticmethod
+    def _round_lots_half_up(raw: float) -> int:
+        """Round a positive lot ratio to nearest whole lot (half-up, not ceil)."""
+        if not math.isfinite(raw) or raw <= 0:
+            return 0
+        return int(
+            Decimal(str(raw)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+
+    async def _get_or_freeze_slave_ref_capital(
+        self,
+        db: Any,
+        *,
+        master_hedge_id: int,
+        master_account_id: int | None = None,
+        ref_id: int = 0,
+    ) -> tuple[float | None, bool, float | None]:
+        """
+        Return (slave_ref_capital_usd, fetch_failed, master_used_audit).
+
+        Prefer HedgePosition.slave_ref_capital_usd. If unset, fetch master
+        wallet total once, persist it on the hedge row, and log
+        SLAVE_REF_CAPITAL_FROZEN. Never re-derive after freeze.
+        """
+        hedge = (
+            db.query(HedgePosition)
+            .filter(HedgePosition.id == int(master_hedge_id))
+            .first()
+        )
+        if hedge is None:
+            return None, True, None
+
+        frozen = getattr(hedge, "slave_ref_capital_usd", None)
+        if frozen is not None and float(frozen) > 0:
+            return float(frozen), False, None
+
+        # First sizing for this structure — capture once and persist.
+        from backend.models import Account
+
+        master_acc = None
+        if master_account_id is not None:
+            master_acc = (
+                db.query(Account)
+                .filter(Account.id == int(master_account_id))
+                .first()
+            )
+        if master_acc is None:
+            master_acc = (
+                db.query(Account)
+                .filter(Account.is_active.is_(True))
+                .order_by(Account.id.asc())
+                .first()
+            )
+        if master_acc is None:
+            return None, True, None
+
+        client = DeltaClient(
+            decrypt(master_acc.api_key_encrypted),
+            decrypt(master_acc.api_secret_encrypted),
+        )
+        try:
+            cap = await self._fetch_master_capital_for_basket_sizing(
+                master_client=client,
+                master_trade_id=int(ref_id or master_hedge_id),
+            )
+        finally:
+            await client.close()
+
+        if bool(cap.get("failed")) or float(cap.get("total") or 0) <= 0:
+            return None, True, float(cap.get("used") or 0) or None
+
+        total = float(cap["total"])
+        used = float(cap.get("used") or 0)
+        hedge.slave_ref_capital_usd = total
+        db.commit()
+        db.refresh(hedge)
+        log_and_buffer(
+            "SLAVE_REF_CAPITAL_FROZEN",
+            int(ref_id or master_hedge_id),
+            {
+                "master_hedge_id": int(master_hedge_id),
+                "slave_ref_capital_usd": round(total, 4),
+                "master_used_audit": round(used, 4),
+                "summary": (
+                    f"[SLAVE_REF_CAPITAL_FROZEN] hedge={master_hedge_id} "
+                    f"ref=${total:.4f} — reused for all slave sizing"
+                ),
+            },
+        )
+        logger.info(
+            "[SLAVE_REF_CAPITAL_FROZEN] hedge=%s ref=$%.4f",
+            master_hedge_id,
+            total,
+        )
+        return total, False, used
 
     def _calc_qty(
         self,
@@ -697,25 +801,29 @@ class MirrorEngine:
                 )
                 return 0
 
-            # qty = floor(effective * mq / master_total)
+            # qty = round_half_up(effective * mq / master_total)
             # master_used cancels out of the old ratio formula — do not divide
             # by it (portfolio margin often reports used=0).
-            calculated_qty = int(
+            # NOT ceil — ceil systematically over-allocates customer capital.
+            raw_qty = (
                 effective_capital * mq / float(master_total_capital_usd)
             )
+            calculated_qty = self._round_lots_half_up(raw_qty)
 
             # Do NOT force max(1, ...) — insufficient capital must skip
             final_qty = max(0, min(calculated_qty, max_qty))
             logger.info(
                 "[SLAVE_SIZING] account_id=%s effective=%.2f "
-                "master_qty=%s master_total=%.2f calculated_qty=%s "
-                "final_qty=%s master_used=%.2f "
+                "master_qty=%s master_total=%.2f (frozen) "
+                "raw_qty=%.4f calculated_qty=%s final_qty=%s "
+                "master_used=%.2f "
                 "(audit only — not used in sizing) "
                 "allocated=%.2f live_balance=%.2f cap=%s",
                 getattr(slave, "id", None),
                 effective_capital,
                 mq,
                 float(master_total_capital_usd),
+                float(raw_qty),
                 calculated_qty,
                 final_qty,
                 float(master_margin_used_usd or 0),
@@ -738,7 +846,8 @@ class MirrorEngine:
                         "master_total_capital": float(
                             master_total_capital_usd
                         ),
-                        "raw_qty": calculated_qty,
+                        "raw_qty": float(raw_qty),
+                        "calculated_qty": calculated_qty,
                     },
                 )
             return int(final_qty)
@@ -1224,7 +1333,7 @@ class MirrorEngine:
             )
             return
 
-        # Fetch master + fresh slave capital for capital-based qty calculation
+        # Frozen master ref capital for capital-based qty (never re-read live)
         master_margin_used: float | None = None
         master_total_capital: float | None = None
         slave_fresh_available: float | None = None
@@ -1235,49 +1344,38 @@ class MirrorEngine:
 
         if bool(getattr(slave, "capital_based_qty", False)):
             try:
-                # Fetch master capital
-                with self.db_factory() as cap_db:
-                    from backend.models import Account
-
-                    master_acc = (
-                        cap_db.query(Account)
-                        .filter(Account.is_active.is_(True))
-                        .order_by(Account.id.asc())
-                        .first()
+                if master_hedge_id is None or int(master_hedge_id) <= 0:
+                    master_capital_fetch_failed = True
+                    master_capital_fail_reason = "no_master_hedge_for_ref_capital"
+                    logger.warning(
+                        "Master ref capital unavailable: no master_hedge_id "
+                        "for trade %s",
+                        master_trade_id,
                     )
-                    if master_acc:
-                        master_client = DeltaClient(
-                            decrypt(master_acc.api_key_encrypted),
-                            decrypt(master_acc.api_secret_encrypted),
-                        )
-                        try:
-                            cap = await self._fetch_master_capital_for_basket_sizing(
-                                master_client=master_client,
-                                master_trade_id=int(master_trade_id),
+                else:
+                    with self.db_factory() as cap_db:
+                        frozen, failed, used_audit = (
+                            await self._get_or_freeze_slave_ref_capital(
+                                cap_db,
+                                master_hedge_id=int(master_hedge_id),
+                                ref_id=int(master_trade_id),
                             )
-                            master_total_capital = float(cap["total"])
-                            master_margin_used = float(cap["used"])
-                            master_open_position_count = int(
-                                cap.get("open_position_count") or 0
-                            )
-                            if bool(cap.get("failed")):
-                                master_capital_fetch_failed = True
-                                master_capital_fail_reason = str(
-                                    cap.get("fail_reason")
-                                    or "master_capital_fetch_failed"
-                                )
-                        finally:
-                            await master_client.close()
-                    else:
-                        master_capital_fetch_failed = True
-                        master_capital_fail_reason = "no_active_master_account"
-                        logger.warning(
-                            "Master capital fetch failed: no active master account"
                         )
+                        if failed or frozen is None or float(frozen) <= 0:
+                            master_capital_fetch_failed = True
+                            master_capital_fail_reason = (
+                                "master_ref_capital_unavailable"
+                            )
+                        else:
+                            master_total_capital = float(frozen)
+                            if used_audit is not None:
+                                master_margin_used = float(used_audit)
             except Exception as cap_err:
                 master_capital_fetch_failed = True
-                master_capital_fail_reason = f"master_capital_fetch_exception:{cap_err}"
-                logger.warning("Master capital fetch failed: %s", cap_err)
+                master_capital_fail_reason = (
+                    f"master_ref_capital_exception:{cap_err}"
+                )
+                logger.warning("Master ref capital freeze failed: %s", cap_err)
 
         # Always fetch live slave balance for sizing / margin headroom
         # (virtual/paper slaves have no real wallet — use allocated/cached)
@@ -4612,53 +4710,27 @@ class MirrorEngine:
             )
             master_capital_fetch_failed = False
             try:
-                from backend.models import Account
-
-                master_acc = (
-                    work_db.query(Account)
-                    .filter(Account.id == master_account_id)
-                    .first()
+                frozen, failed, _used_audit = (
+                    await self._get_or_freeze_slave_ref_capital(
+                        work_db,
+                        master_hedge_id=int(master_hedge_id),
+                        master_account_id=int(master_account_id) or None,
+                        ref_id=int(master_hedge_id),
+                    )
                 )
-                if master_acc is None:
-                    master_acc = (
-                        work_db.query(Account)
-                        .filter(Account.is_active.is_(True))
-                        .order_by(Account.id.asc())
-                        .first()
-                    )
-                if master_acc is not None:
-                    m_client = DeltaClient(
-                        decrypt(master_acc.api_key_encrypted),
-                        decrypt(master_acc.api_secret_encrypted),
-                    )
-                    try:
-                        wallet = await m_client.get_wallet_balance()
-                        master_total_capital = float(
-                            wallet.get("balance_usdt", 0) or 0
-                        )
-                        if master_total_capital <= 0:
-                            master_total_capital = float(
-                                wallet.get("available_balance", 0) or 0
-                            )
-                        if master_total_capital <= 0:
-                            master_capital_fetch_failed = True
-                            logger.warning(
-                                "[SLAVE_HEDGE_OPEN] master capital fetch "
-                                "returned unusable total=$%.2f",
-                                master_total_capital,
-                            )
-                    finally:
-                        await m_client.close()
-                else:
+                if failed or frozen is None or float(frozen) <= 0:
                     master_capital_fetch_failed = True
                     logger.warning(
-                        "[SLAVE_HEDGE_OPEN] master capital fetch failed: "
-                        "no master account"
+                        "[SLAVE_HEDGE_OPEN] frozen master ref capital "
+                        "unavailable for hedge=%s",
+                        master_hedge_id,
                     )
+                else:
+                    master_total_capital = float(frozen)
             except Exception as cap_err:
                 master_capital_fetch_failed = True
                 logger.warning(
-                    "[SLAVE_HEDGE_OPEN] master capital fetch failed: %s",
+                    "[SLAVE_HEDGE_OPEN] master ref capital freeze failed: %s",
                     cap_err,
                 )
 
