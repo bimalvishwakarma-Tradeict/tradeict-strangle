@@ -122,12 +122,14 @@ def resolve_adjustment_basket_qty(
     Lot count for replacement short leg at adjustment.
 
     Returns (new_qty, close_basket).
-    Wings are never resized here — caller must leave wing legs untouched.
+    Caller must also resize wing legs to the same new_qty (short_qty == wing_qty).
 
     Modes (adjustment_qty_mode, with migration from use_dynamic_qty_on_adjustment):
       unchanged         — return triggered_leg_qty
       increase_dynamic  — B25 theta formula + 50% hedge cap
-      decrease_step     — floor(original × (1 − pct/100 × adj_n)), min 1
+      decrease_step     — floor(original_basket_qty × (1 − pct/100 × adj_n)), min 1
+                          original_qty MUST be trades.original_basket_qty from a
+                          fresh DB read — never a leg's current quantity.
     """
     from backend.engine.wing_entry import (
         compute_decrease_step_qty,
@@ -138,8 +140,29 @@ def resolve_adjustment_basket_qty(
     mode = resolve_adjustment_qty_mode(settings)
 
     if mode == "decrease_step":
-        orig = int(original_qty) if original_qty is not None else base_qty
-        orig = max(1, orig)
+        if original_qty is None or int(original_qty) <= 0:
+            logger.error(
+                "[ADJ_QTY_DECREASE] original_qty missing/invalid "
+                "(got %r) — refusing to fall back to leg qty",
+                original_qty,
+            )
+            try:
+                from backend.core.bot_logger import log_and_buffer
+
+                log_and_buffer(
+                    "ADJ_QTY_DECREASE",
+                    int(trade_id) if trade_id is not None else 0,
+                    {
+                        "original": original_qty,
+                        "note": "original_qty missing — abort step "
+                        "(would compound from leg qty)",
+                        "adj_n": adjustment_number,
+                    },
+                )
+            except Exception:
+                pass
+            return base_qty, False
+        orig = max(1, int(original_qty))
         adj_n = int(adjustment_number) if adjustment_number is not None else 1
         adj_n = max(1, adj_n)
         pct = float(
@@ -165,6 +188,7 @@ def resolve_adjustment_basket_qty(
                         "pct": pct,
                         "new_qty": "close",
                         "note": "remaining<=0",
+                        "original_source": "db.original_basket_qty",
                     },
                 )
             except Exception:
@@ -188,6 +212,7 @@ def resolve_adjustment_basket_qty(
                     "adj_n": adj_n,
                     "pct": pct,
                     "new_qty": int(new_qty),
+                    "original_source": "db.original_basket_qty",
                 },
             )
         except Exception:

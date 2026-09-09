@@ -32,6 +32,143 @@ class AdjustmentError(Exception):
     """Raised for adjustment precondition failures (missing legs, etc.)."""
 
 
+def _assert_short_wing_qty_invariant(
+    db_session: Any,
+    trade_id: int,
+) -> None:
+    """
+    After any adjustment: on each side, open short_qty == open wing_qty.
+
+    Logs QTY_INVARIANT_BROKEN at CRITICAL when violated. Does not raise —
+    software stop / operator alert only.
+    """
+    open_legs = (
+        db_session.query(Leg)
+        .filter(
+            Leg.trade_id == int(trade_id),
+            Leg.status == "open",
+            Leg.is_bot_managed.is_(True),
+        )
+        .all()
+    )
+    by_type: dict[str, int] = {}
+    for leg in open_legs:
+        lt = str(getattr(leg, "leg_type", "") or "").lower()
+        by_type[lt] = int(getattr(leg, "quantity", 0) or 0)
+
+    checks = (
+        ("call", "wing_call"),
+        ("put", "wing_put"),
+    )
+    for short_lt, wing_lt in checks:
+        if wing_lt not in by_type:
+            continue
+        if short_lt not in by_type:
+            continue
+        sq = by_type[short_lt]
+        wq = by_type[wing_lt]
+        if sq == wq:
+            continue
+        msg = (
+            f"[QTY_INVARIANT_BROKEN] trade={trade_id} "
+            f"{short_lt}={sq} {wing_lt}={wq}"
+        )
+        logger.critical(msg)
+        log_and_buffer(
+            "QTY_INVARIANT_BROKEN",
+            int(trade_id),
+            {
+                "short_leg": short_lt,
+                "short_qty": sq,
+                "wing_leg": wing_lt,
+                "wing_qty": wq,
+                "summary": msg,
+            },
+        )
+
+
+async def _reduce_open_wings_to_qty(
+    *,
+    db_session: Any,
+    trade: Any,
+    delta_client: Any,
+    order_executor: Any,
+    target_qty: int,
+    trade_is_demo: bool,
+    skip_wing_ids: set[int] | None = None,
+) -> None:
+    """
+    Partially close any open wing whose quantity exceeds target_qty.
+
+    Wings already at/below target are left alone. Never increases wing qty.
+    """
+    tgt = max(1, int(target_qty))
+    skip = skip_wing_ids or set()
+    wings = (
+        db_session.query(Leg)
+        .filter(
+            Leg.trade_id == int(trade.id),
+            Leg.status == "open",
+            Leg.is_bot_managed.is_(True),
+            Leg.leg_type.in_(("wing_call", "wing_put")),
+        )
+        .all()
+    )
+    for wing in wings:
+        wid = int(getattr(wing, "id", 0) or 0)
+        if wid and wid in skip:
+            continue
+        cur = int(getattr(wing, "quantity", 0) or 0)
+        if cur <= tgt:
+            continue
+        reduce_by = cur - tgt
+        try:
+            if trade_is_demo:
+                result = await _demo_mark_order_result(
+                    delta_client,
+                    str(wing.symbol),
+                    float(wing.initial_premium or 0),
+                )
+            else:
+                # Long wing close = sell reduce_only
+                result = await order_executor.close_long_position(
+                    product_id=int(wing.product_id),
+                    quantity=int(reduce_by),
+                    delta_client=delta_client,
+                    symbol_for_fallback=str(wing.symbol),
+                )
+            if not getattr(result, "success", False):
+                logger.critical(
+                    "[ADJ_QTY_DECREASE] wing reduce FAILED trade=%s "
+                    "leg=%s reduce_by=%s err=%s",
+                    trade.id,
+                    wing.leg_type,
+                    reduce_by,
+                    getattr(result, "error", None),
+                )
+                continue
+            wing.quantity = tgt
+            log_and_buffer(
+                "ADJ_QTY_DECREASE",
+                int(trade.id),
+                {
+                    "note": "wing reduced to match short",
+                    "leg": str(wing.leg_type),
+                    "reduced_by": reduce_by,
+                    "qty": tgt,
+                },
+            )
+        except Exception as exc:
+            logger.critical(
+                "[ADJ_QTY_DECREASE] wing reduce EXCEPTION trade=%s "
+                "leg=%s: %s",
+                trade.id,
+                getattr(wing, "leg_type", "?"),
+                exc,
+                exc_info=True,
+            )
+
+
 def compute_adjustment_target_premium(
     untouched_leg_offer: float,
     short_baselines: list[float] | tuple[float, ...],
@@ -45,8 +182,8 @@ def compute_adjustment_target_premium(
     history:
       - at trade entry, baseline == entry fill
       - after each adjustment, the triggered leg's baseline becomes its NEW
-        fill and the untouched leg's baseline is reset to its OFFER at that
-        moment
+        fill and the untouched leg's baseline is reset to the NEWLY ADJUSTED
+        leg's entry premium (not the untouched leg's own offer)
     So combined_baseline is automatically correct for the 1st adjustment and
     every one after it. Realized losses from previous adjustments are NOT
     carried forward.
@@ -1210,18 +1347,8 @@ class AdjustmentExecutor:
                             float(hedge_row.entry_total_theta or 0) / 2.0
                         )
 
-            orig_qty = getattr(trade, "original_basket_qty", None)
-            if orig_qty is None or int(orig_qty or 0) <= 0:
-                orig_qty = max(
-                    int(triggered_leg.quantity or 1),
-                    int(other_leg.quantity or 1),
-                )
-                try:
-                    trade.original_basket_qty = int(orig_qty)
-                except Exception:
-                    pass
-            # Fresh committed count — NEVER use stale in-memory trade.adjustment_count
-            # (live bug: both adj1 and adj2 saw adj_n=1 → decrease_step never stepped).
+            # Fresh DB read of original_basket_qty — NEVER use a leg's current
+            # quantity (that compounds: 16→12→9 instead of 16→12→8).
             try:
                 db_session.refresh(trade)
             except Exception:
@@ -1230,6 +1357,37 @@ class AdjustmentExecutor:
                     db_session.refresh(trade)
                 except Exception:
                     pass
+            try:
+                _fresh_orig = (
+                    db_session.query(Trade.original_basket_qty)
+                    .filter(Trade.id == int(trade.id))
+                    .scalar()
+                )
+            except Exception:
+                _fresh_orig = getattr(trade, "original_basket_qty", None)
+            if _fresh_orig is not None and int(_fresh_orig or 0) > 0:
+                orig_qty = int(_fresh_orig)
+            else:
+                # Seed once from current shorts, then persist for future adjs.
+                orig_qty = max(
+                    int(triggered_leg.quantity or 1),
+                    int(other_leg.quantity or 1),
+                )
+                try:
+                    trade.original_basket_qty = int(orig_qty)
+                    db_session.flush()
+                except Exception:
+                    pass
+                log_and_buffer(
+                    "ADJ_QTY_DECREASE",
+                    int(trade.id),
+                    {
+                        "note": "original_basket_qty was null — seeded once",
+                        "original": int(orig_qty),
+                    },
+                )
+            # Fresh committed count — NEVER use stale in-memory trade.adjustment_count
+            # (live bug: both adj1 and adj2 saw adj_n=1 → decrease_step never stepped).
             try:
                 _fresh_adj = (
                     db_session.query(Trade.adjustment_count)
@@ -1932,8 +2090,16 @@ class AdjustmentExecutor:
                                     or wing_pick.get("premium")
                                     or 0
                                 ),
-                                trigger_baseline_premium=None,
-                                trigger_premium=None,
+                                trigger_baseline_premium=float(
+                                    wing_entry_result.filled_price
+                                    or wing_pick.get("premium")
+                                    or 0
+                                ),
+                                trigger_premium=float(
+                                    wing_entry_result.filled_price
+                                    or wing_pick.get("premium")
+                                    or 0
+                                ),
                                 quantity=int(new_qty),
                                 entry_time=now_uw,
                                 status="open",
@@ -2165,6 +2331,26 @@ class AdjustmentExecutor:
 
             new_entry_premium = float(entry_result.filled_price or 0.0)
 
+            # Wings follow the same decrease_step qty as shorts.
+            # Skip the wing already fully closed+replaced by wing roll.
+            if qty_mode == "decrease_step":
+                skip_wing_ids: set[int] = set()
+                if (
+                    wing_roll_active
+                    and wing_leg is not None
+                    and getattr(wing_leg, "id", None) is not None
+                ):
+                    skip_wing_ids.add(int(wing_leg.id))
+                await _reduce_open_wings_to_qty(
+                    db_session=db_session,
+                    trade=trade,
+                    delta_client=delta_client,
+                    order_executor=order_executor,
+                    target_qty=int(new_qty),
+                    trade_is_demo=trade_is_demo,
+                    skip_wing_ids=skip_wing_ids,
+                )
+
             bracket_sl_price, bracket_sl_limit = await finalize_bracket_sl_after_fill(
                 None if trade_is_demo else delta_client,
                 entry_order_id=(
@@ -2279,8 +2465,8 @@ class AdjustmentExecutor:
                     symbol=str(wing_pick.get("symbol") or ""),
                     product_id=int(wing_pick["product_id"]),
                     initial_premium=wing_entry_px,
-                    trigger_baseline_premium=None,
-                    trigger_premium=None,
+                    trigger_baseline_premium=float(wing_entry_px),
+                    trigger_premium=float(wing_entry_px),
                     quantity=int(new_qty),
                     entry_time=now_utc,
                     status="open",
@@ -2315,41 +2501,32 @@ class AdjustmentExecutor:
                     },
                 )
 
-            # Untouched leg: KEEP original entry; ONLY reset trigger baseline
-            # to Best Offer (ask). Soft fallback: mid, then keep existing.
-            refreshed_offer = await _resolve_offer_price(
-                delta_client,
-                str(other_leg.symbol),
-                keep_if_missing=other_old_baseline,
+            # Untouched leg: KEEP original entry fill; reset trigger baseline to
+            # the NEWLY ADJUSTED leg's entry premium (never own current offer —
+            # that fires adjustments on profitable decayed legs).
+            other_leg.trigger_baseline_premium = float(new_entry_premium)
+            other_leg.trigger_premium = float(new_entry_premium)
+            other_premium = float(new_entry_premium)
+            logger.info(
+                "[BASELINE_RESET] %s baseline: %.2f → %.2f "
+                "(source=%s entry=%.2f)",
+                other_leg.leg_type,
+                other_old_baseline,
+                new_entry_premium,
+                triggered_leg_type,
+                new_entry_premium,
             )
-            if refreshed_offer > 0:
-                other_leg.trigger_baseline_premium = float(refreshed_offer)
-                other_leg.trigger_premium = float(refreshed_offer)
-                other_premium = float(refreshed_offer)
-                logger.info(
-                    "[BASELINE_RESET] %s baseline: %.2f → %.2f "
-                    "(using offer price at adjustment time)",
-                    other_leg.leg_type,
-                    other_old_baseline,
-                    refreshed_offer,
-                )
-                log_and_buffer(
-                    "BASELINE_RESET",
-                    int(trade.id),
-                    {
-                        "leg": str(other_leg.leg_type),
-                        "old": round(other_old_baseline, 4),
-                        "new": round(float(refreshed_offer), 4),
-                        "source": "offer",
-                    },
-                )
-            else:
-                logger.warning(
-                    "[BASELINE_RESET] Could not get offer for %s. "
-                    "Keeping existing baseline: %s",
-                    other_leg.symbol,
-                    other_leg.trigger_baseline_premium,
-                )
+            log_and_buffer(
+                "BASELINE_RESET",
+                int(trade.id),
+                {
+                    "leg": str(other_leg.leg_type),
+                    "old_baseline": round(float(other_old_baseline or 0), 4),
+                    "new_baseline": round(float(new_entry_premium), 4),
+                    "source_leg": str(triggered_leg_type),
+                    "source_entry_premium": round(float(new_entry_premium), 4),
+                },
+            )
 
             # Realized from TRUE fill premium of closed leg (not trigger baseline)
             # USD = (entry - exit) * qty * contract_value  (matches Delta scale)
@@ -2646,6 +2823,7 @@ class AdjustmentExecutor:
                 committed_new_entry,
                 committed_new_entry,
             )
+            _assert_short_wing_qty_invariant(db_session, int(committed_trade_id))
             try:
                 from backend.engine.structure_ledger import (
                     record_master_adjustment,

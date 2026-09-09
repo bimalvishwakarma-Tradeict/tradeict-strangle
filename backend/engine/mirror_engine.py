@@ -3504,12 +3504,14 @@ class MirrorEngine:
             db.commit()
 
             # Close size for new entry: prefer live abs size, else stored.
-            # decrease_step uses THIS slave's original_quantity (not master).
+            # decrease_step uses THIS slave's original_quantity from a FRESH
+            # DB read — never actual_quantity (that compounds after adj1).
             entry_qty = (
                 max(1, abs(int(live_size)))
                 if live_size is not None and live_size != 0
                 else stored_qty
             )
+            qty_mode = "unchanged"
             try:
                 from backend.database import get_or_create_auto_settings
                 from backend.engine.wing_entry import (
@@ -3517,16 +3519,42 @@ class MirrorEngine:
                     resolve_adjustment_qty_mode,
                 )
                 from backend.models import Adjustment
+                from backend.models import SlaveTrade as STModel
 
                 settings = get_or_create_auto_settings(db)
                 qty_mode = resolve_adjustment_qty_mode(settings)
                 if qty_mode == "decrease_step":
-                    orig = int(
-                        getattr(slave_trade, "original_quantity", None)
-                        or slave_trade.actual_quantity
-                        or stored_qty
-                        or 1
+                    try:
+                        db.refresh(slave_trade)
+                    except Exception:
+                        pass
+                    _fresh_orig = (
+                        db.query(STModel.original_quantity)
+                        .filter(STModel.id == int(slave_trade.id))
+                        .scalar()
                     )
+                    if _fresh_orig is not None and int(_fresh_orig or 0) > 0:
+                        orig = int(_fresh_orig)
+                    else:
+                        orig = max(
+                            1,
+                            int(
+                                slave_trade.actual_quantity
+                                or stored_qty
+                                or 1
+                            ),
+                        )
+                        slave_trade.original_quantity = orig
+                        db.commit()
+                        log_and_buffer(
+                            "ADJ_QTY_DECREASE",
+                            int(slave_trade.master_trade_id or 0),
+                            {
+                                "note": "slave original_quantity seeded once",
+                                "slave": str(slave.name or ""),
+                                "original": orig,
+                            },
+                        )
                     adj_n = (
                         db.query(Adjustment)
                         .filter(
@@ -3538,7 +3566,7 @@ class MirrorEngine:
                     adj_n = max(1, int(adj_n))
                     dec_pct = float(
                         getattr(settings, "adjustment_qty_decrease_pct", None)
-                        or 10.0
+                        or 25.0
                     )
                     new_q, close_basket = compute_decrease_step_qty(
                         original_qty=orig,
@@ -3554,9 +3582,21 @@ class MirrorEngine:
                         )
                     elif new_q is not None:
                         entry_qty = max(1, int(new_q))
+                        log_and_buffer(
+                            "ADJ_QTY_DECREASE",
+                            int(slave_trade.master_trade_id or 0),
+                            {
+                                "slave": str(slave.name or ""),
+                                "original": orig,
+                                "adj_n": adj_n,
+                                "pct": dec_pct,
+                                "new_qty": entry_qty,
+                                "original_source": "db.original_quantity",
+                            },
+                        )
                         logger.info(
                             "[MIRROR_ADJ] slave='%s' decrease_step "
-                            "orig=%s adj_n=%s → entry_qty=%s (wings untouched)",
+                            "orig=%s adj_n=%s → entry_qty=%s",
                             slave.name,
                             orig,
                             adj_n,
@@ -3912,6 +3952,151 @@ class MirrorEngine:
                 )
                 db.commit()
                 return
+
+            # decrease_step: reduce open wings to match short entry_qty
+            # (skip wing just rolled — already at entry_qty).
+            if qty_mode == "decrease_step":
+                skip_pids: set[int] = set()
+                if do_wing_roll and new_wing_pid > 0:
+                    skip_pids.add(int(new_wing_pid))
+                if do_wing_roll and old_wing_pid > 0:
+                    skip_pids.add(int(old_wing_pid))
+                live_wings = await client.get_option_positions()
+                for side_name, pid_attr in (
+                    ("wing_call", "wing_call_product_id"),
+                    ("wing_put", "wing_put_product_id"),
+                ):
+                    wpid = int(getattr(slave_trade, pid_attr, 0) or 0)
+                    if wpid <= 0 or wpid in skip_pids:
+                        continue
+                    wlive = self._position_size_for_product(live_wings, wpid)
+                    if wlive is None:
+                        continue
+                    wabs = abs(int(round(float(wlive))))
+                    if wabs <= int(entry_qty):
+                        continue
+                    reduce_by = wabs - int(entry_qty)
+                    # Long wing: ONE partial sell reduce_only (do NOT use
+                    # _close_with_reduce_only — that retries until flat).
+                    try:
+                        await client.place_order(
+                            product_id=wpid,
+                            size=int(reduce_by),
+                            side="sell",
+                            reduce_only=True,
+                        )
+                        await asyncio.sleep(0.5)
+                        live_wings = await client.get_option_positions()
+                        after = self._position_size_for_product(
+                            live_wings, wpid
+                        )
+                        after_abs = (
+                            abs(int(round(float(after))))
+                            if after is not None
+                            else -1
+                        )
+                        ok_wr = after_abs == int(entry_qty) or (
+                            after is None or after_abs == 0
+                        )
+                        werr = (
+                            ""
+                            if ok_wr
+                            else f"after_size={after_abs} want={entry_qty}"
+                        )
+                    except Exception as wexc:
+                        ok_wr = False
+                        werr = str(wexc)
+                    if not ok_wr:
+                        logger.critical(
+                            "[QTY_INVARIANT_BROKEN] slave='%s' wing reduce "
+                            "failed %s pid=%s reduce_by=%s err=%s",
+                            slave.name,
+                            side_name,
+                            wpid,
+                            reduce_by,
+                            werr,
+                        )
+                        log_and_buffer(
+                            "QTY_INVARIANT_BROKEN",
+                            int(slave_trade.master_trade_id or 0),
+                            {
+                                "slave": str(slave.name or ""),
+                                "wing_leg": side_name,
+                                "wing_qty": wabs,
+                                "short_qty": int(entry_qty),
+                                "error": str(werr or "")[:200],
+                            },
+                        )
+                    else:
+                        log_and_buffer(
+                            "ADJ_QTY_DECREASE",
+                            int(slave_trade.master_trade_id or 0),
+                            {
+                                "note": "slave wing reduced to match short",
+                                "slave": str(slave.name or ""),
+                                "leg": side_name,
+                                "reduced_by": reduce_by,
+                                "qty": int(entry_qty),
+                            },
+                        )
+
+            # Assert short_qty == wing_qty on both sides (live sizes)
+            try:
+                inv_pos = await client.get_option_positions()
+                for short_attr, wing_attr, short_name, wing_name in (
+                    (
+                        "call_product_id",
+                        "wing_call_product_id",
+                        "call",
+                        "wing_call",
+                    ),
+                    (
+                        "put_product_id",
+                        "wing_put_product_id",
+                        "put",
+                        "wing_put",
+                    ),
+                ):
+                    spid = int(getattr(slave_trade, short_attr, 0) or 0)
+                    wpid = int(getattr(slave_trade, wing_attr, 0) or 0)
+                    if spid <= 0 or wpid <= 0:
+                        continue
+                    # After this adj, triggered short is new_pid
+                    if short_name == leg:
+                        spid = int(new_pid)
+                    sq = self._position_size_for_product(inv_pos, spid)
+                    wq = self._position_size_for_product(inv_pos, wpid)
+                    if sq is None or wq is None:
+                        continue
+                    sq_abs = abs(int(round(float(sq))))
+                    wq_abs = abs(int(round(float(wq))))
+                    if sq_abs == wq_abs:
+                        continue
+                    logger.critical(
+                        "[QTY_INVARIANT_BROKEN] slave='%s' %s=%s %s=%s",
+                        slave.name,
+                        short_name,
+                        sq_abs,
+                        wing_name,
+                        wq_abs,
+                    )
+                    log_and_buffer(
+                        "QTY_INVARIANT_BROKEN",
+                        int(slave_trade.master_trade_id or 0),
+                        {
+                            "slave": str(slave.name or ""),
+                            "short_leg": short_name,
+                            "short_qty": sq_abs,
+                            "wing_leg": wing_name,
+                            "wing_qty": wq_abs,
+                        },
+                    )
+            except Exception as inv_exc:
+                logger.warning(
+                    "[QTY_INVARIANT_BROKEN] slave='%s' check failed: %s",
+                    slave.name,
+                    inv_exc,
+                )
 
             # New leg confirmed live — open ledger window
             new_opened_ok = record_slave_adjustment_open(

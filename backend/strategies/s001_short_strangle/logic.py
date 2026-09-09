@@ -76,7 +76,8 @@ def _trigger_baseline(leg: Any) -> float:
     """
     Premium used for adjustment trigger %.
 
-    Prefer trigger_baseline_premium (resets each adjustment).
+    Prefer trigger_baseline_premium (resets each adjustment to the newly
+    adjusted leg's entry premium on the untouched side).
     Fall back to legacy trigger_premium, then initial_premium (entry).
     """
     for attr in ("trigger_baseline_premium", "trigger_premium"):
