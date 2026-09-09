@@ -1154,12 +1154,17 @@ class BotEngine:
         trade: Any,
         leg: Any,
         decrease_pct: float,
+        qty_mode: str = "unchanged",
     ) -> int | None:
         """
         Strategy-expected open qty for reconciliation.
 
         Returns None when this leg type should be skipped (hedge).
-        Falls back to DB qty when no adjustment history / original qty.
+        Falls back to DB qty when no adjustment history / original qty,
+        or when adjustment_qty_mode is not decrease_step.
+
+        SHORT and WING share the same decrease_step formula (wings reduce
+        with shorts under decrease_step — see _reduce_open_wings_to_qty).
         """
         import math
 
@@ -1170,15 +1175,18 @@ class BotEngine:
             return None
 
         db_qty = abs(int(getattr(leg, "quantity", 0) or 0))
+        mode = str(qty_mode or "unchanged").lower().strip()
+        # Only decrease_step shrinks shorts+wings; other modes keep DB qty.
+        if mode != "decrease_step":
+            return db_qty
+
         adj_count = int(getattr(trade, "adjustment_count", 0) or 0)
         orig_raw = getattr(trade, "original_basket_qty", None)
         if adj_count <= 0 or orig_raw is None:
             return db_qty
 
         orig = max(1, int(orig_raw))
-        # SHORT and WING both follow decrease_step (dd8baae): same adj_n formula.
-        # Returning orig for wings made the reconciler "correct" reduced wings
-        # back up to original after Adj A or Adj B.
+        # Same formula as shorts: floor(orig × (1 − pct/100 × adj_n))
         pct = float(decrease_pct)
         if not (0 < pct < 100):
             pct = 25.0
@@ -1260,6 +1268,7 @@ class BotEngine:
             return
 
         decrease_pct = 25.0
+        qty_mode = "unchanged"
         try:
             ats = db.query(AutoTradeSettings).order_by(AutoTradeSettings.id.asc()).first()
             if ats is not None:
@@ -1268,6 +1277,9 @@ class BotEngine:
                 )
                 if 0 < raw_pct < 100:
                     decrease_pct = raw_pct
+                from backend.engine.wing_entry import resolve_adjustment_qty_mode
+
+                qty_mode = resolve_adjustment_qty_mode(ats)
         except Exception as exc:
             logger.warning(
                 "Trade %s: could not load decrease_pct for reconcile: %s",
@@ -1286,6 +1298,7 @@ class BotEngine:
                     int(orig_basket) if orig_basket is not None else None
                 ),
                 "decrease_pct": decrease_pct,
+                "adjustment_qty_mode": qty_mode,
             },
         )
 
@@ -1333,6 +1346,7 @@ class BotEngine:
                 trade=trade,
                 leg=leg,
                 decrease_pct=decrease_pct,
+                qty_mode=qty_mode,
             )
             if strategy_expected is None:
                 continue
@@ -1354,6 +1368,7 @@ class BotEngine:
                         int(orig_basket) if orig_basket is not None else None
                     ),
                     "decrease_pct": decrease_pct,
+                    "adjustment_qty_mode": qty_mode,
                 },
             )
 
@@ -1389,7 +1404,47 @@ class BotEngine:
                     )
                 continue
 
-            # Real mismatch: Delta != strategy-expected.
+            # HARD SAFETY: DB and Delta agree → reality is correct.
+            # strategy_expected is wrong (or stale). NEVER place a correction
+            # order in this case — that is how Trade#2 wings were silently
+            # re-bought 8 after Adj B correctly reduced them to 6.
+            # Legitimate corrections always have db_qty != delta_qty.
+            if db_qty == delta_qty:
+                self._clear_reconcile_failure(
+                    trade_id=trade_id,
+                    product_id=pid,
+                )
+                log_and_buffer(
+                    "QTY_RECONCILE_EXPECTATION_ERROR",
+                    trade_id,
+                    {
+                        "trade_id": trade_id,
+                        "leg_symbol": str(getattr(leg, "symbol", "") or ""),
+                        "leg_type": str(getattr(leg, "leg_type", "") or ""),
+                        "phase": phase_name,
+                        "db_qty": db_qty,
+                        "delta_qty": delta_qty,
+                        "strategy_expected_qty": intended_qty,
+                        "adjustment_count": adj_count,
+                        "adjustment_qty_mode": qty_mode,
+                        "correction_order": False,
+                        "note": (
+                            "DB and Delta agree — refusing correction order; "
+                            "strategy_expected_qty is wrong"
+                        ),
+                    },
+                )
+                await self._broadcast_qty_mismatch(
+                    trade_id=trade_id,
+                    leg=leg,
+                    db_qty=db_qty,
+                    delta_qty=delta_qty,
+                    reason="expectation_error",
+                    strategy_expected_qty=intended_qty,
+                )
+                continue
+
+            # Real mismatch: Delta != strategy-expected AND DB != Delta.
             await self._broadcast_qty_mismatch(
                 trade_id=trade_id,
                 leg=leg,
