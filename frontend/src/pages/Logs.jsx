@@ -101,12 +101,16 @@ function detailPreview(details, eventType) {
   if (eventType === 'ADJUSTMENT_DONE') {
     const kind = String(details.decision_type || details.adjustment_kind || '')
       .toUpperCase()
+      .trim()
+    // ADJUSTED / empty = legacy — never invent Adj A vs Adj B
     const label =
       kind === 'ADJ_B' || kind === 'B'
         ? 'Adj B · roll in'
         : kind === 'ADJ_A' || kind === 'A'
           ? 'Adj A · roll out'
-          : 'Adjustment'
+          : kind === 'ADJUSTED' || !kind
+            ? 'Adjustment (legacy)'
+            : 'Adjustment'
     return (
       `${label} ${String(details.leg || '?').toUpperCase()} ` +
       `${details.old_strike ?? '?'} → ${details.new_strike ?? '?'}`

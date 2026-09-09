@@ -735,20 +735,25 @@ function BasketStory({
       })
     }
     for (const adj of mergedAdj || []) {
-      const decision = String(adj.decision_type || '').toUpperCase()
+      const decision = String(adj.decision_type || '').toUpperCase().trim()
       const isConv =
         decision.includes('CONVERSION') ||
         String(adj.slab_used || '').toLowerCase().includes('conversion') ||
         Boolean(adj.conversion_mode)
+      // Only claim Adj A/B when decision_type is explicit. Legacy "ADJUSTED"
+      // (and null/unknown) must stay neutral — guessing wrongly mislabels Adj B.
       const isAdjB = decision === 'ADJ_B'
-      const isAdjA = decision === 'ADJ_A' || decision === 'ADJUSTED' || (!isConv && !isAdjB)
+      const isAdjA = decision === 'ADJ_A'
       const leg = String(adj.leg_type || '').toUpperCase()
       const oldK = fmtStrike(adj.old_strike)
       const newK = fmtStrike(adj.new_strike)
+      const triggerPct = fmtMoney(
+        adj.trigger_pct_reached ?? adj.trigger_pct ?? 0,
+      )
       let type = 'Adjustment'
       let icon = '🔄'
       let what = `${leg} $${oldK} → $${newK}`
-      let why = `${leg} hit ${fmtMoney(adj.trigger_pct_reached ?? adj.trigger_pct ?? 0)}% of baseline`
+      let why = `${leg} rolled $${oldK} → $${newK} (type not recorded)`
       if (isConv) {
         type = 'Conversion'
         icon = '🔀'
@@ -756,13 +761,23 @@ function BasketStory({
       } else if (isAdjB) {
         type = 'Adj B · roll in'
         icon = '↘️'
-        what = `Rolled the untested ${leg.toLowerCase()} in to ${newK}`
-        why = `${leg} $${oldK} → $${newK} (untested side rolled toward spot)`
+        what = `Rolled the untested ${leg.toLowerCase()} toward spot → $${newK}`
+        why =
+          `Untested ${leg} $${oldK} → $${newK}: rolled toward spot at lower ` +
+          `premium than the tested short, without crossing the other short`
       } else if (isAdjA) {
         type = 'Adj A · roll out'
         icon = '↗️'
-        what = `Rolled the tested ${leg.toLowerCase()} out to ${newK}`
-        why = `${leg} hit ${fmtMoney(adj.trigger_pct_reached ?? adj.trigger_pct ?? 0)}% of baseline → farther OTM`
+        what = `Rolled the tested ${leg.toLowerCase()} farther OTM → $${newK}`
+        why =
+          `Tested ${leg} hit ${triggerPct}% of baseline → rolled farther OTM ` +
+          `($${oldK} → $${newK})`
+      } else if (decision === 'ADJUSTED' || !decision) {
+        // Pre-v2 / contaminated rows — do not claim Adj A or Adj B
+        type = 'Adjustment'
+        icon = '🔄'
+        what = `${leg} $${oldK} → $${newK}`
+        why = `${leg} rolled $${oldK} → $${newK} (legacy record — type unknown)`
       }
       rows.push({
         key: `adj-${adj.timestamp}-${adj.leg_type}-${adj.old_strike}`,
