@@ -698,19 +698,42 @@ function BasketStory({
       })
     }
     for (const adj of mergedAdj || []) {
+      const decision = String(adj.decision_type || '').toUpperCase()
       const isConv =
-        String(adj.decision_type || adj.slab_used || '')
-          .toLowerCase()
-          .includes('conversion') || Boolean(adj.conversion_mode)
+        decision.includes('CONVERSION') ||
+        String(adj.slab_used || '').toLowerCase().includes('conversion') ||
+        Boolean(adj.conversion_mode)
+      const isAdjB = decision === 'ADJ_B'
+      const isAdjA = decision === 'ADJ_A' || decision === 'ADJUSTED' || (!isConv && !isAdjB)
+      const leg = String(adj.leg_type || '').toUpperCase()
+      const oldK = fmtStrike(adj.old_strike)
+      const newK = fmtStrike(adj.new_strike)
+      let type = 'Adjustment'
+      let icon = '🔄'
+      let what = `${leg} $${oldK} → $${newK}`
+      let why = `${leg} hit ${fmtMoney(adj.trigger_pct_reached ?? adj.trigger_pct ?? 0)}% of baseline`
+      if (isConv) {
+        type = 'Conversion'
+        icon = '🔀'
+        why = 'Replacement premium below minimum → hedge bought'
+      } else if (isAdjB) {
+        type = 'Adj B · roll in'
+        icon = '↘️'
+        what = `Rolled the untested ${leg.toLowerCase()} in to ${newK}`
+        why = `${leg} $${oldK} → $${newK} (untested side rolled toward spot)`
+      } else if (isAdjA) {
+        type = 'Adj A · roll out'
+        icon = '↗️'
+        what = `Rolled the tested ${leg.toLowerCase()} out to ${newK}`
+        why = `${leg} hit ${fmtMoney(adj.trigger_pct_reached ?? adj.trigger_pct ?? 0)}% of baseline → farther OTM`
+      }
       rows.push({
         key: `adj-${adj.timestamp}-${adj.leg_type}-${adj.old_strike}`,
         time: adj.timestamp,
-        icon: isConv ? '🔀' : '🔄',
-        type: isConv ? 'Conversion' : 'Adjustment',
-        what: `${String(adj.leg_type || '').toUpperCase()} $${fmtStrike(adj.old_strike)} → $${fmtStrike(adj.new_strike)}`,
-        why: isConv
-          ? `Replacement premium below minimum → hedge bought`
-          : `${String(adj.leg_type || '').toUpperCase()} hit ${fmtMoney(adj.trigger_pct_reached ?? adj.trigger_pct ?? 0)}% of baseline (trigger was ${fmtMoney(adj.trigger_pct_reached ?? adj.trigger_pct ?? 0)}%)`,
+        icon,
+        type,
+        what,
+        why,
         pnl: adj.realized_pnl ?? null,
       })
     }

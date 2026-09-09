@@ -242,7 +242,8 @@ class Adjustment(Base):
     )
     time_remaining_hours: Mapped[float] = mapped_column(Float, nullable=False)
     slab_used: Mapped[str] = mapped_column(String(50), nullable=False)
-    # Audit: ADJUSTED | CLOSED_PROFITABLE (nullable for legacy rows)
+    # Audit: ADJ_A | ADJ_B | CLOSED_PROFITABLE (nullable for legacy rows;
+    # pre-v2 adjustments may still be "ADJUSTED")
     decision_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     trade: Mapped[Trade] = relationship("Trade", back_populates="adjustments")

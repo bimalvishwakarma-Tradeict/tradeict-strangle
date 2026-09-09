@@ -2591,6 +2591,8 @@ class AdjustmentExecutor:
                 if triggered_baseline > 0
                 else 0.0
             )
+            # Distinguish Adj A (roll tested OUT) vs Adj B (roll untested IN)
+            decision_label = "ADJ_B" if adj_kind == "B" else "ADJ_A"
             adjustment = Adjustment(
                 trade_id=trade.id,
                 leg_type=triggered_leg.leg_type,
@@ -2602,7 +2604,7 @@ class AdjustmentExecutor:
                 timestamp=now_utc,
                 time_remaining_hours=hours_left,
                 slab_used=self._slab_label(hours_left),
-                decision_type="ADJUSTED",
+                decision_type=decision_label,
             )
             db_session.add(adjustment)
 
@@ -2663,6 +2665,7 @@ class AdjustmentExecutor:
             )
             committed_leg_realized = float(leg_realized)
             committed_trigger_pct = float(trigger_pct)
+            committed_decision_type = str(decision_label)
             committed_other_premium = float(other_premium)
             committed_trade_realized = float(
                 getattr(trade_row, "realized_pnl", None) or 0.0
@@ -2818,7 +2821,7 @@ class AdjustmentExecutor:
                                 timestamp=now_utc,
                                 time_remaining_hours=hours_left,
                                 slab_used=self._slab_label(hours_left),
-                                decision_type="ADJUSTED",
+                                decision_type=committed_decision_type,
                             )
                         )
 

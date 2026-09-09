@@ -1176,10 +1176,9 @@ class BotEngine:
             return db_qty
 
         orig = max(1, int(orig_raw))
-        if phase == "wing":
-            return orig
-
-        # SHORT legs (decrease_step): floor(orig × (1 − pct/100 × adj_n))
+        # SHORT and WING both follow decrease_step (dd8baae): same adj_n formula.
+        # Returning orig for wings made the reconciler "correct" reduced wings
+        # back up to original after Adj A or Adj B.
         pct = float(decrease_pct)
         if not (0 < pct < 100):
             pct = 25.0
@@ -5588,6 +5587,12 @@ class BotEngine:
                     trade_id,
                     {
                         "leg": triggered,
+                        "adjustment_kind": str(adjustment_kind or "A").upper(),
+                        "decision_type": (
+                            "ADJ_B"
+                            if str(adjustment_kind or "A").upper() == "B"
+                            else "ADJ_A"
+                        ),
                         "old_strike": float(result.old_strike or old_strike),
                         "new_strike": float(result.new_strike or 0),
                         "old_premium": round(old_premium, 2),

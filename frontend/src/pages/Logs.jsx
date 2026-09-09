@@ -17,6 +17,9 @@ const EVENT_STYLE = {
   ADJUSTMENT_DONE: 'text-green-400',
   ADJUSTMENT_FAIL: 'text-red-400',
   ADJUSTMENT_HOLD: 'text-yellow-300',
+  ADJ_B_TRIGGERED: 'text-cyan-300',
+  ADJ_B_SKIPPED_NO_PRESSURE: 'text-gray-400',
+  ADJ_B_SKIPPED_NO_STRIKE: 'text-yellow-300',
   EXIT_TRIGGERED: 'text-orange-400',
   EXIT_DONE: 'text-green-400',
   EXIT_FAIL: 'text-red-400',
@@ -32,6 +35,9 @@ const EVENT_ICON = {
   ADJUSTMENT_DONE: '✅',
   ADJUSTMENT_FAIL: '❌',
   ADJUSTMENT_HOLD: '⏸️',
+  ADJ_B_TRIGGERED: '↘️',
+  ADJ_B_SKIPPED_NO_PRESSURE: '⏸️',
+  ADJ_B_SKIPPED_NO_STRIKE: '⏸️',
   EXIT_TRIGGERED: '🚨',
   EXIT_DONE: '✅',
   EXIT_FAIL: '❌',
@@ -90,6 +96,36 @@ function detailPreview(details, eventType) {
     return (
       `call ${callPct}% (${callBand}) · put ${putPct}% (${putBand}) · ` +
       `action=${details.action || '—'}`
+    )
+  }
+  if (eventType === 'ADJUSTMENT_DONE') {
+    const kind = String(details.decision_type || details.adjustment_kind || '')
+      .toUpperCase()
+    const label =
+      kind === 'ADJ_B' || kind === 'B'
+        ? 'Adj B · roll in'
+        : kind === 'ADJ_A' || kind === 'A'
+          ? 'Adj A · roll out'
+          : 'Adjustment'
+    return (
+      `${label} ${String(details.leg || '?').toUpperCase()} ` +
+      `${details.old_strike ?? '?'} → ${details.new_strike ?? '?'}`
+    )
+  }
+  if (eventType === 'ADJ_B_TRIGGERED') {
+    return (
+      `Adj B ${String(details.untested_leg || '?').toUpperCase()} → ` +
+      `strike ${details.chosen_strike ?? '?'} ` +
+      `(P_target=${details.p_target ?? '?'})`
+    )
+  }
+  if (eventType === 'ADJ_B_SKIPPED_NO_PRESSURE') {
+    return 'Adj B skipped — tested side not under pressure'
+  }
+  if (eventType === 'ADJ_B_SKIPPED_NO_STRIKE') {
+    return (
+      `Adj B skipped — no valid strike ` +
+      `(P_target=${details.p_target ?? '?'})`
     )
   }
   if (eventType === 'NAKED_POSITION') {

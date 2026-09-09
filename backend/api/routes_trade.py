@@ -2210,6 +2210,9 @@ async def get_trade_history(
                     "new_entry_premium": a.new_entry_premium,
                     "trigger_pct_reached": a.trigger_pct_reached,
                     "slab_used": a.slab_used,
+                    "decision_type": str(
+                        getattr(a, "decision_type", None) or "ADJUSTED"
+                    ),
                 }
                 for a in adjs
             ]
@@ -2385,6 +2388,9 @@ async def get_trade_adjustments(
             "old_exit_premium": row.old_exit_premium,
             "new_entry_premium": row.new_entry_premium,
             "time_remaining_hours": row.time_remaining_hours,
+            "decision_type": (
+                str(getattr(row, "decision_type", None) or "ADJUSTED")
+            ),
         }
         for row in rows
     ]
