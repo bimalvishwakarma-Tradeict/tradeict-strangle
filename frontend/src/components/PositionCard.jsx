@@ -88,13 +88,44 @@ function adjBOtherPressured(otherBaseline, otherPremium) {
   return base > 0 && prem >= base * 1.0
 }
 
-function adjBProgressPct(baseline, current, trigger) {
-  const b = Number(baseline) || 0
-  const c = Number(current) || 0
-  const t = Number(trigger) || 0
+/**
+ * Travel from baseline toward threshold — same scale for Adj A (up) and Adj B (down).
+ * Returns { pct: number|null, state: 'approaching'|'triggered'|'moving_away'|'undefined' }
+ */
+function travelProgress(baseline, current, trigger, direction) {
+  const b = Number(baseline)
+  const c = Number(current)
+  const t = Number(trigger)
+  if (
+    !Number.isFinite(b) ||
+    !Number.isFinite(c) ||
+    !Number.isFinite(t) ||
+    b <= 0 ||
+    t <= 0
+  ) {
+    return { pct: null, state: 'undefined' }
+  }
+  if (Math.abs(t - b) < 1e-9) {
+    return { pct: null, state: 'undefined' }
+  }
+
+  if (direction === 'up') {
+    // Adj A: threshold above baseline
+    if (c >= t) return { pct: 100, state: 'triggered' }
+    if (c < b) return { pct: 0, state: 'moving_away' }
+    const denom = t - b
+    if (!(denom > 0)) return { pct: null, state: 'undefined' }
+    const pct = Math.max(0, Math.min(100, ((c - b) / denom) * 100))
+    return { pct, state: 'approaching' }
+  }
+
+  // Adj B: threshold below baseline
+  if (c <= t) return { pct: 100, state: 'triggered' }
+  if (c > b) return { pct: 0, state: 'moving_away' }
   const denom = b - t
-  if (!(denom > 0)) return 0
-  return Math.max(0, Math.min(100, ((b - c) / denom) * 100))
+  if (!(denom > 0)) return { pct: null, state: 'undefined' }
+  const pct = Math.max(0, Math.min(100, ((b - c) / denom) * 100))
+  return { pct, state: 'approaching' }
 }
 
 function closestTriggerBadgeLabel({
@@ -106,27 +137,22 @@ function closestTriggerBadgeLabel({
   putB,
   showA,
   showB,
+  callBArmed = true,
+  putBArmed = true,
 }) {
   const candidates = []
+  const push = (name, travel) => {
+    if (!travel || travel.state === 'undefined' || travel.pct == null) return
+    if (travel.state === 'moving_away') return
+    candidates.push({ name, pct: Number(travel.pct) || 0 })
+  }
   if (showA) {
-    candidates.push({
-      name: `${callLabel} Adj A`,
-      pct: Number(callA) || 0,
-    })
-    candidates.push({
-      name: `${putLabel} Adj A`,
-      pct: Number(putA) || 0,
-    })
+    push(`${callLabel} Adj A`, callA)
+    push(`${putLabel} Adj A`, putA)
   }
   if (showB) {
-    candidates.push({
-      name: `${callLabel} Adj B`,
-      pct: Number(callB) || 0,
-    })
-    candidates.push({
-      name: `${putLabel} Adj B`,
-      pct: Number(putB) || 0,
-    })
+    if (callBArmed) push(`${callLabel} Adj B`, callB)
+    if (putBArmed) push(`${putLabel} Adj B`, putB)
   }
   if (!candidates.length) return 'Monitoring — No Action Needed'
   candidates.sort((a, b) => b.pct - a.pct)
@@ -142,14 +168,95 @@ function premiumBandHint(premium) {
   return '< $100'
 }
 
+function TriggerTravelRow({ direction, travel, toTrigger, barClassFn }) {
+  const state = travel?.state || 'undefined'
+  const pct = travel?.pct
+
+  if (state === 'undefined') {
+    return (
+      <>
+        <div className="flex justify-between">
+          <span>To trigger</span>
+          <span className="text-gray-500">—</span>
+        </div>
+        <div className="mt-1 text-xs text-gray-500">—</div>
+      </>
+    )
+  }
+
+  if (state === 'moving_away') {
+    return (
+      <>
+        <div className="flex justify-between">
+          <span>To trigger</span>
+          <span className="text-gray-500">moving away</span>
+        </div>
+        <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-gray-700/50" />
+        <div className="mt-1 text-xs text-gray-500">0.0% to trigger</div>
+      </>
+    )
+  }
+
+  if (state === 'triggered') {
+    return (
+      <>
+        <div className="flex justify-between">
+          <span>To trigger</span>
+          <span className="font-semibold text-red-400">TRIGGERED</span>
+        </div>
+        <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-gray-700">
+          <div
+            className={`h-full w-full rounded-full ${barClassFn(100)}`}
+          />
+        </div>
+        <div className="mt-1 text-xs font-semibold text-red-400">
+          100.0% to trigger 🔴
+        </div>
+      </>
+    )
+  }
+
+  // approaching
+  const p = Math.max(0, Math.min(100, Number(pct) || 0))
+  const warn = p > 70
+  const danger = p > 90
+  return (
+    <>
+      <div className="flex justify-between">
+        <span>To trigger</span>
+        <span className={direction === 'up' ? 'text-gray-300' : 'text-cyan-200/90'}>
+          {fmtSignedMoneyDelta(toTrigger)}
+        </span>
+      </div>
+      <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-gray-700">
+        <div
+          className={`h-full rounded-full transition-all ${barClassFn(p)}`}
+          style={{ width: `${p}%` }}
+        />
+      </div>
+      <div
+        className={`mt-1 text-xs ${
+          danger
+            ? 'font-semibold text-red-400'
+            : warn
+              ? 'text-orange-300'
+              : 'text-gray-400'
+        }`}
+      >
+        {p.toFixed(1)}% to trigger
+        {warn && !danger ? ' ⚠️' : ''}
+        {danger ? ' 🔴' : ''}
+      </div>
+    </>
+  )
+}
+
 function TriggerWatch({
   title,
   entry,
   baseline,
   trigger,
   current,
-  distance,
-  progressPct,
   triggerPct,
   triggerMode,
   deltaSlPrice,
@@ -182,32 +289,16 @@ function TriggerWatch({
       : baselineN > 0
         ? baselineN * (adjAPct / 100)
         : 0
+  const adjATravel = travelProgress(baselineN, currentN, adjATrigger, 'up')
   const adjAToTrigger = adjATrigger - currentN
-  const adjAProgress = Math.max(
-    0,
-    Math.min(
-      120,
-      Number(progressPct) > 0
-        ? Number(progressPct)
-        : adjATrigger > 0
-          ? (currentN / adjATrigger) * 100
-          : 0,
-    ),
-  )
 
   const adjBTrigger = baselineN > 0 ? baselineN * (adjBPct / 100) : 0
-  // Same signed form as Adj A (trigger − current): negative while still above floor
+  const adjBTravel = travelProgress(baselineN, currentN, adjBTrigger, 'down')
   const adjBToTrigger = adjBTrigger - currentN
-  const adjBProg = adjBProgressPct(baselineN, currentN, adjBTrigger)
   const otherArmed = adjBOtherPressured(otherBaseline, otherPremium)
   const adjBStatus = otherArmed
     ? 'Armed'
     : `Blocked — ${otherSideLabel} not under pressure`
-
-  const aWarn = adjAProgress > 70
-  const aDanger = adjAProgress > 90
-  const bWarn = adjBProg > 70
-  const bDanger = adjBProg > 90
 
   return (
     <div
@@ -267,39 +358,12 @@ function TriggerWatch({
               <span>Trigger ({fmtMoney(adjAPct)}%)</span>
               <span className="text-amber-300">${fmtMoney(adjATrigger)}</span>
             </div>
-            <div className="flex justify-between">
-              <span>To trigger</span>
-              <span
-                className={
-                  adjAToTrigger > 0
-                    ? 'text-gray-300'
-                    : 'font-semibold text-red-400'
-                }
-              >
-                {adjAToTrigger > 0
-                  ? fmtSignedMoneyDelta(adjAToTrigger)
-                  : 'TRIGGERED'}
-              </span>
-            </div>
-            <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-gray-700">
-              <div
-                className={`h-full rounded-full transition-all ${triggerBarClass(adjAProgress)}`}
-                style={{ width: `${Math.min(100, adjAProgress)}%` }}
-              />
-            </div>
-            <div
-              className={`text-xs ${
-                aDanger
-                  ? 'font-semibold text-red-400'
-                  : aWarn
-                    ? 'text-orange-300'
-                    : 'text-gray-400'
-              }`}
-            >
-              {adjAProgress.toFixed(1)}% to trigger
-              {aWarn && !aDanger ? ' ⚠️' : ''}
-              {aDanger ? ' 🔴' : ''}
-            </div>
+            <TriggerTravelRow
+              direction="up"
+              travel={adjATravel}
+              toTrigger={adjAToTrigger}
+              barClassFn={triggerBarClass}
+            />
           </div>
         ) : (
           <div className="mt-2 border-t border-gray-700/80 pt-2 text-[10px] text-gray-500">
@@ -316,39 +380,12 @@ function TriggerWatch({
               <span>Trigger ({fmtMoney(adjBPct)}%)</span>
               <span className="text-cyan-300">${fmtMoney(adjBTrigger)}</span>
             </div>
-            <div className="flex justify-between">
-              <span>To trigger</span>
-              <span
-                className={
-                  adjBToTrigger >= 0
-                    ? 'font-semibold text-violet-300'
-                    : 'text-cyan-200/90'
-                }
-              >
-                {adjBToTrigger >= 0
-                  ? 'TRIGGERED'
-                  : fmtSignedMoneyDelta(adjBToTrigger)}
-              </span>
-            </div>
-            <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-gray-700">
-              <div
-                className={`h-full rounded-full transition-all ${adjBBarClass(adjBProg)}`}
-                style={{ width: `${Math.min(100, adjBProg)}%` }}
-              />
-            </div>
-            <div
-              className={`text-xs ${
-                bDanger
-                  ? 'font-semibold text-violet-300'
-                  : bWarn
-                    ? 'text-indigo-300'
-                    : 'text-gray-400'
-              }`}
-            >
-              {adjBProg.toFixed(1)}% to trigger
-              {bWarn && !bDanger ? ' ⚠️' : ''}
-              {bDanger ? ' 🔴' : ''}
-            </div>
+            <TriggerTravelRow
+              direction="down"
+              travel={adjBTravel}
+              toTrigger={adjBToTrigger}
+              barClassFn={adjBBarClass}
+            />
             <div className="flex justify-between">
               <span>Status</span>
               <span
@@ -1104,16 +1141,26 @@ export default function PositionCard({
   const deltaSlActive = Boolean(trade.delta_sl_active)
   const callOfferLive = Number(call.current_premium ?? 0)
   const putOfferLive = Number(put.current_premium ?? 0)
-  const callProgress =
+  const callAdjATravel = travelProgress(
+    callBaseline,
+    callOfferLive,
     callTrigger > 0
-      ? (callOfferLive / callTrigger) * 100
-      : Number(trade.call_pct_to_trigger ?? 0)
-  const putProgress =
+      ? callTrigger
+      : callBaseline > 0
+        ? callBaseline * (callTriggerPct / 100)
+        : 0,
+    'up',
+  )
+  const putAdjATravel = travelProgress(
+    putBaseline,
+    putOfferLive,
     putTrigger > 0
-      ? (putOfferLive / putTrigger) * 100
-      : Number(trade.put_pct_to_trigger ?? 0)
-  const callDistance = callTrigger > 0 ? callTrigger - callOfferLive : 0
-  const putDistance = putTrigger > 0 ? putTrigger - putOfferLive : 0
+      ? putTrigger
+      : putBaseline > 0
+        ? putBaseline * (putTriggerPct / 100)
+        : 0,
+    'up',
+  )
 
   const combinedMode = Boolean(trade.combined_trigger_mode)
   const adjustmentMode = String(trade.adjustment_mode || 'A_ONLY').toUpperCase()
@@ -1126,25 +1173,31 @@ export default function PositionCard({
     callBaseline > 0 ? callBaseline * (adjBTriggerPct / 100) : 0
   const putAdjBTrigger =
     putBaseline > 0 ? putBaseline * (adjBTriggerPct / 100) : 0
-  const callAdjBProgress = adjBProgressPct(
+  const callAdjBTravel = travelProgress(
     callBaseline,
     callOfferLive,
     callAdjBTrigger,
+    'down',
   )
-  const putAdjBProgress = adjBProgressPct(
+  const putAdjBTravel = travelProgress(
     putBaseline,
     putOfferLive,
     putAdjBTrigger,
+    'down',
   )
+  const callBArmed = adjBOtherPressured(putBaseline, putOfferLive)
+  const putBArmed = adjBOtherPressured(callBaseline, callOfferLive)
   const monitoringBadgeLabel = closestTriggerBadgeLabel({
     callLabel: 'CALL',
     putLabel: 'PUT',
-    callA: callProgress,
-    putA: putProgress,
-    callB: callAdjBProgress,
-    putB: putAdjBProgress,
+    callA: callAdjATravel,
+    putA: putAdjATravel,
+    callB: callAdjBTravel,
+    putB: putAdjBTravel,
     showA: showAdjA && !combinedMode,
     showB: showAdjB && !combinedMode,
+    callBArmed,
+    putBArmed,
   })
 
   const combinedEntry = Number(
@@ -1443,8 +1496,6 @@ export default function PositionCard({
                 baseline={callBaseline}
                 trigger={callTrigger}
                 current={call.current_premium}
-                distance={callDistance}
-                progressPct={callProgress}
                 triggerPct={callTriggerPct}
                 triggerMode={triggerMode}
                 deltaSlPrice={callDeltaSl}
@@ -1461,8 +1512,6 @@ export default function PositionCard({
                 baseline={putBaseline}
                 trigger={putTrigger}
                 current={put.current_premium}
-                distance={putDistance}
-                progressPct={putProgress}
                 triggerPct={putTriggerPct}
                 triggerMode={triggerMode}
                 deltaSlPrice={putDeltaSl}
@@ -2317,8 +2366,6 @@ export default function PositionCard({
               baseline={callBaseline}
               trigger={callTrigger}
               current={call.current_premium}
-              distance={callDistance}
-              progressPct={callProgress}
               triggerPct={callTriggerPct}
               triggerMode={triggerMode}
               deltaSlPrice={callDeltaSl}
@@ -2335,8 +2382,6 @@ export default function PositionCard({
               baseline={putBaseline}
               trigger={putTrigger}
               current={put.current_premium}
-              distance={putDistance}
-              progressPct={putProgress}
               triggerPct={putTriggerPct}
               triggerMode={triggerMode}
               deltaSlPrice={putDeltaSl}
