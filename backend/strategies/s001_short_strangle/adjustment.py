@@ -322,6 +322,7 @@ class AdjustmentExecutor:
         delta_client: Any,
         order_executor: Any,
         db_session: Any,
+        adjustment_kind: str = "A",
     ) -> AdjustmentResult:
         """
         ATOMIC EXECUTION — exit triggered leg, then enter replacement.
@@ -343,6 +344,9 @@ class AdjustmentExecutor:
         # post-commit attribute access raises DetachedInstanceError and can
         # abort mid-adjustment (naked position → emergency integrity close).
         db_session.expire_on_commit = False
+        adj_kind = str(adjustment_kind or "A").upper().strip()
+        if adj_kind not in {"A", "B"}:
+            adj_kind = "A"
         try:
             # Trade arrives from an outside session (position_tracker cache).
             # Merge it into THIS session so commit/refresh never detach it.
@@ -530,18 +534,38 @@ class AdjustmentExecutor:
                 _conv_min = 150.0
                 _conversion_mode_enabled = True
 
-            # Basket formula is the single target rule — no premium_cover_loss
-            # override (that path previously replaced target with entry-based
-            # loss and mis-logged other_leg_offer as the full target).
+            # Basket formula is the single target rule for Adj A — no
+            # premium_cover_loss override. Adj B uses tested-side premium
+            # as P_target via select_adj_b_strike (never the basket formula).
             try:
-                plan = await strategy.find_adjustment_strike(
-                    delta_client,
-                    trade,
-                    triggered_leg_type,
-                    float(target_premium),
-                    current_strike=float(triggered_leg.strike),
-                    untouched_leg_offer=float(other_leg_current_offer),
-                )
+                if adj_kind == "B":
+                    plan = await self._plan_adj_b_strike(
+                        trade=trade,
+                        untested_leg=triggered_leg,
+                        tested_leg=other_leg,
+                        untested_leg_type=triggered_leg_type,
+                        p_target=float(other_leg_current_offer),
+                        delta_client=delta_client,
+                        db_session=db_session,
+                    )
+                    if plan is None:
+                        return AdjustmentResult(
+                            success=False,
+                            is_partial=False,
+                            requires_basket_exit=False,
+                            close_basket=False,
+                            old_strike=float(triggered_leg.strike),
+                            error_message="ADJ_B_SKIPPED_NO_STRIKE",
+                        )
+                else:
+                    plan = await strategy.find_adjustment_strike(
+                        delta_client,
+                        trade,
+                        triggered_leg_type,
+                        float(target_premium),
+                        current_strike=float(triggered_leg.strike),
+                        untouched_leg_offer=float(other_leg_current_offer),
+                    )
             except Exception as exc:
                 msg = str(exc)
                 # Wing cross-guard dead_end — keep trade ACTIVE, no orders.
@@ -672,6 +696,22 @@ class AdjustmentExecutor:
                 abs(float(plan.new_strike) - float(triggered_leg.strike)) < 0.01
                 or int(plan.new_product_id) == int(triggered_leg.product_id)
             ):
+                if adj_kind == "B":
+                    log_and_buffer(
+                        "ADJ_B_SKIPPED_NO_STRIKE",
+                        int(trade.id),
+                        {
+                            "reason": "replacement_equals_current",
+                            "strike": float(triggered_leg.strike),
+                            "p_target": round(float(other_leg_current_offer), 4),
+                        },
+                    )
+                    return AdjustmentResult(
+                        success=False,
+                        close_basket=False,
+                        old_strike=float(triggered_leg.strike),
+                        error_message="ADJ_B_SKIPPED_NO_STRIKE: same strike",
+                    )
                 logger.info(
                     "[NO_STRIKE_AVAILABLE] Trade %s leg=%s — replacement equals "
                     "current strike. EXITING BASKET. triggered_strike=%s",
@@ -2940,6 +2980,207 @@ class AdjustmentExecutor:
             except Exception:
                 logger.exception("Rollback failed after unexpected error")
             return AdjustmentResult(success=False, error_message=str(exc))
+
+    async def _plan_adj_b_strike(
+        self,
+        *,
+        trade: Any,
+        untested_leg: Any,
+        tested_leg: Any,
+        untested_leg_type: str,
+        p_target: float,
+        delta_client: Any,
+        db_session: Any,
+    ) -> AdjustmentPlan | None:
+        """
+        Adj B strike plan: roll untested IN to highest premium strictly below
+        tested current premium, never ITM, honouring min_short_gap_points.
+        Returns None on skip (caller must NOT close the basket).
+        """
+        from datetime import date as date_cls
+
+        from backend.strategies.s001_short_strangle.adj_b import (
+            flatten_unified_option_chain,
+            select_adj_b_strike,
+        )
+
+        trade_id = int(getattr(trade, "id", 0) or 0)
+        leg = str(untested_leg_type or "").lower().strip()
+        other_short_strike = float(getattr(tested_leg, "strike", 0) or 0)
+        min_gap = 0.0
+        try:
+            from backend.database import get_or_create_auto_settings
+
+            cfg = get_or_create_auto_settings(db_session)
+            min_gap = float(getattr(cfg, "min_short_gap_points", None) or 0.0)
+        except Exception as exc:
+            logger.warning("Adj B min_short_gap_points read failed: %s", exc)
+
+        underlying_key = str(getattr(trade, "underlying", None) or "BTC").upper()
+        underlying_symbol = UNDERLYING_SYMBOLS.get(underlying_key, underlying_key)
+        expiry = getattr(trade, "expiry_date", None)
+        if isinstance(expiry, date_cls):
+            expiry_str = expiry.isoformat()
+        else:
+            expiry_str = str(expiry)
+
+        try:
+            spot = float(await delta_client.get_underlying_price(underlying_symbol))
+        except Exception as exc:
+            logger.error("Adj B spot fetch failed trade=%s: %s", trade_id, exc)
+            log_and_buffer(
+                "ADJ_B_SKIPPED_NO_STRIKE",
+                trade_id,
+                {
+                    "reason": "spot_fetch_failed",
+                    "error": str(exc)[:200],
+                    "p_target": round(float(p_target), 4),
+                    "other_short_strike": other_short_strike,
+                },
+            )
+            return None
+
+        try:
+            chain = await delta_client.get_option_chain(
+                underlying_symbol, expiry_str
+            )
+        except Exception as exc:
+            logger.error("Adj B chain fetch failed trade=%s: %s", trade_id, exc)
+            log_and_buffer(
+                "ADJ_B_SKIPPED_NO_STRIKE",
+                trade_id,
+                {
+                    "reason": "chain_fetch_failed",
+                    "error": str(exc)[:200],
+                    "p_target": round(float(p_target), 4),
+                    "other_short_strike": other_short_strike,
+                    "spot": round(float(spot), 2),
+                },
+            )
+            return None
+
+        flat = flatten_unified_option_chain(chain)
+        result = select_adj_b_strike(
+            leg_type=leg,
+            p_target=float(p_target),
+            chain=flat,
+            spot=float(spot),
+            other_short_strike=other_short_strike,
+            min_short_gap_points=min_gap,
+        )
+
+        untested_base = float(
+            getattr(untested_leg, "trigger_baseline_premium", None)
+            or getattr(untested_leg, "initial_premium", 0)
+            or 0
+        )
+        untested_prem = 0.0
+        try:
+            untested_prem = float(
+                await _resolve_offer_price(
+                    delta_client,
+                    str(untested_leg.symbol),
+                    keep_if_missing=None,
+                )
+            )
+        except Exception:
+            untested_prem = float(getattr(untested_leg, "initial_premium", 0) or 0)
+
+        if not result.success or result.strike is None or not result.product_id:
+            log_and_buffer(
+                "ADJ_B_SKIPPED_NO_STRIKE",
+                trade_id,
+                {
+                    "p_target": round(float(result.p_target or p_target), 4),
+                    "other_short_strike": other_short_strike,
+                    "spot": round(float(spot), 2),
+                    "required_gap": round(float(result.required_gap or 0), 2),
+                    "skip_reason": result.skip_reason,
+                    "candidates": result.candidates_considered[:20],
+                    "untested_leg": leg,
+                },
+            )
+            logger.info(
+                "[ADJ_B_SKIPPED_NO_STRIKE] trade=%s P_target=%.2f other_short=%s "
+                "spot=%.0f required_gap=%.0f reason=%s",
+                trade_id,
+                float(result.p_target or p_target),
+                other_short_strike,
+                float(spot),
+                float(result.required_gap or 0),
+                result.skip_reason,
+            )
+            return None
+
+        gap_to_other = abs(float(result.strike) - other_short_strike)
+        log_and_buffer(
+            "ADJ_B_TRIGGERED",
+            trade_id,
+            {
+                "untested_leg": leg,
+                "untested_premium": round(untested_prem, 4),
+                "untested_baseline": round(untested_base, 4),
+                "p_target": round(float(result.p_target), 4),
+                "candidates": result.candidates_considered[:30],
+                "chosen_strike": float(result.strike),
+                "chosen_premium": round(float(result.premium or 0), 4),
+                "chosen_why": result.chosen_why,
+                "gap_to_other_short": round(gap_to_other, 2),
+                "required_gap": round(float(result.required_gap or 0), 2),
+                "other_short_strike": other_short_strike,
+                "spot": round(float(spot), 2),
+                "atm": round(float(result.atm_strike or 0), 2),
+            },
+        )
+        logger.info(
+            "[ADJ_B_TRIGGERED] trade=%s untested=%s → strike=%s prem=%.2f "
+            "P_target=%.2f gap=%.0f | %s",
+            trade_id,
+            leg,
+            result.strike,
+            float(result.premium or 0),
+            float(result.p_target),
+            gap_to_other,
+            result.chosen_why,
+        )
+
+        # Wing roll flag when moving short would cross the open wing
+        wing_roll = False
+        wing_old_strike: float | None = None
+        try:
+            from backend.core.basket_legs import basket_legs as _basket_legs
+            from backend.database import get_or_create_auto_settings
+
+            bl = _basket_legs(trade, db_session)
+            wing = bl.get("wing_call") if leg == "call" else bl.get("wing_put")
+            cfg = get_or_create_auto_settings(db_session)
+            roll_enabled = bool(
+                getattr(cfg, "wing_roll_with_short_enabled", True)
+            )
+            if wing is not None and roll_enabled:
+                wing_k = float(getattr(wing, "strike", 0) or 0)
+                new_k = float(result.strike)
+                crosses = (
+                    (leg == "call" and new_k >= wing_k - 1e-9)
+                    or (leg == "put" and new_k <= wing_k + 1e-9)
+                )
+                if crosses and wing_k > 0:
+                    wing_roll = True
+                    wing_old_strike = wing_k
+        except Exception as wing_exc:
+            logger.warning("Adj B wing_roll detect failed: %s", wing_exc)
+
+        return AdjustmentPlan(
+            exit_leg_type=leg,
+            exit_leg_symbol=str(untested_leg.symbol),
+            new_strike=float(result.strike),
+            new_product_id=int(result.product_id),
+            new_symbol=str(result.symbol or ""),
+            target_premium=float(result.premium or 0),
+            other_leg_premium=float(p_target),
+            wing_roll=bool(wing_roll),
+            wing_old_strike=wing_old_strike,
+        )
 
     def _get_legs(self, trade: Any, db_session: Any) -> tuple[Any, Any]:
         """

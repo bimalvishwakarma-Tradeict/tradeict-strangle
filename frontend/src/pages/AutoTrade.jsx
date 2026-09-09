@@ -94,6 +94,12 @@ function applyStatusToForm(data, setters) {
   setters.setAdjustmentQtyDecreasePct(
     String(data.adjustment_qty_decrease_pct ?? 25),
   )
+  const engMode = String(data.adjustment_mode || 'A_ONLY').toUpperCase()
+  setters.setAdjustmentMode(
+    engMode === 'B_ONLY' || engMode === 'BOTH' ? engMode : 'A_ONLY',
+  )
+  setters.setAdjBTriggerPct(String(data.adj_b_trigger_pct ?? 50))
+  setters.setMinShortGapPoints(String(data.min_short_gap_points ?? 0))
   setters.setBasketDecayExitEnabled(!!data.basket_decay_exit_enabled)
   setters.setBasketDecayExitPct(String(data.basket_decay_exit_pct ?? 50))
   setters.setBasketDecayExitMode(
@@ -302,6 +308,9 @@ export default function AutoTrade() {
   const [adjustmentQtyMode, setAdjustmentQtyMode] = useState('unchanged')
   const [adjustmentQtyDecreasePct, setAdjustmentQtyDecreasePct] =
     useState('25')
+  const [adjustmentMode, setAdjustmentMode] = useState('A_ONLY')
+  const [adjBTriggerPct, setAdjBTriggerPct] = useState('50')
+  const [minShortGapPoints, setMinShortGapPoints] = useState('0')
   const [basketDecayExitEnabled, setBasketDecayExitEnabled] = useState(false)
   const [basketDecayExitPct, setBasketDecayExitPct] = useState('50')
   const [basketDecayExitMode, setBasketDecayExitMode] = useState('both_legs')
@@ -402,6 +411,9 @@ export default function AutoTrade() {
       setBasketQtyDynamic,
       setAdjustmentQtyMode,
       setAdjustmentQtyDecreasePct,
+      setAdjustmentMode,
+      setAdjBTriggerPct,
+      setMinShortGapPoints,
       setBasketDecayExitEnabled,
       setBasketDecayExitPct,
       setBasketDecayExitMode,
@@ -857,6 +869,15 @@ export default function AutoTrade() {
         99,
         Math.max(1, Number(adjustmentQtyDecreasePct) || 25),
       ),
+      adjustment_mode:
+        adjustmentMode === 'B_ONLY' || adjustmentMode === 'BOTH'
+          ? adjustmentMode
+          : 'A_ONLY',
+      adj_b_trigger_pct: Math.min(
+        90,
+        Math.max(10, Number(adjBTriggerPct) || 50),
+      ),
+      min_short_gap_points: Math.max(0, Number(minShortGapPoints) || 0),
       use_dynamic_qty_on_adjustment:
         pctOfHedgeSizingActive &&
         basketQtyDynamic &&
@@ -2015,6 +2036,68 @@ export default function AutoTrade() {
 
           {/* D — Adjustment Behaviour */}
           <SectionCard id="adjustment-behaviour" icon="🔄" title="Adjustment Behaviour">
+            <div className="space-y-4 rounded-lg border border-gray-700/60 bg-gray-800/40 p-4">
+              <div>
+                <FieldLabel>Adjustment mode</FieldLabel>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                  {[
+                    { value: 'A_ONLY', label: 'Tested only' },
+                    { value: 'B_ONLY', label: 'Untested only' },
+                    { value: 'BOTH', label: 'Both' },
+                  ].map((opt) => (
+                    <label
+                      key={opt.value}
+                      className="flex cursor-pointer items-center gap-2 rounded-md border border-gray-600 bg-gray-900/60 px-3 py-2 text-sm text-gray-200"
+                    >
+                      <input
+                        type="radio"
+                        name="adjustmentMode"
+                        checked={adjustmentMode === opt.value}
+                        onChange={() => setAdjustmentMode(opt.value)}
+                      />
+                      {opt.label}
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-gray-400">
+                  Untested rolls the decayed side toward spot and narrows the
+                  range.
+                </p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label className="block text-sm text-gray-300">
+                  <FieldLabel>Adj B trigger %</FieldLabel>
+                  <input
+                    type="number"
+                    min={10}
+                    max={90}
+                    step={1}
+                    value={adjBTriggerPct}
+                    onChange={(e) => setAdjBTriggerPct(e.target.value)}
+                    className="mt-2 w-full max-w-xs rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">
+                    Roll the untested side in when its premium falls below this
+                    % of its baseline.
+                  </p>
+                </label>
+                <label className="block text-sm text-gray-300">
+                  <FieldLabel>Minimum gap between shorts (points)</FieldLabel>
+                  <input
+                    type="number"
+                    min={0}
+                    step={100}
+                    value={minShortGapPoints}
+                    onChange={(e) => setMinShortGapPoints(e.target.value)}
+                    className="mt-2 w-full max-w-xs rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">
+                    0 = one strike step. A range narrower than BTC&apos;s daily
+                    move will not hold; 2000 is a safer floor.
+                  </p>
+                </label>
+              </div>
+            </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="flex cursor-pointer items-start gap-3">
                 <input

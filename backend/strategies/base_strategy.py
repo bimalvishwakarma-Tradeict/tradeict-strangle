@@ -15,6 +15,8 @@ class TradeAction:
     should_adjust: bool = False
     exit_reason: str | None = None  # ExitReason enum value
     adjust_leg: str | None = None  # "call" or "put"
+    # Adj Engine v2: "A" = roll tested OUT (legacy), "B" = roll untested IN
+    adjustment_kind: str | None = None
     current_pnl: float = 0.0
     trigger_pct_used: float = 0.0  # slab % that applied this tick (for logs)
     triggered_leg: str | None = None  # which leg hit trigger (decision path)

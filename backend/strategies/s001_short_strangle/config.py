@@ -19,6 +19,11 @@ DEFAULT_SLAB_12H = 175.0
 DEFAULT_SLAB_6H = 150.0
 DEFAULT_SLAB_LT6H = 150.0
 
+# Adj Engine v2 — defaults preserve legacy Adj A behaviour
+DEFAULT_ADJUSTMENT_MODE = "A_ONLY"  # A_ONLY | B_ONLY | BOTH
+DEFAULT_ADJ_B_TRIGGER_PCT = 50.0
+DEFAULT_MIN_SHORT_GAP_POINTS = 0.0  # 0 = one strike step
+
 # Premium-based trigger slabs (%): higher premium → tighter trigger
 DEFAULT_PREMIUM_SLAB_300 = 150.0  # premium >= $300
 DEFAULT_PREMIUM_SLAB_200 = 160.0  # $200–$300

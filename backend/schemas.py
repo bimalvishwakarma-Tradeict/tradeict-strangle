@@ -140,6 +140,22 @@ class TradeExitRequest(BaseModel):
 # --- Auto Trade settings (hedge budget fields; full schema in routes_auto_trade) ---
 
 
+class AutoTradeAdjustmentEngineSettings(BaseModel):
+    """Adj Engine v2 mode + Adj B trigger/gap (defaults preserve Adj A only)."""
+
+    adjustment_mode: str = Field(default="A_ONLY")
+    adj_b_trigger_pct: float = Field(default=50.0, ge=10, le=90)
+    min_short_gap_points: float = Field(default=0.0, ge=0, le=100_000)
+
+    @field_validator("adjustment_mode")
+    @classmethod
+    def validate_adjustment_mode(cls, v: str) -> str:
+        mode = str(v or "A_ONLY").upper().strip()
+        if mode not in {"A_ONLY", "B_ONLY", "BOTH"}:
+            raise ValueError("adjustment_mode must be A_ONLY, B_ONLY, or BOTH")
+        return mode
+
+
 class AutoTradeHedgeBudgetSettings(BaseModel):
     """Hedge fixed SL + floor % + structure target multiple + roll DTE."""
 

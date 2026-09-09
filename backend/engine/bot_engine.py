@@ -3516,7 +3516,11 @@ class BotEngine:
                     exc,
                 )
         elif action.should_adjust and action.adjust_leg:
-            await self._adjust_trade(trade_state, action.adjust_leg)
+            await self._adjust_trade(
+                trade_state,
+                action.adjust_leg,
+                adjustment_kind=str(getattr(action, "adjustment_kind", None) or "A"),
+            )
         else:
             await self._push_update(
                 trade_state,
@@ -5495,7 +5499,10 @@ class BotEngine:
         return True
 
     async def _adjust_trade(
-        self, trade_state: TradeState, triggered_leg_type: str
+        self,
+        trade_state: TradeState,
+        triggered_leg_type: str,
+        adjustment_kind: str = "A",
     ) -> None:
         trade_id = trade_state.trade_id
         from backend.engine.midprice_executor import (
@@ -5550,7 +5557,12 @@ class BotEngine:
                 else getattr(trade_state, "last_call_premium", 0)
             ) or float(other_leg.initial_premium)
 
-            logger.info("Adjusting trade %s, leg: %s", trade_id, triggered_leg_type)
+            logger.info(
+                "Adjusting trade %s, leg: %s kind=%s",
+                trade_id,
+                triggered_leg_type,
+                adjustment_kind,
+            )
             # ADJUSTMENT_START with final target_new_premium is emitted inside
             # AdjustmentExecutor after the basket-loss formula is computed —
             # do not log a pre-loss placeholder here (caused Trade#66 mismatch).
@@ -5562,6 +5574,7 @@ class BotEngine:
                     self.delta_client,
                     self.order_executor,
                     db,
+                    adjustment_kind=str(adjustment_kind or "A"),
                 )
             if result.success:
                 self._reload_legs(trade_state)
@@ -5797,6 +5810,14 @@ class BotEngine:
                     self._reload_legs(trade_state)
                 await self._push_adjustment(trade_state, triggered_leg_type, result)
             else:
+                err_early = str(result.error_message or "")
+                if "ADJ_B_SKIPPED" in err_early.upper():
+                    logger.info(
+                        "[ADJ_B_SKIPPED] trade=%s — %s (no basket exit)",
+                        trade_id,
+                        err_early[:200],
+                    )
+                    return
                 if getattr(result, "requires_basket_exit", False) or result.close_basket:
                     exit_reason = (
                         getattr(result, "exit_reason", None)

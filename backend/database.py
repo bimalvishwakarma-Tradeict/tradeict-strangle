@@ -958,6 +958,12 @@ def _migrate_schema() -> None:
                 "VARCHAR(20) NOT NULL DEFAULT 'unchanged'",
             ),
             ("adjustment_qty_decrease_pct", "FLOAT NOT NULL DEFAULT 25.0"),
+            (
+                "adjustment_mode",
+                "VARCHAR(10) NOT NULL DEFAULT 'A_ONLY'",
+            ),
+            ("adj_b_trigger_pct", "FLOAT NOT NULL DEFAULT 50.0"),
+            ("min_short_gap_points", "FLOAT NOT NULL DEFAULT 0.0"),
             ("basket_decay_exit_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
             ("basket_decay_exit_pct", "FLOAT NOT NULL DEFAULT 50.0"),
             ("basket_decay_exit_mode", "VARCHAR(20) NOT NULL DEFAULT 'both_legs'"),

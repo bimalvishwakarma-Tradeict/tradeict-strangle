@@ -113,6 +113,10 @@ class AutoTradeSettingsSchema(BaseModel):
     use_dynamic_qty_on_adjustment: bool = False  # deprecated → adjustment_qty_mode
     adjustment_qty_mode: str = "unchanged"  # unchanged | increase_dynamic | decrease_step
     adjustment_qty_decrease_pct: float = Field(default=25.0, gt=0, lt=100)
+    # Adj Engine v2 — default A_ONLY preserves legacy behaviour
+    adjustment_mode: str = "A_ONLY"  # A_ONLY | B_ONLY | BOTH
+    adj_b_trigger_pct: float = Field(default=50.0, ge=10, le=90)
+    min_short_gap_points: float = Field(default=0.0, ge=0, le=100_000)
     basket_decay_exit_enabled: bool = False
     basket_decay_exit_pct: float = Field(default=50.0, gt=0, lt=100)
     basket_decay_exit_mode: str = "both_legs"
@@ -253,6 +257,14 @@ class AutoTradeSettingsSchema(BaseModel):
             "decrease_step",
         }:
             return "unchanged"
+        return normalized
+
+    @field_validator("adjustment_mode")
+    @classmethod
+    def validate_adjustment_mode(cls, v: str) -> str:
+        normalized = str(v or "A_ONLY").upper().strip()
+        if normalized not in {"A_ONLY", "B_ONLY", "BOTH"}:
+            return "A_ONLY"
         return normalized
 
     @model_validator(mode="after")
@@ -607,6 +619,24 @@ def settings_to_dict(s: AutoTradeSettings) -> dict[str, Any]:
             getattr(s, "adjustment_qty_decrease_pct", None)
             if getattr(s, "adjustment_qty_decrease_pct", None) is not None
             else 25.0
+        ),
+        "adjustment_mode": (
+            str(getattr(s, "adjustment_mode", None) or "A_ONLY").upper().strip()
+            if str(getattr(s, "adjustment_mode", None) or "A_ONLY")
+            .upper()
+            .strip()
+            in {"A_ONLY", "B_ONLY", "BOTH"}
+            else "A_ONLY"
+        ),
+        "adj_b_trigger_pct": float(
+            getattr(s, "adj_b_trigger_pct", None)
+            if getattr(s, "adj_b_trigger_pct", None) is not None
+            else 50.0
+        ),
+        "min_short_gap_points": float(
+            getattr(s, "min_short_gap_points", None)
+            if getattr(s, "min_short_gap_points", None) is not None
+            else 0.0
         ),
         "basket_decay_exit_enabled": bool(
             getattr(s, "basket_decay_exit_enabled", False)
@@ -990,6 +1020,12 @@ async def update_auto_trade_settings(
     )
     # Keep deprecated bool in sync for rollback / old readers
     settings.use_dynamic_qty_on_adjustment = adj_mode == "increase_dynamic"
+    adj_engine_mode = str(payload.adjustment_mode or "A_ONLY").upper().strip()
+    if adj_engine_mode not in {"A_ONLY", "B_ONLY", "BOTH"}:
+        adj_engine_mode = "A_ONLY"
+    settings.adjustment_mode = adj_engine_mode
+    settings.adj_b_trigger_pct = float(payload.adj_b_trigger_pct)
+    settings.min_short_gap_points = float(payload.min_short_gap_points)
     settings.basket_decay_exit_enabled = bool(payload.basket_decay_exit_enabled)
     settings.basket_decay_exit_pct = float(payload.basket_decay_exit_pct)
     decay_mode = str(payload.basket_decay_exit_mode or "both_legs").lower().strip()

@@ -87,6 +87,129 @@ def _trigger_baseline(leg: Any) -> float:
     return float(getattr(leg, "initial_premium", 0) or 0)
 
 
+def _load_adj_engine_settings(db_session: Any) -> tuple[str, float]:
+    """Return (adjustment_mode, adj_b_trigger_pct). Default A_ONLY / 50."""
+    from backend.strategies.s001_short_strangle.config import (
+        DEFAULT_ADJ_B_TRIGGER_PCT,
+        DEFAULT_ADJUSTMENT_MODE,
+    )
+
+    mode = DEFAULT_ADJUSTMENT_MODE
+    pct = float(DEFAULT_ADJ_B_TRIGGER_PCT)
+    if db_session is None:
+        return mode, pct
+    try:
+        from backend.database import get_or_create_auto_settings
+
+        cfg = get_or_create_auto_settings(db_session)
+        raw = str(getattr(cfg, "adjustment_mode", None) or mode).upper().strip()
+        if raw in {"A_ONLY", "B_ONLY", "BOTH"}:
+            mode = raw
+        pct = float(
+            getattr(cfg, "adj_b_trigger_pct", None)
+            if getattr(cfg, "adj_b_trigger_pct", None) is not None
+            else pct
+        )
+        pct = max(10.0, min(90.0, pct))
+    except Exception as exc:
+        logger.warning("adj engine settings read failed: %s", exc)
+    return mode, pct
+
+
+def _try_adj_b_action(
+    *,
+    trade: Any,
+    call_open: bool,
+    put_open: bool,
+    call_premium: float,
+    put_premium: float,
+    call_baseline: float,
+    put_baseline: float,
+    adj_b_trigger_pct: float,
+    net_for_decision: float,
+    call_trigger_pct: float,
+    put_trigger_pct: float,
+    db_session: Any,
+) -> TradeAction | None:
+    """
+    Adj B: roll the untested (decayed) side IN when the tested side is pressured.
+
+    Returns a TradeAction when Adj B should fire, else None (after optional skip logs).
+    """
+    if not (call_open and put_open):
+        return None
+
+    call_pressured = call_baseline > 0 and call_premium >= call_baseline * 1.0
+    put_pressured = put_baseline > 0 and put_premium >= put_baseline * 1.0
+    thresh = float(adj_b_trigger_pct) / 100.0
+    call_decayed = call_baseline > 0 and call_premium < call_baseline * thresh
+    put_decayed = put_baseline > 0 and put_premium < put_baseline * thresh
+
+    untested: str | None = None
+    tested: str | None = None
+    if call_pressured and put_decayed:
+        tested, untested = "call", "put"
+    elif put_pressured and call_decayed:
+        tested, untested = "put", "call"
+    elif (call_decayed or put_decayed) and not (call_pressured or put_pressured):
+        try:
+            from backend.core.bot_logger import log_and_buffer
+
+            log_and_buffer(
+                "ADJ_B_SKIPPED_NO_PRESSURE",
+                int(getattr(trade, "id", 0) or 0),
+                {
+                    "call_premium": round(float(call_premium), 4),
+                    "put_premium": round(float(put_premium), 4),
+                    "call_baseline": round(float(call_baseline), 4),
+                    "put_baseline": round(float(put_baseline), 4),
+                    "adj_b_trigger_pct": float(adj_b_trigger_pct),
+                    "reason": "untested_decayed_but_tested_not_at_100pct_baseline",
+                },
+            )
+        except Exception:
+            pass
+        logger.info(
+            "[ADJ_B_SKIPPED_NO_PRESSURE] trade=%s call=%.2f/%.2f put=%.2f/%.2f",
+            getattr(trade, "id", "?"),
+            call_premium,
+            call_baseline,
+            put_premium,
+            put_baseline,
+        )
+        return None
+    else:
+        return None
+
+    assert untested is not None and tested is not None
+    untested_prem = put_premium if untested == "put" else call_premium
+    untested_base = put_baseline if untested == "put" else call_baseline
+    tested_prem = call_premium if tested == "call" else put_premium
+
+    logger.info(
+        "[ADJ_B_CANDIDATE] trade=%s untested=%s prem=%.2f baseline=%.2f "
+        "pct=%.1f P_target(tested_%s)=%.2f",
+        getattr(trade, "id", "?"),
+        untested,
+        untested_prem,
+        untested_base,
+        adj_b_trigger_pct,
+        tested,
+        tested_prem,
+    )
+    return TradeAction(
+        should_adjust=True,
+        adjust_leg=untested,
+        adjustment_kind="B",
+        current_pnl=net_for_decision,
+        triggered_leg=tested,  # side under pressure (audit)
+        trigger_pct_hit=float(adj_b_trigger_pct),
+        trigger_pct_used=float(adj_b_trigger_pct),
+        call_trigger_pct=call_trigger_pct,
+        put_trigger_pct=put_trigger_pct,
+    )
+
+
 def _fees_from_legs(
     call_leg: Any,
     put_leg: Any,
@@ -686,6 +809,9 @@ class ShortStrangleStrategy(BaseStrategy):
         )
         mode = str(getattr(trade, "trigger_mode", "slab") or "slab").lower()
         net_for_decision = decision_pnl
+        adj_engine_mode, adj_b_trigger_pct = _load_adj_engine_settings(db_session)
+        allow_adj_a = adj_engine_mode in {"A_ONLY", "BOTH"}
+        allow_adj_b = adj_engine_mode in {"B_ONLY", "BOTH"}
 
         call_open = str(getattr(call_leg, "status", "open")).lower() == "open"
         put_open = str(getattr(put_leg, "status", "open")).lower() == "open"
@@ -918,18 +1044,26 @@ class ShortStrangleStrategy(BaseStrategy):
                 )
                 if max_exit is not None:
                     return max_exit
-                return TradeAction(
-                    should_adjust=True,
-                    adjust_leg=triggered_leg,
-                    current_pnl=net_for_decision,
-                    triggered_leg=triggered_leg,
-                    trigger_pct_hit=trig_pct_hit,
-                    trigger_pct_used=trigger_pct,
-                    call_trigger_pct=call_trigger_pct,
-                    put_trigger_pct=put_trigger_pct,
-                )
+                if not allow_adj_a:
+                    logger.info(
+                        "Trade %s combined Adj A suppressed (mode=%s)",
+                        getattr(trade, "id", "?"),
+                        adj_engine_mode,
+                    )
+                else:
+                    return TradeAction(
+                        should_adjust=True,
+                        adjust_leg=triggered_leg,
+                        adjustment_kind="A",
+                        current_pnl=net_for_decision,
+                        triggered_leg=triggered_leg,
+                        trigger_pct_hit=trig_pct_hit,
+                        trigger_pct_used=trigger_pct,
+                        call_trigger_pct=call_trigger_pct,
+                        put_trigger_pct=put_trigger_pct,
+                    )
             # Combined mode ON but under threshold — never fall through to
-            # individual leg triggers
+            # individual leg Adj A triggers; Adj B may still fire below.
             logger.info(
                 "Trade %s decision: combined mode HOLD | "
                 "combined=%.2f threshold=%.2f | net_mtm=%.2f",
@@ -938,6 +1072,34 @@ class ShortStrangleStrategy(BaseStrategy):
                 combined_threshold,
                 decision_pnl,
             )
+            if allow_adj_b:
+                adj_b = _try_adj_b_action(
+                    trade=trade,
+                    call_open=call_open,
+                    put_open=put_open,
+                    call_premium=call_premium,
+                    put_premium=put_premium,
+                    call_baseline=call_baseline,
+                    put_baseline=put_baseline,
+                    adj_b_trigger_pct=adj_b_trigger_pct,
+                    net_for_decision=net_for_decision,
+                    call_trigger_pct=call_trigger_pct,
+                    put_trigger_pct=put_trigger_pct,
+                    db_session=db_session,
+                )
+                if adj_b is not None:
+                    max_exit = self._check_max_adjustments_exit(
+                        trade,
+                        db_session,
+                        triggered_leg=str(adj_b.adjust_leg or ""),
+                        trigger_pct=float(adj_b.trigger_pct_hit or 0),
+                        net_for_decision=net_for_decision,
+                        call_trigger_pct=call_trigger_pct,
+                        put_trigger_pct=put_trigger_pct,
+                    )
+                    if max_exit is not None:
+                        return max_exit
+                    return adj_b
             return TradeAction(
                 current_pnl=decision_pnl,
                 trigger_pct_used=trigger_pct,
@@ -982,22 +1144,29 @@ class ShortStrangleStrategy(BaseStrategy):
                 )
                 if max_exit is not None:
                     return max_exit
+                if allow_adj_a:
+                    logger.info(
+                        "DECISION: Net MTM negative at trigger — adjusting | "
+                        "Trade %s CALL hit %.1f%% and Net MTM=%.2f is NEGATIVE",
+                        getattr(trade, "id", "?"),
+                        call_trigger_pct,
+                        net_for_decision,
+                    )
+                    return TradeAction(
+                        should_adjust=True,
+                        adjust_leg="call",
+                        adjustment_kind="A",
+                        current_pnl=net_for_decision,
+                        triggered_leg="call",
+                        trigger_pct_hit=call_trigger_pct,
+                        trigger_pct_used=call_trigger_pct,
+                        call_trigger_pct=call_trigger_pct,
+                        put_trigger_pct=put_trigger_pct,
+                    )
                 logger.info(
-                    "DECISION: Net MTM negative at trigger — adjusting | "
-                    "Trade %s CALL hit %.1f%% and Net MTM=%.2f is NEGATIVE",
+                    "Trade %s CALL Adj A suppressed (mode=%s)",
                     getattr(trade, "id", "?"),
-                    call_trigger_pct,
-                    net_for_decision,
-                )
-                return TradeAction(
-                    should_adjust=True,
-                    adjust_leg="call",
-                    current_pnl=net_for_decision,
-                    triggered_leg="call",
-                    trigger_pct_hit=call_trigger_pct,
-                    trigger_pct_used=call_trigger_pct,
-                    call_trigger_pct=call_trigger_pct,
-                    put_trigger_pct=put_trigger_pct,
+                    adj_engine_mode,
                 )
 
         if put_open:
@@ -1036,28 +1205,64 @@ class ShortStrangleStrategy(BaseStrategy):
                 )
                 if max_exit is not None:
                     return max_exit
+                if allow_adj_a:
+                    logger.info(
+                        "DECISION: Net MTM negative at trigger — adjusting | "
+                        "Trade %s PUT hit %.1f%% and Net MTM=%.2f is NEGATIVE",
+                        getattr(trade, "id", "?"),
+                        put_trigger_pct,
+                        net_for_decision,
+                    )
+                    return TradeAction(
+                        should_adjust=True,
+                        adjust_leg="put",
+                        adjustment_kind="A",
+                        current_pnl=net_for_decision,
+                        triggered_leg="put",
+                        trigger_pct_hit=put_trigger_pct,
+                        trigger_pct_used=put_trigger_pct,
+                        call_trigger_pct=call_trigger_pct,
+                        put_trigger_pct=put_trigger_pct,
+                    )
                 logger.info(
-                    "DECISION: Net MTM negative at trigger — adjusting | "
-                    "Trade %s PUT hit %.1f%% and Net MTM=%.2f is NEGATIVE",
+                    "Trade %s PUT Adj A suppressed (mode=%s)",
                     getattr(trade, "id", "?"),
-                    put_trigger_pct,
-                    net_for_decision,
+                    adj_engine_mode,
                 )
-                return TradeAction(
-                    should_adjust=True,
-                    adjust_leg="put",
-                    current_pnl=net_for_decision,
-                    triggered_leg="put",
-                    trigger_pct_hit=put_trigger_pct,
-                    trigger_pct_used=put_trigger_pct,
+
+        if allow_adj_b:
+            adj_b = _try_adj_b_action(
+                trade=trade,
+                call_open=call_open,
+                put_open=put_open,
+                call_premium=call_premium,
+                put_premium=put_premium,
+                call_baseline=call_baseline,
+                put_baseline=put_baseline,
+                adj_b_trigger_pct=adj_b_trigger_pct,
+                net_for_decision=net_for_decision,
+                call_trigger_pct=call_trigger_pct,
+                put_trigger_pct=put_trigger_pct,
+                db_session=db_session,
+            )
+            if adj_b is not None:
+                max_exit = self._check_max_adjustments_exit(
+                    trade,
+                    db_session,
+                    triggered_leg=str(adj_b.adjust_leg or ""),
+                    trigger_pct=float(adj_b.trigger_pct_hit or 0),
+                    net_for_decision=net_for_decision,
                     call_trigger_pct=call_trigger_pct,
                     put_trigger_pct=put_trigger_pct,
                 )
+                if max_exit is not None:
+                    return max_exit
+                return adj_b
 
         logger.info(
             "Trade %s decision: realized=%.2f + upnl=%.2f = gross=%.2f | "
             "net_mtm=%.2f | call_trig=%.1f%% put_trig=%.1f%% | "
-            "target=%s | sl=%s | action=HOLD",
+            "target=%s | sl=%s | adj_mode=%s | action=HOLD",
             getattr(trade, "id", "?"),
             float(realized_pnl or 0.0),
             float(delta_mtm if delta_mtm is not None else 0.0),
@@ -1067,6 +1272,7 @@ class ShortStrangleStrategy(BaseStrategy):
             put_trigger_pct,
             trade.profit_target_usd,
             trade.stoploss_usd,
+            adj_engine_mode,
         )
         return TradeAction(
             current_pnl=decision_pnl,

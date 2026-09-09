@@ -495,6 +495,21 @@ class AutoTradeSettings(Base):
     adjustment_qty_decrease_pct: Mapped[float] = mapped_column(
         Float, nullable=False, server_default="25.0", default=25.0
     )
+    # Adj Engine v2: A_ONLY | B_ONLY | BOTH (default A_ONLY = legacy behaviour)
+    adjustment_mode: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        server_default="A_ONLY",
+        default="A_ONLY",
+    )
+    # Roll untested side IN when its premium < this % of its baseline
+    adj_b_trigger_pct: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="50.0", default=50.0
+    )
+    # Min points between the two short strikes after Adj B (0 = one strike step)
+    min_short_gap_points: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0.0", default=0.0
+    )
     basket_decay_exit_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0", default=False
     )
