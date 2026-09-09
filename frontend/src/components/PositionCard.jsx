@@ -60,7 +60,330 @@ function triggerBarClass(pct) {
   return 'bg-green-500'
 }
 
-const PAYOFF_EXPAND_KEY = 'tradeict_payoff_graph_expanded'
+/** Adj A (rise) uses warm bars; Adj B (fall) uses cool bars. */
+function adjBBarClass(pct) {
+  if (pct >= 90) return 'bg-violet-500 animate-pulse'
+  if (pct >= 70) return 'bg-indigo-500'
+  if (pct >= 50) return 'bg-sky-500'
+  return 'bg-cyan-600'
+}
+
+function fmtSignedMoneyDelta(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '$0.00'
+  const abs = Math.abs(n).toFixed(2)
+  if (n > 0) return `+$${abs}`
+  if (n < 0) return `-$${abs}`
+  return `$${abs}`
+}
+
+/**
+ * Armed iff the OTHER leg is at/above 100% of its baseline.
+ * Mirrors logic.py _try_adj_b_action:
+ *   other_pressured = other_baseline > 0 && other_premium >= other_baseline * 1.0
+ */
+function adjBOtherPressured(otherBaseline, otherPremium) {
+  const base = Number(otherBaseline) || 0
+  const prem = Number(otherPremium) || 0
+  return base > 0 && prem >= base * 1.0
+}
+
+function adjBProgressPct(baseline, current, trigger) {
+  const b = Number(baseline) || 0
+  const c = Number(current) || 0
+  const t = Number(trigger) || 0
+  const denom = b - t
+  if (!(denom > 0)) return 0
+  return Math.max(0, Math.min(100, ((b - c) / denom) * 100))
+}
+
+function closestTriggerBadgeLabel({
+  callLabel,
+  putLabel,
+  callA,
+  putA,
+  callB,
+  putB,
+  showA,
+  showB,
+}) {
+  const candidates = []
+  if (showA) {
+    candidates.push({
+      name: `${callLabel} Adj A`,
+      pct: Number(callA) || 0,
+    })
+    candidates.push({
+      name: `${putLabel} Adj A`,
+      pct: Number(putA) || 0,
+    })
+  }
+  if (showB) {
+    candidates.push({
+      name: `${callLabel} Adj B`,
+      pct: Number(callB) || 0,
+    })
+    candidates.push({
+      name: `${putLabel} Adj B`,
+      pct: Number(putB) || 0,
+    })
+  }
+  if (!candidates.length) return 'Monitoring — No Action Needed'
+  candidates.sort((a, b) => b.pct - a.pct)
+  const top = candidates[0]
+  return `Monitoring — closest: ${top.name}, ${top.pct.toFixed(0)}% there`
+}
+
+function premiumBandHint(premium) {
+  const px = Number(premium) || 0
+  if (px >= 300) return '≥ $300'
+  if (px >= 200) return '$200–$300'
+  if (px >= 100) return '$100–$200'
+  return '< $100'
+}
+
+function TriggerWatch({
+  title,
+  entry,
+  baseline,
+  trigger,
+  current,
+  distance,
+  progressPct,
+  triggerPct,
+  triggerMode,
+  deltaSlPrice,
+  universalSlPct,
+  referenceOnly = false,
+  adjustmentMode = 'A_ONLY',
+  adjBTriggerPct = 50,
+  otherBaseline = 0,
+  otherPremium = 0,
+  otherSideLabel = 'other',
+}) {
+  const entryN = Number(entry) || 0
+  const baselineN = Number(baseline) || 0
+  const currentN = Number(current) || 0
+  const deltaSlN = Number(deltaSlPrice) || 0
+  const adjAPct = Number(triggerPct) || 0
+  const adjBPct = Number(adjBTriggerPct) || 50
+  const mode = String(adjustmentMode || 'A_ONLY').toUpperCase()
+  const showAdjA = mode === 'A_ONLY' || mode === 'BOTH'
+  const showAdjB = mode === 'B_ONLY' || mode === 'BOTH'
+  const isPremium = triggerMode === 'premium'
+
+  // Amber when baseline diverges from entry by more than 1%
+  const baselineDiverged =
+    entryN > 0 && Math.abs(baselineN - entryN) / entryN > 0.01
+
+  const adjATrigger =
+    Number(trigger) > 0
+      ? Number(trigger)
+      : baselineN > 0
+        ? baselineN * (adjAPct / 100)
+        : 0
+  const adjAToTrigger = adjATrigger - currentN
+  const adjAProgress = Math.max(
+    0,
+    Math.min(
+      120,
+      Number(progressPct) > 0
+        ? Number(progressPct)
+        : adjATrigger > 0
+          ? (currentN / adjATrigger) * 100
+          : 0,
+    ),
+  )
+
+  const adjBTrigger = baselineN > 0 ? baselineN * (adjBPct / 100) : 0
+  // Same signed form as Adj A (trigger − current): negative while still above floor
+  const adjBToTrigger = adjBTrigger - currentN
+  const adjBProg = adjBProgressPct(baselineN, currentN, adjBTrigger)
+  const otherArmed = adjBOtherPressured(otherBaseline, otherPremium)
+  const adjBStatus = otherArmed
+    ? 'Armed'
+    : `Blocked — ${otherSideLabel} not under pressure`
+
+  const aWarn = adjAProgress > 70
+  const aDanger = adjAProgress > 90
+  const bWarn = adjBProg > 70
+  const bDanger = adjBProg > 90
+
+  return (
+    <div
+      className={`rounded-lg border p-3 ${
+        referenceOnly
+          ? 'border-gray-700/60 bg-gray-900/30 opacity-80'
+          : 'border-gray-700 bg-gray-900/50'
+      }`}
+    >
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
+        {title}
+        {referenceOnly ? (
+          <span className="ml-2 font-normal normal-case text-gray-500">
+            (Reference only — combined mode active)
+          </span>
+        ) : null}
+      </div>
+      <div className="space-y-1 text-xs text-gray-300">
+        <div className="flex justify-between">
+          <span>Entry (original)</span>
+          <span>${fmtMoney(entryN)}</span>
+        </div>
+        <div
+          className={`flex justify-between ${
+            baselineDiverged ? 'text-amber-300' : ''
+          }`}
+          title={
+            baselineDiverged
+              ? 'Triggers are measured from this baseline, not from the entry premium. It is reset on every adjustment.'
+              : undefined
+          }
+        >
+          <span>Baseline</span>
+          <span className={baselineDiverged ? 'font-medium' : ''}>
+            ${fmtMoney(baselineN)}
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span>Current Premium</span>
+          <span>
+            ${fmtMoney(currentN)}
+            {isPremium ? (
+              <span className="text-gray-500">
+                {' '}
+                ({premiumBandHint(currentN)} → {fmtMoney(adjAPct)}%)
+              </span>
+            ) : null}
+          </span>
+        </div>
+
+        {showAdjA ? (
+          <div className="mt-2 space-y-1 border-t border-gray-700/80 pt-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-400/90">
+              Adj A · roll out ↑
+            </div>
+            <div className="flex justify-between">
+              <span>Trigger ({fmtMoney(adjAPct)}%)</span>
+              <span className="text-amber-300">${fmtMoney(adjATrigger)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>To trigger</span>
+              <span
+                className={
+                  adjAToTrigger > 0
+                    ? 'text-gray-300'
+                    : 'font-semibold text-red-400'
+                }
+              >
+                {adjAToTrigger > 0
+                  ? fmtSignedMoneyDelta(adjAToTrigger)
+                  : 'TRIGGERED'}
+              </span>
+            </div>
+            <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-gray-700">
+              <div
+                className={`h-full rounded-full transition-all ${triggerBarClass(adjAProgress)}`}
+                style={{ width: `${Math.min(100, adjAProgress)}%` }}
+              />
+            </div>
+            <div
+              className={`text-xs ${
+                aDanger
+                  ? 'font-semibold text-red-400'
+                  : aWarn
+                    ? 'text-orange-300'
+                    : 'text-gray-400'
+              }`}
+            >
+              {adjAProgress.toFixed(1)}% to trigger
+              {aWarn && !aDanger ? ' ⚠️' : ''}
+              {aDanger ? ' 🔴' : ''}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-2 border-t border-gray-700/80 pt-2 text-[10px] text-gray-500">
+            Adj A · off
+          </div>
+        )}
+
+        {showAdjB ? (
+          <div className="mt-2 space-y-1 border-t border-gray-700/80 pt-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-cyan-400/90">
+              Adj B · roll in ↓
+            </div>
+            <div className="flex justify-between">
+              <span>Trigger ({fmtMoney(adjBPct)}%)</span>
+              <span className="text-cyan-300">${fmtMoney(adjBTrigger)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>To trigger</span>
+              <span
+                className={
+                  adjBToTrigger >= 0
+                    ? 'font-semibold text-violet-300'
+                    : 'text-cyan-200/90'
+                }
+              >
+                {adjBToTrigger >= 0
+                  ? 'TRIGGERED'
+                  : fmtSignedMoneyDelta(adjBToTrigger)}
+              </span>
+            </div>
+            <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-gray-700">
+              <div
+                className={`h-full rounded-full transition-all ${adjBBarClass(adjBProg)}`}
+                style={{ width: `${Math.min(100, adjBProg)}%` }}
+              />
+            </div>
+            <div
+              className={`text-xs ${
+                bDanger
+                  ? 'font-semibold text-violet-300'
+                  : bWarn
+                    ? 'text-indigo-300'
+                    : 'text-gray-400'
+              }`}
+            >
+              {adjBProg.toFixed(1)}% to trigger
+              {bWarn && !bDanger ? ' ⚠️' : ''}
+              {bDanger ? ' 🔴' : ''}
+            </div>
+            <div className="flex justify-between">
+              <span>Status</span>
+              <span
+                className={
+                  otherArmed ? 'text-green-400' : 'text-gray-500'
+                }
+              >
+                {adjBStatus}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-2 border-t border-gray-700/80 pt-2 text-[10px] text-gray-500">
+            Adj B · off
+          </div>
+        )}
+
+        <div className="mt-2 flex justify-between border-t border-gray-700/80 pt-2 text-red-300/90">
+          <span title="Attached to Delta position — no separate stop order">
+            Bracket SL
+            {universalSlPct != null
+              ? ` (${fmtMoney(universalSlPct)}%)`
+              : ''}
+          </span>
+          <span className="font-medium">
+            {deltaSlN > 0 ? `$${fmtMoney(deltaSlN)}` : '—'}
+          </span>
+        </div>
+        {deltaSlN > 0 && (
+          <div className="text-[10px] text-gray-500">auto-cancels on close</div>
+        )}
+      </div>
+    </div>
+  )
+}
 
 function useSettlingCountdown(settlingEndsAt, isSettlingFlag) {
   const [nowTick, setNowTick] = useState(0)
@@ -278,129 +601,7 @@ function LegRow({ label, leg, compact = false, accent = false }) {
   )
 }
 
-function premiumBandHint(premium) {
-  const px = Number(premium) || 0
-  if (px >= 300) return '≥ $300'
-  if (px >= 200) return '$200–$300'
-  if (px >= 100) return '$100–$200'
-  return '< $100'
-}
-
-function TriggerWatch({
-  title,
-  entry,
-  baseline,
-  trigger,
-  current,
-  distance,
-  progressPct,
-  triggerPct,
-  triggerMode,
-  deltaSlPrice,
-  universalSlPct,
-  referenceOnly = false,
-}) {
-  const pct = Math.max(0, Math.min(120, Number(progressPct) || 0))
-  const warn = pct > 70
-  const danger = pct > 90
-  const entryN = Number(entry) || 0
-  const baselineN = Number(baseline) || 0
-  const currentN = Number(current) || 0
-  const deltaSlN = Number(deltaSlPrice) || 0
-  const showAdjBaseline =
-    baselineN > 0 && Math.abs(baselineN - entryN) > 0.005
-  const isPremium = triggerMode === 'premium'
-  return (
-    <div
-      className={`rounded-lg border p-3 ${
-        referenceOnly
-          ? 'border-gray-700/60 bg-gray-900/30 opacity-80'
-          : 'border-gray-700 bg-gray-900/50'
-      }`}
-    >
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
-        {title}
-        {referenceOnly ? (
-          <span className="ml-2 font-normal normal-case text-gray-500">
-            (Reference only — combined mode active)
-          </span>
-        ) : null}
-      </div>
-      <div className="space-y-1 text-xs text-gray-300">
-        <div className="flex justify-between">
-          <span>Entry (original)</span>
-          <span>${fmtMoney(entryN)}</span>
-        </div>
-        {showAdjBaseline && (
-          <div className="flex justify-between text-orange-200/90">
-            <span>Price at Last Adj</span>
-            <span>${fmtMoney(baselineN)}</span>
-          </div>
-        )}
-        {isPremium && (
-          <div className="flex justify-between">
-            <span>Current Premium</span>
-            <span>
-              ${fmtMoney(currentN)}{' '}
-              <span className="text-gray-500">
-                ({premiumBandHint(currentN)} → {fmtMoney(triggerPct)}%)
-              </span>
-            </span>
-          </div>
-        )}
-        <div className="flex justify-between">
-          <span>Trigger ({fmtMoney(triggerPct)}%)</span>
-          <span className="text-amber-300">${fmtMoney(trigger)}</span>
-        </div>
-        <div className="flex justify-between text-red-300/90">
-          <span title="Attached to Delta position — no separate stop order">
-            🔒 Bracket SL
-            {universalSlPct != null
-              ? ` (${fmtMoney(universalSlPct)}%)`
-              : ''}
-          </span>
-          <span className="font-medium">
-            {deltaSlN > 0 ? `$${fmtMoney(deltaSlN)}` : '—'}
-          </span>
-        </div>
-        {deltaSlN > 0 && (
-          <div className="text-[10px] text-gray-500">
-            auto-cancels on close
-          </div>
-        )}
-        <div className="flex justify-between">
-          <span>Offer</span>
-          <span>${fmtMoney(currentN)}</span>
-        </div>
-        <div className="flex justify-between">
-          <span>To trigger</span>
-          <span className={distance > 0 ? 'text-gray-300' : 'text-red-400'}>
-            {distance > 0 ? `+$${fmtMoney(distance)}` : 'TRIGGERED'}
-          </span>
-        </div>
-      </div>
-      <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-700">
-        <div
-          className={`h-full rounded-full transition-all ${triggerBarClass(pct)}`}
-          style={{ width: `${Math.min(100, pct)}%` }}
-        />
-      </div>
-      <div
-        className={`mt-1 text-xs ${
-          danger
-            ? 'font-semibold text-red-400'
-            : warn
-              ? 'text-orange-300'
-              : 'text-gray-400'
-        }`}
-      >
-        {pct.toFixed(1)}% to trigger
-        {warn && !danger ? ' ⚠️' : ''}
-        {danger ? ' 🔴' : ''}
-      </div>
-    </div>
-  )
-}
+const PAYOFF_EXPAND_KEY = 'tradeict_payoff_graph_expanded'
 
 const NEXT_ACTION_BADGE = {
   HOLD: {
@@ -892,6 +1093,37 @@ export default function PositionCard({
   const putDistance = putTrigger > 0 ? putTrigger - putOfferLive : 0
 
   const combinedMode = Boolean(trade.combined_trigger_mode)
+  const adjustmentMode = String(trade.adjustment_mode || 'A_ONLY').toUpperCase()
+  const adjBTriggerPct = Number(trade.adj_b_trigger_pct ?? 50)
+  const showAdjA =
+    adjustmentMode === 'A_ONLY' || adjustmentMode === 'BOTH'
+  const showAdjB =
+    adjustmentMode === 'B_ONLY' || adjustmentMode === 'BOTH'
+  const callAdjBTrigger =
+    callBaseline > 0 ? callBaseline * (adjBTriggerPct / 100) : 0
+  const putAdjBTrigger =
+    putBaseline > 0 ? putBaseline * (adjBTriggerPct / 100) : 0
+  const callAdjBProgress = adjBProgressPct(
+    callBaseline,
+    callOfferLive,
+    callAdjBTrigger,
+  )
+  const putAdjBProgress = adjBProgressPct(
+    putBaseline,
+    putOfferLive,
+    putAdjBTrigger,
+  )
+  const monitoringBadgeLabel = closestTriggerBadgeLabel({
+    callLabel: 'CALL',
+    putLabel: 'PUT',
+    callA: callProgress,
+    putA: putProgress,
+    callB: callAdjBProgress,
+    putB: putAdjBProgress,
+    showA: showAdjA && !combinedMode,
+    showB: showAdjB && !combinedMode,
+  })
+
   const combinedEntry = Number(
     trade.combined_entry_premium != null
       ? trade.combined_entry_premium
@@ -1165,11 +1397,13 @@ export default function PositionCard({
                 'HOLD',
             )
             const badge = NEXT_ACTION_BADGE[action] || NEXT_ACTION_BADGE.HOLD
+            const label =
+              action === 'HOLD' ? monitoringBadgeLabel : badge.label
             return (
               <div
                 className={`mb-3 inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${badge.className}`}
               >
-                {badge.label}
+                {label}
               </div>
             )
           })()}
@@ -1192,6 +1426,11 @@ export default function PositionCard({
                 triggerMode={triggerMode}
                 deltaSlPrice={callDeltaSl}
                 universalSlPct={universalSlPct}
+                adjustmentMode={adjustmentMode}
+                adjBTriggerPct={adjBTriggerPct}
+                otherBaseline={putBaseline}
+                otherPremium={putOfferLive}
+                otherSideLabel="PUT"
               />
               <TriggerWatch
                 title="Put Leg Watch"
@@ -1205,6 +1444,11 @@ export default function PositionCard({
                 triggerMode={triggerMode}
                 deltaSlPrice={putDeltaSl}
                 universalSlPct={universalSlPct}
+                adjustmentMode={adjustmentMode}
+                adjBTriggerPct={adjBTriggerPct}
+                otherBaseline={callBaseline}
+                otherPremium={callOfferLive}
+                otherSideLabel="CALL"
               />
             </div>
           )}
@@ -1975,11 +2219,13 @@ export default function PositionCard({
               'HOLD',
           )
           const badge = NEXT_ACTION_BADGE[action] || NEXT_ACTION_BADGE.HOLD
+          const label =
+            action === 'HOLD' ? monitoringBadgeLabel : badge.label
           return (
             <div
               className={`mb-3 inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${badge.className}`}
             >
-              {badge.label}
+              {label}
             </div>
           )
         })()}
@@ -2054,6 +2300,11 @@ export default function PositionCard({
               triggerMode={triggerMode}
               deltaSlPrice={callDeltaSl}
               universalSlPct={universalSlPct}
+              adjustmentMode={adjustmentMode}
+              adjBTriggerPct={adjBTriggerPct}
+              otherBaseline={putBaseline}
+              otherPremium={putOfferLive}
+              otherSideLabel="PUT"
             />
             <TriggerWatch
               title="Put Leg Watch"
@@ -2067,6 +2318,11 @@ export default function PositionCard({
               triggerMode={triggerMode}
               deltaSlPrice={putDeltaSl}
               universalSlPct={universalSlPct}
+              adjustmentMode={adjustmentMode}
+              adjBTriggerPct={adjBTriggerPct}
+              otherBaseline={callBaseline}
+              otherPremium={callOfferLive}
+              otherSideLabel="CALL"
             />
           </div>
         )}

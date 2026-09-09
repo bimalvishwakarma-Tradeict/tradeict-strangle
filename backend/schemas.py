@@ -156,6 +156,29 @@ class AutoTradeAdjustmentEngineSettings(BaseModel):
         return mode
 
 
+class ActiveTradeLegSnapshot(BaseModel):
+    """Read-only leg fields on GET /api/trade/active (monitoring card)."""
+
+    id: int
+    leg_type: str = ""
+    strike: float = 0.0
+    symbol: str = ""
+    quantity: int = 0
+    initial_premium: float = 0.0
+    # Triggers are measured from this — resets on every adjustment
+    trigger_baseline_premium: float = 0.0
+    current_premium: float = 0.0
+    status: str = "open"
+
+
+class ActiveTradeAdjEngineDisplay(BaseModel):
+    """Read-only Adj Engine v2 fields on GET /api/trade/active."""
+
+    adjustment_mode: str = Field(default="A_ONLY")
+    adj_b_trigger_pct: float = Field(default=50.0)
+    min_short_gap_points: float = Field(default=0.0)
+
+
 class AutoTradeHedgeBudgetSettings(BaseModel):
     """Hedge fixed SL + floor % + structure target multiple + roll DTE."""
 

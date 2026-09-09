@@ -1629,6 +1629,30 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
     conversion_mode_enabled = bool(
         getattr(auto_settings, "conversion_mode_enabled", True)
     )
+    adj_mode_raw = str(
+        getattr(auto_settings, "adjustment_mode", None) or "A_ONLY"
+    ).upper().strip()
+    adjustment_mode = (
+        adj_mode_raw if adj_mode_raw in {"A_ONLY", "B_ONLY", "BOTH"} else "A_ONLY"
+    )
+    try:
+        adj_b_trigger_pct = float(
+            getattr(auto_settings, "adj_b_trigger_pct", None)
+            if getattr(auto_settings, "adj_b_trigger_pct", None) is not None
+            else 50.0
+        )
+    except (TypeError, ValueError):
+        adj_b_trigger_pct = 50.0
+    adj_b_trigger_pct = max(10.0, min(90.0, adj_b_trigger_pct))
+    try:
+        min_short_gap_points = float(
+            getattr(auto_settings, "min_short_gap_points", None)
+            if getattr(auto_settings, "min_short_gap_points", None) is not None
+            else 0.0
+        )
+    except (TypeError, ValueError):
+        min_short_gap_points = 0.0
+    min_short_gap_points = max(0.0, min_short_gap_points)
 
     try:
         await bot_engine._refresh_btc_spot()
@@ -2091,6 +2115,10 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 else None
             ),
             "conversion_mode_enabled": conversion_mode_enabled,
+            # Adj Engine v2 (read-only display for Bot Monitoring Plan)
+            "adjustment_mode": adjustment_mode,
+            "adj_b_trigger_pct": round(adj_b_trigger_pct, 4),
+            "min_short_gap_points": round(min_short_gap_points, 4),
             "last_adjustment": last_adjustment,
             "is_settling": settling["is_settling"],
             "settling_ends_at": settling["settling_ends_at"],
