@@ -863,7 +863,7 @@ class BacktestEngine:
         debug_day: str,
     ) -> tuple[Any, Path]:
         """
-        Load only the debug day's month, dump scan-window CSV, simulate that day.
+        Load only the debug day's month, simulate, dump full-day CSV with MTM.
         """
         try:
             from backtest.s002_sim import S002Simulator, s002_trade_to_dict
@@ -885,9 +885,9 @@ class BacktestEngine:
             date_to=trade_date,
         )
         sim = S002Simulator(self.config)
-        out_csv = Path("backtest/results") / f"debug_{trade_date.isoformat()}.csv"
-        sim.write_debug_day_csv(df, trade_date, out_csv)
         day = sim.simulate_day(df, trade_date)
+        out_csv = Path("backtest/results") / f"debug_{trade_date.isoformat()}.csv"
+        sim.write_debug_day_csv(df, trade_date, out_csv, trades=day.trades)
 
         print(f"\n=== DEBUG DAY {trade_date} ===")
         print(

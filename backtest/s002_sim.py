@@ -68,12 +68,22 @@ class S002Trade:
     minutes_held: int
     max_favourable: float
     max_adverse: float
-    # Zero-cost twin (mid fills, zero fees)
+    # Zero-cost twin (mid fills, zero fees) — always computed
     gross_pnl_zc: float = 0.0
     net_pnl_zc: float = 0.0
     capital_used_zc: float = 0.0
     target_usd: float = 0.0
     stoploss_usd: float = 0.0
+    # Extra fields for hand-verification export
+    call_bid: float = 0.0
+    put_bid: float = 0.0
+    call_ask_age_s: float = 0.0
+    put_ask_age_s: float = 0.0
+    cost_per_lot: float = 0.0
+    allocated: float = 0.0
+    entry_fee_call: float = 0.0
+    entry_fee_put: float = 0.0
+    exit_value_gross: float = 0.0
 
 
 @dataclass
@@ -136,6 +146,15 @@ class S002Simulator:
         self.intrabar_lookahead_allowed = bool(
             cfg.get("intrabar_lookahead_allowed", False)
         )
+        # Primary fill/fee mode. ZC twin is always mid + zero fees regardless.
+        mode_raw = str(cfg.get("cost_mode", "real")).lower().strip()
+        if mode_raw not in ("real", "fees_only", "zero"):
+            print(
+                f"WARNING: unknown cost_mode={mode_raw!r} — falling back to 'real'"
+            )
+            mode_raw = "real"
+        self.cost_mode = mode_raw
+        self.fees_on = self.cost_mode != "zero"
         # Expiry 17:30 IST = 12:00 UTC
         self.expiry_h, self.expiry_m = 17, 30
         pe_h, pe_m = _parse_hhmm(
@@ -152,6 +171,18 @@ class S002Simulator:
             print(
                 "S002 quote panels: causal (no intra-bar look-ahead) — "
                 "minute t uses last print through minute t-1 only"
+            )
+        if self.cost_mode == "real":
+            print(
+                "S002 cost_mode=real — primary: entry ASK / exit BID, fees ON"
+            )
+        elif self.cost_mode == "fees_only":
+            print(
+                "S002 cost_mode=fees_only — primary: entry MID / exit MID, fees ON"
+            )
+        else:
+            print(
+                "S002 cost_mode=zero — primary: entry MID / exit MID, fees OFF"
             )
 
     def _allocated(self) -> float:
@@ -491,9 +522,22 @@ class S002Simulator:
             p_mid = self._leg_px(panels, m, "put_mid", put_k)
             c_ask = self._leg_px(panels, m, "call_ask", call_k)
             p_ask = self._leg_px(panels, m, "put_ask", put_k)
+            c_bid = self._leg_px(panels, m, "call_bid", call_k)
+            p_bid = self._leg_px(panels, m, "put_bid", put_k)
             if None in (c_mid, p_mid, c_ask, p_ask):
                 i += 1
                 continue
+            # Bid optional for entry filter; default to mid if missing (export only)
+            if c_bid is None:
+                c_bid = c_mid
+            if p_bid is None:
+                p_bid = p_mid
+            c_ask_age = self._leg_px(panels, m, "call_ask_age", call_k)
+            p_ask_age = self._leg_px(panels, m, "put_ask_age", put_k)
+            if c_ask_age is None:
+                c_ask_age = float("nan")
+            if p_ask_age is None:
+                p_ask_age = float("nan")
 
             diff = abs(float(c_mid) - float(p_mid))
             max_side = max(float(c_mid), float(p_mid))
@@ -545,7 +589,14 @@ class S002Simulator:
 
             # --- ENTRY ---
             allocated = self._allocated()
-            cost_per_lot = (float(c_ask) + float(p_ask)) * OPTIONS_CONTRACT_VALUE
+            # Primary fill prices depend on cost_mode; ZC twin always mid.
+            if self.cost_mode == "real":
+                c_entry = float(c_ask)
+                p_entry = float(p_ask)
+            else:
+                c_entry = float(c_mid)
+                p_entry = float(p_mid)
+            cost_per_lot = (c_entry + p_entry) * OPTIONS_CONTRACT_VALUE
             if cost_per_lot <= 0:
                 i += 1
                 continue
@@ -561,7 +612,7 @@ class S002Simulator:
                 f"ask={float(c_ask):.2f}/{float(p_ask):.2f} | "
                 f"cost_per_lot={cost_per_lot:.6f} | lots={lots} | "
                 f"capital_used="
-                f"{(float(c_ask) + float(p_ask)) * OPTIONS_CONTRACT_VALUE * lots:.2f}"
+                f"{(c_entry + p_entry) * OPTIONS_CONTRACT_VALUE * lots:.2f}"
             )
             if lots > 100_000:
                 print(
@@ -570,20 +621,29 @@ class S002Simulator:
                     f"allocated={allocated:.2f}) — no cap applied, log only"
                 )
 
-            capital_used = (float(c_ask) + float(p_ask)) * OPTIONS_CONTRACT_VALUE * lots
+            capital_used = (c_entry + p_entry) * OPTIONS_CONTRACT_VALUE * lots
             capital_used_zc = (
                 (float(c_mid) + float(p_mid)) * OPTIONS_CONTRACT_VALUE * lots
             )
-            entry_fees = estimate_option_fee(
-                premium=float(c_ask), qty_lots=lots, btc_index=float(spot)
-            ) + estimate_option_fee(
-                premium=float(p_ask), qty_lots=lots, btc_index=float(spot)
-            )
-            spread_entry = (
-                ((float(c_ask) - float(c_mid)) + (float(p_ask) - float(p_mid)))
-                * OPTIONS_CONTRACT_VALUE
-                * lots
-            )
+            if self.fees_on:
+                entry_fee_call = estimate_option_fee(
+                    premium=c_entry, qty_lots=lots, btc_index=float(spot)
+                )
+                entry_fee_put = estimate_option_fee(
+                    premium=p_entry, qty_lots=lots, btc_index=float(spot)
+                )
+            else:
+                entry_fee_call = 0.0
+                entry_fee_put = 0.0
+            entry_fees = entry_fee_call + entry_fee_put
+            if self.cost_mode == "real":
+                spread_entry = (
+                    ((float(c_ask) - float(c_mid)) + (float(p_ask) - float(p_mid)))
+                    * OPTIONS_CONTRACT_VALUE
+                    * lots
+                )
+            else:
+                spread_entry = 0.0
 
             target = capital_used * self.target_pct / 100.0
             stoploss = min(
@@ -604,6 +664,7 @@ class S002Simulator:
             net = 0.0
             gross_zc = 0.0
             net_zc = 0.0
+            exit_value_gross = 0.0
             max_fav = 0.0
             max_adv = 0.0
             peak_net = 0.0
@@ -635,12 +696,13 @@ class S002Simulator:
                     call_val = max(0.0, s_settle - float(call_k))
                     put_val = max(0.0, float(put_k) - s_settle)
                     payout = (call_val + put_val) * OPTIONS_CONTRACT_VALUE * lots
+                    exit_value_gross = payout
                     gross = payout - capital_used
                     gross_zc = (
                         (call_val + put_val) * OPTIONS_CONTRACT_VALUE * lots
                         - capital_used_zc
                     )
-                    if self.settlement_fee_enabled:
+                    if self.settlement_fee_enabled and self.fees_on:
                         exit_fees = estimate_option_fee(
                             premium=call_val, qty_lots=lots, btc_index=s_settle
                         ) + estimate_option_fee(
@@ -661,31 +723,41 @@ class S002Simulator:
                     max_adv = min(max_adv, net)
                     break
 
-                c_bid = self._leg_px(panels, mj, "call_bid", call_k)
-                p_bid = self._leg_px(panels, mj, "put_bid", put_k)
+                c_bid_x = self._leg_px(panels, mj, "call_bid", call_k)
+                p_bid_x = self._leg_px(panels, mj, "put_bid", put_k)
                 c_md = self._leg_px(panels, mj, "call_mid", call_k)
                 p_md = self._leg_px(panels, mj, "put_mid", put_k)
-                if None in (c_bid, p_bid):
+                if None in (c_bid_x, p_bid_x):
                     j += 1
                     continue
                 if c_md is None:
-                    c_md = c_bid
+                    c_md = c_bid_x
                 if p_md is None:
-                    p_md = p_bid
+                    p_md = p_bid_x
 
-                exit_value_gross = (
-                    (float(c_bid) + float(p_bid)) * OPTIONS_CONTRACT_VALUE * lots
+                if self.cost_mode == "real":
+                    c_exit_px = float(c_bid_x)
+                    p_exit_px = float(p_bid_x)
+                else:
+                    c_exit_px = float(c_md)
+                    p_exit_px = float(p_md)
+
+                exit_value_gross_mtm = (
+                    (c_exit_px + p_exit_px) * OPTIONS_CONTRACT_VALUE * lots
                 )
-                gross_mtm = exit_value_gross - capital_used
-                est_exit_fees = estimate_option_fee(
-                    premium=float(c_bid),
-                    qty_lots=lots,
-                    btc_index=float(spot_j if spot_j is not None else spot),
-                ) + estimate_option_fee(
-                    premium=float(p_bid),
-                    qty_lots=lots,
-                    btc_index=float(spot_j if spot_j is not None else spot),
-                )
+                gross_mtm = exit_value_gross_mtm - capital_used
+                if self.fees_on:
+                    est_exit_fees = estimate_option_fee(
+                        premium=c_exit_px,
+                        qty_lots=lots,
+                        btc_index=float(spot_j if spot_j is not None else spot),
+                    ) + estimate_option_fee(
+                        premium=p_exit_px,
+                        qty_lots=lots,
+                        btc_index=float(spot_j if spot_j is not None else spot),
+                    )
+                else:
+                    est_exit_fees = 0.0
                 net_mtm = gross_mtm - entry_fees - est_exit_fees
 
                 exit_value_zc = (
@@ -697,6 +769,34 @@ class S002Simulator:
                 max_fav = max(max_fav, net_mtm)
                 max_adv = min(max_adv, net_mtm)
                 peak_net = max(peak_net, net_mtm)
+
+                def _record_early_exit(reason: str) -> None:
+                    nonlocal exit_reason, exit_ist, call_bid_exit, put_bid_exit
+                    nonlocal call_mid_exit, put_mid_exit, exit_fees, spread_exit
+                    nonlocal gross, net, gross_zc, net_zc, exit_value_gross
+                    exit_reason = reason
+                    exit_ist = mj.to_pydatetime()
+                    call_bid_exit = float(c_bid_x)
+                    put_bid_exit = float(p_bid_x)
+                    call_mid_exit = float(c_md)
+                    put_mid_exit = float(p_md)
+                    exit_fees = est_exit_fees
+                    exit_value_gross = exit_value_gross_mtm
+                    if self.cost_mode == "real":
+                        spread_exit = (
+                            (
+                                (float(c_md) - float(c_bid_x))
+                                + (float(p_md) - float(p_bid_x))
+                            )
+                            * OPTIONS_CONTRACT_VALUE
+                            * lots
+                        )
+                    else:
+                        spread_exit = 0.0
+                    gross = gross_mtm
+                    net = net_mtm
+                    gross_zc = gross_mtm_zc
+                    net_zc = net_mtm_zc
 
                 # Trailing (coded, default OFF — not used when trail_enabled=False)
                 if self.trail_enabled:
@@ -710,82 +810,22 @@ class S002Simulator:
                     )
                     trail_floor = max(target, peak_net * (1.0 - retrace))
                     if trail_armed and net_mtm <= trail_floor:
-                        exit_reason = "TRAIL"
-                        exit_ist = mj.to_pydatetime()
-                        call_bid_exit = float(c_bid)
-                        put_bid_exit = float(p_bid)
-                        call_mid_exit = float(c_md)
-                        put_mid_exit = float(p_md)
-                        exit_fees = est_exit_fees
-                        spread_exit = (
-                            ((float(c_md) - float(c_bid)) + (float(p_md) - float(p_bid)))
-                            * OPTIONS_CONTRACT_VALUE
-                            * lots
-                        )
-                        gross = gross_mtm
-                        net = net_mtm
-                        gross_zc = gross_mtm_zc
-                        net_zc = net_mtm_zc
+                        _record_early_exit("TRAIL")
                         break
 
                 # a) Target on NET
                 if net_mtm >= target:
-                    exit_reason = "TARGET"
-                    exit_ist = mj.to_pydatetime()
-                    call_bid_exit = float(c_bid)
-                    put_bid_exit = float(p_bid)
-                    call_mid_exit = float(c_md)
-                    put_mid_exit = float(p_md)
-                    exit_fees = est_exit_fees
-                    spread_exit = (
-                        ((float(c_md) - float(c_bid)) + (float(p_md) - float(p_bid)))
-                        * OPTIONS_CONTRACT_VALUE
-                        * lots
-                    )
-                    gross = gross_mtm
-                    net = net_mtm
-                    gross_zc = gross_mtm_zc
-                    net_zc = net_mtm_zc
+                    _record_early_exit("TARGET")
                     break
 
                 # b) Stoploss on GROSS
                 if gross_mtm <= -stoploss:
-                    exit_reason = "STOPLOSS"
-                    exit_ist = mj.to_pydatetime()
-                    call_bid_exit = float(c_bid)
-                    put_bid_exit = float(p_bid)
-                    call_mid_exit = float(c_md)
-                    put_mid_exit = float(p_md)
-                    exit_fees = est_exit_fees
-                    spread_exit = (
-                        ((float(c_md) - float(c_bid)) + (float(p_md) - float(p_bid)))
-                        * OPTIONS_CONTRACT_VALUE
-                        * lots
-                    )
-                    gross = gross_mtm
-                    net = net_mtm
-                    gross_zc = gross_mtm_zc
-                    net_zc = net_mtm_zc
+                    _record_early_exit("STOPLOSS")
                     break
 
                 # c) Pre-expiry close
                 if self.pre_expiry_close_enabled and mj >= pre_expiry_ist:
-                    exit_reason = "PRE_EXPIRY"
-                    exit_ist = mj.to_pydatetime()
-                    call_bid_exit = float(c_bid)
-                    put_bid_exit = float(p_bid)
-                    call_mid_exit = float(c_md)
-                    put_mid_exit = float(p_md)
-                    exit_fees = est_exit_fees
-                    spread_exit = (
-                        ((float(c_md) - float(c_bid)) + (float(p_md) - float(p_bid)))
-                        * OPTIONS_CONTRACT_VALUE
-                        * lots
-                    )
-                    gross = gross_mtm
-                    net = net_mtm
-                    gross_zc = gross_mtm_zc
-                    net_zc = net_mtm_zc
+                    _record_early_exit("PRE_EXPIRY")
                     break
 
                 j += 1
@@ -830,6 +870,19 @@ class S002Simulator:
                 capital_used_zc=float(capital_used_zc),
                 target_usd=float(target),
                 stoploss_usd=float(stoploss),
+                call_bid=float(c_bid),
+                put_bid=float(p_bid),
+                call_ask_age_s=float(c_ask_age)
+                if not pd.isna(c_ask_age)
+                else 0.0,
+                put_ask_age_s=float(p_ask_age)
+                if not pd.isna(p_ask_age)
+                else 0.0,
+                cost_per_lot=float(cost_per_lot),
+                allocated=float(allocated),
+                entry_fee_call=float(entry_fee_call),
+                entry_fee_put=float(entry_fee_put),
+                exit_value_gross=float(exit_value_gross),
             )
             trades.append(trade)
 
@@ -894,11 +947,13 @@ class S002Simulator:
         df: pd.DataFrame,
         trade_date: date,
         out_csv: str | Path,
+        trades: list[S002Trade] | None = None,
     ) -> Path:
         """
-        Per-minute scan-window dump for one day (diagnosis only).
+        Per-minute dump from scan_start through expiry (17:30 IST).
 
-        Columns match the --debug-day contract. Does not change strategy rules.
+        When `trades` is provided, minutes while a position is open also get
+        in-position MTM columns. Does not change strategy rules.
         """
         trade_date = _as_date(trade_date)
         expiry = trade_date
@@ -908,29 +963,37 @@ class S002Simulator:
         out_path = Path(out_csv)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
+        base_cols = [
+            "ist_minute",
+            "parity_spot",
+            "atm_strike",
+            "call_strike",
+            "call_bid",
+            "call_ask",
+            "call_mid",
+            "call_ask_age_s",
+            "put_strike",
+            "put_bid",
+            "put_ask",
+            "put_mid",
+            "put_ask_age_s",
+            "diff",
+            "cond_diff_ok",
+            "cond_premium_ok",
+            "cond_age_ok",
+            "cond_all_ok",
+            "in_position",
+            "exit_value_gross",
+            "gross_mtm",
+            "net_mtm",
+            "target_usd",
+            "stoploss_usd",
+            "would_exit_target",
+            "would_exit_stoploss",
+        ]
+
         if day.empty or "buyer_role" not in day.columns:
-            pd.DataFrame(
-                columns=[
-                    "ist_minute",
-                    "parity_spot",
-                    "atm_strike",
-                    "call_strike",
-                    "call_bid",
-                    "call_ask",
-                    "call_mid",
-                    "call_ask_age_s",
-                    "put_strike",
-                    "put_bid",
-                    "put_ask",
-                    "put_mid",
-                    "put_ask_age_s",
-                    "diff",
-                    "cond_diff_ok",
-                    "cond_premium_ok",
-                    "cond_age_ok",
-                    "cond_all_ok",
-                ]
-            ).to_csv(out_path, index=False)
+            pd.DataFrame(columns=base_cols).to_csv(out_path, index=False)
             print(f"DEBUG day {trade_date}: no 0DTE rows — empty CSV {out_path}")
             return out_path
 
@@ -952,14 +1015,6 @@ class S002Simulator:
             self.scan_start[1],
             0,
         )
-        entry_cutoff = datetime(
-            trade_date.year,
-            trade_date.month,
-            trade_date.day,
-            self.entry_cutoff[0],
-            self.entry_cutoff[1],
-            0,
-        )
         expiry_ist = datetime(
             trade_date.year,
             trade_date.month,
@@ -968,13 +1023,23 @@ class S002Simulator:
             self.expiry_m,
             0,
         )
-        # Panels need full day for ffill continuity into the window
         minutes_full = pd.date_range(start=scan_start, end=expiry_ist, freq="1min")
-        scan_minutes = pd.date_range(start=scan_start, end=entry_cutoff, freq="1min")
         panels = self._build_day_panels(day, minutes_full, strikes)
+        open_trades = list(trades or [])
+
+        def _active_trade(minute: pd.Timestamp) -> S002Trade | None:
+            """Position is open from the minute AFTER entry through exit inclusive."""
+            for t in open_trades:
+                if t.exit_ist is None:
+                    continue
+                entry_m = pd.Timestamp(t.entry_ist).floor("min")
+                exit_m = pd.Timestamp(t.exit_ist).floor("min")
+                if entry_m < minute <= exit_m:
+                    return t
+            return None
 
         rows: list[dict[str, Any]] = []
-        for m in scan_minutes:
+        for m in minutes_full:
             spot, atm = self._spot_and_atm(panels, m, strikes)
             call_k = (
                 self._pick_wing(strikes, atm, side="call", offset_pts=offset_pts)
@@ -1009,6 +1074,72 @@ class S002Simulator:
                 cond_age = self._quote_ok(panels, m, call_k, put_k)
                 cond_all = bool(cond_diff and cond_prem and cond_age)
 
+            active = _active_trade(m)
+            in_pos = active is not None
+            exit_value = gross_mtm = net_mtm = None
+            tgt = sl = None
+            would_tgt = would_sl = False
+            if active is not None:
+                tgt = float(active.target_usd)
+                sl = float(active.stoploss_usd)
+                ck = float(active.call_strike)
+                pk = float(active.put_strike)
+                lots = int(active.lots)
+                # Settlement bar: intrinsic vs spot if at/after expiry
+                if m >= expiry_ist:
+                    # Use parity spot if available, else trade entry spot
+                    s_settle = float(spot) if spot is not None else float(active.spot)
+                    call_val = max(0.0, s_settle - ck)
+                    put_val = max(0.0, pk - s_settle)
+                    exit_value = (call_val + put_val) * OPTIONS_CONTRACT_VALUE * lots
+                    est_exit_fees = 0.0
+                    if self.settlement_fee_enabled and self.fees_on:
+                        est_exit_fees = estimate_option_fee(
+                            premium=call_val, qty_lots=lots, btc_index=s_settle
+                        ) + estimate_option_fee(
+                            premium=put_val, qty_lots=lots, btc_index=s_settle
+                        )
+                else:
+                    xb = self._leg_px(panels, m, "call_bid", ck)
+                    xp = self._leg_px(panels, m, "put_bid", pk)
+                    xm_c = self._leg_px(panels, m, "call_mid", ck)
+                    xm_p = self._leg_px(panels, m, "put_mid", pk)
+                    if xb is not None and xp is not None:
+                        if xm_c is None:
+                            xm_c = xb
+                        if xm_p is None:
+                            xm_p = xp
+                        if self.cost_mode == "real":
+                            c_exit_px = float(xb)
+                            p_exit_px = float(xp)
+                        else:
+                            c_exit_px = float(xm_c)
+                            p_exit_px = float(xm_p)
+                        exit_value = (
+                            (c_exit_px + p_exit_px) * OPTIONS_CONTRACT_VALUE * lots
+                        )
+                        if self.fees_on:
+                            btc = float(spot) if spot is not None else float(active.spot)
+                            est_exit_fees = estimate_option_fee(
+                                premium=c_exit_px, qty_lots=lots, btc_index=btc
+                            ) + estimate_option_fee(
+                                premium=p_exit_px, qty_lots=lots, btc_index=btc
+                            )
+                        else:
+                            est_exit_fees = 0.0
+                    else:
+                        exit_value = None
+                        est_exit_fees = 0.0
+                if exit_value is not None:
+                    gross_mtm = float(exit_value) - float(active.capital_used)
+                    net_mtm = (
+                        float(gross_mtm)
+                        - float(active.entry_fees)
+                        - float(est_exit_fees)
+                    )
+                    would_tgt = bool(net_mtm >= tgt)
+                    would_sl = bool(gross_mtm <= -sl)
+
             rows.append(
                 {
                     "ist_minute": m.isoformat(sep=" ", timespec="minutes"),
@@ -1029,15 +1160,130 @@ class S002Simulator:
                     "cond_premium_ok": cond_prem,
                     "cond_age_ok": cond_age,
                     "cond_all_ok": cond_all,
+                    "in_position": in_pos,
+                    "exit_value_gross": exit_value,
+                    "gross_mtm": gross_mtm,
+                    "net_mtm": net_mtm,
+                    "target_usd": tgt,
+                    "stoploss_usd": sl,
+                    "would_exit_target": would_tgt,
+                    "would_exit_stoploss": would_sl,
                 }
             )
 
         pd.DataFrame(rows).to_csv(out_path, index=False)
         print(
-            f"DEBUG day {trade_date}: wrote {len(rows)} scan-window minutes "
-            f"-> {out_path}"
+            f"DEBUG day {trade_date}: wrote {len(rows)} minutes "
+            f"(scan_start→expiry) -> {out_path}"
         )
         return out_path
+
+
+TRADE_EXPORT_COLUMNS = [
+    "trade_date",
+    "trade_no_that_day",
+    "entry_ist",
+    "spot_at_entry",
+    "atm_strike",
+    "call_strike",
+    "call_bid",
+    "call_ask",
+    "call_mid",
+    "put_strike",
+    "put_bid",
+    "put_ask",
+    "put_mid",
+    "diff_at_entry",
+    "call_ask_age_s",
+    "put_ask_age_s",
+    "cost_per_lot",
+    "lots",
+    "allocated",
+    "capital_used",
+    "entry_fee_call",
+    "entry_fee_put",
+    "entry_fee_total",
+    "target_usd",
+    "stoploss_usd",
+    "exit_ist",
+    "exit_reason",
+    "minutes_held",
+    "call_bid_exit",
+    "put_bid_exit",
+    "exit_value_gross",
+    "exit_fee_total",
+    "gross_pnl",
+    "net_pnl",
+    "spread_cost_entry",
+    "spread_cost_exit",
+    "max_favourable",
+    "max_adverse",
+    "gross_pnl_zc",
+    "net_pnl_zc",
+]
+
+
+def export_s002_trades_csv(
+    results: list[S002DayResult],
+    out_csv: str | Path,
+) -> Path:
+    """Write one row per trade for hand verification. Exact column names fixed."""
+    out_path = Path(out_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for day in results:
+        for idx, t in enumerate(day.trades, start=1):
+            rows.append(
+                {
+                    "trade_date": t.trade_date.isoformat(),
+                    "trade_no_that_day": idx,
+                    "entry_ist": t.entry_ist.isoformat(sep=" ", timespec="minutes"),
+                    "spot_at_entry": round(float(t.spot), 4),
+                    "atm_strike": round(float(t.atm_strike), 4),
+                    "call_strike": round(float(t.call_strike), 4),
+                    "call_bid": round(float(t.call_bid), 4),
+                    "call_ask": round(float(t.call_ask), 4),
+                    "call_mid": round(float(t.call_mid), 4),
+                    "put_strike": round(float(t.put_strike), 4),
+                    "put_bid": round(float(t.put_bid), 4),
+                    "put_ask": round(float(t.put_ask), 4),
+                    "put_mid": round(float(t.put_mid), 4),
+                    "diff_at_entry": round(float(t.diff), 4),
+                    "call_ask_age_s": round(float(t.call_ask_age_s), 4),
+                    "put_ask_age_s": round(float(t.put_ask_age_s), 4),
+                    "cost_per_lot": round(float(t.cost_per_lot), 6),
+                    "lots": int(t.lots),
+                    "allocated": round(float(t.allocated), 4),
+                    "capital_used": round(float(t.capital_used), 4),
+                    "entry_fee_call": round(float(t.entry_fee_call), 4),
+                    "entry_fee_put": round(float(t.entry_fee_put), 4),
+                    "entry_fee_total": round(float(t.entry_fees), 4),
+                    "target_usd": round(float(t.target_usd), 4),
+                    "stoploss_usd": round(float(t.stoploss_usd), 4),
+                    "exit_ist": (
+                        t.exit_ist.isoformat(sep=" ", timespec="minutes")
+                        if t.exit_ist
+                        else None
+                    ),
+                    "exit_reason": t.exit_reason,
+                    "minutes_held": int(t.minutes_held),
+                    "call_bid_exit": round(float(t.call_bid_exit), 4),
+                    "put_bid_exit": round(float(t.put_bid_exit), 4),
+                    "exit_value_gross": round(float(t.exit_value_gross), 4),
+                    "exit_fee_total": round(float(t.exit_fees), 4),
+                    "gross_pnl": round(float(t.gross_pnl), 4),
+                    "net_pnl": round(float(t.net_pnl), 4),
+                    "spread_cost_entry": round(float(t.spread_cost_entry), 4),
+                    "spread_cost_exit": round(float(t.spread_cost_exit), 4),
+                    "max_favourable": round(float(t.max_favourable), 4),
+                    "max_adverse": round(float(t.max_adverse), 4),
+                    "gross_pnl_zc": round(float(t.gross_pnl_zc), 4),
+                    "net_pnl_zc": round(float(t.net_pnl_zc), 4),
+                }
+            )
+    pd.DataFrame(rows, columns=TRADE_EXPORT_COLUMNS).to_csv(out_path, index=False)
+    print(f"S002 trades export: {len(rows)} rows -> {out_path}")
+    return out_path
 
 
 def s002_trade_to_dict(t: S002Trade) -> dict[str, Any]:
@@ -1058,6 +1304,15 @@ def s002_trade_to_dict(t: S002Trade) -> dict[str, Any]:
         "diff",
         "call_ask",
         "put_ask",
+        "call_bid",
+        "put_bid",
+        "call_ask_age_s",
+        "put_ask_age_s",
+        "cost_per_lot",
+        "allocated",
+        "entry_fee_call",
+        "entry_fee_put",
+        "exit_value_gross",
         "capital_used",
         "entry_fees",
         "call_bid_exit",

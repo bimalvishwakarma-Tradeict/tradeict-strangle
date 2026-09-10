@@ -90,7 +90,12 @@ def build_config(argv: list[str] | None = None) -> dict:
         "--debug-day",
         type=str,
         default=None,
-        help="S002: dump per-minute scan-window CSV for one day only (YYYY-MM-DD)",
+        help="S002: dump per-minute CSV scan_start→expiry for one day (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--export-trades",
+        action="store_true",
+        help="S002: write per-trade CSV to backtest/results/s002_trades_<timestamp>.csv",
     )
     parser.add_argument(
         "--cache-refresh",
@@ -143,6 +148,7 @@ def build_config(argv: list[str] | None = None) -> dict:
         cfg["debug_day"] = str(args.debug_day).strip()
         # Debug path implies S002 single-day mode
         cfg["mode"] = "s002"
+    cfg["export_trades"] = bool(getattr(args, "export_trades", False))
     cfg["_no_open"] = bool(args.no_open)
     return cfg
 
@@ -646,13 +652,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nDebug complete. CSV saved: {csv_path}")
             return 0
 
-        from backtest.s002_sim import s002_day_to_dict
+        from backtest.s002_sim import export_s002_trades_csv, s002_day_to_dict
 
         results, summary = engine.run_s002(data_dir, progress_callback=on_progress)
         print_summary(summary)
         day_dicts = [s002_day_to_dict(r) for r in results]
         report_html = generate_s002_html_report(cfg, day_dicts, summary)
         stamp_prefix = "s002_report"
+        if cfg.get("export_trades"):
+            out_dir = Path("backtest/results")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            trades_path = out_dir / f"s002_trades_{stamp}.csv"
+            export_s002_trades_csv(results, trades_path)
+            print(f"Trades CSV: {trades_path.resolve()}")
     elif mode == "simple":
         results, summary = engine.run(data_dir, progress_callback=on_progress)
         print_summary(summary)
