@@ -131,12 +131,28 @@ class S002Simulator:
         self.settlement_fee_enabled = bool(
             cfg.get("settlement_fee_enabled", False)
         )
-        # Primary path is always real fills; zero-cost twin always computed.
-        self.zero_cost_primary = bool(cfg.get("zero_cost", False))
+        # False (default) = causal panels: minute t sees only data through t-1.
+        # True = legacy intra-bar look-ahead (minute t uses last print inside t).
+        self.intrabar_lookahead_allowed = bool(
+            cfg.get("intrabar_lookahead_allowed", False)
+        )
         # Expiry 17:30 IST = 12:00 UTC
         self.expiry_h, self.expiry_m = 17, 30
-        # Pre-expiry window: 15 minutes before expiry (S001 convention)
-        self.pre_expiry_h, self.pre_expiry_m = 17, 15
+        pe_h, pe_m = _parse_hhmm(
+            str(cfg.get("pre_expiry_close_time_ist", "17:25")), (17, 25)
+        )
+        self.pre_expiry_h, self.pre_expiry_m = pe_h, pe_m
+
+        if self.intrabar_lookahead_allowed:
+            print(
+                "S002 quote panels: INTRA-BAR LOOK-AHEAD ALLOWED (legacy) — "
+                "minute t uses last print inside minute t"
+            )
+        else:
+            print(
+                "S002 quote panels: causal (no intra-bar look-ahead) — "
+                "minute t uses last print through minute t-1 only"
+            )
 
     def _allocated(self) -> float:
         return self.starting_capital * self.capital_pct / 100.0
@@ -181,6 +197,10 @@ class S002Simulator:
         """
         Per-minute bid/ask/mid/age panels for call and put across all strikes.
 
+        Default (causal): after per-minute last aggregation, shift(1) then ffill
+        so minute t only sees prints through the end of minute t-1.
+        If intrabar_lookahead_allowed: skip shift (legacy look-ahead).
+
         Shape of each price panel: DataFrame index=minute, columns=strike.
         """
         work = day.copy()
@@ -188,6 +208,7 @@ class S002Simulator:
         work["_role"] = role
         work["_minute"] = work["ist_time"].dt.floor("min")
         strike_cols = [float(s) for s in strikes]
+        allow_lookahead = bool(self.intrabar_lookahead_allowed)
 
         def panel(opt: str, role_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
             sub = work.loc[
@@ -204,8 +225,16 @@ class S002Simulator:
             )
             px = g["price"].unstack("strike")
             ts = g["ts"].unstack("strike")
-            px = px.reindex(index=minutes, columns=strike_cols).ffill()
-            ts = ts.reindex(index=minutes, columns=strike_cols).ffill()
+            # 1) align to full minute grid (empty minutes stay NaN)
+            px = px.reindex(index=minutes, columns=strike_cols)
+            ts = ts.reindex(index=minutes, columns=strike_cols)
+            # 2) causal: row t gets minute t-1's last observed value
+            if not allow_lookahead:
+                px = px.shift(1)
+                ts = ts.shift(1)
+            # 3) then forward-fill gaps
+            px = px.ffill()
+            ts = ts.ffill()
             return px, ts
 
         call_bid, call_bid_ts = panel("call", "maker")
@@ -216,7 +245,7 @@ class S002Simulator:
         call_mid = (call_bid + call_ask) / 2.0
         put_mid = (put_bid + put_ask) / 2.0
 
-        # Age vs floored minute (clip same-minute negatives to 0)
+        # Age from same (possibly shifted) observation as the price panel
         minute_series = pd.Series(minutes, index=minutes)
 
         def ages(ts_panel: pd.DataFrame) -> pd.DataFrame:
@@ -415,6 +444,7 @@ class S002Simulator:
         saw_prem_ok = False
         saw_all_before_cutoff = False
         saw_lots_zero = False
+        saw_strikes_collapsed = False
         # Post-cutoff: only used to decide CUTOFF_PASSED (numbers stay window mins)
         conditions_only_after_cutoff = False
 
@@ -442,6 +472,18 @@ class S002Simulator:
                 strikes, atm, side="put", offset_pts=offset_pts
             )
             if call_k is None or put_k is None:
+                i += 1
+                continue
+            if abs(float(call_k) - float(put_k)) < 1e-6:
+                # Not a strangle — both wings collapsed to the same listed strike
+                if in_entry_window:
+                    saw_strikes_collapsed = True
+                print(
+                    f"WARNING: STRIKES_COLLAPSED {trade_date} {m} | "
+                    f"spot={spot} atm={atm} call_k={call_k} put_k={put_k} "
+                    f"strike_step={strike_step} offset_pts={offset_pts} — "
+                    f"entry skipped"
+                )
                 i += 1
                 continue
 
@@ -805,7 +847,10 @@ class S002Simulator:
             # Reasons ranked from window-only observations.
             # CUTOFF_PASSED only if window never fully cleared but post-cutoff did.
             if not saw_any_quotes:
-                no_entry_reason = "NO_QUOTES"
+                # All in-window minutes may have collapsed before quotes were seen
+                no_entry_reason = (
+                    "STRIKES_COLLAPSED" if saw_strikes_collapsed else "NO_QUOTES"
+                )
             elif not saw_diff_ok:
                 no_entry_reason = "DIFF_NEVER_MET"
             elif not saw_prem_ok:
@@ -819,9 +864,13 @@ class S002Simulator:
                 no_entry_reason = "CUTOFF_PASSED"
             elif saw_lots_zero:
                 no_entry_reason = "LOTS_ZERO"
+            elif saw_strikes_collapsed:
+                no_entry_reason = "STRIKES_COLLAPSED"
             else:
                 if conditions_only_after_cutoff:
                     no_entry_reason = "CUTOFF_PASSED"
+                elif saw_strikes_collapsed:
+                    no_entry_reason = "STRIKES_COLLAPSED"
                 elif not saw_diff_ok:
                     no_entry_reason = "DIFF_NEVER_MET"
                 elif not saw_prem_ok:

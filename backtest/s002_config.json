@@ -24,6 +24,7 @@
   "retrace_pct_late": 0.20,
   "trail_tighten_after_time_ist": "16:00",
   "pre_expiry_close_enabled": false,
+  "pre_expiry_close_time_ist": "17:25",
   "settlement_fee_enabled": false,
-  "zero_cost": false
+  "intrabar_lookahead_allowed": false
 }
