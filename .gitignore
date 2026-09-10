@@ -34,6 +34,8 @@ logs/
 *.tmp
 .pytest_cache/
 backtest/data/*.csv
+backtest/data_raw/
+backtest/data_raw/*
 backtest/data_smoke/*.csv
 backtest/results/
 deploy/gdrive_credentials.json
