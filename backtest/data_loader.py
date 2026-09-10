@@ -8,6 +8,7 @@ import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 # C-BTC-73600-010626  or  P-BTC-73400-010626
@@ -17,6 +18,18 @@ _SYMBOL_RE = re.compile(
 
 # Skip expensive symbol filter when df is already a small pre-filtered slice
 _LARGE_DF_ROWS = 100_000
+
+# Columns kept after slim (everything else dropped post-parse)
+_SLIM_KEEP = (
+    "price",
+    "size",
+    "buyer_role",
+    "opt_type",
+    "strike",
+    "expiry_date",
+    "ist_time",
+    "ist_date",
+)
 
 
 def _parse_expiry_ddmmyy(token: str) -> date:
@@ -38,6 +51,84 @@ def _as_date(value: date | datetime | pd.Timestamp | str) -> date:
     return pd.Timestamp(value).date()
 
 
+def slim_trade_frame(df: pd.DataFrame, *, log: bool = True) -> pd.DataFrame:
+    """
+    Drop unused raw columns and downcast dtypes for memory.
+
+    Verified: DataFrame column `trade_date` is never read after load_csv
+    (filters use ist_date). Safe to drop with product_symbol + timestamp.
+    """
+    if df is None or df.empty:
+        return df
+
+    before = int(df.memory_usage(deep=True).sum())
+
+    drop_cols = [
+        c
+        for c in ("product_symbol", "timestamp", "trade_date")
+        if c in df.columns
+    ]
+    out = df.drop(columns=drop_cols) if drop_cols else df.copy()
+
+    # Keep only known trade columns when present (ignore extras)
+    keep = [c for c in _SLIM_KEEP if c in out.columns]
+    if keep and list(out.columns) != keep:
+        out = out.loc[:, keep]
+
+    if "price" in out.columns and out["price"].dtype != np.float32:
+        out["price"] = pd.to_numeric(out["price"], errors="coerce").astype(
+            np.float32
+        )
+    if "size" in out.columns and out["size"].dtype != np.int32:
+        out["size"] = (
+            pd.to_numeric(out["size"], errors="coerce")
+            .fillna(0)
+            .round()
+            .astype(np.int32)
+        )
+    if "strike" in out.columns and out["strike"].dtype != np.float32:
+        out["strike"] = pd.to_numeric(out["strike"], errors="coerce").astype(
+            np.float32
+        )
+    if "buyer_role" in out.columns:
+        if out["buyer_role"].dtype.name != "category":
+            out["buyer_role"] = (
+                out["buyer_role"]
+                .astype(str)
+                .str.lower()
+                .str.strip()
+                .astype("category")
+            )
+    if "opt_type" in out.columns and out["opt_type"].dtype.name != "category":
+        out["opt_type"] = out["opt_type"].astype("category")
+    if "expiry_date" in out.columns:
+        if out["expiry_date"].dtype.name != "category":
+            out["expiry_date"] = pd.Categorical(
+                pd.to_datetime(out["expiry_date"], errors="coerce").dt.date
+            )
+    if "ist_date" in out.columns:
+        if out["ist_date"].dtype.name != "category":
+            out["ist_date"] = pd.Categorical(
+                pd.to_datetime(out["ist_date"], errors="coerce").dt.date
+            )
+
+    after = int(out.memory_usage(deep=True).sum())
+    if log:
+        print(
+            f"Slim frame: {before / (1024 ** 2):.1f} MiB -> "
+            f"{after / (1024 ** 2):.1f} MiB "
+            f"(saved {(before - after) / (1024 ** 2):.1f} MiB)"
+        )
+    return out
+
+
+def _frame_needs_slim(df: pd.DataFrame) -> bool:
+    """True if cache/frame still has fat raw columns that should be dropped."""
+    return any(
+        c in df.columns for c in ("product_symbol", "timestamp", "trade_date")
+    )
+
+
 class DataLoader:
     """Load Delta options trade CSVs and query ATM / premiums by IST time."""
 
@@ -45,8 +136,8 @@ class DataLoader:
         """
         Load a Delta trade CSV and enrich with opt_type, strike, expiry, IST times.
 
-        Returns DataFrame with original columns plus:
-          opt_type, strike, expiry_date, trade_date, ist_time, ist_date
+        Returns slim DataFrame:
+          price, size, buyer_role, opt_type, strike, expiry_date, ist_time, ist_date
         """
         path = Path(filepath)
         raw = pd.read_csv(path)
@@ -95,16 +186,12 @@ class DataLoader:
             df = df.loc[~bad_dates].copy()
             dropped += n_bad
 
-        # Categorical dates → much faster equality filters on multi-million rows
-        df["expiry_date"] = pd.Categorical(df["expiry_date"])
-        df["ist_date"] = pd.Categorical(df["ist_date"])
-        df["opt_type"] = pd.Categorical(df["opt_type"])
-
         print(
             f"Loaded {len(df)} rows from {path.name} "
             f"({dropped} dropped of {n_raw} raw)"
         )
-        return df.reset_index(drop=True)
+        # Slim at end of parse (drops product_symbol/timestamp/trade_date)
+        return slim_trade_frame(df.reset_index(drop=True), log=True)
 
     def filter_symbol(
         self,
