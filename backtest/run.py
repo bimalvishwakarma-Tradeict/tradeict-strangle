@@ -73,6 +73,11 @@ def build_config(argv: list[str] | None = None) -> dict:
         help="simple=one basket/day; continuous=re-enter 2m after exit (default)",
     )
     parser.add_argument(
+        "--cache-refresh",
+        action="store_true",
+        help="Ignore parquet cache; re-parse all source zip/csv files",
+    )
+    parser.add_argument(
         "--no-open",
         action="store_true",
         help="Do not auto-open the HTML report in a browser",
@@ -111,6 +116,7 @@ def build_config(argv: list[str] | None = None) -> dict:
         cfg["entry_hour_ist"] = hour
         cfg["entry_minute_ist"] = minute
 
+    cfg["cache_refresh"] = bool(args.cache_refresh)
     cfg["_no_open"] = bool(args.no_open)
     return cfg
 

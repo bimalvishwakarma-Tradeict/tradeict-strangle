@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import pandas as pd
@@ -31,6 +33,67 @@ SIM_KEYS = (
     "entry_hour_ist",
     "entry_minute_ist",
 )
+
+# Delta India bulk download name patterns (optional " (1)" from browser re-downloads)
+_MONTHLY_RE = re.compile(
+    r"^options-trades-monthly-BTC-(?P<y>\d{4})-(?P<m>\d{2})"
+    r"\.csv(?: \(\d+\))?(?:\.zip)?$",
+    re.IGNORECASE,
+)
+_DAILY_RE = re.compile(
+    r"^options-trades-daily-BTC-(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})"
+    r"\.csv(?: \(\d+\))?(?:\.zip)?$",
+    re.IGNORECASE,
+)
+_LEGACY_MONTH_RE = re.compile(
+    r"^BTC_(?P<y>\d{4})-(?P<m>\d{2})\.csv$",
+    re.IGNORECASE,
+)
+
+
+def _parse_source_meta(path: Path) -> dict[str, Any] | None:
+    """Classify a file as monthly / daily / legacy BTC month CSV."""
+    name = path.name
+    m = _MONTHLY_RE.match(name)
+    if m:
+        return {
+            "kind": "monthly",
+            "year": int(m.group("y")),
+            "month": int(m.group("m")),
+            "path": path,
+        }
+    m = _DAILY_RE.match(name)
+    if m:
+        return {
+            "kind": "daily",
+            "year": int(m.group("y")),
+            "month": int(m.group("m")),
+            "day": int(m.group("d")),
+            "path": path,
+        }
+    m = _LEGACY_MONTH_RE.match(name)
+    if m:
+        return {
+            "kind": "legacy",
+            "year": int(m.group("y")),
+            "month": int(m.group("m")),
+            "path": path,
+        }
+    return None
+
+
+def _month_key(year: int, month: int) -> str:
+    return f"{year:04d}-{month:02d}"
+
+
+def _prefer_cleaner_name(paths: list[Path]) -> Path:
+    """Prefer exact .csv.zip / .csv over browser ' (1)' duplicates."""
+    def score(p: Path) -> tuple[int, str]:
+        n = p.name
+        penalty = 1 if " (" in n else 0
+        return (penalty, n)
+
+    return sorted(paths, key=score)[0]
 
 
 def day_result_to_dict(result: DayResult) -> dict[str, Any]:
@@ -125,31 +188,219 @@ class BacktestEngine:
     def __init__(self, config: dict) -> None:
         self.config = dict(config or {})
         self.loader = DataLoader()
+        self.cache_refresh = bool(self.config.get("cache_refresh", False))
         sim_kwargs = {k: self.config[k] for k in SIM_KEYS if k in self.config}
         self.sim = StrategySimulator(**sim_kwargs)
 
+    def _cache_path(self, cache_dir: Path, source: Path) -> Path:
+        # Keep original filename visible; parquet replaces final extension(s)
+        safe = source.name
+        if safe.lower().endswith(".csv.zip"):
+            safe = safe[: -len(".csv.zip")] + ".parquet"
+        elif safe.lower().endswith(".zip"):
+            safe = safe[: -len(".zip")] + ".parquet"
+        elif safe.lower().endswith(".csv"):
+            safe = safe[: -len(".csv")] + ".parquet"
+        else:
+            safe = safe + ".parquet"
+        # Browser duplicate names: "file.csv (1).zip" → already handled above
+        return cache_dir / safe
+
+    def _load_source_cached(self, path: Path, cache_dir: Path) -> pd.DataFrame:
+        """Load+enrich a source file, using parquet cache when fresh."""
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = self._cache_path(cache_dir, path)
+        src_mtime = path.stat().st_mtime
+
+        if (
+            not self.cache_refresh
+            and cache_path.exists()
+            and cache_path.stat().st_mtime >= src_mtime
+        ):
+            print(f"Cache hit: {cache_path.name}")
+            df = pd.read_parquet(cache_path)
+            print(f"Loaded {len(df)} rows from cache ({path.name})")
+            return df
+
+        print(f"Loading {path.name}...")
+        df = self.loader.load_csv(path)
+        try:
+            df.to_parquet(cache_path, index=False)
+            print(f"Cache wrote: {cache_path.name} ({len(df)} rows)")
+        except Exception as exc:
+            print(f"Cache write failed for {cache_path.name}: {exc}")
+        return df
+
     def load_data_dir(self, data_dir: str) -> pd.DataFrame:
-        """Load all BTC_*.csv files from directory into one DataFrame."""
-        pattern = os.path.join(data_dir, "BTC_*.csv")
-        files = sorted(glob.glob(pattern))
-        if not files:
-            raise FileNotFoundError(f"No BTC_*.csv files found in {data_dir}")
+        """
+        Load trade data from backtest/data (BTC_*.csv) and backtest/data_raw
+        (Delta monthly/daily zip or csv), with calendar-date dedupe.
 
-        print(
-            f"Found {len(files)} CSV files: "
-            f"{[os.path.basename(f) for f in files]}"
-        )
+        Priority for any calendar date:
+          1. monthly data_raw
+          2. daily data_raw (only dates not in any monthly)
+          3. legacy backtest/data/BTC_YYYY-MM.csv (months not covered by data_raw)
+        """
+        data_path = Path(data_dir)
+        raw_path = data_path.parent / "data_raw"
+        cache_dir = data_path.parent / "cache"
 
+        monthly_by_month: dict[str, list[Path]] = {}
+        daily_files: list[tuple[date, Path]] = []
+        legacy_files: list[tuple[str, Path]] = []
+
+        if raw_path.is_dir():
+            for p in sorted(raw_path.iterdir()):
+                if not p.is_file():
+                    continue
+                meta = _parse_source_meta(p)
+                if meta is None:
+                    continue
+                if meta["kind"] == "monthly":
+                    key = _month_key(meta["year"], meta["month"])
+                    monthly_by_month.setdefault(key, []).append(p)
+                elif meta["kind"] == "daily":
+                    d = date(meta["year"], meta["month"], meta["day"])
+                    daily_files.append((d, p))
+
+        # Legacy BTC_*.csv — keep old path working
+        for f in sorted(glob.glob(os.path.join(str(data_path), "BTC_*.csv"))):
+            p = Path(f)
+            meta = _parse_source_meta(p)
+            if meta and meta["kind"] == "legacy":
+                legacy_files.append((_month_key(meta["year"], meta["month"]), p))
+
+        if not monthly_by_month and not daily_files and not legacy_files:
+            raise FileNotFoundError(
+                f"No BTC_*.csv in {data_dir} and no Delta zip/csv in {raw_path}"
+            )
+
+        covered_dates: set[date] = set()
+        months_covered_by_raw: set[str] = set()
         dfs: list[pd.DataFrame] = []
-        for f in files:
-            print(f"Loading {os.path.basename(f)}...")
-            dfs.append(self.loader.load_csv(f))
+        files_loaded = 0
+        files_skipped = 0
+
+        # --- 1) Monthly (highest priority) ---
+        for month_key in sorted(monthly_by_month.keys()):
+            candidates = monthly_by_month[month_key]
+            chosen = _prefer_cleaner_name(candidates)
+            for dup in candidates:
+                if dup != chosen:
+                    print(
+                        f"SKIP duplicate monthly: {dup.name} "
+                        f"(using {chosen.name})"
+                    )
+                    files_skipped += 1
+            df = self._load_source_cached(chosen, cache_dir)
+            files_loaded += 1
+            months_covered_by_raw.add(month_key)
+            # All ist_dates in this frame are owned by monthly
+            for d in df["ist_date"].dropna().unique():
+                covered_dates.add(
+                    d if isinstance(d, date) else pd.Timestamp(d).date()
+                )
+            dfs.append(df)
+
+        # --- 2) Daily (skip dates already in monthly) ---
+        # Prefer one file per calendar day if duplicates exist
+        daily_by_day: dict[date, list[Path]] = {}
+        for d, p in daily_files:
+            daily_by_day.setdefault(d, []).append(p)
+
+        for day_key in sorted(daily_by_day.keys()):
+            candidates = daily_by_day[day_key]
+            chosen = _prefer_cleaner_name(candidates)
+            for dup in candidates:
+                if dup != chosen:
+                    print(
+                        f"SKIP duplicate daily: {dup.name} "
+                        f"(using {chosen.name})"
+                    )
+                    files_skipped += 1
+
+            if day_key in covered_dates:
+                print(
+                    f"SKIP daily (date covered by monthly): {chosen.name} "
+                    f"date={day_key}"
+                )
+                files_skipped += 1
+                continue
+
+            df = self._load_source_cached(chosen, cache_dir)
+            # Drop any rows whose date is already covered (belt + suspenders)
+            before = len(df)
+            mask_dates = df["ist_date"].map(
+                lambda x: (
+                    x if isinstance(x, date) else pd.Timestamp(x).date()
+                )
+            )
+            keep = ~mask_dates.isin(covered_dates)
+            df = df.loc[keep].copy()
+            dropped = before - len(df)
+            if dropped:
+                print(
+                    f"SKIP {dropped} daily rows already covered "
+                    f"({chosen.name})"
+                )
+            if df.empty:
+                print(f"SKIP daily (all rows covered): {chosen.name}")
+                files_skipped += 1
+                continue
+
+            files_loaded += 1
+            months_covered_by_raw.add(_month_key(day_key.year, day_key.month))
+            for d in df["ist_date"].dropna().unique():
+                covered_dates.add(
+                    d if isinstance(d, date) else pd.Timestamp(d).date()
+                )
+            dfs.append(df)
+
+        # --- 3) Legacy BTC_*.csv (skip months covered by data_raw) ---
+        for month_key, path in legacy_files:
+            if month_key in months_covered_by_raw:
+                print(
+                    f"SKIP legacy CSV (month covered by data_raw): "
+                    f"{path.name} month={month_key}"
+                )
+                files_skipped += 1
+                continue
+
+            df = self._load_source_cached(path, cache_dir)
+            before = len(df)
+            mask_dates = df["ist_date"].map(
+                lambda x: (
+                    x if isinstance(x, date) else pd.Timestamp(x).date()
+                )
+            )
+            keep = ~mask_dates.isin(covered_dates)
+            df = df.loc[keep].copy()
+            dropped = before - len(df)
+            if dropped:
+                print(
+                    f"SKIP {dropped} legacy rows already covered "
+                    f"({path.name})"
+                )
+            if df.empty:
+                print(f"SKIP legacy (all rows covered): {path.name}")
+                files_skipped += 1
+                continue
+
+            files_loaded += 1
+            for d in df["ist_date"].dropna().unique():
+                covered_dates.add(
+                    d if isinstance(d, date) else pd.Timestamp(d).date()
+                )
+            dfs.append(df)
+
+        if not dfs:
+            raise FileNotFoundError(
+                f"All sources skipped or empty under {data_dir} / {raw_path}"
+            )
 
         combined = pd.concat(dfs, ignore_index=True)
 
-        # SPEED OPTIMIZATION: sort for faster equality filters + time windows
         print("Sorting and indexing data for fast lookup...")
-        # Re-categorical after concat (concat can widen categories → object)
         combined["expiry_date"] = pd.Categorical(combined["expiry_date"])
         combined["ist_date"] = pd.Categorical(combined["ist_date"])
         combined["opt_type"] = pd.Categorical(combined["opt_type"])
@@ -157,7 +408,18 @@ class BacktestEngine:
             ["expiry_date", "opt_type", "strike", "ist_time"]
         ).reset_index(drop=True)
 
-        print(f"Total rows: {len(combined):,}")
+        ist_dates = [
+            d if isinstance(d, date) else pd.Timestamp(d).date()
+            for d in combined["ist_date"].dropna().unique()
+        ]
+        oldest = min(ist_dates) if ist_dates else None
+        newest = max(ist_dates) if ist_dates else None
+
+        print(
+            f"Load summary: files_loaded={files_loaded} "
+            f"files_skipped={files_skipped} total_rows={len(combined):,} "
+            f"ist_date_range={oldest} -> {newest}"
+        )
         return combined
 
     def run(

@@ -307,6 +307,114 @@ class DataLoader:
         series.name = "price"
         return series
 
+    def get_minute_bid_ask(
+        self,
+        df: pd.DataFrame,
+        trade_date: date,
+        expiry_date: date,
+        opt_type: str,
+        strike: float,
+        start_ist: datetime,
+        end_ist: datetime,
+    ) -> pd.DataFrame:
+        """
+        Reconstruct per-minute bid/ask from buyer_role trade prints.
+
+        buyer_role == "taker" → buyer lifted the offer → price ≈ ASK
+        buyer_role == "maker" → seller hit the bid     → price ≈ BID
+
+        Returns DataFrame indexed by ist_minute with columns:
+          bid, ask, mid, bid_age_s, ask_age_s
+        Prices are last print in the minute, then forward-filled.
+        Ages are seconds since the last print that set that side.
+        """
+        if isinstance(trade_date, datetime):
+            trade_date = trade_date.date()
+        if isinstance(expiry_date, datetime):
+            expiry_date = expiry_date.date()
+        expiry_date = _as_date(expiry_date)
+
+        opt = str(opt_type).lower().strip()
+        strike_f = float(strike)
+
+        needs_filter = len(df) > _LARGE_DF_ROWS or (
+            "strike" in df.columns
+            and (
+                df["expiry_date"].nunique(dropna=True) > 1
+                or df["opt_type"].nunique(dropna=True) > 1
+                or df["strike"].nunique(dropna=True) > 1
+            )
+        )
+        work = (
+            self.filter_symbol(df, expiry_date, opt, strike_f)
+            if needs_filter
+            else df
+        )
+
+        subset = work[
+            (work["ist_time"] >= start_ist) & (work["ist_time"] <= end_ist)
+        ].copy()
+
+        full_idx = pd.date_range(
+            start=start_ist.replace(second=0, microsecond=0),
+            end=end_ist.replace(second=0, microsecond=0),
+            freq="1min",
+        )
+        empty = pd.DataFrame(
+            index=full_idx,
+            columns=["bid", "ask", "mid", "bid_age_s", "ask_age_s"],
+            dtype=float,
+        )
+        empty.index.name = "ist_minute"
+        if subset.empty or "buyer_role" not in subset.columns:
+            return empty
+
+        if not subset["ist_time"].is_monotonic_increasing:
+            subset = subset.sort_values("ist_time")
+        subset["minute"] = subset["ist_time"].dt.floor("min")
+        role = subset["buyer_role"].astype(str).str.lower().str.strip()
+
+        def _side_frame(mask: pd.Series) -> tuple[pd.Series, pd.Series]:
+            side = subset.loc[mask]
+            if side.empty:
+                return (
+                    pd.Series(dtype=float),
+                    pd.Series(dtype="datetime64[ns]"),
+                )
+            g = side.groupby("minute", sort=True)
+            px = g["price"].last()
+            ts = g["ist_time"].last()
+            return px, ts
+
+        bid_px, bid_ts = _side_frame(role == "maker")
+        ask_px, ask_ts = _side_frame(role == "taker")
+
+        bid = bid_px.reindex(full_idx).ffill()
+        ask = ask_px.reindex(full_idx).ffill()
+        bid_last = bid_ts.reindex(full_idx).ffill()
+        ask_last = ask_ts.reindex(full_idx).ffill()
+
+        # Age = seconds from last print that set this side → current minute.
+        # Same-minute prints can be after the floored minute stamp → clip at 0.
+        minute_as_ts = pd.Series(full_idx, index=full_idx)
+        bid_age = (minute_as_ts - bid_last).dt.total_seconds().clip(lower=0)
+        ask_age = (minute_as_ts - ask_last).dt.total_seconds().clip(lower=0)
+        bid_age = bid_age.where(bid.notna())
+        ask_age = ask_age.where(ask.notna())
+
+        out = pd.DataFrame(
+            {
+                "bid": bid,
+                "ask": ask,
+                "mid": (bid + ask) / 2.0,
+                "bid_age_s": bid_age,
+                "ask_age_s": ask_age,
+            },
+            index=full_idx,
+        )
+        out.index.name = "ist_minute"
+        return out
+
     def find_strike_by_premium(
         self,
         df: pd.DataFrame,
