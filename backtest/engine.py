@@ -465,6 +465,76 @@ class BacktestEngine:
         summary = self.compute_summary(results)
         return results, summary
 
+    def run_s002(
+        self,
+        data_dir: str,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        """
+        S002 0DTE long-strangle mode.
+
+        Does not alter run() / run_continuous(). Filters by date_from/date_to.
+        """
+        try:
+            from backtest.s002_sim import (
+                S002Simulator,
+                compute_s002_summary,
+            )
+        except ImportError:
+            from s002_sim import S002Simulator, compute_s002_summary
+
+        df = self.load_data_dir(data_dir)
+        sim = S002Simulator(self.config)
+
+        raw_dates = sorted(df["ist_date"].unique())
+        all_dates: list[date] = []
+        for d in raw_dates:
+            if isinstance(d, date) and not isinstance(d, datetime):
+                all_dates.append(d)
+            else:
+                all_dates.append(pd.Timestamp(d).date())
+
+        date_from_raw = self.config.get("date_from")
+        date_to_raw = self.config.get("date_to")
+        date_from = (
+            pd.Timestamp(date_from_raw).date() if date_from_raw else None
+        )
+        date_to = pd.Timestamp(date_to_raw).date() if date_to_raw else None
+        if date_from is not None:
+            all_dates = [d for d in all_dates if d >= date_from]
+        if date_to is not None:
+            all_dates = [d for d in all_dates if d <= date_to]
+
+        results = []
+        for i, trade_date in enumerate(all_dates):
+            if progress_callback:
+                progress_callback(i + 1, len(all_dates), str(trade_date))
+            try:
+                day = sim.simulate_day(df, trade_date)
+                results.append(day)
+                if day.trades:
+                    n = len(day.trades)
+                    pnl = sum(t.net_pnl for t in day.trades)
+                    pnl_zc = sum(t.net_pnl_zc for t in day.trades)
+                    print(
+                        f"OK {trade_date} | trades={n} | "
+                        f"real=${pnl:+.2f} | zc=${pnl_zc:+.2f} | "
+                        f"min_diff={day.min_diff_seen}"
+                    )
+                else:
+                    print(
+                        f"-- {trade_date} | no entry | "
+                        f"reason={day.no_entry_reason} | "
+                        f"min_diff={day.min_diff_seen} "
+                        f"(C={day.min_diff_call_prem}/P={day.min_diff_put_prem}) | "
+                        f"min_max_prem={day.min_max_premium_seen}"
+                    )
+            except Exception as exc:
+                print(f"ERR {trade_date} ERROR: {exc}")
+
+        summary = compute_s002_summary(results)
+        return results, summary
+
     def run_continuous(
         self,
         data_dir: str,

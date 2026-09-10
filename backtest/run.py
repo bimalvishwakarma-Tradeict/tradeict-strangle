@@ -68,9 +68,23 @@ def build_config(argv: list[str] | None = None) -> dict:
     parser.add_argument("--entry-time", type=str, default=None, help="IST HH:MM")
     parser.add_argument(
         "--mode",
-        choices=["simple", "continuous"],
+        choices=["simple", "continuous", "s002"],
         default=None,
-        help="simple=one basket/day; continuous=re-enter 2m after exit (default)",
+        help="simple=S001 one/day; continuous=S001 re-enter; s002=0DTE long strangle",
+    )
+    parser.add_argument(
+        "--date-from",
+        dest="date_from",
+        type=str,
+        default=None,
+        help="S002 inclusive start date YYYY-MM-DD",
+    )
+    parser.add_argument(
+        "--date-to",
+        dest="date_to",
+        type=str,
+        default=None,
+        help="S002 inclusive end date YYYY-MM-DD",
     )
     parser.add_argument(
         "--cache-refresh",
@@ -106,6 +120,8 @@ def build_config(argv: list[str] | None = None) -> dict:
         "fee_per_leg_usd": args.fee_per_leg_usd,
         "slippage_pct": args.slippage_pct,
         "mode": args.mode,
+        "date_from": args.date_from,
+        "date_to": args.date_to,
     }
     for key, val in cli_map.items():
         if val is not None:
@@ -349,6 +365,9 @@ new Chart(document.getElementById('pnlChart'), {{
 
 
 def print_summary(summary: dict) -> None:
+    if summary.get("strategy") == "S002":
+        print_s002_summary(summary)
+        return
     api = summary_for_api(summary)
     print("\n========== SUMMARY ==========")
     if summary.get("error"):
@@ -364,6 +383,231 @@ def print_summary(summary: dict) -> None:
     print(f"Conversions: {api['total_conversions']}")
     print(f"Exits:       {api.get('exit_counts')}")
     print("=============================\n")
+
+
+def print_s002_summary(summary: dict) -> None:
+    print("\n========== S002 SUMMARY ==========")
+    print(f"Days:          {summary.get('data_ok_days')}/{summary.get('total_days')}")
+    print(f"Days w/ trades:{summary.get('days_with_trades')}")
+    print(f"Trades:        {summary.get('total_trades')}")
+    print(
+        f"Win rate REAL: {float(summary.get('win_rate') or 0):.1f}%  |  "
+        f"ZERO-COST: {float(summary.get('win_rate_zc') or 0):.1f}%"
+    )
+    print(
+        f"Net P&L REAL:  ${_money_raw(summary.get('total_net_pnl'))}  |  "
+        f"ZERO-COST: ${_money_raw(summary.get('total_net_pnl_zc'))}"
+    )
+    print(f"Expectancy:    ${_money_raw(summary.get('expectancy'))}")
+    print(f"Avg win/loss:  ${_money_raw(summary.get('avg_win'))} / ${_money_raw(summary.get('avg_loss'))}")
+    print(
+        f"Fees:          ${_money_raw(summary.get('total_fees'))} "
+        f"({float(summary.get('fees_pct_of_target') or 0):.1f}% of target sum)"
+    )
+    print(
+        f"Spread cost:   ${_money_raw(summary.get('total_spread_cost'))} "
+        f"({float(summary.get('spread_pct_of_target') or 0):.1f}% of target sum)"
+    )
+    print(
+        f"BE win rate:   {float(summary.get('breakeven_win_rate') or 0):.1f}%  "
+        f"(actual REAL {float(summary.get('win_rate') or 0):.1f}%)"
+    )
+    print(f"Exits:         {summary.get('exit_counts')}")
+    print(f"Entry hours:   {summary.get('entry_hour_counts')}")
+    print(f"No-entry:      {summary.get('no_entry_reasons')}")
+    print(f"Note: {summary.get('settlement_fee_note')}")
+    print("==================================\n")
+
+
+def _money_raw(v: object) -> str:
+    try:
+        return f"{float(v or 0):+.2f}"
+    except (TypeError, ValueError):
+        return "+0.00"
+
+
+def generate_s002_html_report(
+    config: dict,
+    day_dicts: list[dict],
+    summary: dict,
+) -> str:
+    """HTML report for S002 with real vs zero-cost columns."""
+    dates = summary.get("daily_dates") or []
+    pnls = [float(x) for x in (summary.get("daily_pnl") or [])]
+    pnls_zc = [float(x) for x in (summary.get("daily_pnl_zc") or [])]
+    colors = ["#22c55e" if p >= 0 else "#ef4444" for p in pnls]
+
+    exit_counts = summary.get("exit_counts") or {}
+    hour_counts = summary.get("entry_hour_counts") or {}
+    no_entry = summary.get("no_entry_reasons") or {}
+
+    config_rows = "".join(
+        f"<tr><td>{_esc(k)}</td><td>{_esc(v)}</td></tr>"
+        for k, v in sorted(config.items())
+        if not str(k).startswith("_")
+    )
+
+    trade_rows: list[str] = []
+    for d in day_dicts:
+        for t in d.get("trades") or []:
+            trade_rows.append(
+                "<tr>"
+                f"<td>{_esc(t.get('trade_date'))}</td>"
+                f"<td>{_esc(str(t.get('entry_ist') or '')[11:16])}</td>"
+                f"<td>{_esc(t.get('call_strike'))}/{_esc(t.get('put_strike'))}</td>"
+                f"<td>{_esc(t.get('diff'))}</td>"
+                f"<td>{_esc(t.get('lots'))}</td>"
+                f"<td>{_esc(t.get('exit_reason'))}</td>"
+                f"<td>{_esc(_money(float(t.get('net_pnl') or 0), True))}</td>"
+                f"<td>{_esc(_money(float(t.get('net_pnl_zc') or 0), True))}</td>"
+                f"<td>{_esc(_money(float(t.get('spread_cost_entry') or 0) + float(t.get('spread_cost_exit') or 0)))}</td>"
+                f"<td>{_esc(_money(float(t.get('entry_fees') or 0) + float(t.get('exit_fees') or 0)))}</td>"
+                "</tr>"
+            )
+
+    no_entry_rows = "".join(
+        f"<tr><td>{_esc(d.get('trade_date'))}</td>"
+        f"<td>{_esc(d.get('no_entry_reason'))}</td>"
+        f"<td>{_esc(d.get('min_diff_seen'))}</td>"
+        f"<td>{_esc(d.get('min_diff_call_prem'))} / {_esc(d.get('min_diff_put_prem'))}</td>"
+        f"<td>{_esc(d.get('min_max_premium_seen'))}</td></tr>"
+        for d in day_dicts
+        if d.get("data_ok") and not d.get("trades")
+    )
+
+    hour_rows = "".join(
+        f"<tr><td>{_esc(h)}:00</td><td>{_esc(c)}</td></tr>"
+        for h, c in sorted(hour_counts.items())
+    )
+    reason_rows = "".join(
+        f"<tr><td>{_esc(k)}</td><td>{_esc(v)}</td></tr>"
+        for k, v in sorted(no_entry.items())
+    )
+    exit_rows = "".join(
+        f"<tr><td>{_esc(k)}</td><td>{_esc(v)}</td></tr>"
+        for k, v in sorted(exit_counts.items())
+    )
+
+    wr = float(summary.get("win_rate") or 0)
+    be = float(summary.get("breakeven_win_rate") or 0)
+    be_msg = "ABOVE break-even" if wr >= be else "BELOW break-even"
+
+    chart_labels = json.dumps(dates)
+    chart_values = json.dumps(pnls)
+    chart_values_zc = json.dumps(pnls_zc)
+    chart_colors = json.dumps(colors)
+
+    net = float(summary.get("total_net_pnl") or 0)
+    net_zc = float(summary.get("total_net_pnl_zc") or 0)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>S002 Backtest Report</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ margin:0; font-family: ui-sans-serif, system-ui, Segoe UI, sans-serif;
+    background:#0f172a; color:#e2e8f0; line-height:1.45; }}
+  .wrap {{ max-width: 1200px; margin:0 auto; padding:24px 16px 48px; }}
+  h1 {{ margin:0 0 8px; font-size:1.6rem; }}
+  h2 {{ margin:28px 0 12px; font-size:1.1rem; color:#93c5fd; }}
+  .muted {{ color:#94a3b8; font-size:0.9rem; }}
+  .cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; }}
+  .card {{ background:#1e293b; border:1px solid #334155; border-radius:10px; padding:12px; }}
+  .card .label {{ font-size:0.75rem; color:#94a3b8; text-transform:uppercase; }}
+  .card .value {{ font-size:1.15rem; font-weight:700; margin-top:4px; }}
+  .pos {{ color:#4ade80; }} .neg {{ color:#f87171; }}
+  table {{ width:100%; border-collapse:collapse; font-size:0.85rem; }}
+  th, td {{ padding:8px 10px; border-bottom:1px solid #334155; text-align:left; }}
+  th {{ color:#94a3b8; font-weight:600; font-size:0.75rem; text-transform:uppercase; }}
+  .panel {{ background:#1e293b; border:1px solid #334155; border-radius:10px; padding:14px; overflow-x:auto; }}
+  .chart-box {{ height:320px; }}
+  .footnote {{ margin-top:24px; font-size:0.8rem; color:#94a3b8; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>S002 — 0DTE Long Strangle</h1>
+  <p class="muted">Generated {_esc(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</p>
+
+  <h2>Config</h2>
+  <div class="panel"><table><tbody>{config_rows}</tbody></table></div>
+
+  <h2>Summary — REAL vs ZERO-COST</h2>
+  <div class="cards">
+    <div class="card"><div class="label">Trades</div><div class="value">{_esc(summary.get('total_trades'))}</div></div>
+    <div class="card"><div class="label">Win Rate REAL</div><div class="value">{_esc(f"{wr:.1f}")}%</div></div>
+    <div class="card"><div class="label">Win Rate ZERO-COST</div><div class="value">{_esc(f"{float(summary.get('win_rate_zc') or 0):.1f}")}%</div></div>
+    <div class="card"><div class="label">Net P&amp;L REAL</div><div class="value {'pos' if net>=0 else 'neg'}">{_esc(_money(net, True))}</div></div>
+    <div class="card"><div class="label">Net P&amp;L ZERO-COST</div><div class="value {'pos' if net_zc>=0 else 'neg'}">{_esc(_money(net_zc, True))}</div></div>
+    <div class="card"><div class="label">Expectancy</div><div class="value">{_esc(_money(float(summary.get('expectancy') or 0), True))}</div></div>
+    <div class="card"><div class="label">Avg Win / Loss</div><div class="value">{_esc(_money(float(summary.get('avg_win') or 0), True))} / {_esc(_money(float(summary.get('avg_loss') or 0), True))}</div></div>
+    <div class="card"><div class="label">Total Fees</div><div class="value neg">{_esc(_money(float(summary.get('total_fees') or 0)))} ({_esc(f"{float(summary.get('fees_pct_of_target') or 0):.1f}")}% tgt)</div></div>
+    <div class="card"><div class="label">Total Spread</div><div class="value neg">{_esc(_money(float(summary.get('total_spread_cost') or 0)))} ({_esc(f"{float(summary.get('spread_pct_of_target') or 0):.1f}")}% tgt)</div></div>
+    <div class="card"><div class="label">Break-even WR</div><div class="value">{_esc(f"{be:.1f}")}% — {_esc(be_msg)}</div></div>
+  </div>
+
+  <h2>Exit Reasons</h2>
+  <div class="panel"><table><thead><tr><th>Reason</th><th>Count</th></tr></thead>
+  <tbody>{exit_rows or '<tr><td colspan="2">None</td></tr>'}</tbody></table></div>
+
+  <h2>Entry Hour Distribution (IST)</h2>
+  <div class="panel"><table><thead><tr><th>Hour</th><th>Entries</th></tr></thead>
+  <tbody>{hour_rows or '<tr><td colspan="2">None</td></tr>'}</tbody></table></div>
+
+  <h2>No-Entry Day Reasons</h2>
+  <div class="panel"><table><thead><tr><th>Reason</th><th>Days</th></tr></thead>
+  <tbody>{reason_rows or '<tr><td colspan="2">None</td></tr>'}</tbody></table></div>
+
+  <h2>Daily Net P&amp;L (REAL bars, ZERO-COST line)</h2>
+  <div class="panel chart-box"><canvas id="pnlChart"></canvas></div>
+
+  <h2>Trades</h2>
+  <div class="panel"><table>
+    <thead><tr>
+      <th>Date</th><th>Entry</th><th>C/P Strike</th><th>Diff</th><th>Lots</th>
+      <th>Exit</th><th>Net REAL</th><th>Net ZC</th><th>Spread</th><th>Fees</th>
+    </tr></thead>
+    <tbody>{''.join(trade_rows) if trade_rows else '<tr><td colspan="10">No trades</td></tr>'}</tbody>
+  </table></div>
+
+  <h2>No-Entry Days (diagnostics)</h2>
+  <div class="panel"><table>
+    <thead><tr><th>Date</th><th>Reason</th><th>Min Diff</th><th>C/P @ Min Diff</th><th>Min Max Prem</th></tr></thead>
+    <tbody>{no_entry_rows or '<tr><td colspan="5">None</td></tr>'}</tbody>
+  </table></div>
+
+  <p class="footnote">{_esc(summary.get('settlement_fee_note'))}</p>
+</div>
+<script>
+const labels = {chart_labels};
+const values = {chart_values};
+const valuesZc = {chart_values_zc};
+const colors = {chart_colors};
+new Chart(document.getElementById('pnlChart'), {{
+  data: {{
+    labels,
+    datasets: [
+      {{ type:'bar', label:'Net P&L REAL', data: values, backgroundColor: colors }},
+      {{ type:'line', label:'Net P&L ZERO-COST', data: valuesZc, borderColor:'#38bdf8', tension:0.2, pointRadius:0 }}
+    ]
+  }},
+  options: {{
+    responsive:true, maintainAspectRatio:false,
+    plugins: {{ legend: {{ labels: {{ color:'#94a3b8' }} }} }},
+    scales: {{
+      x: {{ ticks: {{ color:'#94a3b8', maxRotation:60 }}, grid: {{ color:'#334155' }} }},
+      y: {{ ticks: {{ color:'#94a3b8' }}, grid: {{ color:'#334155' }} }}
+    }}
+  }}
+}});
+</script>
+</body>
+</html>
+"""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -385,21 +629,33 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"Basket {current}: starting {date_str}...")
 
-    if mode == "simple":
+    if mode == "s002":
+        from backtest.s002_sim import s002_day_to_dict
+
+        results, summary = engine.run_s002(data_dir, progress_callback=on_progress)
+        print_summary(summary)
+        day_dicts = [s002_day_to_dict(r) for r in results]
+        report_html = generate_s002_html_report(cfg, day_dicts, summary)
+        stamp_prefix = "s002_report"
+    elif mode == "simple":
         results, summary = engine.run(data_dir, progress_callback=on_progress)
+        print_summary(summary)
+        day_dicts = [day_result_to_dict(r) for r in results]
+        report_html = generate_html_report(cfg, day_dicts, summary)
+        stamp_prefix = "report"
     else:
         results, summary = engine.run_continuous(
             data_dir, progress_callback=on_progress
         )
-    print_summary(summary)
-
-    day_dicts = [day_result_to_dict(r) for r in results]
-    report_html = generate_html_report(cfg, day_dicts, summary)
+        print_summary(summary)
+        day_dicts = [day_result_to_dict(r) for r in results]
+        report_html = generate_html_report(cfg, day_dicts, summary)
+        stamp_prefix = "report"
 
     out_dir = Path("backtest/results")
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = out_dir / f"report_{stamp}.html"
+    report_path = out_dir / f"{stamp_prefix}_{stamp}.html"
     report_path.write_text(report_html, encoding="utf-8")
     abs_path = report_path.resolve()
     print(f"Report saved: {abs_path}")
