@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -390,9 +391,11 @@ class S002Simulator:
             end=expiry_ist,
             freq="1min",
         )
+        # Diagnostic / entry-condition scan is ONLY this window (not post-cutoff).
+        # Full `minutes` still runs to expiry for hold + settlement.
         panels = self._build_day_panels(day, minutes, strikes)
 
-        # Precompute spot/ATM series
+        # Precompute spot/ATM series (full day — needed for hold/settlement)
         spot_by_min: dict[pd.Timestamp, float] = {}
         atm_by_min: dict[pd.Timestamp, float] = {}
         for m in minutes:
@@ -401,7 +404,7 @@ class S002Simulator:
                 spot_by_min[m] = spot
                 atm_by_min[m] = atm
 
-        # Diagnostics accumulators
+        # Diagnostics accumulators — SCAN WINDOW ONLY (12:00–cutoff)
         min_diff_seen: float | None = None
         min_diff_call: float | None = None
         min_diff_put: float | None = None
@@ -412,6 +415,7 @@ class S002Simulator:
         saw_prem_ok = False
         saw_all_before_cutoff = False
         saw_lots_zero = False
+        # Post-cutoff: only used to decide CUTOFF_PASSED (numbers stay window mins)
         conditions_only_after_cutoff = False
 
         trades: list[S002Trade] = []
@@ -449,36 +453,32 @@ class S002Simulator:
                 i += 1
                 continue
 
-            saw_any_quotes = True
             diff = abs(float(c_mid) - float(p_mid))
             max_side = max(float(c_mid), float(p_mid))
-            if min_diff_seen is None or diff < min_diff_seen:
-                min_diff_seen = diff
-                min_diff_call = float(c_mid)
-                min_diff_put = float(p_mid)
-            if min_max_prem is None or max_side < min_max_prem:
-                min_max_prem = max_side
-
             fresh = self._quote_ok(panels, m, call_k, put_k)
-            if fresh:
-                saw_fresh_quotes = True
-
             diff_ok = diff < self.entry_max_diff_usd
             prem_ok = (
                 float(c_mid) < self.entry_max_premium
                 and float(p_mid) < self.entry_max_premium
             )
-            if diff_ok:
-                saw_diff_ok = True
-            if prem_ok:
-                saw_prem_ok = True
 
-            can_enter = (
-                in_entry_window
-                and fresh
-                and diff_ok
-                and prem_ok
-            )
+            # --- Diagnostics + no-entry flags: SCAN WINDOW ONLY ---
+            if in_entry_window:
+                saw_any_quotes = True
+                if min_diff_seen is None or diff < min_diff_seen:
+                    min_diff_seen = diff
+                    min_diff_call = float(c_mid)
+                    min_diff_put = float(p_mid)
+                if min_max_prem is None or max_side < min_max_prem:
+                    min_max_prem = max_side
+                if fresh:
+                    saw_fresh_quotes = True
+                if diff_ok:
+                    saw_diff_ok = True
+                if prem_ok:
+                    saw_prem_ok = True
+
+            # Post-cutoff: detect that entry would have been possible later
             if (
                 (not in_entry_window)
                 and fresh
@@ -488,6 +488,12 @@ class S002Simulator:
             ):
                 conditions_only_after_cutoff = True
 
+            can_enter = (
+                in_entry_window
+                and fresh
+                and diff_ok
+                and prem_ok
+            )
             if not can_enter:
                 i += 1
                 continue
@@ -506,6 +512,21 @@ class S002Simulator:
                 saw_lots_zero = True
                 i += 1
                 continue
+
+            print(
+                f"[S002_ENTRY] {trade_date} {m} | "
+                f"C={call_k:.0f} P={put_k:.0f} | "
+                f"ask={float(c_ask):.2f}/{float(p_ask):.2f} | "
+                f"cost_per_lot={cost_per_lot:.6f} | lots={lots} | "
+                f"capital_used="
+                f"{(float(c_ask) + float(p_ask)) * OPTIONS_CONTRACT_VALUE * lots:.2f}"
+            )
+            if lots > 100_000:
+                print(
+                    f"WARNING: lots={lots} exceeds 100000 on {trade_date} "
+                    f"at {m} (cost_per_lot={cost_per_lot:.8f}, "
+                    f"allocated={allocated:.2f}) — no cap applied, log only"
+                )
 
             capital_used = (float(c_ask) + float(p_ask)) * OPTIONS_CONTRACT_VALUE * lots
             capital_used_zc = (
@@ -781,6 +802,8 @@ class S002Simulator:
 
         no_entry_reason: str | None = None
         if not trades:
+            # Reasons ranked from window-only observations.
+            # CUTOFF_PASSED only if window never fully cleared but post-cutoff did.
             if not saw_any_quotes:
                 no_entry_reason = "NO_QUOTES"
             elif not saw_diff_ok:
@@ -789,14 +812,14 @@ class S002Simulator:
                 no_entry_reason = "PREMIUM_NEVER_MET"
             elif not saw_fresh_quotes:
                 no_entry_reason = "STALE_QUOTES"
+            elif saw_lots_zero and not saw_all_before_cutoff:
+                # Had quotes/diff/prem/fresh in window but lots never >= min
+                no_entry_reason = "LOTS_ZERO"
             elif not saw_all_before_cutoff and conditions_only_after_cutoff:
                 no_entry_reason = "CUTOFF_PASSED"
             elif saw_lots_zero:
                 no_entry_reason = "LOTS_ZERO"
-            elif not saw_fresh_quotes:
-                no_entry_reason = "STALE_QUOTES"
             else:
-                # Had pieces but never all together before cutoff
                 if conditions_only_after_cutoff:
                     no_entry_reason = "CUTOFF_PASSED"
                 elif not saw_diff_ok:
@@ -816,6 +839,156 @@ class S002Simulator:
             min_diff_put_prem=min_diff_put,
             min_max_premium_seen=min_max_prem,
         )
+
+    def write_debug_day_csv(
+        self,
+        df: pd.DataFrame,
+        trade_date: date,
+        out_csv: str | Path,
+    ) -> Path:
+        """
+        Per-minute scan-window dump for one day (diagnosis only).
+
+        Columns match the --debug-day contract. Does not change strategy rules.
+        """
+        trade_date = _as_date(trade_date)
+        expiry = trade_date
+        ist = df["ist_date"].astype(object).map(_as_date)
+        exp = df["expiry_date"].astype(object).map(_as_date)
+        day = df.loc[(ist == trade_date) & (exp == expiry)].copy()
+        out_path = Path(out_csv)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if day.empty or "buyer_role" not in day.columns:
+            pd.DataFrame(
+                columns=[
+                    "ist_minute",
+                    "parity_spot",
+                    "atm_strike",
+                    "call_strike",
+                    "call_bid",
+                    "call_ask",
+                    "call_mid",
+                    "call_ask_age_s",
+                    "put_strike",
+                    "put_bid",
+                    "put_ask",
+                    "put_mid",
+                    "put_ask_age_s",
+                    "diff",
+                    "cond_diff_ok",
+                    "cond_premium_ok",
+                    "cond_age_ok",
+                    "cond_all_ok",
+                ]
+            ).to_csv(out_path, index=False)
+            print(f"DEBUG day {trade_date}: no 0DTE rows — empty CSV {out_path}")
+            return out_path
+
+        if not day["ist_time"].is_monotonic_increasing:
+            day = day.sort_values("ist_time")
+
+        strikes = np.array(sorted({float(s) for s in day["strike"].unique()}))
+        diffs = np.diff(strikes)
+        strike_step = float(np.median(diffs)) if len(diffs) else 200.0
+        if strike_step <= 0:
+            strike_step = 200.0
+        offset_pts = self._offset_points(strike_step)
+
+        scan_start = datetime(
+            trade_date.year,
+            trade_date.month,
+            trade_date.day,
+            self.scan_start[0],
+            self.scan_start[1],
+            0,
+        )
+        entry_cutoff = datetime(
+            trade_date.year,
+            trade_date.month,
+            trade_date.day,
+            self.entry_cutoff[0],
+            self.entry_cutoff[1],
+            0,
+        )
+        expiry_ist = datetime(
+            trade_date.year,
+            trade_date.month,
+            trade_date.day,
+            self.expiry_h,
+            self.expiry_m,
+            0,
+        )
+        # Panels need full day for ffill continuity into the window
+        minutes_full = pd.date_range(start=scan_start, end=expiry_ist, freq="1min")
+        scan_minutes = pd.date_range(start=scan_start, end=entry_cutoff, freq="1min")
+        panels = self._build_day_panels(day, minutes_full, strikes)
+
+        rows: list[dict[str, Any]] = []
+        for m in scan_minutes:
+            spot, atm = self._spot_and_atm(panels, m, strikes)
+            call_k = (
+                self._pick_wing(strikes, atm, side="call", offset_pts=offset_pts)
+                if atm is not None
+                else None
+            )
+            put_k = (
+                self._pick_wing(strikes, atm, side="put", offset_pts=offset_pts)
+                if atm is not None
+                else None
+            )
+            c_bid = c_ask = c_mid = c_age = None
+            p_bid = p_ask = p_mid = p_age = None
+            diff = None
+            cond_diff = cond_prem = cond_age = cond_all = False
+            if call_k is not None and put_k is not None:
+                c_bid = self._leg_px(panels, m, "call_bid", call_k)
+                c_ask = self._leg_px(panels, m, "call_ask", call_k)
+                c_mid = self._leg_px(panels, m, "call_mid", call_k)
+                c_age = self._leg_px(panels, m, "call_ask_age", call_k)
+                p_bid = self._leg_px(panels, m, "put_bid", put_k)
+                p_ask = self._leg_px(panels, m, "put_ask", put_k)
+                p_mid = self._leg_px(panels, m, "put_mid", put_k)
+                p_age = self._leg_px(panels, m, "put_ask_age", put_k)
+                if c_mid is not None and p_mid is not None:
+                    diff = abs(float(c_mid) - float(p_mid))
+                    cond_diff = diff < self.entry_max_diff_usd
+                    cond_prem = (
+                        float(c_mid) < self.entry_max_premium
+                        and float(p_mid) < self.entry_max_premium
+                    )
+                cond_age = self._quote_ok(panels, m, call_k, put_k)
+                cond_all = bool(cond_diff and cond_prem and cond_age)
+
+            rows.append(
+                {
+                    "ist_minute": m.isoformat(sep=" ", timespec="minutes"),
+                    "parity_spot": spot,
+                    "atm_strike": atm,
+                    "call_strike": call_k,
+                    "call_bid": c_bid,
+                    "call_ask": c_ask,
+                    "call_mid": c_mid,
+                    "call_ask_age_s": c_age,
+                    "put_strike": put_k,
+                    "put_bid": p_bid,
+                    "put_ask": p_ask,
+                    "put_mid": p_mid,
+                    "put_ask_age_s": p_age,
+                    "diff": diff,
+                    "cond_diff_ok": cond_diff,
+                    "cond_premium_ok": cond_prem,
+                    "cond_age_ok": cond_age,
+                    "cond_all_ok": cond_all,
+                }
+            )
+
+        pd.DataFrame(rows).to_csv(out_path, index=False)
+        print(
+            f"DEBUG day {trade_date}: wrote {len(rows)} scan-window minutes "
+            f"-> {out_path}"
+        )
+        return out_path
 
 
 def s002_trade_to_dict(t: S002Trade) -> dict[str, Any]:

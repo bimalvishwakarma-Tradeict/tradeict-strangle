@@ -535,6 +535,52 @@ class BacktestEngine:
         summary = compute_s002_summary(results)
         return results, summary
 
+    def run_s002_debug_day(
+        self,
+        data_dir: str,
+        debug_day: str,
+    ) -> tuple[Any, Path]:
+        """
+        Load data once, dump scan-window CSV for one day, simulate that day only.
+        """
+        try:
+            from backtest.s002_sim import S002Simulator, s002_trade_to_dict
+        except ImportError:
+            from s002_sim import S002Simulator, s002_trade_to_dict
+
+        trade_date = pd.Timestamp(debug_day).date()
+        df = self.load_data_dir(data_dir)
+        sim = S002Simulator(self.config)
+        out_csv = Path("backtest/results") / f"debug_{trade_date.isoformat()}.csv"
+        sim.write_debug_day_csv(df, trade_date, out_csv)
+        day = sim.simulate_day(df, trade_date)
+
+        print(f"\n=== DEBUG DAY {trade_date} ===")
+        print(
+            f"no_entry_reason={day.no_entry_reason} | "
+            f"min_diff={day.min_diff_seen} "
+            f"(C={day.min_diff_call_prem}/P={day.min_diff_put_prem}) | "
+            f"min_max_prem={day.min_max_premium_seen} "
+            f"(scan window only)"
+        )
+        if not day.trades:
+            print("No entries on this day.")
+        for t in day.trades:
+            d = s002_trade_to_dict(t)
+            print(
+                f"ENTRY {d['entry_ist']} | strikes C={d['call_strike']} "
+                f"P={d['put_strike']} | ask {d['call_ask']}/{d['put_ask']} | "
+                f"lots={d['lots']} | capital_used={d['capital_used']} | "
+                f"entry_fees={d['entry_fees']}"
+            )
+            print(
+                f"  EXIT {d['exit_ist']} | {d['exit_reason']} | "
+                f"gross={d['gross_pnl']} | net={d['net_pnl']} | "
+                f"zc_net={d['net_pnl_zc']}"
+            )
+        print(f"CSV: {out_csv.resolve()}")
+        return day, out_csv
+
     def run_continuous(
         self,
         data_dir: str,

@@ -87,6 +87,12 @@ def build_config(argv: list[str] | None = None) -> dict:
         help="S002 inclusive end date YYYY-MM-DD",
     )
     parser.add_argument(
+        "--debug-day",
+        type=str,
+        default=None,
+        help="S002: dump per-minute scan-window CSV for one day only (YYYY-MM-DD)",
+    )
+    parser.add_argument(
         "--cache-refresh",
         action="store_true",
         help="Ignore parquet cache; re-parse all source zip/csv files",
@@ -133,6 +139,10 @@ def build_config(argv: list[str] | None = None) -> dict:
         cfg["entry_minute_ist"] = minute
 
     cfg["cache_refresh"] = bool(args.cache_refresh)
+    if args.debug_day:
+        cfg["debug_day"] = str(args.debug_day).strip()
+        # Debug path implies S002 single-day mode
+        cfg["mode"] = "s002"
     cfg["_no_open"] = bool(args.no_open)
     return cfg
 
@@ -630,6 +640,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Basket {current}: starting {date_str}...")
 
     if mode == "s002":
+        debug_day = cfg.get("debug_day")
+        if debug_day:
+            day, csv_path = engine.run_s002_debug_day(data_dir, str(debug_day))
+            print(f"\nDebug complete. CSV saved: {csv_path}")
+            return 0
+
         from backtest.s002_sim import s002_day_to_dict
 
         results, summary = engine.run_s002(data_dir, progress_callback=on_progress)
