@@ -24,24 +24,41 @@ IST = ZoneInfo("Asia/Kolkata")
 HORIZON = 240
 FWD_BARS = (5, 15, 30, 60, 120, 240)
 MFE_MAE_WINDOWS = (30, 60, 120, 240)
-HIT_LEVELS = (50, 100, 150, 200, 300, 400)
-STOP_LEVELS = (30, 50, 80, 120)
-TARGETS = (100, 150, 200, 300)
-STOPS = (50, 59, 80, 120)
 COST_HEDGE_OFF = 23.0
 COST_HEDGE_ON = 53.0
 DEFAULT_SEED = 20260913
+DEFAULT_TARGETS = (50, 100, 150, 200, 300, 500, 800)
+DEFAULT_STOPS = (30, 50, 59, 80, 120, 200)
+TF_SECONDS = {"1m": 60, "3m": 180, "5m": 300, "15m": 900}
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 DEFAULT_DATA = Path(__file__).resolve().parent / "data_1m" / "BTCUSD_1m_20250913_20260913.csv"
 
 
-def _latest_signals_csv() -> Path:
+def _parse_int_list(s: str) -> tuple[int, ...]:
+    parts = [p.strip() for p in str(s).split(",") if p.strip()]
+    if not parts:
+        raise ValueError("empty integer list")
+    return tuple(int(p) for p in parts)
+
+
+def _latest_signals_csv(timeframe: str | None = None) -> Path:
+    if timeframe:
+        pattern = str(RESULTS_DIR / f"s003_signals_{timeframe}_*.csv")
+    else:
+        pattern = str(RESULTS_DIR / "s003_signals_*.csv")
     matches = sorted(
-        glob.glob(str(RESULTS_DIR / "s003_signals_*.csv")),
+        glob.glob(pattern),
         key=lambda p: Path(p).stat().st_mtime,
         reverse=True,
     )
+    if not matches and timeframe:
+        # fallback: older files without tf in name
+        matches = sorted(
+            glob.glob(str(RESULTS_DIR / "s003_signals_*.csv")),
+            key=lambda p: Path(p).stat().st_mtime,
+            reverse=True,
+        )
     if not matches:
         raise FileNotFoundError(f"No s003_signals_*.csv in {RESULTS_DIR}")
     return Path(matches[0])
@@ -126,6 +143,8 @@ def compute_path_metrics(
     highs: list[float],
     lows: list[float],
     closes: list[float],
+    targets: tuple[int, ...],
+    stops: tuple[int, ...],
 ) -> dict[str, Any]:
     """
     Walk forward up to HORIZON bars from confirm index `idx`.
@@ -134,6 +153,8 @@ def compute_path_metrics(
     n = len(closes)
     long = direction == "LONG"
     max_fwd = n - 1 - idx
+    hit_levels = targets
+    stop_levels = stops
     row: dict[str, Any] = {
         "entry_idx": idx,
         "max_forward_bars": max_fwd,
@@ -170,25 +191,21 @@ def compute_path_metrics(
                 mfe = fav
             if adv > mae:
                 mae = adv
-        row[mfe_k] = mfe if max_fwd >= w or upto > 0 else None
-        row[mae_k] = mae if max_fwd >= w or upto > 0 else None
-        # If window not complete, still report partial MFE/MAE but mark — user said null for windows that do not fit
+        row[mfe_k] = mfe
+        row[mae_k] = mae
         if max_fwd < w:
             row[mfe_k] = None
             row[mae_k] = None
 
-    # First-touch helpers over full available horizon (capped at 240)
     walk = min(HORIZON, max_fwd)
-    hit_bars: dict[int, int | None] = {lv: None for lv in HIT_LEVELS}
-    stop_bars: dict[int, int | None] = {lv: None for lv in STOP_LEVELS}
+    hit_bars: dict[int, int | None] = {lv: None for lv in hit_levels}
+    stop_bars: dict[int, int | None] = {lv: None for lv in stop_levels}
     breach_bars: int | None = None
     running_fav = 0.0
     running_adv = 0.0
 
-    # Path outcomes for expectancy / before rates
-    # path_hits[T][S] = points outcome or None if incomplete horizon and neither hit
     path_result: dict[tuple[int, int], float | None] = {
-        (t, s): None for t in TARGETS for s in STOPS
+        (t, s): None for t in targets for s in stops
     }
     hit100_before50: bool | None = None
     hit150_before59: bool | None = None
@@ -204,10 +221,10 @@ def compute_path_metrics(
         if adv > running_adv:
             running_adv = adv
 
-        for lv in HIT_LEVELS:
+        for lv in hit_levels:
             if hit_bars[lv] is None and running_fav >= lv:
                 hit_bars[lv] = step
-        for lv in STOP_LEVELS:
+        for lv in stop_levels:
             if stop_bars[lv] is None and running_adv >= lv:
                 stop_bars[lv] = step
 
@@ -217,7 +234,6 @@ def compute_path_metrics(
             elif (not long) and highs[j] > extreme:
                 breach_bars = step
 
-        # Adverse-first within the bar for target/stop races
         if not flag_100_50_done:
             if running_adv >= 50:
                 hit100_before50 = False
@@ -233,8 +249,8 @@ def compute_path_metrics(
                 hit150_before59 = True
                 flag_150_59_done = True
 
-        for t in TARGETS:
-            for s in STOPS:
+        for t in targets:
+            for s in stops:
                 key = (t, s)
                 if key in path_done:
                     continue
@@ -245,7 +261,6 @@ def compute_path_metrics(
                     path_result[key] = float(t)
                     path_done.add(key)
 
-    # Close unresolved paths at horizon if full 240 available
     if max_fwd >= HORIZON:
         close_move = closes[idx + HORIZON] - entry
         close_pts = close_move if long else -close_move
@@ -257,21 +272,20 @@ def compute_path_metrics(
         if not flag_150_59_done:
             hit150_before59 = False
     else:
-        # incomplete — leave unresolved as None; before-rates None if undecided
         if not flag_100_50_done:
             hit100_before50 = None
         if not flag_150_59_done:
             hit150_before59 = None
 
-    for lv in HIT_LEVELS:
+    for lv in hit_levels:
         row[f"bars_to_hit_{lv}"] = hit_bars[lv]
-    for lv in STOP_LEVELS:
+    for lv in stop_levels:
         row[f"bars_to_stop_{lv}"] = stop_bars[lv]
     row["bars_to_breach_extreme"] = breach_bars
     row["hit_rate_100_before_50"] = hit100_before50
     row["hit_rate_150_before_59"] = hit150_before59
-    for t in TARGETS:
-        for s in STOPS:
+    for t in targets:
+        for s in stops:
             row[f"expect_t{t}_s{s}"] = path_result[(t, s)]
     return row
 
@@ -303,7 +317,14 @@ def adx_bucket(adx: float) -> str:
     return ">=28"
 
 
-def summarize_group(rows: list[dict[str, Any]], label: str) -> list[str]:
+def summarize_group(
+    rows: list[dict[str, Any]],
+    label: str,
+    *,
+    targets: tuple[int, ...],
+    stops: tuple[int, ...],
+    bar_minutes: int | None = None,
+) -> list[str]:
     lines: list[str] = []
     n = len(rows)
     lines.append(f"### {label}  (n={n})")
@@ -315,7 +336,6 @@ def summarize_group(rows: list[dict[str, Any]], label: str) -> list[str]:
     def collect(key: str) -> list[float]:
         return [float(r[key]) for r in rows if r.get(key) is not None]
 
-    # Headline hit rates / expectancy
     h100 = [r["hit_rate_100_before_50"] for r in rows if r.get("hit_rate_100_before_50") is not None]
     h150 = [r["hit_rate_150_before_59"] for r in rows if r.get("hit_rate_150_before_59") is not None]
     n100 = sum(1 for x in h100 if x)
@@ -329,8 +349,8 @@ def summarize_group(rows: list[dict[str, Any]], label: str) -> list[str]:
         f"(eligible {len(h150)}/{n})"
     )
     lines.append("  expectancy grid (points; cost floors OFF=23 ON=53):")
-    for t in TARGETS:
-        for s in STOPS:
+    for t in targets:
+        for s in stops:
             key = f"expect_t{t}_s{s}"
             vals = collect(key)
             m = _mean(vals)
@@ -344,26 +364,28 @@ def summarize_group(rows: list[dict[str, Any]], label: str) -> list[str]:
     lines.append("  forward close-to-close (mean / median):")
     for b in FWD_BARS:
         vals = collect(f"fwd_{b}")
+        clock = f" (~{b * bar_minutes}m)" if bar_minutes else ""
         lines.append(
-            f"    fwd_{b}: mean={_fmt(_mean(vals))}  median={_fmt(_median(vals))}  n={len(vals)}"
+            f"    fwd_{b}{clock}: mean={_fmt(_mean(vals))}  "
+            f"median={_fmt(_median(vals))}  n={len(vals)}"
         )
     lines.append("  MFE / MAE (mean / median):")
     for w in MFE_MAE_WINDOWS:
         mf = collect(f"mfe_{w}")
         ma = collect(f"mae_{w}")
+        clock = f" (~{w * bar_minutes}m)" if bar_minutes else ""
         lines.append(
-            f"    mfe_{w}: mean={_fmt(_mean(mf))} median={_fmt(_median(mf))} | "
+            f"    mfe_{w}{clock}: mean={_fmt(_mean(mf))} median={_fmt(_median(mf))} | "
             f"mae_{w}: mean={_fmt(_mean(ma))} median={_fmt(_median(ma))}"
         )
     lines.append("  hit rates (reached level within available <=240 bars):")
-    for lv in HIT_LEVELS:
+    for lv in targets:
         key = f"bars_to_hit_{lv}"
-        # among rows with full horizon only for fair rate
         full = [r for r in rows if int(r.get("max_forward_bars") or 0) >= HORIZON]
         hits = sum(1 for r in full if r.get(key) is not None)
         lines.append(f"    hit_{lv}: {hits}/{len(full)} = {_pct(hits, len(full))}")
     lines.append("  stop rates:")
-    for lv in STOP_LEVELS:
+    for lv in stops:
         key = f"bars_to_stop_{lv}"
         full = [r for r in rows if int(r.get("max_forward_bars") or 0) >= HORIZON]
         hits = sum(1 for r in full if r.get(key) is not None)
@@ -384,9 +406,11 @@ def build_baseline(
     lows: list[float],
     closes: list[float],
     rng: random.Random,
+    *,
+    targets: tuple[int, ...],
+    stops: tuple[int, ...],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Match LONG/SHORT mix and IST hour distribution; fixed seed via rng."""
-    # candle indices by IST hour that have enough room when possible
     by_hour: dict[int, list[int]] = defaultdict(list)
     by_hour_full: dict[int, list[int]] = defaultdict(list)
     for i, ts in enumerate(times):
@@ -416,6 +440,8 @@ def build_baseline(
             highs=highs,
             lows=lows,
             closes=closes,
+            targets=targets,
+            stops=stops,
         )
         meta.append(
             {
@@ -439,13 +465,48 @@ def build_baseline(
     return meta, metrics
 
 
+def _best_expectancy(
+    rows: list[dict[str, Any]],
+    targets: tuple[int, ...],
+    stops: tuple[int, ...],
+) -> tuple[float | None, tuple[int, int] | None]:
+    best_mean: float | None = None
+    best_ts: tuple[int, int] | None = None
+    for t in targets:
+        for s in stops:
+            key = f"expect_t{t}_s{s}"
+            vals = [float(r[key]) for r in rows if r.get(key) is not None]
+            if not vals:
+                continue
+            m = float(statistics.mean(vals))
+            if best_mean is None or m > best_mean:
+                best_mean = m
+                best_ts = (t, s)
+    return best_mean, best_ts
+
+
+def _hit_rate(rows: list[dict[str, Any]], key: str) -> float | None:
+    vals = [r[key] for r in rows if r.get(key) is not None]
+    if not vals:
+        return None
+    return sum(1 for x in vals if x) / len(vals)
+
+
 def run(
     *,
     signals_path: Path,
     data_path: Path,
     seed: int,
-) -> tuple[Path, Path]:
+    timeframe: str = "1m",
+    targets: tuple[int, ...] = DEFAULT_TARGETS,
+    stops: tuple[int, ...] = DEFAULT_STOPS,
+) -> tuple[Path, Path, dict[str, Any]]:
     t0 = time.perf_counter()
+    tf = str(timeframe)
+    if tf not in TF_SECONDS:
+        raise ValueError(f"unsupported timeframe: {tf}")
+    bar_minutes = TF_SECONDS[tf] // 60
+
     times, _o, highs, lows, closes = load_candles(data_path)
     index_by_time = {t: i for i, t in enumerate(times)}
     signals = load_signals(signals_path)
@@ -465,7 +526,6 @@ def run(
         if idx is None:
             missing_confirm += 1
             continue
-        # Prefer CSV confirm close; fall back to stored confirm_price
         entry = closes[idx]
         m = compute_path_metrics(
             idx=idx,
@@ -475,6 +535,8 @@ def run(
             highs=highs,
             lows=lows,
             closes=closes,
+            targets=targets,
+            stops=stops,
         )
         if m["tail_truncated"]:
             tail_count += 1
@@ -489,10 +551,16 @@ def run(
 
     rng = random.Random(seed)
     base_meta, base_metrics = build_baseline(
-        signal_meta, times, highs, lows, closes, rng
+        signal_meta,
+        times,
+        highs,
+        lows,
+        closes,
+        rng,
+        targets=targets,
+        stops=stops,
     )
 
-    # Worked SHORT example for audit
     worked = None
     for meta, met in zip(signal_meta, signal_metrics):
         if meta["direction"] == "SHORT" and met.get("fwd_30") is not None:
@@ -509,10 +577,9 @@ def run(
     runtime = time.perf_counter() - t0
     stamp = datetime.now(tz=IST).strftime("%Y%m%d_%H%M%S")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    txt_path = RESULTS_DIR / f"s003_edge_{stamp}.txt"
-    csv_path = RESULTS_DIR / f"s003_edge_{stamp}.csv"
+    txt_path = RESULTS_DIR / f"s003_edge_{tf}_{stamp}.txt"
+    csv_path = RESULTS_DIR / f"s003_edge_{tf}_{stamp}.csv"
 
-    # Write per-signal CSV (signals only)
     fieldnames = [
         "kind",
         "confirm_unix",
@@ -540,14 +607,14 @@ def run(
         fieldnames.append(f"fwd_{b}")
     for w in MFE_MAE_WINDOWS:
         fieldnames.extend([f"mfe_{w}", f"mae_{w}"])
-    for lv in HIT_LEVELS:
+    for lv in targets:
         fieldnames.append(f"bars_to_hit_{lv}")
-    for lv in STOP_LEVELS:
+    for lv in stops:
         fieldnames.append(f"bars_to_stop_{lv}")
     fieldnames.append("bars_to_breach_extreme")
     fieldnames.extend(["hit_100_before_50", "hit_150_before_59"])
-    for t in TARGETS:
-        for s in STOPS:
+    for t in targets:
+        for s in stops:
             fieldnames.append(f"expect_t{t}_s{s}")
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -595,13 +662,13 @@ def run(
             for ww in MFE_MAE_WINDOWS:
                 row[f"mfe_{ww}"] = met.get(f"mfe_{ww}")
                 row[f"mae_{ww}"] = met.get(f"mae_{ww}")
-            for lv in HIT_LEVELS:
+            for lv in targets:
                 row[f"bars_to_hit_{lv}"] = met.get(f"bars_to_hit_{lv}")
-            for lv in STOP_LEVELS:
+            for lv in stops:
                 row[f"bars_to_stop_{lv}"] = met.get(f"bars_to_stop_{lv}")
             row["bars_to_breach_extreme"] = met.get("bars_to_breach_extreme")
-            for t in TARGETS:
-                for s in STOPS:
+            for t in targets:
+                for s in stops:
                     row[f"expect_t{t}_s{s}"] = met.get(f"expect_t{t}_s{s}")
             w.writerow(row)
 
@@ -611,11 +678,23 @@ def run(
     sig_rows = pack(signal_meta, signal_metrics)
     base_rows = pack(base_meta, base_metrics)
 
+    sg = lambda rows, label: summarize_group(
+        rows, label, targets=targets, stops=stops, bar_minutes=bar_minutes
+    )
+
     lines: list[str] = []
     lines.append("=== S003 Phase 2.3 — signal edge vs random baseline ===")
+    lines.append(f"timeframe:   {tf}")
+    lines.append(f"bar_minutes: {bar_minutes}")
+    lines.append(
+        "forward bar horizons in wall-clock minutes: "
+        + ", ".join(f"{b} bars={b * bar_minutes}m" for b in FWD_BARS)
+    )
     lines.append(f"signals_file: {signals_path}")
     lines.append(f"data_file:    {data_path}")
     lines.append(f"random_seed:  {seed}")
+    lines.append(f"targets: {list(targets)}")
+    lines.append(f"stops:   {list(stops)}")
     lines.append(f"signals loaded: {len(signals)}")
     lines.append(f"signals matched to candles: {len(signal_meta)}")
     lines.append(f"confirm timestamps missing from CSV: {missing_confirm}")
@@ -632,78 +711,50 @@ def run(
     lines.append("COST FLOORS (round-trip, points): hedge OFF=23  hedge ON=53")
     lines.append("")
 
-    # HEADLINE first
     lines.append("========== HEADLINE ==========")
-    lines.extend(summarize_group(sig_rows, "ALL SIGNALS"))
-    lines.extend(summarize_group(base_rows, "RANDOM BASELINE"))
+    lines.extend(sg(sig_rows, "ALL SIGNALS"))
+    lines.extend(sg(base_rows, "RANDOM BASELINE"))
 
     lines.append("========== BY SCORE ==========")
     for sc in (3, 4, 5):
-        lines.extend(
-            summarize_group([r for r in sig_rows if int(r["score"]) == sc], f"score={sc}")
-        )
-    lines.extend(summarize_group(base_rows, "BASELINE (vs score cuts)"))
+        lines.extend(sg([r for r in sig_rows if int(r["score"]) == sc], f"score={sc}"))
+    lines.extend(sg(base_rows, "BASELINE (vs score cuts)"))
 
     lines.append("========== BY COMPONENT ==========")
     for comp in ("c_wick", "c_volume", "c_vwap_ext", "c_rsi"):
-        lines.extend(
-            summarize_group([r for r in sig_rows if r[comp]], f"{comp}=1 (fired)")
-        )
-        lines.extend(
-            summarize_group([r for r in sig_rows if not r[comp]], f"{comp}=0 (not fired)")
-        )
+        lines.extend(sg([r for r in sig_rows if r[comp]], f"{comp}=1 (fired)"))
+        lines.extend(sg([r for r in sig_rows if not r[comp]], f"{comp}=0 (not fired)"))
 
     lines.append("========== BY DIRECTION ==========")
     for d in ("LONG", "SHORT"):
+        lines.extend(sg([r for r in sig_rows if r["direction"] == d], f"direction={d}"))
         lines.extend(
-            summarize_group([r for r in sig_rows if r["direction"] == d], f"direction={d}")
-        )
-        lines.extend(
-            summarize_group(
-                [r for r in base_rows if r["direction"] == d], f"baseline direction={d}"
-            )
+            sg([r for r in base_rows if r["direction"] == d], f"baseline direction={d}")
         )
 
     lines.append("========== BY MODE ==========")
     for mode in ("RANGE", "EXHAUSTION"):
-        lines.extend(
-            summarize_group([r for r in sig_rows if r["mode"] == mode], f"mode={mode}")
-        )
+        lines.extend(sg([r for r in sig_rows if r["mode"] == mode], f"mode={mode}"))
 
     lines.append("========== BY ADX BUCKET ==========")
     for b in ("<15", "15-20", "20-25", "25-28", ">=28"):
-        lines.extend(
-            summarize_group(
-                [r for r in sig_rows if r["adx_bucket"] == b], f"adx={b}"
-            )
-        )
+        lines.extend(sg([r for r in sig_rows if r["adx_bucket"] == b], f"adx={b}"))
 
     lines.append("========== BY ATR QUARTILE ==========")
     for b in ("Q1", "Q2", "Q3", "Q4"):
-        lines.extend(
-            summarize_group(
-                [r for r in sig_rows if r["atr_bucket"] == b], f"atr={b}"
-            )
-        )
+        lines.extend(sg([r for r in sig_rows if r["atr_bucket"] == b], f"atr={b}"))
 
     lines.append("========== BY DISTANCE QUARTILE ==========")
     for b in ("Q1", "Q2", "Q3", "Q4"):
-        lines.extend(
-            summarize_group(
-                [r for r in sig_rows if r["dist_bucket"] == b], f"distance={b}"
-            )
-        )
+        lines.extend(sg([r for r in sig_rows if r["dist_bucket"] == b], f"distance={b}"))
 
     lines.append("========== BY HOUR IST ==========")
     for hour in range(24):
         lines.extend(
-            summarize_group(
-                [r for r in sig_rows if int(r["hour_ist"]) == hour],
-                f"hour_ist={hour:02d}",
-            )
+            sg([r for r in sig_rows if int(r["hour_ist"]) == hour], f"hour_ist={hour:02d}")
         )
         lines.extend(
-            summarize_group(
+            sg(
                 [r for r in base_rows if int(r["hour_ist"]) == hour],
                 f"baseline hour_ist={hour:02d}",
             )
@@ -732,23 +783,90 @@ def run(
     print(text)
     print(f"report: {txt_path}")
     print(f"csv:    {csv_path}")
-    return txt_path, csv_path
+
+    med_dist = _median([float(r["distance_points"]) for r in sig_rows])
+    sig_best, sig_ts = _best_expectancy(sig_rows, targets, stops)
+    base_best, base_ts = _best_expectancy(base_rows, targets, stops)
+    edge = None
+    if sig_best is not None and base_best is not None:
+        edge = sig_best - base_best
+
+    conf_times = [int(r["confirm_unix"]) for r in signal_meta]
+    if conf_times:
+        span_days = max((max(conf_times) - min(conf_times)) / 86400.0, 1e-9)
+    else:
+        span_days = 1.0
+
+    summary = {
+        "timeframe": tf,
+        "seed": seed,
+        "signals_total": len(sig_rows),
+        "signals_per_day": len(sig_rows) / span_days,
+        "median_distance_points": med_dist,
+        "cost_as_pct_of_median_distance": (
+            None if not med_dist else 100.0 * COST_HEDGE_OFF / med_dist
+        ),
+        "hit_100_before_50_signal": _hit_rate(sig_rows, "hit_rate_100_before_50"),
+        "hit_100_before_50_baseline": _hit_rate(base_rows, "hit_rate_100_before_50"),
+        "best_expectancy_signal": sig_best,
+        "best_expectancy_signal_ts": sig_ts,
+        "best_expectancy_baseline": base_best,
+        "best_expectancy_baseline_ts": base_ts,
+        "edge_over_baseline": edge,
+        "clears_23": bool(sig_best is not None and sig_best > COST_HEDGE_OFF),
+        "clears_53": bool(sig_best is not None and sig_best > COST_HEDGE_ON),
+        "runtime_s": runtime,
+        "report_path": txt_path,
+        "csv_path": csv_path,
+        "targets": targets,
+        "stops": stops,
+    }
+    return txt_path, csv_path, summary
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="S003 signal edge vs random baseline")
     p.add_argument("--signals", default=None, help="Path to s003_signals_*.csv")
-    p.add_argument("--data", default=str(DEFAULT_DATA))
+    p.add_argument("--data", default=None, help="Deprecated alias for --candles")
+    p.add_argument("--candles", default=None, help="OHLCV CSV matching the signals")
+    p.add_argument(
+        "--timeframe",
+        default="1m",
+        choices=["1m", "3m", "5m", "15m"],
+        help="Label + output filename tag",
+    )
+    p.add_argument(
+        "--targets",
+        default=",".join(str(x) for x in DEFAULT_TARGETS),
+        help="Comma-separated target points",
+    )
+    p.add_argument(
+        "--stops",
+        default=",".join(str(x) for x in DEFAULT_STOPS),
+        help="Comma-separated stop points",
+    )
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = p.parse_args(argv)
     try:
-        signals_path = Path(args.signals) if args.signals else _latest_signals_csv()
-        data_path = Path(args.data)
+        candles_arg = args.candles or args.data or str(DEFAULT_DATA)
+        signals_path = (
+            Path(args.signals)
+            if args.signals
+            else _latest_signals_csv(args.timeframe)
+        )
+        data_path = Path(candles_arg)
         if not data_path.is_file():
-            alt = Path(__file__).resolve().parents[1] / args.data
+            alt = Path(__file__).resolve().parents[1] / candles_arg
             if alt.is_file():
                 data_path = alt
-        run(signals_path=signals_path, data_path=data_path, seed=int(args.seed))
+        run(
+            signals_path=signals_path,
+            data_path=data_path,
+            seed=int(args.seed),
+            timeframe=str(args.timeframe),
+            targets=_parse_int_list(args.targets),
+            stops=_parse_int_list(args.stops),
+        )
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

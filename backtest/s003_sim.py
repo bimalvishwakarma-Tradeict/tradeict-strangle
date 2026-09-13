@@ -408,18 +408,31 @@ def run(
     config_path: Path,
     start: str | None,
     end: str | None,
-) -> tuple[Path, Path, Path]:
+    data_file: Path | None = None,
+    timeframe: str | None = None,
+) -> tuple[Path, Path, Path, dict[str, Any]]:
     raw, cfg = load_config(config_path)
-    data_file = Path(raw["data_file"])
-    if not data_file.is_file():
-        # try relative to trading-bot root
-        alt = _ROOT / raw["data_file"]
-        if alt.is_file():
-            data_file = alt
-        else:
-            raise FileNotFoundError(f"data_file not found: {raw['data_file']}")
 
-    candles = load_candles(data_file, start=start, end=end)
+    if data_file is not None:
+        resolved = Path(data_file)
+    else:
+        resolved = Path(raw["data_file"])
+    if not resolved.is_file():
+        alt = _ROOT / resolved
+        if alt.is_file():
+            resolved = alt
+        else:
+            raise FileNotFoundError(f"data_file not found: {resolved}")
+
+    if timeframe is not None:
+        tf = str(timeframe).strip()
+        if tf not in {"1m", "3m", "5m", "15m"}:
+            raise ValueError(f"timeframe must be one of 1m/3m/5m/15m, got {tf}")
+        cfg.timeframe = tf
+    else:
+        tf = str(cfg.timeframe)
+
+    candles = load_candles(resolved, start=start, end=end)
     if not candles:
         raise RuntimeError("No candles loaded for the requested window")
 
@@ -435,9 +448,9 @@ def run(
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(tz=IST).strftime("%Y%m%d_%H%M%S")
-    sig_path = RESULTS_DIR / f"s003_signals_{stamp}.csv"
-    arm_path = RESULTS_DIR / f"s003_arms_{stamp}.csv"
-    sum_path = RESULTS_DIR / f"s003_summary_{stamp}.txt"
+    sig_path = RESULTS_DIR / f"s003_signals_{tf}_{stamp}.csv"
+    arm_path = RESULTS_DIR / f"s003_arms_{tf}_{stamp}.csv"
+    sum_path = RESULTS_DIR / f"s003_summary_{tf}_{stamp}.txt"
 
     write_signals_csv(sig_path, chart.signals)
     write_arms_csv(arm_path, chart.arms)
@@ -453,7 +466,27 @@ def run(
     print(f"signals: {sig_path}")
     print(f"arms:    {arm_path}")
     print(f"summary: {sum_path}")
-    return sig_path, arm_path, sum_path
+
+    first = candles[0].open_time
+    last = candles[-1].open_time
+    span_days = max(
+        (last - first).total_seconds() / 86400.0,
+        1e-9,
+    )
+    meta = {
+        "timeframe": tf,
+        "data_file": str(resolved),
+        "signals_path": sig_path,
+        "arms_path": arm_path,
+        "summary_path": sum_path,
+        "signals_total": len(chart.signals),
+        "candles": len(candles),
+        "span_days": span_days,
+        "signals_per_day": len(chart.signals) / span_days,
+        "runtime_s": runtime_s,
+        "emitted": int(diag.emitted),
+    }
+    return sig_path, arm_path, sum_path, meta
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -465,9 +498,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--start", default=None, help="UTC start date YYYY-MM-DD inclusive")
     p.add_argument("--end", default=None, help="UTC end date YYYY-MM-DD inclusive")
+    p.add_argument(
+        "--data-file",
+        default=None,
+        help="OHLCV CSV path (overrides config data_file)",
+    )
+    p.add_argument(
+        "--timeframe",
+        default=None,
+        choices=["1m", "3m", "5m", "15m"],
+        help="Engine timeframe (overrides config)",
+    )
     args = p.parse_args(argv)
     try:
-        run(config_path=Path(args.config), start=args.start, end=args.end)
+        run(
+            config_path=Path(args.config),
+            start=args.start,
+            end=args.end,
+            data_file=Path(args.data_file) if args.data_file else None,
+            timeframe=args.timeframe,
+        )
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
