@@ -38,6 +38,7 @@ backtest/data_raw/
 backtest/data_raw/*
 backtest/cache/
 backtest/cache/*
+# includes options_trades/*.sqlite monthly shards from backtest/options_trades.py
 backtest/data_smoke/*.csv
 backtest/data_1m/
 backtest/results/
