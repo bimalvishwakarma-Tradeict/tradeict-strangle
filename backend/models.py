@@ -1082,3 +1082,132 @@ class AppUser(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utc_now
     )
+
+
+# ---------------------------------------------------------------------------
+# Strategy S003 — LSR4 signal engine (signal only; disabled by default)
+# ---------------------------------------------------------------------------
+
+
+class Strategy3ConfigRow(Base):
+    """Singleton (id=1) global config for S003. enabled defaults FALSE."""
+
+    __tablename__ = "strategy3_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, default="BTCUSD")
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False, default="1m")
+    vwap_anchor_tz: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="Asia/Kolkata"
+    )
+    sweep_len: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    max_wait: Mapped[int] = mapped_column(Integer, nullable=False, default=6)
+    confirm_frac: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    adx_len: Mapped[int] = mapped_column(Integer, nullable=False, default=14)
+    adx_trend: Mapped[float] = mapped_column(Float, nullable=False, default=28.0)
+    exh_vol_mult: Mapped[float] = mapped_column(Float, nullable=False, default=2.0)
+    exh_rng_mult: Mapped[float] = mapped_column(Float, nullable=False, default=1.8)
+    adx_fall: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    wick_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.45)
+    vol_len: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    vol_mult: Mapped[float] = mapped_column(Float, nullable=False, default=1.5)
+    atr_len: Mapped[int] = mapped_column(Integer, nullable=False, default=14)
+    ext_mult: Mapped[float] = mapped_column(Float, nullable=False, default=1.2)
+    rsi_len: Mapped[int] = mapped_column(Integer, nullable=False, default=14)
+    rsi_ob: Mapped[float] = mapped_column(Float, nullable=False, default=62.0)
+    rsi_os: Mapped[float] = mapped_column(Float, nullable=False, default=38.0)
+    min_score: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    cooldown_bars: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    cooldown_atr: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    allow_long: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    allow_short: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    allow_range_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    allow_exhaustion_mode: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now
+    )
+
+
+class Strategy3Signal(Base):
+    """Persisted S003 signals. UNIQUE for restart idempotency."""
+
+    __tablename__ = "strategy3_signals"
+    __table_args__ = (
+        UniqueConstraint(
+            "direction",
+            "signal_candle_time",
+            "confirm_candle_time",
+            name="uq_strategy3_signal_idempotent",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now
+    )
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    signal_candle_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    confirm_candle_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    confirm_price: Mapped[float] = mapped_column(Float, nullable=False)
+    signal_extreme: Mapped[float] = mapped_column(Float, nullable=False)
+    atr_at_arm: Mapped[float] = mapped_column(Float, nullable=False)
+    atr_at_confirm: Mapped[float] = mapped_column(Float, nullable=False)
+    adx_at_signal: Mapped[float] = mapped_column(Float, nullable=False)
+    acted_on: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Strategy3ArmState(Base):
+    """Persisted TOP / BOTTOM arm state (side is the natural key)."""
+
+    __tablename__ = "strategy3_arm_state"
+
+    side: Mapped[str] = mapped_column(String(8), primary_key=True)  # TOP | BOTTOM
+    armed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    signal_extreme: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confirm_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    arm_candle_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    bars_elapsed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    atr_at_arm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adx_at_arm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now
+    )
+
+
+class Strategy3EngineState(Base):
+    """Singleton (id=1) live engine cursor / warmup state."""
+
+    __tablename__ = "strategy3_engine_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    last_processed_candle_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_signal_candle_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_signal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    candles_processed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    vwap_session_date: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    warm: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now
+    )

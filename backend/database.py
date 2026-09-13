@@ -1234,4 +1234,8 @@ if __name__ == "__main__":
     assert "auto_trade_settings" in tables
     assert "slave_accounts" in tables
     assert "slave_trades" in tables
+    assert "strategy3_config" in tables
+    assert "strategy3_signals" in tables
+    assert "strategy3_arm_state" in tables
+    assert "strategy3_engine_state" in tables
     print("✅ DATABASE TEST PASSED")

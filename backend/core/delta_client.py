@@ -597,6 +597,63 @@ class DeltaClient:
             return parsed
         return await self._enrich_wallet_unrealised(parsed)
 
+    async def get_historical_candles(
+        self,
+        symbol: str,
+        resolution: str,
+        start: int,
+        end: int,
+    ) -> list[dict[str, Any]]:
+        """
+        Public GET /v2/history/candles — no HMAC signing required.
+
+        Returns list of {time, open, high, low, close, volume} (time = unix sec).
+        """
+        path = "/v2/history/candles"
+        params = {
+            "symbol": str(symbol),
+            "resolution": str(resolution),
+            "start": int(start),
+            "end": int(end),
+        }
+        query_string = self._build_query_string(params)
+        url = f"{self.base_url}{path}{query_string}"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Tradeict-Short-Strangle-Bot/1.0",
+        }
+        try:
+            response = await self.client.request(
+                method="GET",
+                url=url,
+                headers=headers,
+                timeout=CHAIN_TIMEOUT_SECONDS,
+            )
+        except httpx.TimeoutException as exc:
+            logger.error("Delta candles timeout: %s", exc)
+            raise DeltaAPIError(408, f"Candles request timed out: {exc}") from exc
+        except httpx.RequestError as exc:
+            logger.error("Delta candles connection error: %s", exc)
+            raise DeltaAPIError(0, f"Candles connection error: {exc}") from exc
+
+        if response.status_code != 200:
+            logger.error(
+                "Delta candles failed: %s %s",
+                response.status_code,
+                response.text,
+            )
+            raise DeltaAPIError(response.status_code, response.text)
+
+        payload = response.json()
+        result = payload.get("result")
+        if not isinstance(result, list):
+            raise DeltaAPIError(
+                response.status_code,
+                f"Unexpected candles payload: {payload}",
+            )
+        return result
+
     async def get_wallet_balance(self) -> dict[str, float]:
         """
         GET /v2/wallet/balances — return USD/USDT balance summary.

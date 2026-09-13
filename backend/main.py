@@ -17,6 +17,7 @@ from backend.api.routes_hedge import router as hedge_router
 from backend.api.routes_logs import router as logs_router
 from backend.api.routes_slave import router as slave_router
 from backend.api.routes_strategy import router as strategy_router
+from backend.api.routes_strategy3 import router as strategy3_router
 from backend.api.routes_structures import router as structures_router
 from backend.api.routes_trade import router as trade_router
 from backend.api.routes_ws import router as ws_router
@@ -25,6 +26,7 @@ from backend.core.bot_logger import setup_bot_logger
 from backend.core.db_audit import verify_db_consistency
 from backend.database import init_db
 from backend.engine.bot_engine import bot_engine
+from backend.strategies.s003_lsr4.worker import s003_signal_worker
 
 # Re-export for `from backend.main import verify_db_consistency` tests
 __all__ = ["app", "verify_db_consistency"]
@@ -164,12 +166,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     auto_task = asyncio.create_task(
         auto_trade_engine.start(), name="auto-trade-engine"
     )
+    s003_task = asyncio.create_task(s003_signal_worker(), name="s003-signal")
     try:
         yield
     finally:
         await bot_engine.stop()
         await auto_trade_engine.stop()
-        for task in (bot_task, auto_task):
+        for task in (bot_task, auto_task, s003_task):
             task.cancel()
             try:
                 await task
@@ -198,6 +201,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(account_router, dependencies=[Depends(require_user)])
 app.include_router(strategy_router, dependencies=[Depends(require_user)])
+app.include_router(strategy3_router, dependencies=[Depends(require_user)])
 app.include_router(trade_router, dependencies=[Depends(require_user)])
 app.include_router(auto_trade_router, dependencies=[Depends(require_user)])
 app.include_router(hedge_router, dependencies=[Depends(require_user)])
