@@ -58,12 +58,38 @@ class Signal:
 
 
 @dataclass
+class ScoreComponents:
+    """Observation-only breakdown of the 5-point score. Never drives decisions alone."""
+
+    c_sweep: bool = False
+    c_wick: bool = False
+    c_volume: bool = False
+    c_vwap_ext: bool = False
+    c_rsi: bool = False
+
+    def as_score(self) -> int:
+        return int(self.c_sweep) + int(self.c_wick) + int(self.c_volume) + int(
+            self.c_vwap_ext
+        ) + int(self.c_rsi)
+
+    def to_dict(self) -> dict[str, bool]:
+        return {
+            "c_sweep": bool(self.c_sweep),
+            "c_wick": bool(self.c_wick),
+            "c_volume": bool(self.c_volume),
+            "c_vwap_ext": bool(self.c_vwap_ext),
+            "c_rsi": bool(self.c_rsi),
+        }
+
+
+@dataclass
 class ChartTrace:
     """
     Read-only observation of the engine's own indicator values and arm events.
     Never influences decisions — only records what the engine already computed.
     """
 
+    record_bars: bool = True
     indicators: dict[str, list[dict[str, Any]]] = field(
         default_factory=lambda: {
             "vwap": [],
@@ -77,6 +103,10 @@ class ChartTrace:
     )
     arm_events: list[dict[str, Any]] = field(default_factory=list)
     signals: list[dict[str, Any]] = field(default_factory=list)
+    # Completed arms with final outcome (CONFIRM / INVALIDATE / EXPIRE / COOLDOWN_BLOCK)
+    arms: list[dict[str, Any]] = field(default_factory=list)
+    _pending_arms: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    _last_confirm_idx: dict[str, int] = field(default_factory=dict, repr=False)
 
     def record_bar(
         self,
@@ -90,6 +120,9 @@ class ChartTrace:
         minus_di: float | None,
         vol_sma: float | None,
     ) -> None:
+        if not self.record_bars:
+            return
+
         def _pt(value: float | None) -> dict[str, Any]:
             return {"time": int(time_unix), "value": value}
 
@@ -108,17 +141,55 @@ class ChartTrace:
         side: str,
         event_type: str,
         level: float,
+        arm_snapshot: dict[str, Any] | None = None,
     ) -> None:
+        side_u = str(side).upper()
+        et = str(event_type).upper()
         self.arm_events.append(
             {
                 "time": int(time_unix),
-                "side": side,
-                "type": event_type,
+                "side": side_u,
+                "type": et,
                 "level": float(level),
             }
         )
+        if et == "ARM" and arm_snapshot is not None:
+            pending = dict(arm_snapshot)
+            pending["side"] = side_u
+            pending["arm_time"] = int(time_unix)
+            pending["outcome"] = None
+            pending["outcome_time"] = None
+            self._pending_arms[side_u] = pending
+            return
+        if et in {"INVALIDATE", "EXPIRE", "CONFIRM"}:
+            pending = self._pending_arms.pop(side_u, None)
+            if pending is None:
+                return
+            pending["outcome"] = et
+            pending["outcome_time"] = int(time_unix)
+            self.arms.append(pending)
+            if et == "CONFIRM":
+                self._last_confirm_idx[side_u] = len(self.arms) - 1
+            return
+        if et == "COOLDOWN_BLOCK":
+            idx = self._last_confirm_idx.get(side_u)
+            if idx is not None and 0 <= idx < len(self.arms):
+                row = self.arms[idx]
+                if row.get("outcome") == "CONFIRM":
+                    row["outcome"] = "COOLDOWN_BLOCK"
+                    row["outcome_time"] = int(time_unix)
 
-    def record_signal(self, signal: Signal) -> None:
+    def record_signal(
+        self,
+        signal: Signal,
+        *,
+        components: ScoreComponents | None = None,
+        rsi_at_arm: float | None = None,
+        vwap_at_arm: float | None = None,
+        volume_at_arm: float | None = None,
+        vol_sma_at_arm: float | None = None,
+    ) -> None:
+        comps = (components or ScoreComponents()).to_dict()
         self.signals.append(
             {
                 "time": int(signal.confirm_candle_time.timestamp()),
@@ -130,7 +201,13 @@ class ChartTrace:
                 "confirm_price": float(signal.confirm_price),
                 "confirm_level": float(signal.confirm_level),
                 "atr_at_arm": float(signal.atr_at_arm),
+                "atr_at_confirm": float(signal.atr_at_confirm),
                 "adx_at_signal": float(signal.adx_at_signal),
+                "rsi_at_arm": rsi_at_arm,
+                "vwap_at_arm": vwap_at_arm,
+                "volume_at_arm": volume_at_arm,
+                "vol_sma_at_arm": vol_sma_at_arm,
+                **comps,
             }
         )
 
@@ -146,6 +223,12 @@ class _ArmState:
     score: int
     atr_at_arm: float
     adx_at_arm: float
+    # Observation-only score breakdown + arm-bar context (does not affect decisions)
+    components: ScoreComponents = field(default_factory=ScoreComponents)
+    rsi_at_arm: float | None = None
+    vwap_at_arm: float | None = None
+    volume_at_arm: float | None = None
+    vol_sma_at_arm: float | None = None
 
 
 @dataclass
@@ -241,6 +324,7 @@ class LSR4Engine:
         self._expected_next: datetime | None = None
         self._rewarm_remaining = 0
         self._natural_warm_ever = False
+        self._emit_meta: dict[str, Any] | None = None
         if self._ignore_warmup and self._diag is not None:
             self._diag.warm_from_index = 0
             self._diag.warm_blocked_reason = None
@@ -649,6 +733,52 @@ class LSR4Engine:
         else:
             self._diag.warm_blocked_reason = "candle_count"
 
+    def _score_components_top(
+        self,
+        *,
+        sweep_up: bool,
+        upper_wick: float,
+        bar_range: float,
+        volume: float,
+        vol_sma: float,
+        close: float,
+        vwap: float,
+        atr: float,
+        rsi: float,
+    ) -> ScoreComponents:
+        c = self.cfg
+        rh = self._rsi_high3.highest()
+        return ScoreComponents(
+            c_sweep=bool(sweep_up),
+            c_wick=bool(bar_range > 0 and upper_wick / bar_range >= c.wick_pct),
+            c_volume=bool(volume > vol_sma * c.vol_mult),
+            c_vwap_ext=bool((close - vwap) > c.ext_mult * atr),
+            c_rsi=bool(rh is not None and rh >= c.rsi_ob),
+        )
+
+    def _score_components_bottom(
+        self,
+        *,
+        sweep_dn: bool,
+        lower_wick: float,
+        bar_range: float,
+        volume: float,
+        vol_sma: float,
+        close: float,
+        vwap: float,
+        atr: float,
+        rsi: float,
+    ) -> ScoreComponents:
+        c = self.cfg
+        rl = self._rsi_low3.lowest()
+        return ScoreComponents(
+            c_sweep=bool(sweep_dn),
+            c_wick=bool(bar_range > 0 and lower_wick / bar_range >= c.wick_pct),
+            c_volume=bool(volume > vol_sma * c.vol_mult),
+            c_vwap_ext=bool((vwap - close) > c.ext_mult * atr),
+            c_rsi=bool(rl is not None and rl <= c.rsi_os),
+        )
+
     def _score_top(
         self,
         *,
@@ -662,20 +792,17 @@ class LSR4Engine:
         atr: float,
         rsi: float,
     ) -> int:
-        c = self.cfg
-        score = 0
-        if sweep_up:
-            score += 1
-        if upper_wick / bar_range >= c.wick_pct:
-            score += 1
-        if volume > vol_sma * c.vol_mult:
-            score += 1
-        if (close - vwap) > c.ext_mult * atr:
-            score += 1
-        rh = self._rsi_high3.highest()
-        if rh is not None and rh >= c.rsi_ob:
-            score += 1
-        return score
+        return self._score_components_top(
+            sweep_up=sweep_up,
+            upper_wick=upper_wick,
+            bar_range=bar_range,
+            volume=volume,
+            vol_sma=vol_sma,
+            close=close,
+            vwap=vwap,
+            atr=atr,
+            rsi=rsi,
+        ).as_score()
 
     def _score_bottom(
         self,
@@ -690,20 +817,17 @@ class LSR4Engine:
         atr: float,
         rsi: float,
     ) -> int:
-        c = self.cfg
-        score = 0
-        if sweep_dn:
-            score += 1
-        if lower_wick / bar_range >= c.wick_pct:
-            score += 1
-        if volume > vol_sma * c.vol_mult:
-            score += 1
-        if (vwap - close) > c.ext_mult * atr:
-            score += 1
-        rl = self._rsi_low3.lowest()
-        if rl is not None and rl <= c.rsi_os:
-            score += 1
-        return score
+        return self._score_components_bottom(
+            sweep_dn=sweep_dn,
+            lower_wick=lower_wick,
+            bar_range=bar_range,
+            volume=volume,
+            vol_sma=vol_sma,
+            close=close,
+            vwap=vwap,
+            atr=atr,
+            rsi=rsi,
+        ).as_score()
 
     def _adx_rolling_down(self, adx: float) -> bool:
         if not self.cfg.adx_fall:
@@ -738,7 +862,7 @@ class LSR4Engine:
             and candle.low < prior_low
             and candle.close > prior_low
         )
-        score_top = self._score_top(
+        comps_top = self._score_components_top(
             sweep_up=sweep_up,
             upper_wick=upper_wick,
             bar_range=bar_range,
@@ -749,7 +873,7 @@ class LSR4Engine:
             atr=atr,
             rsi=rsi,
         )
-        score_bot = self._score_bottom(
+        comps_bot = self._score_components_bottom(
             sweep_dn=sweep_dn,
             lower_wick=lower_wick,
             bar_range=bar_range,
@@ -760,6 +884,8 @@ class LSR4Engine:
             atr=atr,
             rsi=rsi,
         )
+        score_top = comps_top.as_score()
+        score_bot = comps_bot.as_score()
 
         # PATH A: RANGE
         if c.allow_range_mode and adx < c.adx_trend:
@@ -770,7 +896,16 @@ class LSR4Engine:
                 and score_top >= c.min_score
             ):
                 self._arm_top(
-                    candle, score_top, atr, adx, bar_range, mode="RANGE"
+                    candle,
+                    score_top,
+                    atr,
+                    adx,
+                    bar_range,
+                    mode="RANGE",
+                    components=comps_top,
+                    vwap=vwap,
+                    rsi=rsi,
+                    vol_sma=vol_sma,
                 )
             if (
                 c.allow_long
@@ -779,7 +914,16 @@ class LSR4Engine:
                 and score_bot >= c.min_score
             ):
                 self._arm_bottom(
-                    candle, score_bot, atr, adx, bar_range, mode="RANGE"
+                    candle,
+                    score_bot,
+                    atr,
+                    adx,
+                    bar_range,
+                    mode="RANGE",
+                    components=comps_bot,
+                    vwap=vwap,
+                    rsi=rsi,
+                    vol_sma=vol_sma,
                 )
 
         # PATH B: EXHAUSTION
@@ -799,7 +943,16 @@ class LSR4Engine:
                 and candle.close < self._prev_close
             ):
                 self._arm_top(
-                    candle, score_top, atr, adx, bar_range, mode="EXHAUSTION"
+                    candle,
+                    score_top,
+                    atr,
+                    adx,
+                    bar_range,
+                    mode="EXHAUSTION",
+                    components=comps_top,
+                    vwap=vwap,
+                    rsi=rsi,
+                    vol_sma=vol_sma,
                 )
             if (
                 c.allow_long
@@ -811,8 +964,34 @@ class LSR4Engine:
                 and candle.close > self._prev_close
             ):
                 self._arm_bottom(
-                    candle, score_bot, atr, adx, bar_range, mode="EXHAUSTION"
+                    candle,
+                    score_bot,
+                    atr,
+                    adx,
+                    bar_range,
+                    mode="EXHAUSTION",
+                    components=comps_bot,
+                    vwap=vwap,
+                    rsi=rsi,
+                    vol_sma=vol_sma,
                 )
+
+    def _arm_snapshot(self, arm: _ArmState) -> dict[str, Any]:
+        comps = arm.components.to_dict()
+        return {
+            "direction": "SHORT" if arm.side == "TOP" else "LONG",
+            "mode": arm.mode,
+            "score": int(arm.score),
+            "signal_extreme": float(arm.signal_extreme),
+            "confirm_level": float(arm.confirm_level),
+            "atr_at_arm": float(arm.atr_at_arm),
+            "adx_at_arm": float(arm.adx_at_arm),
+            "rsi_at_arm": arm.rsi_at_arm,
+            "vwap_at_arm": arm.vwap_at_arm,
+            "volume_at_arm": arm.volume_at_arm,
+            "vol_sma_at_arm": arm.vol_sma_at_arm,
+            **comps,
+        }
 
     def _arm_top(
         self,
@@ -823,6 +1002,10 @@ class LSR4Engine:
         bar_range: float,
         *,
         mode: str,
+        components: ScoreComponents,
+        vwap: float,
+        rsi: float,
+        vol_sma: float,
     ) -> None:
         confirm_level = candle.high - (bar_range * self.cfg.confirm_frac)
         self._top = _ArmState(
@@ -835,6 +1018,11 @@ class LSR4Engine:
             score=int(score),
             atr_at_arm=float(atr),
             adx_at_arm=float(adx),
+            components=components,
+            rsi_at_arm=float(rsi),
+            vwap_at_arm=float(vwap),
+            volume_at_arm=float(candle.volume),
+            vol_sma_at_arm=float(vol_sma),
         )
         if self._diag is not None:
             self._diag.arms_top += 1
@@ -844,6 +1032,7 @@ class LSR4Engine:
                 side="TOP",
                 event_type="ARM",
                 level=float(confirm_level),
+                arm_snapshot=self._arm_snapshot(self._top),
             )
         _log(
             "STRAT3_ARM",
@@ -868,6 +1057,10 @@ class LSR4Engine:
         bar_range: float,
         *,
         mode: str,
+        components: ScoreComponents,
+        vwap: float,
+        rsi: float,
+        vol_sma: float,
     ) -> None:
         confirm_level = candle.low + (bar_range * self.cfg.confirm_frac)
         self._bottom = _ArmState(
@@ -880,6 +1073,11 @@ class LSR4Engine:
             score=int(score),
             atr_at_arm=float(atr),
             adx_at_arm=float(adx),
+            components=components,
+            rsi_at_arm=float(rsi),
+            vwap_at_arm=float(vwap),
+            volume_at_arm=float(candle.volume),
+            vol_sma_at_arm=float(vol_sma),
         )
         if self._diag is not None:
             self._diag.arms_bottom += 1
@@ -889,6 +1087,7 @@ class LSR4Engine:
                 side="BOTTOM",
                 event_type="ARM",
                 level=float(confirm_level),
+                arm_snapshot=self._arm_snapshot(self._bottom),
             )
         _log(
             "STRAT3_ARM",
@@ -950,6 +1149,13 @@ class LSR4Engine:
                 adx_at_signal=arm.adx_at_arm,
                 confirm_level=float(arm.confirm_level),
             )
+            self._emit_meta = {
+                "components": arm.components,
+                "rsi_at_arm": arm.rsi_at_arm,
+                "vwap_at_arm": arm.vwap_at_arm,
+                "volume_at_arm": arm.volume_at_arm,
+                "vol_sma_at_arm": arm.vol_sma_at_arm,
+            }
             if self._diag is not None:
                 self._diag.confirms += 1
             if self._chart is not None:
@@ -1028,6 +1234,13 @@ class LSR4Engine:
                 adx_at_signal=arm.adx_at_arm,
                 confirm_level=float(arm.confirm_level),
             )
+            self._emit_meta = {
+                "components": arm.components,
+                "rsi_at_arm": arm.rsi_at_arm,
+                "vwap_at_arm": arm.vwap_at_arm,
+                "volume_at_arm": arm.volume_at_arm,
+                "vol_sma_at_arm": arm.vol_sma_at_arm,
+            }
             if self._diag is not None:
                 self._diag.confirms += 1
             if self._chart is not None:
@@ -1090,6 +1303,7 @@ class LSR4Engine:
                     event_type="COOLDOWN_BLOCK",
                     level=float(signal.confirm_level),
                 )
+            self._emit_meta = None
             _log(
                 "STRAT3_COOLDOWN_BLOCK",
                 {
@@ -1106,7 +1320,19 @@ class LSR4Engine:
         self._last_signal_price = float(candle.close)
         self._last_signal_candle_time = signal.confirm_candle_time
         if self._chart is not None:
-            self._chart.record_signal(signal)
+            meta = self._emit_meta or {}
+            comps = meta.get("components")
+            if not isinstance(comps, ScoreComponents):
+                comps = ScoreComponents()
+            self._chart.record_signal(
+                signal,
+                components=comps,
+                rsi_at_arm=meta.get("rsi_at_arm"),
+                vwap_at_arm=meta.get("vwap_at_arm"),
+                volume_at_arm=meta.get("volume_at_arm"),
+                vol_sma_at_arm=meta.get("vol_sma_at_arm"),
+            )
+        self._emit_meta = None
         _log(
             "STRAT3_SIGNAL",
             {

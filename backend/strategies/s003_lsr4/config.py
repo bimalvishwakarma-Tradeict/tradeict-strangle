@@ -187,6 +187,24 @@ def validate_strategy3_config_payload(payload: dict[str, Any]) -> dict[str, Any]
     return out
 
 
+def config_from_dict(payload: dict[str, Any], *, tick_size: float | None = None) -> Strategy3Config:
+    """
+    Build Strategy3Config from a plain dict (JSON / overrides).
+    No database access — used by the backtest harness and API overrides.
+    """
+    known = {f.name for f in fields(Strategy3Config)}
+    kwargs: dict[str, Any] = {}
+    for key, val in payload.items():
+        if key in known:
+            kwargs[key] = val
+    cfg = Strategy3Config(**kwargs)
+    if tick_size is not None:
+        cfg.tick_size = float(tick_size)
+    elif "tick_size" in payload:
+        cfg.tick_size = float(payload["tick_size"])
+    return cfg
+
+
 def config_from_row(row: Any, *, tick_size: float | None = None) -> Strategy3Config:
     cfg = Strategy3Config(
         enabled=bool(row.enabled),
