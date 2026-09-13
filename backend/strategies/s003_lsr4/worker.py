@@ -208,10 +208,18 @@ def get_live_engine() -> LSR4Engine | None:
     return _engine
 
 
-async def run_backfill(n: int = 500) -> list[dict[str, Any]]:
+async def run_backfill(
+    n: int = 500,
+    *,
+    ignore_warmup: bool = False,
+) -> dict[str, Any]:
     """
     Fresh engine over last N candles. Does NOT write signals or disturb live state.
     """
+    import pytz
+
+    from backend.strategies.s003_lsr4.lsr4 import BackfillDiagnostics
+
     cfg, _ = _load_runtime_config()
     client = _resolve_client()
     try:
@@ -220,8 +228,11 @@ async def run_backfill(n: int = 500) -> list[dict[str, Any]]:
         pass
     feed = CandleFeed(client, cfg)
     candles = await feed.fetch_last_n(n)
-    engine = LSR4Engine(cfg)
-    signals = []
+    diag = BackfillDiagnostics()
+    engine = LSR4Engine(
+        cfg, ignore_warmup=bool(ignore_warmup), diagnostics=diag
+    )
+    signals: list[dict[str, Any]] = []
     for candle in candles:
         sig = engine.process_closed_candle(candle)
         if sig is not None:
@@ -239,4 +250,45 @@ async def run_backfill(n: int = 500) -> list[dict[str, Any]]:
                     "adx_at_signal": sig.adx_at_signal,
                 }
             )
-    return signals
+    engine.finalize_warmup_diagnostics()
+
+    ist = pytz.timezone(str(cfg.vwap_anchor_tz or "Asia/Kolkata"))
+
+    def _fmt(dt: Any) -> str | None:
+        if dt is None:
+            return None
+        return dt.isoformat()
+
+    first = candles[0] if candles else None
+    last = candles[-1] if candles else None
+    first_utc = first.open_time if first else None
+    last_utc = last.open_time if last else None
+    first_ist = first_utc.astimezone(ist) if first_utc is not None else None
+    last_ist = last_utc.astimezone(ist) if last_utc is not None else None
+
+    diag_payload = diag.to_dict()
+    out: dict[str, Any] = {
+        "candles_requested": int(n),
+        "candles_fetched": len(candles),
+        "first_candle_utc": _fmt(first_utc),
+        "first_candle_ist": _fmt(first_ist),
+        "last_candle_utc": _fmt(last_utc),
+        "last_candle_ist": _fmt(last_ist),
+        "warm_from_index": diag_payload["warm_from_index"],
+        "warm_blocked_reason": diag_payload["warm_blocked_reason"],
+        "vwap_session_resets": diag_payload["vwap_session_resets"],
+        "counters": diag_payload["counters"],
+        "signals": signals,
+        "count": len(signals),
+    }
+    if len(candles) != int(n):
+        out["fetch_note"] = (
+            f"requested {int(n)} closed candles, exchange/finality returned "
+            f"{len(candles)}"
+        )
+    if ignore_warmup:
+        out["warning"] = (
+            "warmup guard bypassed — VWAP and ADX may be unreliable, "
+            "do not compare these signals against the chart"
+        )
+    return out

@@ -149,15 +149,41 @@ async def get_state(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 
 class BackfillRequest(BaseModel):
-    n: int = Field(500, ge=50, le=2000)
+    """
+    candles: how many closed candles to fetch (100..4000).
+    Previously this field was named `n` with default 500 — clients sending
+    `candles` were silently ignored. `n` is still accepted as an alias.
+    """
+
+    candles: int | None = Field(default=None, ge=100, le=4000)
+    n: int | None = Field(default=None, ge=100, le=4000)
+    ignore_warmup: bool = False
 
 
 @router.post("/backfill")
 async def backfill(body: BackfillRequest | None = None) -> dict[str, Any]:
-    n = int(body.n) if body is not None else 500
+    if body is None:
+        candles = 500
+        ignore_warmup = False
+    else:
+        # Prefer explicit `candles`; fall back to legacy `n`; else default 500
+        if body.candles is not None:
+            candles = int(body.candles)
+        elif body.n is not None:
+            candles = int(body.n)
+        else:
+            candles = 500
+        ignore_warmup = bool(body.ignore_warmup)
+
+    if candles < 100 or candles > 4000:
+        raise HTTPException(
+            status_code=422,
+            detail=f"candles must be in [100, 4000], got {candles}",
+        )
+
     try:
-        signals = await run_backfill(n)
+        data = await run_backfill(candles, ignore_warmup=ignore_warmup)
     except Exception as exc:
         logger.error("S003 backfill failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {"success": True, "data": {"n": n, "signals": signals, "count": len(signals)}}
+    return {"success": True, "data": data}

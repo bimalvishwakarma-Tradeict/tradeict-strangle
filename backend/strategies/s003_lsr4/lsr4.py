@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -69,12 +69,70 @@ class _ArmState:
     adx_at_arm: float
 
 
+@dataclass
+class BackfillDiagnostics:
+    """Observation-only counters for POST /backfill. Never affects decisions."""
+
+    warm_from_index: int | None = None
+    warm_blocked_reason: str | None = None
+    vwap_session_resets: int = 0
+    adx_below_trend: int = 0
+    adx_at_or_above_trend: int = 0
+    sweep_up_count: int = 0
+    sweep_dn_count: int = 0
+    score_hist: dict[int, int] = field(
+        default_factory=lambda: {i: 0 for i in range(6)}
+    )
+    arms_top: int = 0
+    arms_bottom: int = 0
+    invalidates: int = 0
+    expires: int = 0
+    confirms: int = 0
+    cooldown_blocks: int = 0
+    conflicts: int = 0
+    gaps: int = 0
+    emitted: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "warm_from_index": self.warm_from_index,
+            "warm_blocked_reason": self.warm_blocked_reason,
+            "vwap_session_resets": self.vwap_session_resets,
+            "counters": {
+                "adx_below_trend": self.adx_below_trend,
+                "adx_at_or_above_trend": self.adx_at_or_above_trend,
+                "sweep_up_count": self.sweep_up_count,
+                "sweep_dn_count": self.sweep_dn_count,
+                "score_hist": {
+                    str(k): int(v) for k, v in sorted(self.score_hist.items())
+                },
+                "arms_top": self.arms_top,
+                "arms_bottom": self.arms_bottom,
+                "invalidates": self.invalidates,
+                "expires": self.expires,
+                "confirms": self.confirms,
+                "cooldown_blocks": self.cooldown_blocks,
+                "conflicts": self.conflicts,
+                "gaps": self.gaps,
+                "emitted": self.emitted,
+            },
+        }
+
+
 class LSR4Engine:
     """Incremental LSR4 range + exhaustion signal engine."""
 
-    def __init__(self, cfg: Strategy3Config) -> None:
+    def __init__(
+        self,
+        cfg: Strategy3Config,
+        *,
+        ignore_warmup: bool = False,
+        diagnostics: BackfillDiagnostics | None = None,
+    ) -> None:
         self.cfg = cfg
         self._tf_seconds = timeframe_seconds(cfg.timeframe)
+        self._ignore_warmup = bool(ignore_warmup)
+        self._diag = diagnostics
         self._reset_indicators()
         self._top: _ArmState | None = None
         self._bottom: _ArmState | None = None
@@ -91,6 +149,10 @@ class LSR4Engine:
         self._prev_adx_2: float | None = None
         self._expected_next: datetime | None = None
         self._rewarm_remaining = 0
+        self._natural_warm_ever = False
+        if self._ignore_warmup and self._diag is not None:
+            self._diag.warm_from_index = 0
+            self._diag.warm_blocked_reason = None
 
     def _reset_indicators(self) -> None:
         c = self.cfg
@@ -249,19 +311,14 @@ class LSR4Engine:
 
         # Gap detection
         if self._expected_next is not None and open_time > self._expected_next:
-            gap_bars = int(
-                round(
-                    (open_time - self._expected_next).total_seconds()
-                    / float(self._tf_seconds)
-                )
-            ) + 1
-            # missing slots between expected and actual
             missing = int(
                 round(
                     (open_time - self._expected_next).total_seconds()
                     / float(self._tf_seconds)
                 )
             )
+            if self._diag is not None:
+                self._diag.gaps += 1
             _log(
                 "STRAT3_GAP",
                 {
@@ -288,9 +345,17 @@ class LSR4Engine:
         dmi = self._dmi.update(candle.high, candle.low, candle.close)
         adx = dmi[2] if dmi is not None else None
         vol_sma = self._vol_sma.update(candle.volume)
+        prev_session = self._vwap.session_date
         vwap = self._vwap.update(
             open_time, candle.high, candle.low, candle.close, candle.volume
         )
+        if (
+            self._diag is not None
+            and prev_session is not None
+            and self._vwap.session_date is not None
+            and self._vwap.session_date != prev_session
+        ):
+            self._diag.vwap_session_resets += 1
 
         if rsi is not None:
             self._rsi_high3.update(rsi)
@@ -309,28 +374,92 @@ class LSR4Engine:
         if self._rewarm_remaining > 0:
             self._rewarm_remaining -= 1
 
+        # Observation: ADX regime + sweeps/scores (does not affect decisions)
+        if self._diag is not None and adx is not None:
+            if adx < self.cfg.adx_trend:
+                self._diag.adx_below_trend += 1
+            else:
+                self._diag.adx_at_or_above_trend += 1
+            sweep_up_obs = (
+                prior_high is not None
+                and candle.high > prior_high
+                and candle.close < prior_high
+            )
+            sweep_dn_obs = (
+                prior_low is not None
+                and candle.low < prior_low
+                and candle.close > prior_low
+            )
+            if sweep_up_obs:
+                self._diag.sweep_up_count += 1
+            if sweep_dn_obs:
+                self._diag.sweep_dn_count += 1
+            if (
+                (sweep_up_obs or sweep_dn_obs)
+                and atr is not None
+                and vol_sma is not None
+                and rsi is not None
+            ):
+                if sweep_up_obs:
+                    sc = self._score_top(
+                        sweep_up=True,
+                        upper_wick=upper_wick,
+                        bar_range=bar_range,
+                        volume=candle.volume,
+                        vol_sma=vol_sma,
+                        close=candle.close,
+                        vwap=vwap,
+                        atr=atr,
+                        rsi=rsi,
+                    )
+                    self._diag.score_hist[int(sc)] = (
+                        self._diag.score_hist.get(int(sc), 0) + 1
+                    )
+                if sweep_dn_obs:
+                    sc = self._score_bottom(
+                        sweep_dn=True,
+                        lower_wick=lower_wick,
+                        bar_range=bar_range,
+                        volume=candle.volume,
+                        vol_sma=vol_sma,
+                        close=candle.close,
+                        vwap=vwap,
+                        atr=atr,
+                        rsi=rsi,
+                    )
+                    self._diag.score_hist[int(sc)] = (
+                        self._diag.score_hist.get(int(sc), 0) + 1
+                    )
+
         # Warmup gate
         warm_ready = (
             self._candles_processed >= 100
             and self._vwap.session_boundary_crossed
             and self._rewarm_remaining <= 0
         )
-        if warm_ready and not self._warm:
+        if warm_ready:
+            self._natural_warm_ever = True
+            if self._diag is not None and self._diag.warm_from_index is None:
+                self._diag.warm_from_index = self._candles_processed - 1
+            if not self._warm:
+                self._warm = True
+                if not self._warmup_logged:
+                    _log(
+                        "STRAT3_WARMUP",
+                        {
+                            "candles_processed": self._candles_processed,
+                            "vwap_session_date": (
+                                self._vwap.session_date.isoformat()
+                                if self._vwap.session_date
+                                else None
+                            ),
+                        },
+                    )
+                    self._warmup_logged = True
+        elif self._ignore_warmup:
+            # Diagnosis only: skip warmup guard; indicators still update normally
             self._warm = True
-            if not self._warmup_logged:
-                _log(
-                    "STRAT3_WARMUP",
-                    {
-                        "candles_processed": self._candles_processed,
-                        "vwap_session_date": (
-                            self._vwap.session_date.isoformat()
-                            if self._vwap.session_date
-                            else None
-                        ),
-                    },
-                )
-                self._warmup_logged = True
-        elif not warm_ready:
+        else:
             self._warm = False
 
         # Confirm existing arms first (on later candles)
@@ -339,6 +468,8 @@ class LSR4Engine:
 
         emitted: Signal | None = None
         if confirm_top is not None and confirm_bot is not None:
+            if self._diag is not None:
+                self._diag.conflicts += 1
             _log(
                 "STRAT3_CONFLICT",
                 {
@@ -386,7 +517,23 @@ class LSR4Engine:
         self._prev_adx_2 = self._prev_adx
         self._prev_adx = adx
 
+        if emitted is not None and self._diag is not None:
+            self._diag.emitted += 1
         return emitted
+
+    def finalize_warmup_diagnostics(self) -> None:
+        """Set warm_blocked_reason after a backfill run (observation only)."""
+        if self._diag is None or self._ignore_warmup:
+            return
+        if self._natural_warm_ever:
+            self._diag.warm_blocked_reason = None
+            return
+        if self._candles_processed < 100 or self._rewarm_remaining > 0:
+            self._diag.warm_blocked_reason = "candle_count"
+        elif not self._vwap.session_boundary_crossed:
+            self._diag.warm_blocked_reason = "no_vwap_session_boundary"
+        else:
+            self._diag.warm_blocked_reason = "candle_count"
 
     def _score_top(
         self,
@@ -575,6 +722,8 @@ class LSR4Engine:
             atr_at_arm=float(atr),
             adx_at_arm=float(adx),
         )
+        if self._diag is not None:
+            self._diag.arms_top += 1
         _log(
             "STRAT3_ARM",
             {
@@ -611,6 +760,8 @@ class LSR4Engine:
             atr_at_arm=float(atr),
             adx_at_arm=float(adx),
         )
+        if self._diag is not None:
+            self._diag.arms_bottom += 1
         _log(
             "STRAT3_ARM",
             {
@@ -636,6 +787,8 @@ class LSR4Engine:
             return None
         arm.bars_elapsed += 1
         if candle.high > arm.signal_extreme:
+            if self._diag is not None:
+                self._diag.invalidates += 1
             _log(
                 "STRAT3_INVALIDATE",
                 {
@@ -661,9 +814,13 @@ class LSR4Engine:
                 atr_at_confirm=float(atr if atr is not None else arm.atr_at_arm),
                 adx_at_signal=arm.adx_at_arm,
             )
+            if self._diag is not None:
+                self._diag.confirms += 1
             self._top = None
             return sig
         if arm.bars_elapsed > self.cfg.max_wait:
+            if self._diag is not None:
+                self._diag.expires += 1
             _log(
                 "STRAT3_EXPIRE",
                 {
@@ -686,6 +843,8 @@ class LSR4Engine:
             return None
         arm.bars_elapsed += 1
         if candle.low < arm.signal_extreme:
+            if self._diag is not None:
+                self._diag.invalidates += 1
             _log(
                 "STRAT3_INVALIDATE",
                 {
@@ -711,9 +870,13 @@ class LSR4Engine:
                 atr_at_confirm=float(atr if atr is not None else arm.atr_at_arm),
                 adx_at_signal=arm.adx_at_arm,
             )
+            if self._diag is not None:
+                self._diag.confirms += 1
             self._bottom = None
             return sig
         if arm.bars_elapsed > self.cfg.max_wait:
+            if self._diag is not None:
+                self._diag.expires += 1
             _log(
                 "STRAT3_EXPIRE",
                 {
@@ -745,6 +908,8 @@ class LSR4Engine:
         if not self._warm:
             return None
         if not self._cooldown_allows(candle, atr):
+            if self._diag is not None:
+                self._diag.cooldown_blocks += 1
             _log(
                 "STRAT3_COOLDOWN_BLOCK",
                 {
