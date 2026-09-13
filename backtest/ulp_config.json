@@ -1,0 +1,6 @@
+{
+  "lookback": 5,
+  "shrink_during_confirmation": false,
+  "data_file": "backtest/data_1m/BTCUSD_1m_20250913_20260913.csv",
+  "timeframe": "1m"
+}
