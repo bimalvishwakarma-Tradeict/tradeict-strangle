@@ -12,7 +12,7 @@ function FunnelRow({ label, value, hint }) {
   )
 }
 
-function ScoreHist({ hist, minScore }) {
+function ScoreHist({ title, hist, minScore }) {
   const entries = [0, 1, 2, 3, 4, 5].map((k) => ({
     score: k,
     count: Number(hist?.[String(k)] ?? hist?.[k] ?? 0),
@@ -20,9 +20,7 @@ function ScoreHist({ hist, minScore }) {
   const max = Math.max(1, ...entries.map((e) => e.count))
   return (
     <div className="space-y-1 py-2">
-      <div className="text-xs uppercase tracking-wide text-gray-500">
-        Score histogram (sweep candles only)
-      </div>
+      <div className="text-xs uppercase tracking-wide text-gray-500">{title}</div>
       {entries.map((e) => {
         const pct = (e.count / max) * 100
         const below = e.score < Number(minScore)
@@ -81,7 +79,23 @@ export default function S003Diagnostics({
             label="Sweeps up / dn"
             value={`${d.sweep_up_count ?? 0} / ${d.sweep_dn_count ?? 0}`}
           />
-          <ScoreHist hist={d.score_hist} minScore={minScore} />
+          <ScoreHist
+            title="Score histogram (combined)"
+            hist={d.score_hist}
+            minScore={minScore}
+          />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <ScoreHist
+              title="Score hist — top (sweep up)"
+              hist={d.score_hist_top}
+              minScore={minScore}
+            />
+            <ScoreHist
+              title="Score hist — bottom (sweep dn)"
+              hist={d.score_hist_bottom}
+              minScore={minScore}
+            />
+          </div>
           <FunnelRow
             label="Arms top / bottom"
             value={`${d.arms_top ?? 0} / ${d.arms_bottom ?? 0}`}

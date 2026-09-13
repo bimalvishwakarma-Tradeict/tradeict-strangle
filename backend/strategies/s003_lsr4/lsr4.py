@@ -129,6 +129,8 @@ class ChartTrace:
                 "signal_extreme": float(signal.signal_extreme),
                 "confirm_price": float(signal.confirm_price),
                 "confirm_level": float(signal.confirm_level),
+                "atr_at_arm": float(signal.atr_at_arm),
+                "adx_at_signal": float(signal.adx_at_signal),
             }
         )
 
@@ -160,6 +162,12 @@ class BackfillDiagnostics:
     score_hist: dict[int, int] = field(
         default_factory=lambda: {i: 0 for i in range(6)}
     )
+    score_hist_top: dict[int, int] = field(
+        default_factory=lambda: {i: 0 for i in range(6)}
+    )
+    score_hist_bottom: dict[int, int] = field(
+        default_factory=lambda: {i: 0 for i in range(6)}
+    )
     arms_top: int = 0
     arms_bottom: int = 0
     invalidates: int = 0
@@ -169,6 +177,10 @@ class BackfillDiagnostics:
     conflicts: int = 0
     gaps: int = 0
     emitted: int = 0
+
+    @staticmethod
+    def _hist_dict(hist: dict[int, int]) -> dict[str, int]:
+        return {str(k): int(v) for k, v in sorted(hist.items())}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -180,9 +192,9 @@ class BackfillDiagnostics:
                 "adx_at_or_above_trend": self.adx_at_or_above_trend,
                 "sweep_up_count": self.sweep_up_count,
                 "sweep_dn_count": self.sweep_dn_count,
-                "score_hist": {
-                    str(k): int(v) for k, v in sorted(self.score_hist.items())
-                },
+                "score_hist": self._hist_dict(self.score_hist),
+                "score_hist_top": self._hist_dict(self.score_hist_top),
+                "score_hist_bottom": self._hist_dict(self.score_hist_bottom),
                 "arms_top": self.arms_top,
                 "arms_bottom": self.arms_bottom,
                 "invalidates": self.invalidates,
@@ -506,8 +518,12 @@ class LSR4Engine:
                         atr=atr,
                         rsi=rsi,
                     )
-                    self._diag.score_hist[int(sc)] = (
-                        self._diag.score_hist.get(int(sc), 0) + 1
+                    sc_i = int(sc)
+                    self._diag.score_hist[sc_i] = (
+                        self._diag.score_hist.get(sc_i, 0) + 1
+                    )
+                    self._diag.score_hist_top[sc_i] = (
+                        self._diag.score_hist_top.get(sc_i, 0) + 1
                     )
                 if sweep_dn_obs:
                     sc = self._score_bottom(
@@ -521,8 +537,12 @@ class LSR4Engine:
                         atr=atr,
                         rsi=rsi,
                     )
-                    self._diag.score_hist[int(sc)] = (
-                        self._diag.score_hist.get(int(sc), 0) + 1
+                    sc_i = int(sc)
+                    self._diag.score_hist[sc_i] = (
+                        self._diag.score_hist.get(sc_i, 0) + 1
+                    )
+                    self._diag.score_hist_bottom[sc_i] = (
+                        self._diag.score_hist_bottom.get(sc_i, 0) + 1
                     )
 
         # Warmup gate

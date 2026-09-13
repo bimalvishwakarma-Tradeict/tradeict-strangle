@@ -3,12 +3,74 @@ import {
   ColorType,
   CrosshairMode,
   LineStyle,
+  TickMarkType,
   createChart,
 } from 'lightweight-charts'
 
 const BG = '#0b1220'
 const GRID = '#1f2937'
 const TEXT = '#9ca3af'
+const IST = 'Asia/Kolkata'
+
+function unixSeconds(time) {
+  if (typeof time === 'number') return time
+  if (time && typeof time === 'object' && 'timestamp' in time) {
+    return Number(time.timestamp)
+  }
+  return null
+}
+
+/** Display-only IST labels — series data stays true UTC unix seconds. */
+function formatIstTick(time, tickMarkType) {
+  const sec = unixSeconds(time)
+  if (sec == null) return ''
+  const d = new Date(sec * 1000)
+  const opts = { timeZone: IST, hourCycle: 'h23' }
+  switch (tickMarkType) {
+    case TickMarkType.Year:
+      return new Intl.DateTimeFormat('en-GB', {
+        ...opts,
+        year: 'numeric',
+      }).format(d)
+    case TickMarkType.Month:
+      return new Intl.DateTimeFormat('en-GB', {
+        ...opts,
+        month: 'short',
+      }).format(d)
+    case TickMarkType.DayOfMonth:
+      return new Intl.DateTimeFormat('en-GB', {
+        ...opts,
+        day: 'numeric',
+      }).format(d)
+    case TickMarkType.TimeWithSeconds:
+      return new Intl.DateTimeFormat('en-GB', {
+        ...opts,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }).format(d)
+    case TickMarkType.Time:
+    default:
+      return new Intl.DateTimeFormat('en-GB', {
+        ...opts,
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(d)
+  }
+}
+
+function formatIstCrosshair(time) {
+  const sec = unixSeconds(time)
+  if (sec == null) return ''
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: IST,
+    hourCycle: 'h23',
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(sec * 1000))
+}
 
 function filterPoints(series) {
   if (!Array.isArray(series)) return []
@@ -61,11 +123,15 @@ function applyCommonOptions(chart, { showTimeAxis }) {
     },
     crosshair: { mode: CrosshairMode.Normal },
     rightPriceScale: { borderColor: GRID },
+    localization: {
+      timeFormatter: formatIstCrosshair,
+    },
     timeScale: {
       borderColor: GRID,
       timeVisible: true,
       secondsVisible: false,
       visible: showTimeAxis,
+      tickMarkFormatter: formatIstTick,
     },
   })
 }
@@ -394,8 +460,13 @@ const S003Chart = forwardRef(function S003Chart(
 
   return (
     <div className="overflow-hidden rounded-lg border border-gray-800 bg-gray-950">
+      <div className="flex items-center justify-between border-b border-gray-800 px-3 py-1">
+        <span className="text-xs text-gray-500">Price + VWAP + signals</span>
+        <span className="rounded border border-gray-700 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300/90">
+          times in IST
+        </span>
+      </div>
       <div className="relative border-b border-gray-800">
-        <div className="px-3 py-1 text-xs text-gray-500">Price + VWAP + signals</div>
         <div ref={priceRef} className="w-full" />
         <div
           ref={warmOverlayRef}

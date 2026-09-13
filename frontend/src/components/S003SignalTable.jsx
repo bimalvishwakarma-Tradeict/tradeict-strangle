@@ -1,15 +1,21 @@
-function formatIstRange(armUnix, confirmUnix) {
-  const opts = {
+function formatIst(unix) {
+  return new Date(Number(unix) * 1000).toLocaleString('en-GB', {
     timeZone: 'Asia/Kolkata',
-    month: 'short',
+    hourCycle: 'h23',
     day: '2-digit',
+    month: 'short',
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false,
-  }
-  const a = new Date(Number(armUnix) * 1000).toLocaleString('en-IN', opts)
-  const c = new Date(Number(confirmUnix) * 1000).toLocaleString('en-IN', opts)
-  return `${a} → ${c}`
+  })
+}
+
+function formatIstRange(armUnix, confirmUnix) {
+  return `${formatIst(armUnix)} → ${formatIst(confirmUnix)}`
+}
+
+function fmt2(v) {
+  if (v == null || !Number.isFinite(Number(v))) return '—'
+  return Number(v).toFixed(2)
 }
 
 export default function S003SignalTable({
@@ -83,13 +89,9 @@ export default function S003SignalTable({
                 <td className="px-3 py-2 text-amber-300">
                   {distance.toFixed(1)}
                 </td>
+                <td className="px-3 py-2 text-gray-400">{fmt2(s.atr_at_arm)}</td>
                 <td className="px-3 py-2 text-gray-400">
-                  {s.atr_at_arm != null ? Number(s.atr_at_arm).toFixed(2) : '—'}
-                </td>
-                <td className="px-3 py-2 text-gray-400">
-                  {s.adx_at_signal != null
-                    ? Number(s.adx_at_signal).toFixed(1)
-                    : '—'}
+                  {fmt2(s.adx_at_signal)}
                 </td>
               </tr>
             )
