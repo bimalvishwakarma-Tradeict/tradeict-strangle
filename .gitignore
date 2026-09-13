@@ -39,6 +39,7 @@ backtest/data_raw/*
 backtest/cache/
 backtest/cache/*
 backtest/data_smoke/*.csv
+backtest/data_1m/
 backtest/results/
 deploy/gdrive_credentials.json
 
