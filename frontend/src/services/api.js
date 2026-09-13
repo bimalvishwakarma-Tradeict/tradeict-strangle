@@ -707,3 +707,26 @@ export const getBacktestStatus = async () => {
     throw new Error(extractError(err, 'Failed to fetch backtest status'))
   }
 }
+
+export const getStrategy3Config = async () => {
+  try {
+    const res = await api.get('/api/strategy3/config')
+    return res.data?.data ?? res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch S003 config'))
+  }
+}
+
+export const getStrategy3Chart = async ({
+  candles = 1500,
+  timeframe = undefined,
+} = {}) => {
+  try {
+    const params = { candles }
+    if (timeframe) params.timeframe = timeframe
+    const res = await api.get('/api/strategy3/chart', { params })
+    return res.data?.data ?? res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch S003 chart data'))
+  }
+}
