@@ -44,3 +44,6 @@ backtest/data_1m/
 backtest/results/
 deploy/gdrive_credentials.json
 
+
+# IV surface pickle cache (also covered by backtest/cache/)
+# backtest/cache/iv_surface/
