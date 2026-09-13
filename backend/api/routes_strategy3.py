@@ -19,7 +19,11 @@ from backend.strategies.s003_lsr4.config import (
     get_or_create_strategy3_engine_state,
     validate_strategy3_config_payload,
 )
-from backend.strategies.s003_lsr4.worker import get_live_engine, run_backfill
+from backend.strategies.s003_lsr4.worker import (
+    get_live_engine,
+    run_backfill,
+    run_chart,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,5 +189,60 @@ async def backfill(body: BackfillRequest | None = None) -> dict[str, Any]:
         data = await run_backfill(candles, ignore_warmup=ignore_warmup)
     except Exception as exc:
         logger.error("S003 backfill failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"success": True, "data": data}
+
+
+@router.get("/chart")
+async def chart_data(
+    candles: int = Query(1500, ge=100, le=4000),
+    timeframe: str | None = Query(None),
+    overrides: str | None = Query(
+        None,
+        description="Optional JSON object of Strategy3Config field overrides (preview only)",
+    ),
+) -> dict[str, Any]:
+    """
+    Engine's own candles + indicator series + signals + arm events for charting.
+
+    `overrides` never writes strategy3_config and never touches live engine state.
+    """
+    import json
+
+    overrides_obj: dict[str, Any] | None = None
+    if overrides is not None and str(overrides).strip():
+        try:
+            parsed = json.loads(overrides)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"overrides must be valid JSON: {exc}",
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise HTTPException(
+                status_code=422,
+                detail="overrides must be a JSON object",
+            )
+        overrides_obj = parsed
+
+    if timeframe is not None and timeframe not in {"1m", "3m", "5m", "15m"}:
+        raise HTTPException(
+            status_code=422,
+            detail="timeframe must be one of 1m/3m/5m/15m",
+        )
+
+    try:
+        if overrides_obj is not None:
+            # Validate before running so bad keys get 422, not 502
+            validate_strategy3_config_payload(overrides_obj)
+        data = await run_chart(
+            candles,
+            timeframe=timeframe,
+            overrides=overrides_obj,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("S003 chart failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"success": True, "data": data}

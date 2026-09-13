@@ -54,6 +54,83 @@ class Signal:
     atr_at_arm: float
     atr_at_confirm: float
     adx_at_signal: float
+    confirm_level: float = 0.0
+
+
+@dataclass
+class ChartTrace:
+    """
+    Read-only observation of the engine's own indicator values and arm events.
+    Never influences decisions — only records what the engine already computed.
+    """
+
+    indicators: dict[str, list[dict[str, Any]]] = field(
+        default_factory=lambda: {
+            "vwap": [],
+            "atr": [],
+            "rsi": [],
+            "adx": [],
+            "plus_di": [],
+            "minus_di": [],
+            "vol_sma": [],
+        }
+    )
+    arm_events: list[dict[str, Any]] = field(default_factory=list)
+    signals: list[dict[str, Any]] = field(default_factory=list)
+
+    def record_bar(
+        self,
+        *,
+        time_unix: int,
+        vwap: float | None,
+        atr: float | None,
+        rsi: float | None,
+        adx: float | None,
+        plus_di: float | None,
+        minus_di: float | None,
+        vol_sma: float | None,
+    ) -> None:
+        def _pt(value: float | None) -> dict[str, Any]:
+            return {"time": int(time_unix), "value": value}
+
+        self.indicators["vwap"].append(_pt(vwap))
+        self.indicators["atr"].append(_pt(atr))
+        self.indicators["rsi"].append(_pt(rsi))
+        self.indicators["adx"].append(_pt(adx))
+        self.indicators["plus_di"].append(_pt(plus_di))
+        self.indicators["minus_di"].append(_pt(minus_di))
+        self.indicators["vol_sma"].append(_pt(vol_sma))
+
+    def record_arm_event(
+        self,
+        *,
+        time_unix: int,
+        side: str,
+        event_type: str,
+        level: float,
+    ) -> None:
+        self.arm_events.append(
+            {
+                "time": int(time_unix),
+                "side": side,
+                "type": event_type,
+                "level": float(level),
+            }
+        )
+
+    def record_signal(self, signal: Signal) -> None:
+        self.signals.append(
+            {
+                "time": int(signal.confirm_candle_time.timestamp()),
+                "arm_time": int(signal.signal_candle_time.timestamp()),
+                "direction": signal.direction,
+                "mode": signal.mode,
+                "score": int(signal.score),
+                "signal_extreme": float(signal.signal_extreme),
+                "confirm_price": float(signal.confirm_price),
+                "confirm_level": float(signal.confirm_level),
+            }
+        )
 
 
 @dataclass
@@ -128,11 +205,13 @@ class LSR4Engine:
         *,
         ignore_warmup: bool = False,
         diagnostics: BackfillDiagnostics | None = None,
+        chart_trace: ChartTrace | None = None,
     ) -> None:
         self.cfg = cfg
         self._tf_seconds = timeframe_seconds(cfg.timeframe)
         self._ignore_warmup = bool(ignore_warmup)
         self._diag = diagnostics
+        self._chart = chart_trace
         self._reset_indicators()
         self._top: _ArmState | None = None
         self._bottom: _ArmState | None = None
@@ -344,6 +423,8 @@ class LSR4Engine:
         rsi = self._rsi.update(candle.close)
         dmi = self._dmi.update(candle.high, candle.low, candle.close)
         adx = dmi[2] if dmi is not None else None
+        plus_di = dmi[0] if dmi is not None else None
+        minus_di = dmi[1] if dmi is not None else None
         vol_sma = self._vol_sma.update(candle.volume)
         prev_session = self._vwap.session_date
         vwap = self._vwap.update(
@@ -360,6 +441,19 @@ class LSR4Engine:
         if rsi is not None:
             self._rsi_high3.update(rsi)
             self._rsi_low3.update(rsi)
+
+        # Chart observation — engine's own values (None while indicator warming)
+        if self._chart is not None:
+            self._chart.record_bar(
+                time_unix=int(open_time.timestamp()),
+                vwap=float(vwap) if vwap is not None else None,
+                atr=float(atr) if atr is not None else None,
+                rsi=float(rsi) if rsi is not None else None,
+                adx=float(adx) if adx is not None else None,
+                plus_di=float(plus_di) if plus_di is not None else None,
+                minus_di=float(minus_di) if minus_di is not None else None,
+                vol_sma=float(vol_sma) if vol_sma is not None else None,
+            )
 
         tick = float(self.cfg.tick_size)
         if tick <= 0:
@@ -724,6 +818,13 @@ class LSR4Engine:
         )
         if self._diag is not None:
             self._diag.arms_top += 1
+        if self._chart is not None:
+            self._chart.record_arm_event(
+                time_unix=int(_as_utc(candle.open_time).timestamp()),
+                side="TOP",
+                event_type="ARM",
+                level=float(confirm_level),
+            )
         _log(
             "STRAT3_ARM",
             {
@@ -762,6 +863,13 @@ class LSR4Engine:
         )
         if self._diag is not None:
             self._diag.arms_bottom += 1
+        if self._chart is not None:
+            self._chart.record_arm_event(
+                time_unix=int(_as_utc(candle.open_time).timestamp()),
+                side="BOTTOM",
+                event_type="ARM",
+                level=float(confirm_level),
+            )
         _log(
             "STRAT3_ARM",
             {
@@ -789,6 +897,13 @@ class LSR4Engine:
         if candle.high > arm.signal_extreme:
             if self._diag is not None:
                 self._diag.invalidates += 1
+            if self._chart is not None:
+                self._chart.record_arm_event(
+                    time_unix=int(_as_utc(candle.open_time).timestamp()),
+                    side="TOP",
+                    event_type="INVALIDATE",
+                    level=float(arm.signal_extreme),
+                )
             _log(
                 "STRAT3_INVALIDATE",
                 {
@@ -813,14 +928,29 @@ class LSR4Engine:
                 atr_at_arm=arm.atr_at_arm,
                 atr_at_confirm=float(atr if atr is not None else arm.atr_at_arm),
                 adx_at_signal=arm.adx_at_arm,
+                confirm_level=float(arm.confirm_level),
             )
             if self._diag is not None:
                 self._diag.confirms += 1
+            if self._chart is not None:
+                self._chart.record_arm_event(
+                    time_unix=int(_as_utc(candle.open_time).timestamp()),
+                    side="TOP",
+                    event_type="CONFIRM",
+                    level=float(arm.confirm_level),
+                )
             self._top = None
             return sig
         if arm.bars_elapsed > self.cfg.max_wait:
             if self._diag is not None:
                 self._diag.expires += 1
+            if self._chart is not None:
+                self._chart.record_arm_event(
+                    time_unix=int(_as_utc(candle.open_time).timestamp()),
+                    side="TOP",
+                    event_type="EXPIRE",
+                    level=float(arm.confirm_level),
+                )
             _log(
                 "STRAT3_EXPIRE",
                 {
@@ -845,6 +975,13 @@ class LSR4Engine:
         if candle.low < arm.signal_extreme:
             if self._diag is not None:
                 self._diag.invalidates += 1
+            if self._chart is not None:
+                self._chart.record_arm_event(
+                    time_unix=int(_as_utc(candle.open_time).timestamp()),
+                    side="BOTTOM",
+                    event_type="INVALIDATE",
+                    level=float(arm.signal_extreme),
+                )
             _log(
                 "STRAT3_INVALIDATE",
                 {
@@ -869,14 +1006,29 @@ class LSR4Engine:
                 atr_at_arm=arm.atr_at_arm,
                 atr_at_confirm=float(atr if atr is not None else arm.atr_at_arm),
                 adx_at_signal=arm.adx_at_arm,
+                confirm_level=float(arm.confirm_level),
             )
             if self._diag is not None:
                 self._diag.confirms += 1
+            if self._chart is not None:
+                self._chart.record_arm_event(
+                    time_unix=int(_as_utc(candle.open_time).timestamp()),
+                    side="BOTTOM",
+                    event_type="CONFIRM",
+                    level=float(arm.confirm_level),
+                )
             self._bottom = None
             return sig
         if arm.bars_elapsed > self.cfg.max_wait:
             if self._diag is not None:
                 self._diag.expires += 1
+            if self._chart is not None:
+                self._chart.record_arm_event(
+                    time_unix=int(_as_utc(candle.open_time).timestamp()),
+                    side="BOTTOM",
+                    event_type="EXPIRE",
+                    level=float(arm.confirm_level),
+                )
             _log(
                 "STRAT3_EXPIRE",
                 {
@@ -910,6 +1062,14 @@ class LSR4Engine:
         if not self._cooldown_allows(candle, atr):
             if self._diag is not None:
                 self._diag.cooldown_blocks += 1
+            if self._chart is not None:
+                side = "TOP" if signal.direction == "SHORT" else "BOTTOM"
+                self._chart.record_arm_event(
+                    time_unix=int(_as_utc(candle.open_time).timestamp()),
+                    side=side,
+                    event_type="COOLDOWN_BLOCK",
+                    level=float(signal.confirm_level),
+                )
             _log(
                 "STRAT3_COOLDOWN_BLOCK",
                 {
@@ -925,6 +1085,8 @@ class LSR4Engine:
         self._last_signal_bar = self._candles_processed
         self._last_signal_price = float(candle.close)
         self._last_signal_candle_time = signal.confirm_candle_time
+        if self._chart is not None:
+            self._chart.record_signal(signal)
         _log(
             "STRAT3_SIGNAL",
             {

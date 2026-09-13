@@ -25,8 +25,13 @@ from backend.strategies.s003_lsr4.config import (
     persist_arm_state,
     persist_engine_state,
     timeframe_seconds,
+    validate_strategy3_config_payload,
 )
-from backend.strategies.s003_lsr4.lsr4 import LSR4Engine
+from backend.strategies.s003_lsr4.lsr4 import (
+    BackfillDiagnostics,
+    ChartTrace,
+    LSR4Engine,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,35 +213,66 @@ def get_live_engine() -> LSR4Engine | None:
     return _engine
 
 
-async def run_backfill(
+async def run_offline(
     n: int = 500,
     *,
     ignore_warmup: bool = False,
+    timeframe: str | None = None,
+    overrides: dict[str, Any] | None = None,
+    with_chart: bool = False,
 ) -> dict[str, Any]:
     """
-    Fresh engine over last N candles. Does NOT write signals or disturb live state.
+    Shared offline engine run for backfill + chart.
+
+    Does NOT write strategy3_signals / config and does NOT touch live engine state.
     """
+    import copy
+
     import pytz
 
-    from backend.strategies.s003_lsr4.lsr4 import BackfillDiagnostics
-
     cfg, _ = _load_runtime_config()
+    cfg = copy.deepcopy(cfg)
+    overrides_applied: dict[str, Any] = {}
+
+    if overrides:
+        validated = validate_strategy3_config_payload(dict(overrides))
+        for key, val in validated.items():
+            if key == "enabled":
+                # Echo only — never treat as a live toggle in offline preview
+                overrides_applied[key] = val
+                continue
+            setattr(cfg, key, val)
+            overrides_applied[key] = val
+
+    if timeframe is not None:
+        tf = str(timeframe).strip()
+        if tf not in {"1m", "3m", "5m", "15m"}:
+            raise ValueError(f"timeframe must be one of 1m/3m/5m/15m, got {tf}")
+        cfg.timeframe = tf
+        overrides_applied["timeframe"] = tf
+
     client = _resolve_client()
     try:
         cfg.tick_size = await fetch_product_tick_size(client, cfg.symbol)
     except Exception:
         pass
+
     feed = CandleFeed(client, cfg)
     candles = await feed.fetch_last_n(n)
     diag = BackfillDiagnostics()
+    chart = ChartTrace() if with_chart else None
     engine = LSR4Engine(
-        cfg, ignore_warmup=bool(ignore_warmup), diagnostics=diag
+        cfg,
+        ignore_warmup=bool(ignore_warmup),
+        diagnostics=diag,
+        chart_trace=chart,
     )
-    signals: list[dict[str, Any]] = []
+
+    signals_iso: list[dict[str, Any]] = []
     for candle in candles:
         sig = engine.process_closed_candle(candle)
         if sig is not None:
-            signals.append(
+            signals_iso.append(
                 {
                     "direction": sig.direction,
                     "mode": sig.mode,
@@ -248,6 +284,7 @@ async def run_backfill(
                     "atr_at_arm": sig.atr_at_arm,
                     "atr_at_confirm": sig.atr_at_confirm,
                     "adx_at_signal": sig.adx_at_signal,
+                    "confirm_level": sig.confirm_level,
                 }
             )
     engine.finalize_warmup_diagnostics()
@@ -268,6 +305,8 @@ async def run_backfill(
 
     diag_payload = diag.to_dict()
     out: dict[str, Any] = {
+        "timeframe": cfg.timeframe,
+        "overrides_applied": overrides_applied,
         "candles_requested": int(n),
         "candles_fetched": len(candles),
         "first_candle_utc": _fmt(first_utc),
@@ -277,9 +316,12 @@ async def run_backfill(
         "warm_from_index": diag_payload["warm_from_index"],
         "warm_blocked_reason": diag_payload["warm_blocked_reason"],
         "vwap_session_resets": diag_payload["vwap_session_resets"],
+        "diagnostics": diag_payload["counters"],
         "counters": diag_payload["counters"],
-        "signals": signals,
-        "count": len(signals),
+        "signals": signals_iso,
+        "count": len(signals_iso),
+        "_candles_raw": candles,
+        "_chart": chart,
     }
     if len(candles) != int(n):
         out["fetch_note"] = (
@@ -291,4 +333,77 @@ async def run_backfill(
             "warmup guard bypassed — VWAP and ADX may be unreliable, "
             "do not compare these signals against the chart"
         )
+    return out
+
+
+async def run_backfill(
+    n: int = 500,
+    *,
+    ignore_warmup: bool = False,
+) -> dict[str, Any]:
+    """Backfill wrapper — same engine path as chart, no DB writes."""
+    raw = await run_offline(n, ignore_warmup=ignore_warmup, with_chart=False)
+    out: dict[str, Any] = {
+        "candles_requested": raw["candles_requested"],
+        "candles_fetched": raw["candles_fetched"],
+        "first_candle_utc": raw["first_candle_utc"],
+        "first_candle_ist": raw["first_candle_ist"],
+        "last_candle_utc": raw["last_candle_utc"],
+        "last_candle_ist": raw["last_candle_ist"],
+        "warm_from_index": raw["warm_from_index"],
+        "warm_blocked_reason": raw["warm_blocked_reason"],
+        "vwap_session_resets": raw["vwap_session_resets"],
+        "counters": raw["counters"],
+        "signals": raw["signals"],
+        "count": raw["count"],
+    }
+    if "fetch_note" in raw:
+        out["fetch_note"] = raw["fetch_note"]
+    if "warning" in raw:
+        out["warning"] = raw["warning"]
+    return out
+
+
+async def run_chart(
+    n: int = 1500,
+    *,
+    timeframe: str | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Chart payload: candles + engine indicator series + signals + arm events."""
+    raw = await run_offline(
+        n,
+        ignore_warmup=False,
+        timeframe=timeframe,
+        overrides=overrides,
+        with_chart=True,
+    )
+    candles_raw = raw.pop("_candles_raw")
+    chart = raw.pop("_chart")
+    assert isinstance(chart, ChartTrace)
+
+    candle_rows = [
+        {
+            "time": int(c.open_time.timestamp()),
+            "open": float(c.open),
+            "high": float(c.high),
+            "low": float(c.low),
+            "close": float(c.close),
+            "volume": float(c.volume),
+        }
+        for c in candles_raw
+    ]
+
+    out: dict[str, Any] = {
+        "timeframe": raw["timeframe"],
+        "overrides_applied": raw["overrides_applied"],
+        "candles": candle_rows,
+        "indicators": chart.indicators,
+        "signals": chart.signals,
+        "arm_events": chart.arm_events,
+        "warm_from_index": raw["warm_from_index"],
+        "diagnostics": raw["diagnostics"],
+    }
+    if "fetch_note" in raw:
+        out["fetch_note"] = raw["fetch_note"]
     return out
