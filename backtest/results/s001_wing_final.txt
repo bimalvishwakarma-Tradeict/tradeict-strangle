@@ -1,0 +1,92 @@
+S001 FINAL WING DISTANCE × ROLL (new baseline)
+====================================================================================================
+BASELINE FIXED: dte2 B_only trig70 maker B25 qty=8 11:00 IST HEDGE=OFF dec%=40 profit_k=1
+Entry wings: print preferred, surface OK (income-engine parity). ROLL re-establish: real prints only.
+Qty path dec%40 max_adj2: [8,4,1]
+
+===== PART A: WING DISTANCE × ROLL =====
+
+  wing roll     n   mean/day     ci_lo     ci_hi     worst       mdd  netCred   wing%   roll/c  widen%    wTheo
+------------------------------------------------------------------------------------------------------------------------
+  1500  OFF   302     0.9503    0.8481    1.0556   -5.2329    5.2329   4.4870    39.1   0.0000    17.5  20.4857
+  1500   ON   302     1.0732    0.8992    1.2423  -10.0846   16.4952   4.4870    39.1   0.6162     0.3  17.2802
+  2000  OFF   300     0.9778    0.8814    1.0792   -0.1904    0.1904   5.0854    31.7   0.0000     6.3  21.9720
+  2000   ON   300     1.0845    0.9104    1.2538  -12.1223   12.1223   5.0854    31.7   0.4400     0.0  18.7851
+  2500  OFF   301     0.9787    0.8837    1.0728   -4.4126    4.4126   5.5572    26.1   0.0000     2.3  25.0059
+  2500   ON   301     1.1938    1.0298    1.3551  -13.0072   13.0072   5.5572    26.1   0.2167     0.0  25.0059
+  3000  OFF   300     0.9532    0.8616    1.0503   -4.4126    4.4126   5.7850    23.5   0.0000     0.7  25.9920
+  3000   ON   300     1.2000    1.0007    1.3931  -16.0303   16.0303   5.7850    23.5   0.1557     0.0  25.9920
+
+configs with ci_lo > baseline ci_lo: 5 / 8 (chance exp 0.40)
+
+--- gaps wing=1500 roll=OFF ---
+  entry (n=302): call_gap avg=1592.4 worst(min)=600.0 | put_gap avg=1607.9 worst(min)=400.0 | theo_max avg=11.1323 worst(max)=17.2802
+  adj_1 (n=296): call_gap avg=2106.8 worst(min)=800.0 | put_gap avg=2092.9 worst(min)=1000.0 | theo_max avg=8.9609 worst(max)=20.4857
+  adj_2 (n=294): call_gap avg=2602.0 worst(min)=1400.0 | put_gap avg=2510.5 worst(min)=1200.0 | theo_max avg=2.8264 worst(max)=5.6455
+  force_exit (n=281): call_gap avg=2598.6 worst(min)=1400.0 | put_gap avg=2524.2 worst(min)=1200.0 | theo_max avg=2.8320 worst(max)=5.6455
+  %cycles post-adj theo_max > entry: 17.5%  | WORST theo_max sample: 20.4857  | avg entry theo: 11.1323
+
+--- gaps wing=1500 roll=ON ---
+  entry (n=302): call_gap avg=1592.4 worst(min)=600.0 | put_gap avg=1607.9 worst(min)=400.0 | theo_max avg=11.1323 worst(max)=17.2802
+  adj_1 (n=248): call_gap avg=1602.8 worst(min)=1200.0 | put_gap avg=1606.0 worst(min)=1400.0 | theo_max avg=5.8641 worst(max)=11.6520
+  adj_2 (n=236): call_gap avg=1603.4 worst(min)=1500.0 | put_gap avg=1598.3 worst(min)=1400.0 | theo_max avg=1.4944 worst(max)=2.9410
+  force_exit (n=203): call_gap avg=1604.4 worst(min)=1500.0 | put_gap avg=1599.0 worst(min)=1400.0 | theo_max avg=1.4390 worst(max)=2.7050
+  %cycles post-adj theo_max > entry: 0.3%  | WORST theo_max sample: 17.2802  | avg entry theo: 11.1323
+
+--- gaps wing=2000 roll=OFF ---
+  entry (n=300): call_gap avg=1950.3 worst(min)=600.0 | put_gap avg=1993.7 worst(min)=400.0 | theo_max avg=14.0459 worst(max)=18.7851
+  adj_1 (n=289): call_gap avg=2459.5 worst(min)=1200.0 | put_gap avg=2477.5 worst(min)=1200.0 | theo_max avg=10.2353 worst(max)=21.9720
+  adj_2 (n=285): call_gap avg=2954.0 worst(min)=1600.0 | put_gap avg=2894.0 worst(min)=1200.0 | theo_max avg=3.1416 worst(max)=5.9250
+  force_exit (n=262): call_gap avg=2924.8 worst(min)=1600.0 | put_gap avg=2926.0 worst(min)=1200.0 | theo_max avg=3.1315 worst(max)=5.9250
+  %cycles post-adj theo_max > entry: 6.3%  | WORST theo_max sample: 21.9720  | avg entry theo: 14.0459
+
+--- gaps wing=2000 roll=ON ---
+  entry (n=300): call_gap avg=1950.3 worst(min)=600.0 | put_gap avg=1993.7 worst(min)=400.0 | theo_max avg=14.0459 worst(max)=18.7851
+  adj_1 (n=221): call_gap avg=2000.0 worst(min)=1200.0 | put_gap avg=2018.1 worst(min)=1400.0 | theo_max avg=7.3513 worst(max)=12.9400
+  adj_2 (n=205): call_gap avg=2011.2 worst(min)=1600.0 | put_gap avg=2014.1 worst(min)=1400.0 | theo_max avg=1.8310 worst(max)=2.9320
+  force_exit (n=168): call_gap avg=2012.5 worst(min)=1600.0 | put_gap avg=2016.1 worst(min)=1400.0 | theo_max avg=1.7812 worst(max)=2.9320
+  %cycles post-adj theo_max > entry: 0.0%  | WORST theo_max sample: 18.7851  | avg entry theo: 14.0459
+
+--- gaps wing=2500 roll=OFF ---
+  entry (n=301): call_gap avg=2382.1 worst(min)=600.0 | put_gap avg=2457.5 worst(min)=400.0 | theo_max avg=18.2716 worst(max)=25.0059
+  adj_1 (n=280): call_gap avg=2882.9 worst(min)=1200.0 | put_gap avg=2941.1 worst(min)=1200.0 | theo_max avg=11.8480 worst(max)=24.7550
+  adj_2 (n=267): call_gap avg=3405.2 worst(min)=1600.0 | put_gap avg=3338.6 worst(min)=1200.0 | theo_max avg=3.5037 worst(max)=6.6208
+  force_exit (n=217): call_gap avg=3365.0 worst(min)=1600.0 | put_gap avg=3401.8 worst(min)=1200.0 | theo_max avg=3.4958 worst(max)=6.6208
+  %cycles post-adj theo_max > entry: 2.3%  | WORST theo_max sample: 25.0059  | avg entry theo: 18.2716
+
+--- gaps wing=2500 roll=ON ---
+  entry (n=301): call_gap avg=2382.1 worst(min)=600.0 | put_gap avg=2457.5 worst(min)=400.0 | theo_max avg=18.2716 worst(max)=25.0059
+  adj_1 (n=167): call_gap avg=2540.1 worst(min)=1200.0 | put_gap avg=2587.4 worst(min)=1400.0 | theo_max avg=9.6689 worst(max)=16.5000
+  adj_2 (n=142): call_gap avg=2619.7 worst(min)=1800.0 | put_gap avg=2608.5 worst(min)=1400.0 | theo_max avg=2.4036 worst(max)=3.1580
+  force_exit (n=105): call_gap avg=2608.6 worst(min)=1800.0 | put_gap avg=2613.3 worst(min)=1400.0 | theo_max avg=2.3362 worst(max)=2.9080
+  %cycles post-adj theo_max > entry: 0.0%  | WORST theo_max sample: 25.0059  | avg entry theo: 18.2716
+
+--- gaps wing=3000 roll=OFF ---
+  entry (n=300): call_gap avg=2622.3 worst(min)=600.0 | put_gap avg=2730.7 worst(min)=400.0 | theo_max avg=20.8680 worst(max)=25.9920
+  adj_1 (n=269): call_gap avg=3134.9 worst(min)=1200.0 | put_gap avg=3217.5 worst(min)=1200.0 | theo_max avg=12.9875 worst(max)=24.7550
+  adj_2 (n=252): call_gap avg=3659.5 worst(min)=1600.0 | put_gap avg=3588.1 worst(min)=1200.0 | theo_max avg=3.7441 worst(max)=6.7767
+  force_exit (n=189): call_gap avg=3547.6 worst(min)=1600.0 | put_gap avg=3655.0 worst(min)=1200.0 | theo_max avg=3.7119 worst(max)=6.7767
+  %cycles post-adj theo_max > entry: 0.7%  | WORST theo_max sample: 25.9920  | avg entry theo: 20.8680
+
+--- gaps wing=3000 roll=ON ---
+  entry (n=300): call_gap avg=2622.3 worst(min)=600.0 | put_gap avg=2730.7 worst(min)=400.0 | theo_max avg=20.8680 worst(max)=25.9920
+  adj_1 (n=153): call_gap avg=2888.9 worst(min)=1200.0 | put_gap avg=2919.6 worst(min)=1400.0 | theo_max avg=11.1382 worst(max)=15.9600
+  adj_2 (n=130): call_gap avg=2985.4 worst(min)=1600.0 | put_gap avg=2956.9 worst(min)=1400.0 | theo_max avg=2.8159 worst(max)=5.4650
+  force_exit (n=87): call_gap avg=2964.4 worst(min)=1600.0 | put_gap avg=2932.2 worst(min)=1400.0 | theo_max avg=2.6726 worst(max)=3.4350
+  %cycles post-adj theo_max > entry: 0.0%  | WORST theo_max sample: 25.9920  | avg entry theo: 20.8680
+
+===== PART B: SIZING NUMBER (C6) =====
+Winner by mean/day: wing=3000 roll=ON (mean/day=1.2000, ci_lo=1.0007)
+
+  n cycles: 300
+  theoretical max loss at entry (avg): 20.8680 USD
+  theoretical max loss at entry (worst cycle): 25.9920 USD
+  WORST theoretical max loss any stage (sample): 25.9920 USD
+  actual worst cycle P&L: -16.0303 USD
+  p1 cycle P&L: -5.5122  |  p5 cycle P&L: 0.1529
+  same-day multi baskets: days_with_2+=0  worst_sum2=nan  worst_sum3=nan
+  hypothetical worst 2-cycle sum: -28.8550  |  worst 3-cycle sum: -40.4847
+
+sizing ke liye max loss per basket = 25.9920 USD maano — ye worst-stage theo_max (not entry-only) hai.
+
+DONE.
