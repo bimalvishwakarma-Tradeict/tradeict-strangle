@@ -1,0 +1,109 @@
+S001 MISSING-DAY AUDIT + QTY STRIKES + NO-HEDGE VARIANT
+====================================================================================================
+
+===== PART A: MISSING DAYS =====
+Official denominator day_span=456 (cache meta). Inclusive calendar dates 2025-06-13→2026-09-13 = 458 (+2 edge-day difference vs day_span).
+winner-filter days with cycle=300  missing vs day_span=156  missing vs inclusive=158
+Note: income engine does NOT gate on live hedge activity — 'hedge inactive' is NOT a backtest drop reason for these cycles.
+IV surface loaded for wing fallback: True
+
+Days WITH winner cycle: 300
+Days MISSING: 156 (vs day_span=456) / 158 (vs inclusive=458)
+
+reason                                                                  count % of 456 % of incl
+----------------------------------------------------------------------------------------------------
+HAS_CYCLE (winner filter present)                                         300    65.8%     65.5%
+no_ATM_trade_prints_at_11:00_IST                                           95    20.8%     20.7%
+2DTE_expiry_does_not_exist_that_day                                        59    12.9%     12.9%
+no_wing_price (print+surface both failed)                                   3     0.7%      0.7%
+entry_outside_spot_range (candle/data edge)                                 1     0.2%      0.2%
+
+Fixable vs genuine (classification):
+  FIXABLE (backtest data/print gap; live bot might still trade): 99
+    includes: no spot/ATM/strangle/wing PRINTS at 11:00, cache mismatch
+  GENUINE (structure/expiry/settlement impossible that day): 59
+    includes: no 2DTE expiry in index, no settle spot, entry after settle, no wing strikes 2000pts away
+  OTHER / uncategorized: 0
+  NOTE: 'hedge inactive' does not apply — s001_income_engine never requires an active hedge to form B25 cycles (uses ATM straddle proxy).
+
+Missing-day geography:
+  contiguous ranges: 59  isolated single days: 40  clusters (>=3 consecutive): 11
+  Largest clusters:
+    2026-07-27 → 2026-09-13  (49 days)
+    2025-06-13 → 2025-07-01  (19 days)
+    2025-09-07 → 2025-09-11  (5 days)
+    2025-07-12 → 2025-07-15  (4 days)
+    2025-08-25 → 2025-08-28  (4 days)
+    2025-11-16 → 2025-11-19  (4 days)
+    2025-12-02 → 2025-12-05  (4 days)
+    2025-12-22 → 2025-12-25  (4 days)
+    2025-07-27 → 2025-07-29  (3 days)
+    2025-08-19 → 2025-08-21  (3 days)
+    2025-08-31 → 2025-09-02  (3 days)
+
+===== PART B: QTY SCALING STRIKE DIAGNOSTIC =====
+Strikes come from CycleObs (B25 selection) — same strikes for all qty%; qty only scales lots. Distances/premiums averaged over n=300 winner days.
+
+CODE CONFIRM — strangle_premium_pct_of_hedge target:
+  File: backend/engine/auto_trade_engine.py
+  Function: resolve_strangle_target_premium  lines 279–356
+  Formula (lines 334–336):
+    avg = (hedge_call_mark + hedge_put_mark) / 2.0
+    computed = ceil(avg × pct / 100.0)
+  Returns: target_premium_PER_SIDE (docstring line 286–291, return line 356).
+  Verdict: PER SIDE premium level for strike matching — NOT total USD across lots. Qty is applied later; this sets the $/BTC target per short leg.
+  Backtest B25 note: income engine uses 25% of ATM straddle (call+put sum), which is a PROXY — not identical to live avg(hedge marks)×25%.
+
+ qty%  qty  call_dist   put_dist c_prem/lot p_prem/lot   tot_prem   hedge_px    ratio
+----------------------------------------------------------------------------------------------------
+  200    8     1276.6     1317.1     477.85     483.82     7.6934    23.5370    0.329
+  250   10     1276.6     1317.1     477.85     483.82     9.6167    23.5370    0.411
+  300   12     1276.6     1317.1     477.85     483.82    11.5400    23.5370    0.493
+  350   14     1276.6     1317.1     477.85     483.82    13.4634    23.5370    0.576
+  400   16     1276.6     1317.1     477.85     483.82    15.3867    23.5370    0.658
+hedge_px = 4-lot ATM monthly (month_1, min_dte=6) long-straddle debit from real prints at entry when available; else excluded from avg.
+ratio = total_basket_premium_collected_at_entry / hedge_premium. Strikes identical across qty% (only lots change).
+
+===== PART C: NO-HEDGE VARIANT =====
+Config: dte2 B_only trig70 maker B25 wings2000 qty=8 entry11:00 — NO hedge cost in standalone metrics.
+
+Standalone basket (WITHOUT hedge cost):
+  n=300
+  mean/cycle=0.8975  median=0.8161  std=1.2494
+  ci_lo=0.7559  ci_hi=1.0393
+  worst=-3.7110  p1=-2.2932  p5=-0.8520  p10=-0.4441
+  max_drawdown_running_sum=3.8674
+  margin_APPROX (shorts+wings only)=41.07  RoM_ann=5.2507
+
+|move| deciles (WITHOUT hedge — basket P&L only):
+   dec   |move|_lo   |move|_hi      n    mean_pnl
+  D0           4.0       296.0     30      0.9189
+  D1         299.5       548.0     30      0.8621
+  D2         562.5       946.0     30      0.9647
+  D3         965.5      1223.5     30      0.7545
+  D4        1226.0      1492.0     30      1.2330
+  D5        1506.5      1853.5     30      0.8981
+  D6        1857.0      2417.0     30      0.8534
+  D7        2427.0      2867.0     30      1.0176
+  D8        2871.0      4412.0     30      0.3097
+  D9        4425.5      9821.5     30      1.1631
+
+Crash day 2026-06-02: P&L = 0.3595
+Crash day 2025-11-19: P&L = NOT AVAILABLE (no cycle that entry_date)
+Crash-month window 2026-01-27 → 2026-02-24: n_cycles=26  total_pnl=18.24327587045801
+
+===== FINAL SIDE-BY-SIDE =====
+metric                          WITH hedge (200%)        WITHOUT hedge
+------------------------------------------------------------------------
+mean/day                                  -0.0350               0.5905
+ci_lo (of mean/day)                       -0.1282               0.4973
+worst cycle                               -3.7110              -3.7110
+max drawdown                               3.8674               3.8674
+margin APPROX                               73.07                41.07
+return on margin ann                      -0.1751               5.2507
+crash-month total                          0.1038              18.2433
+
+WITH hedge uses −0.6255/day on mean/day and −0.6255×29 on crash-month (2026-01-27..2026-02-24).
+worst cycle / max drawdown identical: hedge cost is a flat daily constant, not path-dependent in this column.
+
+END
