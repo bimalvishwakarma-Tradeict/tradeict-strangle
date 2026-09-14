@@ -1,0 +1,55 @@
+MARK PILOT 2026-05 — PART A DOWNLOAD + B/C
+================================================================================
+
+===== PART A: DOWNLOAD SUMMARY =====
+pilot month: 2026-05
+products May (expired BTC opts): 1984
+after spot+/-6000 filter: 1947 symbols (31 expiries)
+downloaded: 1947/1947 done, empty=0, error=0
+sqlite: backtest/cache/option_marks/marks_2026-05.sqlite
+total_mark_rows: 7715867
+note: per-symbol window = pilot month intersect contract life (~10d to settle)
+
+===== PART B: MARK vs PRINT CALIBRATION (2026-05) =====
+mark symbols available: 1947
+trades on mark symbols scanned: 3831117
+matched mark+print: 3816940  minute_miss: 14177
+
+ALL diff_pct (print-mark)/mark*100: n=3816940 mean=9.6710 med=0.0000 std=433.0225 p5=-30.8399 p25=-4.2024 p50=0.0000 p75=4.1018 p95=43.5780
+BUY prints  (role=taker/buyer):     n=1778041 mean=19.5367 med=1.7100 std=552.1121 p5=-16.3986 p25=-0.9108 p50=1.7100 p75=8.6943 p95=84.2722
+SELL prints (role=maker/buyer):     n=2038899 mean=1.0675 med=-1.5860 std=291.6166 p5=-39.0119 p25=-7.4664 p50=-1.5860 p75=0.9945 p95=18.6213
+
+premium buckets (diff_pct):
+  <100     n=2106516 mean=15.3630 med=-0.0919 std=356.0525 p5=-48.9078 p25=-9.0576 p50=-0.0919 p75=9.2872 p95=97.4782
+  100-300  n=803054 mean=5.2405 med=0.0694 std=747.1057 p5=-9.2395 p25=-2.2872 p50=0.0694 p75=2.6833 p95=12.1223
+  300-600  n=537555 mean=0.5408 med=0.0405 std=20.4738 p5=-5.9507 p25=-1.5029 p50=0.0405 p75=1.7229 p95=7.0802
+  600+     n=369815 mean=0.1407 med=-0.0008 std=9.3715 p5=-4.2366 p25=-1.0563 p50=-0.0008 p75=1.0805 p95=4.5980
+
+ATM (|k-spot|/spot<=1%):  n=2278156 mean=2.2685 med=-0.0159 std=54.6460 p5=-35.3756 p25=-3.8575 p50=-0.0159 p75=3.2580 p95=31.5337
+deep OTM (>=5%):          n=69166 mean=20.9572 med=0.0000 std=112.1963 p5=-28.7065 p25=-4.9023 p50=0.0000 p75=16.2081 p95=100.0000
+
+median sell diff_pct=-1.5860 → X_sell=1.5860%  |  median buy diff_pct=1.7100 → X_buy=1.7100%
+mark se fill karne pe realistic adjustment 1.65% hai (sell pe mark − 1.65%, buy pe mark + 1.65%)
+
+===== PART C: SANITY — May 2026 print-only cycles, mark vs print =====
+print-only cycles total=60 skipped=1446; May 2026 entry cycles=9
+mark cycles rebuilt=7 failed_missing_mark=2 symbols_loaded=31/36
+mark path slip (fill adj) = 1.6480% → slip=0.016480
+
+cycle date      print PnL     mark PnL        farak
+----------------------------------------------------
+2026-05-02         0.6339       0.1927      -0.4412
+2026-05-08         0.1123       0.2823       0.1701
+2026-05-13         1.2960          nan          n/a
+2026-05-14         1.1481       0.4117      -0.7364
+2026-05-19         0.0801      -0.2829      -0.3630
+2026-05-20         0.6334       0.4041      -0.2293
+2026-05-24         1.0429       0.1718      -0.8712
+2026-05-29         0.4898       0.1065      -0.3833
+2026-05-30         0.1691          nan          n/a
+
+n paired=7  mean|farak|=0.4564  med|farak|=0.3833
+mean|farak| / |mean print PnL| = 73.27%
+VERDICT: BAHUT ALAG — RUKO. Poora download mat shuru karo. Mark pipeline print-only se match nahi karti.
+
+DONE.
