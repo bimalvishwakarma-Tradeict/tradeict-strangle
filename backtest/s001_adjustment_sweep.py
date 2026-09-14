@@ -115,6 +115,16 @@ class CycleResult:
     net: float
     n_adjustments: int
     adjustment_fees: float
+    # Stress / leverage metrics (USD notional of short premium sold;
+    # total_fees includes entry + adj exit/entry + wing fees when present)
+    premium_sold_usd: float = 0.0
+    total_fees_usd: float = 0.0
+    entry_date: date | None = None
+
+
+def premium_notional_usd(premium: float, qty_lots: int) -> float:
+    """USD credit from selling `qty_lots` at `premium` ($/BTC)."""
+    return float(premium) * abs(int(qty_lots)) * eng.CONTRACT_VALUE
 
 
 def build_configs() -> list[SweepCfg]:
@@ -353,10 +363,19 @@ def settle_legs(
 
 def simulate_none(o: eng.CycleObs) -> CycleResult:
     """Scale cached 4-lot net to live 8-lot (fees+cash both linear in qty)."""
+    qty = ORIGINAL_BASKET_QTY
+    sc = float(o.short_call.price)
+    sp = float(o.short_put.price)
+    prem = premium_notional_usd(sc, qty) + premium_notional_usd(sp, qty)
+    # entry_fees in cache is 4-lot; scale linearly to 8
+    fees = float(o.entry_fees) * QTY_SCALE
     return CycleResult(
         net=float(o.net_no_settle) * QTY_SCALE,
         n_adjustments=0,
         adjustment_fees=0.0,
+        premium_sold_usd=prem,
+        total_fees_usd=fees,
+        entry_date=o.entry_date,
     )
 
 
@@ -403,6 +422,9 @@ def simulate_with_adjustments(
             wp_entry, spot_e, qty
         )
 
+    premium_sold = premium_notional_usd(sc_entry, qty) + premium_notional_usd(
+        sp_entry, qty
+    )
     realized = 0.0
     adj_fees = 0.0
     adj_count = 0
@@ -636,6 +658,7 @@ def simulate_with_adjustments(
             fee_entry = eng.option_fee(new_fill_px, spot, int(new_qty))
             fees += fee_exit + fee_entry
             adj_fees += fee_exit + fee_entry
+            premium_sold += premium_notional_usd(new_fill_px, int(new_qty))
             sc_k = new_k
             sc_entry = new_fill_px
             # Baseline reset rules from compute_adjustment_target_premium docstring:
@@ -649,6 +672,7 @@ def simulate_with_adjustments(
             fee_entry = eng.option_fee(new_fill_px, spot, int(new_qty))
             fees += fee_exit + fee_entry
             adj_fees += fee_exit + fee_entry
+            premium_sold += premium_notional_usd(new_fill_px, int(new_qty))
             sp_k = new_k
             sp_entry = new_fill_px
             sp_base = new_fill_px
@@ -740,7 +764,14 @@ def simulate_with_adjustments(
     else:
         net = realized - fees
 
-    return CycleResult(net=net, n_adjustments=adj_count, adjustment_fees=adj_fees)
+    return CycleResult(
+        net=net,
+        n_adjustments=adj_count,
+        adjustment_fees=adj_fees,
+        premium_sold_usd=premium_sold,
+        total_fees_usd=fees,
+        entry_date=o.entry_date,
+    )
 
 
 def summarize(

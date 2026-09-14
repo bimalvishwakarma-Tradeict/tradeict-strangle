@@ -1,0 +1,84 @@
+S001 WINNER STRESS — WINNER vs CONTROL
+==========================================================================================
+fixed: fill=maker  strike=B25  wing=2000  entry_IST=11:00  basket_qty=8
+WINNER  = dte=2  adjustment=B_only  trigger_pct=70
+CONTROL = dte=2  adjustment=none
+bootstrap_n=10000  seed=20260914  block_days=3  day_span=456
+n_winner=300  n_control=300
+
+===== TEST 1: OVERLAP =====
+
+(a) Adjustment distribution — WINNER (B_only / 70)
+  adjustments=0:    0  (  0.0%)
+  adjustments=1:    0  (  0.0%)
+  adjustments=2:  300  (100.0%)
+  % cycles at cap (=2): 100.0%
+
+(b) Non-overlapping subsets — every 3rd entry-day (3 offsets)
+  offset      n       mean      ci_lo      ci_hi  label
+       0    100     1.0960     0.8770     1.3231  days 0,3,6,...
+       1    100     0.7564     0.5083     1.0022  days 1,4,7,...
+       2    100     0.8402     0.5866     1.0986  days 2,5,8,...
+
+(c) Block bootstrap (block_days=3) vs original iid ci_lo
+  original sweep cited ci_lo ~ 0.76  (this recompute iid ci_lo=0.7559)
+  iid  bootstrap: mean=0.8975  ci_lo=0.7559  ci_hi=1.0393
+  block bootstrap (len=3d, n_blocks=298): mean=0.8975  ci_lo=0.8179  ci_hi=0.9971
+  side-by-side ci_lo:  original~0.7557 | iid=0.7559 | block3=0.8179
+
+===== TEST 2: LEVERAGE vs EDGE =====
+  config          n  mean_prem_sold   mean_fees    mean_pnl  pnl_per_$prem
+  WINNER        300         13.7306      0.6043      0.8975       0.059115
+             aggregate pnl/prem = 0.065366  (sum_pnl / sum_prem)
+  CONTROL       300          7.6934      0.2586     -0.5546      -0.104345
+             aggregate pnl/prem = -0.072092  (sum_pnl / sum_prem)
+
+  Interpretation aid: if WINNER pnl_per_$prem ~ CONTROL, gain is mostly leverage (more premium sold);
+  if WINNER pnl_per_$prem >> CONTROL, gain includes true edge.
+
+===== TEST 3: TAIL =====
+  WINNER:
+    worst=-3.7110
+    p1=-2.2932
+    p5=-0.8520
+    p10=-0.4441
+    max_drawdown_running_sum=3.8674
+  CONTROL:
+    worst=-13.0106
+    p1=-12.3954
+    p5=-11.4562
+    p10=-10.7763
+    max_drawdown_running_sum=200.9075
+
+  Crash-day cycles (by entry_date):
+  --- 2025-11-19 ---
+    (no cycles with this entry_date in either config)
+  --- 2026-06-02 ---
+    WINNER  entry=2026-06-02  net=0.3595  adj=2  prem_sold=11.7060
+    CONTROL entry=2026-06-02  net=-11.2800  adj=0  prem_sold=6.5920
+
+===== TEST 4: CLAMP SOURCE (report only — no code change) =====
+  adj_b_trigger_pct is clamped to [10, 90] in multiple places:
+
+  1) LIVE RUNTIME (hardcoded clamp after DB read):
+     backend/strategies/s001_short_strangle/logic.py
+     function _load_adj_engine_settings, line 113:
+       pct = max(10.0, min(90.0, pct))
+     Kind: hardcoded limit in strategy code (not a DB CHECK).
+
+  2) TRADE API snapshot path (hardcoded clamp):
+     backend/api/routes_trade.py  lines 1639–1646:
+       adj_b_trigger_pct = max(10.0, min(90.0, adj_b_trigger_pct))
+     Kind: hardcoded limit when exposing settings to client.
+
+  3) PYDANTIC / API validation (schema bounds):
+     backend/schemas.py  line 147:
+       adj_b_trigger_pct: float = Field(default=50.0, ge=10, le=90)
+     backend/api/routes_auto_trade.py  line 118:
+       adj_b_trigger_pct: float = Field(default=50.0, ge=10, le=90)
+     Kind: request validation — rejects values outside [10, 90] before persist.
+
+  Sweep mapping note: s001_adjustment_sweep.adj_b_pct_from_trigger
+  mirrors the live [10,90] clamp so trigger=110 → adj_b=90 (why B_only 90 and 110 matched).
+
+END
