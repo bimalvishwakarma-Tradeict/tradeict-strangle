@@ -1,0 +1,126 @@
+=== S001 SWEEP DISTRIBUTION AUDIT ===
+source_csv: D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\results\s001_sweep_configs.csv
+n_configs: 2112
+columns: time_of_day, dte, strike_mode, adjustment_setting, wing, fill_package, n, mean, ci_lo, ci_hi, sortino_per_cycle
+note: adjustment_setting is always 'none' - income-engine sweep has no adjustments.
+
+--- SECTION 1: ALL CONFIGS - MEAN DISTRIBUTION ---
+ALL configs:
+  count              = 2112
+  mean_of_means      = -0.376043
+  median             = -0.253659
+  std                = 0.570720
+  p1                 = -3.045704
+  p5                 = -1.443399
+  p10                = -0.780825
+  p25                = -0.473475
+  p50                = -0.253659
+  p75                = -0.041686
+  p90                = 0.049094
+  p95                = 0.085829
+  p99                = 0.146622
+  mean > 0           = 405  (19.18%)
+  mean < 0           = 1707  (80.82%)
+  mean == 0          = 0  (0.00%)
+
+MAKER-only subset:
+  count              = 1056
+  mean_of_means      = -0.388394
+  median             = -0.261372
+  std                = 0.569895
+  p1                 = -3.064875
+  p5                 = -1.436089
+  p10                = -0.786566
+  p25                = -0.474806
+  p50                = -0.261372
+  p75                = -0.070296
+  p90                = 0.032892
+  p95                = 0.055320
+  p99                = 0.131966
+  mean > 0           = 173  (16.38%)
+  mean < 0           = 883  (83.62%)
+  mean == 0          = 0  (0.00%)
+
+n>=300 subset:
+  count              = 1292
+  mean_of_means      = -0.143663
+  median             = -0.123360
+  std                = 0.189254
+  p1                 = -0.675077
+  p5                 = -0.504987
+  p10                = -0.372748
+  p25                = -0.269307
+  p50                = -0.123360
+  p75                = 0.017881
+  p90                = 0.070793
+  p95                = 0.096111
+  p99                = 0.138507
+  mean > 0           = 385  (29.80%)
+  mean < 0           = 907  (70.20%)
+  mean == 0          = 0  (0.00%)
+
+--- SECTION 2: THE CI-CLEARING CONFIGS (ci_lo > 0) ---
+count with ci_lo > 0: 12
+  tod dte  strike  adj  wing   fill    n     mean    ci_lo    ci_hi  sortino
+15:00   3     B10 none   OFF  taker   11   0.9830   0.0174   1.8504 1.208495
+13:00   0     B30 none   OFF  taker  386   0.1548   0.0071   0.2963 0.131679
+13:00   0     B20 none   OFF  taker  386   0.1376   0.0084   0.2569 0.130117
+15:00   0    A300 none   OFF  taker  386   0.1258   0.0097   0.2381 0.137578
+15:00   0    A200 none   OFF  taker  386   0.1224   0.0118   0.2319 0.135206
+15:00   0     B40 none   OFF  taker  386   0.1203   0.0046   0.2302 0.132909
+15:00   0    A150 none   OFF  taker  386   0.1169   0.0045   0.2222 0.131125
+13:00   0     B25 none  1000  taker  386   0.1127   0.0005   0.2210 0.125807
+15:00   0    A200 none  1000  taker  386   0.1097   0.0144   0.2058 0.145591
+15:00   0    A150 none  1000  taker  386   0.1090   0.0150   0.1996 0.146206
+15:00   0    A300 none  1000  taker  386   0.1081   0.0080   0.2036 0.144022
+15:00   0     B40 none  1000  taker  386   0.1005   0.0013   0.1977 0.132566
+
+--- SECTION 3: MARGINAL ENRICHMENT (among ci_lo>0 vs all) ---
+expected_in_12_if_random = n_clear * (count_in_all / n_all); ratio = in_clear / expected
+
+Dimension: dte  (n_clear=12, n_all=2112)
+  level             in_12  in_2112   expected    ratio
+  0                    11      528      3.000    3.667
+  1                     0      528      3.000    0.000
+  2                     0      528      3.000    0.000
+  3                     1      528      3.000    0.333
+
+Dimension: time_of_day  (n_clear=12, n_all=2112)
+  level             in_12  in_2112   expected    ratio
+  09:00                 0      528      3.000    0.000
+  11:00                 0      528      3.000    0.000
+  13:00                 3      528      3.000    1.000
+  15:00                 9      528      3.000    3.000
+
+Dimension: strike_mode  (n_clear=12, n_all=2112)
+  level             in_12  in_2112   expected    ratio
+  A100                  0      192      1.091    0.000
+  A150                  2      192      1.091    1.833
+  A200                  2      192      1.091    1.833
+  A300                  2      192      1.091    1.833
+  A50                   0      192      1.091    0.000
+  B10                   1      192      1.091    0.917
+  B15                   0      192      1.091    0.000
+  B20                   1      192      1.091    0.917
+  B25                   1      192      1.091    0.917
+  B30                   1      192      1.091    0.917
+  B40                   2      192      1.091    1.833
+
+Dimension: adjustment_setting  (n_clear=12, n_all=2112)
+  level             in_12  in_2112   expected    ratio
+  none                 12     2112     12.000    1.000
+
+Dimension: wing  (n_clear=12, n_all=2112)
+  level             in_12  in_2112   expected    ratio
+  1000                  5      352      2.000    2.500
+  1500                  0      352      2.000    0.000
+  2000                  0      352      2.000    0.000
+  3000                  0      352      2.000    0.000
+  4000                  0      352      2.000    0.000
+  OFF                   7      352      2.000    3.500
+
+Dimension: fill_package  (n_clear=12, n_all=2112)
+  level             in_12  in_2112   expected    ratio
+  maker                 0     1056      6.000    0.000
+  taker                12     1056      6.000    2.000
+

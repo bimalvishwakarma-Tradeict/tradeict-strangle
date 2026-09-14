@@ -395,6 +395,68 @@ def crash_dates_from_moves(obs: list[eng.CycleObs], dte: int, top_n: int = 2) ->
     return {d for d, _ in worst}
 
 
+def write_sweep_configs_csv(stats: list[eng.CfgStats]) -> Path:
+    """
+    Per-config rows for distribution audits.
+    Columns match cfg_key: time_of_day, dte, strike_mode, wing, fill_package.
+    This income sweep has no adjustments — column adjustment_setting is always 'none'.
+    """
+    import csv
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = RESULTS_DIR / "s001_sweep_configs.csv"
+    fields = [
+        "time_of_day",
+        "dte",
+        "strike_mode",
+        "adjustment_setting",
+        "wing",
+        "fill_package",
+        "n",
+        "mean",
+        "median",
+        "ci_lo",
+        "ci_hi",
+        "p5",
+        "worst",
+        "worst_date",
+        "sortino_per_cycle",
+        "mdd",
+        "surf_wing_pct",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for s in stats:
+            hhmm, dte, mode, wing, fill = s.key
+            w.writerow(
+                {
+                    "time_of_day": hhmm,
+                    "dte": int(dte),
+                    "strike_mode": mode,
+                    "adjustment_setting": "none",
+                    "wing": "OFF" if wing is None else str(int(wing)),
+                    "fill_package": fill,
+                    "n": s.n,
+                    "mean": f"{s.mean:.6f}",
+                    "median": f"{s.median:.6f}",
+                    "ci_lo": f"{s.ci_lo:.6f}",
+                    "ci_hi": f"{s.ci_hi:.6f}",
+                    "p5": f"{s.p5:.6f}",
+                    "worst": f"{s.worst:.6f}",
+                    "worst_date": s.worst_date,
+                    "sortino_per_cycle": (
+                        f"{s.sortino:.6f}" if math.isfinite(s.sortino) else "nan"
+                    ),
+                    "mdd": f"{s.mdd:.6f}",
+                    "surf_wing_pct": (
+                        f"{100.0 * s.n_surface_wing / s.n:.2f}" if s.n else "0"
+                    ),
+                }
+            )
+    return path
+
+
 def write_report(
     obs: list[eng.CycleObs],
     day_span: int,
@@ -586,6 +648,11 @@ def write_report(
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild-cycles", action="store_true")
+    ap.add_argument(
+        "--csv-only",
+        action="store_true",
+        help="From cycle cache: bootstrap configs and write s001_sweep_configs.csv only",
+    )
     args = ap.parse_args(argv)
     t0 = time.time()
 
@@ -596,6 +663,15 @@ def main(argv: list[str] | None = None) -> int:
     stats_all = eng.summarize_configs(
         obs, use_settle=False, prints_only=False, do_bootstrap=True
     )
+    csv_path = write_sweep_configs_csv(stats_all)
+    print(f"Wrote {csv_path} ({len(stats_all)} rows)", flush=True)
+    n_clear = count_ci_above_zero(stats_all)
+    print(f"ci_lo>0 count={n_clear}/{len(stats_all)}", flush=True)
+
+    if args.csv_only:
+        print(f"runtime_s={time.time() - t0:.1f}", flush=True)
+        return 0
+
     stats_maker = [s for s in stats_all if s.key[4] == "maker"]
     stats_maker_n300 = [s for s in stats_maker if s.n >= 300]
 
