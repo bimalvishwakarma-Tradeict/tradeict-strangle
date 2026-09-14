@@ -1,0 +1,240 @@
+S001 WINNER FORENSIC — diagnostic only (no fixes)
+====================================================================================================
+WINNER=dte2 B_only trig70 maker B25 wing2000 qty8 entry11:00 | CONTROL=dte2 none
+n=300  day_span=456  cache=D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\cache\s001_income_cycles.pkl
+
+===== PART 1: GAMMA FINGERPRINT =====
+|move| = CycleObs.spot_move_abs = |settlement_index - entry_index| (points)
+
+Correlations (P&L vs |move|):
+  WINNER  Pearson=0.024758  Spearman=-0.001246
+  CONTROL Pearson=-0.811526  Spearman=-0.810660
+
+WINNER |move| deciles (mean P&L):
+   dec   |move|_lo   |move|_hi      n    mean_pnl
+  D0           4.0       296.0     30      0.9189
+  D1         299.5       548.0     30      0.8621
+  D2         562.5       946.0     30      0.9647
+  D3         965.5      1223.5     30      0.7545
+  D4        1226.0      1492.0     30      1.2330
+  D5        1506.5      1853.5     30      0.8981
+  D6        1857.0      2417.0     30      0.8534
+  D7        2427.0      2867.0     30      1.0176
+  D8        2871.0      4412.0     30      0.3097
+  D9        4425.5      9821.5     30      1.1631
+
+CONTROL |move| deciles (mean P&L):
+   dec   |move|_lo   |move|_hi      n    mean_pnl
+  D0           4.0       296.0     30      4.8848
+  D1         299.5       548.0     30      4.7433
+  D2         562.5       946.0     30      4.5302
+  D3         965.5      1223.5     30      3.5928
+  D4        1226.0      1492.0     30      3.6774
+  D5        1506.5      1853.5     30      1.0947
+  D6        1857.0      2417.0     30     -2.3967
+  D7        2427.0      2867.0     30     -5.5686
+  D8        2871.0      4412.0     30     -9.4098
+  D9        4425.5      9821.5     30    -10.6944
+
+Per-cycle P&L moments:
+  WINNER: std=1.2494  skew=0.3154  min=-3.7110  max=5.6193
+  CONTROL: std=6.3224  skew=-0.6089  min=-13.0106  max=8.1312
+
+===== PART 2: FULL LEDGER (3 CYCLES) =====
+Hedge rows: NOT AVAILABLE (engine excludes hedge). PRICE_SOURCE is the critical column.
+
+----------------------------------------------------------------------------------------------------
+(a) CRASH_DAY 2026-06-02
+  entry_date=2026-06-02  entry_utc=2026-06-02T05:30:00+00:00  |move|=8004.0  spot_entry=70562.00  spot_settle=62558.00
+  WINNER net=0.359484  adj=2  |  CONTROL net=-11.279988
+
+  --- WINNER ledger ---
+  timestamp                     symbol                        side             qty       price       index       fee     run_pnl  PRICE_SOURCE
+  ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  2026-06-02T05:30:00+00:00     HEDGE                         NOT AVAILABLE      0      0.0000    70562.00    0.0000      0.0000  NOT AVAILABLE — s001_income_engine / sweep exclude hedge  [hedge legs not present on CycleObs]
+  2026-06-02T05:40:35.378420+00:00  C-BTC-71400-040626            SELL               8    401.0000    70562.00    0.0666      3.1414  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short call entry]
+  2026-06-02T05:42:08.422781+00:00  P-BTC-69600-040626            SELL               8    423.0000    70562.00    0.0666      6.4588  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short put entry]
+  2026-06-02T05:30:00+00:00     C-BTC-73400-040626            BUY                8     96.9457    70562.00    0.0320      5.6512  IV surface model (iv_surface.py smile / Black-76)  [wing call; wing_used_surface=True]
+  2026-06-02T05:30:00+00:00     P-BTC-67600-040626            BUY                8    111.7798    70562.00    0.0369      4.7200  IV surface model (iv_surface.py smile / Black-76)  [wing put; wing_used_surface=True]
+  2026-06-02T07:05:00+00:00     C-BTC-71400-040626            BUY_TO_CLOSE       8    240.5000    69874.00    0.0660      0.9664  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [Adj B #1 exit call]
+  2026-06-02T07:05:00+00:00     C-BTC-70600-040626            SELL               6    441.0000    69874.00    0.0495      0.9664  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [Adj B #1 enter call]
+  2026-06-02T12:10:00+00:00     C-BTC-70600-040626            BUY_TO_CLOSE       6    269.0000    69370.00    0.0491      1.9165  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)  [Adj B #2 exit call]
+  2026-06-02T12:10:00+00:00     C-BTC-69800-040626            SELL               4    617.0000    69370.00    0.0327      1.9165  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [Adj B #2 enter call]
+  2026-06-02T12:10:00+00:00     C-BTC-73400-040626            SELL_PARTIAL       2     19.0000    69370.00    0.0016      2.1607  real trade print via nearest_print_prefer (long_role)  [wing qty reduce call adj#2]
+  2026-06-02T12:10:00+00:00     P-BTC-67600-040626            SELL_PARTIAL       2    320.8000    69370.00    0.0164      2.1607  real trade print via nearest_print_prefer (long_role)  [wing qty reduce put adj#2]
+  2026-06-02T13:45:00+00:00     BASKET_FORCE_EXIT             CLOSE_ALL          4      0.0000    68934.00    0.1007      0.3595  real trade print marks via nearest_print_prefer (long_role for short exits)  [max_adjustments_per_basket gate]
+  2026-06-02T13:45:00+00:00     NET                           MARK               0      0.3595  NOT AVAILABLE    0.5182      0.3595  early exit net (realized - fees)  [WINNER early exit; adj_count=2]
+
+  --- CONTROL ledger ---
+  timestamp                     symbol                        side             qty       price       index       fee     run_pnl  PRICE_SOURCE
+  ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  2026-06-02T05:30:00+00:00     HEDGE                         NOT AVAILABLE      0      0.0000    70562.00    0.0000      0.0000  NOT AVAILABLE — s001_income_engine / sweep exclude hedge  [hedge legs not present on CycleObs]
+  2026-06-02T05:40:35.378420+00:00  C-BTC-71400-040626            SELL               8    401.0000    70562.00    0.0666      3.1414  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short call entry]
+  2026-06-02T05:42:08.422781+00:00  P-BTC-69600-040626            SELL               8    423.0000    70562.00    0.0666      6.4588  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short put entry]
+  2026-06-02T05:30:00+00:00     C-BTC-73400-040626            BUY                8     96.9457    70562.00    0.0320      5.6512  IV surface model (iv_surface.py smile / Black-76)  [wing call entry; wing_used_surface=True]
+  2026-06-02T05:30:00+00:00     P-BTC-67600-040626            BUY                8    111.7798    70562.00    0.0369      4.7200  IV surface model (iv_surface.py smile / Black-76)  [wing put entry; wing_used_surface=True]
+  2026-06-04T12:00:00+00:00     C-BTC-71400-040626            BUY_TO_CLOSE       8      0.0000    62558.00    0.0000    -11.2800  settlement intrinsic (max(spot-strike,0) at 12:00 UTC)  [settle short call; cash_pnl_component=3.208000]
+  2026-06-04T12:00:00+00:00     P-BTC-69600-040626            BUY_TO_CLOSE       8   7042.0000    62558.00    0.0000    -11.2800  settlement intrinsic (max(strike-spot,0) at 12:00 UTC)  [settle short put; cash_pnl_component=-52.952000]
+  2026-06-04T12:00:00+00:00     C-BTC-73400-040626            SELL_TO_CLOSE      8      0.0000    62558.00    0.0000    -11.2800  settlement intrinsic (max(spot-strike,0) at 12:00 UTC)  [settle wing call]
+  2026-06-04T12:00:00+00:00     P-BTC-67600-040626            SELL_TO_CLOSE      8   5042.0000    62558.00    0.0000    -11.2800  settlement intrinsic (max(strike-spot,0) at 12:00 UTC)  [settle wing put]
+  2026-06-04T12:00:00+00:00     NET                           MARK               0    -11.2800    62558.00    0.2022    -11.2800  engine net_no_settle x QTY_SCALE (cache_qty=4 -> live_qty=8)  [CONTROL final net (fees already inside net_no_settle)]
+
+----------------------------------------------------------------------------------------------------
+(b) WINNER worst net=-3.7110 date=2026-01-31
+  entry_date=2026-01-31  entry_utc=2026-01-31T05:30:00+00:00  |move|=6215.0  spot_entry=83968.00  spot_settle=77753.00
+  WINNER net=-3.710962  adj=2  |  CONTROL net=-12.037744
+
+  --- WINNER ledger ---
+  timestamp                     symbol                        side             qty       price       index       fee     run_pnl  PRICE_SOURCE
+  ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  2026-01-31T05:30:00+00:00     HEDGE                         NOT AVAILABLE      0      0.0000    83968.00    0.0000      0.0000  NOT AVAILABLE — s001_income_engine / sweep exclude hedge  [hedge legs not present on CycleObs]
+  2026-01-31T05:34:49.211094+00:00  C-BTC-85000-020226            SELL               8    357.0000    83968.00    0.0793      2.7767  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short call entry]
+  2026-01-31T05:42:12.099755+00:00  P-BTC-83000-020226            SELL               8    366.0000    83968.00    0.0793      5.6255  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short put entry]
+  2026-01-31T05:31:00.472028+00:00  C-BTC-86800-020226            BUY                8     74.0000    83968.00    0.0244      5.0090  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [wing call; wing_used_surface=True]
+  2026-01-31T05:30:00+00:00     P-BTC-81000-020226            BUY                8    125.6557    83968.00    0.0415      3.9623  IV surface model (iv_surface.py smile / Black-76)  [wing put; wing_used_surface=True]
+  2026-01-31T07:35:00+00:00     C-BTC-85000-020226            BUY_TO_CLOSE       8    242.0000    83521.50    0.0788      0.5575  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [Adj B #1 exit call]
+  2026-01-31T07:35:00+00:00     C-BTC-84000-020226            SELL               6    500.0000    83521.50    0.0591      0.5575  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [Adj B #1 enter call]
+  2026-01-31T12:50:00+00:00     C-BTC-84000-020226            BUY_TO_CLOSE       6    349.0000    82738.00    0.0586      1.3659  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [Adj B #2 exit call]
+  2026-01-31T12:50:00+00:00     C-BTC-83200-020226            SELL               4    725.0000    82738.00    0.0391      1.3659  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [Adj B #2 enter call]
+  2026-01-31T14:30:00+00:00     BASKET_FORCE_EXIT             CLOSE_ALL          4      0.0000    81415.00    0.0769     -3.7110  real trade print marks via nearest_print_prefer (long_role for short exits)  [max_adjustments_per_basket gate]
+  2026-01-31T14:30:00+00:00     NET                           MARK               0     -3.7110  NOT AVAILABLE    0.5370     -3.7110  early exit net (realized - fees)  [WINNER early exit; adj_count=2]
+
+  --- CONTROL ledger ---
+  timestamp                     symbol                        side             qty       price       index       fee     run_pnl  PRICE_SOURCE
+  ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  2026-01-31T05:30:00+00:00     HEDGE                         NOT AVAILABLE      0      0.0000    83968.00    0.0000      0.0000  NOT AVAILABLE — s001_income_engine / sweep exclude hedge  [hedge legs not present on CycleObs]
+  2026-01-31T05:34:49.211094+00:00  C-BTC-85000-020226            SELL               8    357.0000    83968.00    0.0793      2.7767  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short call entry]
+  2026-01-31T05:42:12.099755+00:00  P-BTC-83000-020226            SELL               8    366.0000    83968.00    0.0793      5.6255  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short put entry]
+  2026-01-31T05:31:00.472028+00:00  C-BTC-86800-020226            BUY                8     74.0000    83968.00    0.0244      5.0090  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [wing call entry; wing_used_surface=True]
+  2026-01-31T05:30:00+00:00     P-BTC-81000-020226            BUY                8    125.6557    83968.00    0.0415      3.9623  IV surface model (iv_surface.py smile / Black-76)  [wing put entry; wing_used_surface=True]
+  2026-02-02T12:00:00+00:00     C-BTC-85000-020226            BUY_TO_CLOSE       8      0.0000    77753.00    0.0000    -12.0377  settlement intrinsic (max(spot-strike,0) at 12:00 UTC)  [settle short call; cash_pnl_component=2.856000]
+  2026-02-02T12:00:00+00:00     P-BTC-83000-020226            BUY_TO_CLOSE       8   5247.0000    77753.00    0.0000    -12.0377  settlement intrinsic (max(strike-spot,0) at 12:00 UTC)  [settle short put; cash_pnl_component=-39.048000]
+  2026-02-02T12:00:00+00:00     C-BTC-86800-020226            SELL_TO_CLOSE      8      0.0000    77753.00    0.0000    -12.0377  settlement intrinsic (max(spot-strike,0) at 12:00 UTC)  [settle wing call]
+  2026-02-02T12:00:00+00:00     P-BTC-81000-020226            SELL_TO_CLOSE      8   3247.0000    77753.00    0.0000    -12.0377  settlement intrinsic (max(strike-spot,0) at 12:00 UTC)  [settle wing put]
+  2026-02-02T12:00:00+00:00     NET                           MARK               0    -12.0377    77753.00    0.2245    -12.0377  engine net_no_settle x QTY_SCALE (cache_qty=4 -> live_qty=8)  [CONTROL final net (fees already inside net_no_settle)]
+
+----------------------------------------------------------------------------------------------------
+(c) WINNER best net=5.6193 date=2025-11-21
+  entry_date=2025-11-21  entry_utc=2025-11-21T05:30:00+00:00  |move|=12.5  spot_entry=86245.00  spot_settle=86257.50
+  WINNER net=5.619262  adj=2  |  CONTROL net=5.026476
+
+  --- WINNER ledger ---
+  timestamp                     symbol                        side             qty       price       index       fee     run_pnl  PRICE_SOURCE
+  ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  2025-11-21T05:30:00+00:00     HEDGE                         NOT AVAILABLE      0      0.0000    86245.00    0.0000      0.0000  NOT AVAILABLE — s001_income_engine / sweep exclude hedge  [hedge legs not present on CycleObs]
+  2025-11-21T05:30:27.178005+00:00  C-BTC-88200-231125            SELL               8    616.0000    86245.00    0.0814      4.8466  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=taker)  [short call entry]
+  2025-11-21T05:32:36.023168+00:00  P-BTC-84000-231125            SELL               8    591.0000    86245.00    0.0814      9.4932  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short put entry]
+  2025-11-21T05:25:44.680641+00:00  C-BTC-90200-231125            BUY                8    246.0000    86245.00    0.0813      7.4439  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [wing call; wing_used_surface=False]
+  2025-11-21T05:30:21.614934+00:00  P-BTC-82000-231125            BUY                8    292.0000    86245.00    0.0814      5.0265  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [wing put; wing_used_surface=False]
+  2025-11-21T07:25:00+00:00     C-BTC-88200-231125            BUY_TO_CLOSE       8    222.0000    85313.00    0.0733      2.6927  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [Adj B #1 exit call]
+  2025-11-21T07:25:00+00:00     C-BTC-87200-231125            SELL               6    614.0000    85313.00    0.0604      2.6927  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=taker)  [Adj B #1 enter call]
+  2025-11-21T07:25:00+00:00     C-BTC-90200-231125            SELL_PARTIAL       2     68.0000    85313.00    0.0056      2.5710  real trade print via nearest_print_prefer (long_role)  [wing qty reduce call adj#1]
+  2025-11-21T07:25:00+00:00     P-BTC-82000-231125            SELL_PARTIAL       2    422.0000    85313.00    0.0201      2.5710  real trade print via nearest_print_prefer (long_role)  [wing qty reduce put adj#1]
+  2025-11-21T09:35:00+00:00     C-BTC-87200-231125            BUY_TO_CLOSE       6    273.0000    82936.00    0.0587      4.5191  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [Adj B #2 exit call]
+  2025-11-21T09:35:00+00:00     C-BTC-84200-231125            SELL               4    948.0000    82936.00    0.0391      4.5191  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [Adj B #2 enter call]
+  2025-11-21T09:35:00+00:00     C-BTC-90200-231125            SELL_PARTIAL       2     79.0000    82936.00    0.0065      5.7950  real trade print via nearest_print_prefer (long_role)  [wing qty reduce call adj#2]
+  2025-11-21T09:35:00+00:00     P-BTC-82000-231125            SELL_PARTIAL       2   1110.0000    82936.00    0.0196      5.7950  real trade print via nearest_print_prefer (long_role)  [wing qty reduce put adj#2]
+  2025-11-21T21:15:00+00:00     BASKET_FORCE_EXIT             CLOSE_ALL          4      0.0000    84480.50    0.0797      5.6193  real trade print marks via nearest_print_prefer (long_role for short exits)  [max_adjustments_per_basket gate]
+  2025-11-21T21:15:00+00:00     NET                           MARK               0      5.6193  NOT AVAILABLE    0.6887      5.6193  early exit net (realized - fees)  [WINNER early exit; adj_count=2]
+
+  --- CONTROL ledger ---
+  timestamp                     symbol                        side             qty       price       index       fee     run_pnl  PRICE_SOURCE
+  ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  2025-11-21T05:30:00+00:00     HEDGE                         NOT AVAILABLE      0      0.0000    86245.00    0.0000      0.0000  NOT AVAILABLE — s001_income_engine / sweep exclude hedge  [hedge legs not present on CycleObs]
+  2025-11-21T05:30:27.178005+00:00  C-BTC-88200-231125            SELL               8    616.0000    86245.00    0.0814      4.8466  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=taker)  [short call entry]
+  2025-11-21T05:32:36.023168+00:00  P-BTC-84000-231125            SELL               8    591.0000    86245.00    0.0814      9.4932  real trade print (OptionsTradeStore shard; preferred_role=maker, fill_role=maker)  [short put entry]
+  2025-11-21T05:25:44.680641+00:00  C-BTC-90200-231125            BUY                8    246.0000    86245.00    0.0813      7.4439  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [wing call entry; wing_used_surface=False]
+  2025-11-21T05:30:21.614934+00:00  P-BTC-82000-231125            BUY                8    292.0000    86245.00    0.0814      5.0265  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)  [wing put entry; wing_used_surface=False]
+  2025-11-23T12:00:00+00:00     C-BTC-88200-231125            BUY_TO_CLOSE       8      0.0000    86257.50    0.0000      5.0265  settlement intrinsic (max(spot-strike,0) at 12:00 UTC)  [settle short call; cash_pnl_component=4.928000]
+  2025-11-23T12:00:00+00:00     P-BTC-84000-231125            BUY_TO_CLOSE       8      0.0000    86257.50    0.0000      5.0265  settlement intrinsic (max(strike-spot,0) at 12:00 UTC)  [settle short put; cash_pnl_component=4.728000]
+  2025-11-23T12:00:00+00:00     C-BTC-90200-231125            SELL_TO_CLOSE      8      0.0000    86257.50    0.0000      5.0265  settlement intrinsic (max(spot-strike,0) at 12:00 UTC)  [settle wing call]
+  2025-11-23T12:00:00+00:00     P-BTC-82000-231125            SELL_TO_CLOSE      8      0.0000    86257.50    0.0000      5.0265  settlement intrinsic (max(strike-spot,0) at 12:00 UTC)  [settle wing put]
+  2025-11-23T12:00:00+00:00     NET                           MARK               0      5.0265    86257.50    0.3255      5.0265  engine net_no_settle x QTY_SCALE (cache_qty=4 -> live_qty=8)  [CONTROL final net (fees already inside net_no_settle)]
+
+===== PART 3: ADJUSTMENT TIMING =====
+Total Adj events across WINNER cycles: 600
+
+Per-adjustment sample (first 40 rows; full count above):
+  date            n   min_aft      idx_e      idx_a      d_idx  leg      exit_px        theo  exit_src
+  2025-07-02      1     160.0   106426.0   107362.0      936.0  put     258.0000    290.5437  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-02      2     510.0   106426.0   107783.0     1357.0  put     484.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-03      1     270.0   109103.5   109918.0      814.5  put     352.0000    432.0242  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-03      2     430.0   109103.5   109032.5      -71.0  call    585.0000    915.8995  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-05      1    1925.0   108060.0   108634.0      574.0  put      47.5000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-05      2    2070.0   108060.0   108891.5      831.5  put     185.5000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-07      1     390.0   109069.0   108561.5     -507.5  call    362.0000    356.8837  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-07      2     460.0   109069.0   108282.0     -787.0  call    449.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-08      1     240.0   108032.5   108366.0      333.5  put     118.0000    110.3333  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-08      2     320.0   108032.5   108780.0      747.5  put     338.0000    399.4177  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-09      1     400.0   108460.5   109294.5      834.0  put     343.0000    430.9296  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-09      2     820.0   108460.5   109528.5     1068.0  put     301.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-10      1     625.0   110936.0   111300.0      364.0  put     383.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-10      2     650.0   110936.0   111755.0      819.0  put     253.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-11      1     485.0   117629.5   117582.0      -47.5  call    399.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-11      2     510.0   117629.5   118008.5      379.0  put     256.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-16      1     190.0   117899.5   118616.5      717.0  put     344.0000    364.6145  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-16      2     790.0   117899.5   119549.5     1650.0  put     368.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-17      1     730.0   118344.5   118501.0      156.5  put     239.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-17      2    1025.0   118344.5   120212.5     1868.0  put     259.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-19      1     325.0   118097.5   118332.5      235.0  put     262.8000    215.8554  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-19      2     945.0   118097.5   117669.5     -428.0  call    265.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-22      1     100.0   117137.5   118191.0     1053.5  put     417.0000    402.4345  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-22      2     410.0   117137.5   119254.0     2116.5  put     546.0000    513.7515  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-24      1     155.0   117528.5   118422.0      893.5  put     313.0000    457.0703  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-24      2     560.0   117528.5   118869.0     1340.5  put     424.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-25      1     190.0   115496.5   115179.0     -317.5  call    360.0000    514.4026  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-25      2     280.0   115496.5   115989.0      492.5  put     320.0000    390.6393  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-07-26      1     450.0   117497.5   117866.0      368.5  put     350.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-26      2     855.0   117497.5   118162.5      665.0  put     133.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-30      1     565.0   117961.0   118640.5      679.5  put     370.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-07-30      2     660.0   117961.0   117782.5     -178.5  call    463.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-08-01      1     125.0   115594.0   114656.0     -938.0  call    267.0000    315.9776  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-08-01      2     365.0   115594.0   115073.0     -521.0  put     499.0000    520.0858  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-08-02      1      60.0   113976.0   113542.5     -433.5  call    240.0000    300.3966  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-08-02      2     535.0   113976.0   113208.5     -767.5  call    365.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-08-03      1     825.0   113532.0   114361.5      829.5  put     377.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  2025-08-03      2    1165.0   113532.0   114860.5     1328.5  put     519.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-08-04      1     485.0   114256.0   114494.5      238.5  put     125.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+  2025-08-04      2     625.0   114256.0   114822.0      566.0  put     418.0000  NOT AVAILABLE (surface unsupported at this point)  real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  ... (560 more events not printed)
+
+Summary stats (minutes after entry):
+  n=600  mean=523.9  median=467.5  min=15.0  max=2070.0
+
+Time-of-day distribution (IST hour of adjustment timestamp):
+  hour_IST=00:00  count=11
+  hour_IST=01:00  count=4
+  hour_IST=02:00  count=8
+  hour_IST=03:00  count=7
+  hour_IST=04:00  count=15
+  hour_IST=05:00  count=13
+  hour_IST=06:00  count=15
+  hour_IST=07:00  count=3
+  hour_IST=08:00  count=9
+  hour_IST=09:00  count=3
+  hour_IST=10:00  count=3
+  hour_IST=11:00  count=12
+  hour_IST=12:00  count=26
+  hour_IST=13:00  count=43
+  hour_IST=14:00  count=64
+  hour_IST=15:00  count=49
+  hour_IST=16:00  count=32
+  hour_IST=17:00  count=47
+  hour_IST=18:00  count=47
+  hour_IST=19:00  count=67
+  hour_IST=20:00  count=62
+  hour_IST=21:00  count=36
+  hour_IST=22:00  count=14
+  hour_IST=23:00  count=10
+
+Exit-leg distribution:
+  call: 319
+  put: 281
+
+Exit PRICE_SOURCE distribution:
+  n=368: real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=taker)
+  n=232: real trade print (OptionsTradeStore shard; preferred_role=taker, fill_role=maker)
+
+Surface theo available on 304/600 adjustments (model=iv_surface.py when supported; else NOT AVAILABLE)
+
+END FORENSIC (no code changes applied to live trading logic)
