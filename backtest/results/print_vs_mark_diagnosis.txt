@@ -1,0 +1,367 @@
+PRINT vs MARK DIAGNOSIS — 2026-05
+==========================================================================================
+marks db: D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\cache\option_marks\marks_2026-05.sqlite exists=True
+NO new download — diagnose only.
+
+May cycles: 9  mark_ok=7  mark_fail=2 fail_dates=['2026-05-13', '2026-05-30']
+
+Paired May days (print+mark):
+  2026-05-02  print=0.6339  mark=0.1925  farak=-0.4414
+  2026-05-08  print=0.1123  mark=0.2822  farak=0.1699
+  2026-05-14  print=1.1481  mark=0.4115  farak=-0.7366
+  2026-05-19  print=0.0801  mark=-0.2830  farak=-0.3631
+  2026-05-20  print=0.6334  mark=0.4039  farak=-0.2295
+  2026-05-24  print=1.0429  mark=0.1716  farak=-0.8713
+  2026-05-29  print=0.4898  mark=0.1064  farak=-0.3834
+
+===== PART A: NEAREST-PRINT TIME GAP =====
+cycles: 2026-05-02, 2026-05-08, 2026-05-14, 2026-05-19, 2026-05-20, 2026-05-24, 2026-05-29
+
+--- cycle 2026-05-02 n_ledger=16 net=0.6339 ---
+note                   symbol                   side           req_ts                 print_ts                  gap_s   print_px    mark_px       diff    diff%
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+entry short call       C-BTC-78800-040526       SELL           2026-05-02 05:30:00 UTC 2026-05-02 05:26:36 UTC    204.0   265.0000   272.8835    -7.8835   -2.889
+entry short put        P-BTC-77400-040526       SELL           2026-05-02 05:30:00 UTC 2026-05-02 05:29:52 UTC      8.0   312.0000   309.1617     2.8383    0.918
+entry wing call        C-BTC-80800-040526       BUY            2026-05-02 05:30:00 UTC 2026-05-02 05:33:13 UTC    193.0    39.0000    34.5151     4.4849   12.994
+entry wing put         P-BTC-75600-040526       BUY            2026-05-02 05:30:00 UTC 2026-05-02 05:17:16 UTC    764.0    76.0000    73.6311     2.3689    3.217
+adj1 exit put          P-BTC-77400-040526       BUY_TO_CLOSE   2026-05-02 09:40:00 UTC 2026-05-02 09:38:03 UTC    117.0   211.0000   230.0239   -19.0239   -8.270
+adj1 enter put         P-BTC-77600-040526       SELL           2026-05-02 09:40:00 UTC 2026-05-02 09:54:18 UTC    858.0   286.0000   276.0526     9.9474    3.603
+adj1 partial wing call C-BTC-80800-040526       SELL_PARTIAL   2026-05-02 09:40:00 UTC 2026-05-02 09:37:37 UTC    143.0    46.0000    38.7027     7.2973   18.855
+adj1 partial wing put  P-BTC-75600-040526       SELL_PARTIAL   2026-05-02 09:40:00 UTC 2026-05-02 09:31:34 UTC    506.0    52.0000    53.7025    -1.7025   -3.170
+adj2 exit put          P-BTC-77600-040526       BUY_TO_CLOSE   2026-05-02 14:35:00 UTC 2026-05-02 14:34:55 UTC      5.0   187.0000   190.2520    -3.2520   -1.709
+adj2 enter put         P-BTC-77800-040526       SELL           2026-05-02 14:35:00 UTC 2026-05-02 14:38:55 UTC    235.0   251.0000   236.1682    14.8318    6.280
+adj2 partial wing call C-BTC-80800-040526       SELL_PARTIAL   2026-05-02 14:35:00 UTC 2026-05-02 14:24:13 UTC    647.0    29.0000    33.9939    -4.9939  -14.690
+adj2 partial wing put  P-BTC-75600-040526       SELL_PARTIAL   2026-05-02 14:35:00 UTC 2026-05-02 14:36:36 UTC     96.0    28.0000    28.1194    -0.1194   -0.424
+force close call       C-BTC-78800-040526       BUY_TO_CLOSE   2026-05-02 21:25:00 UTC 2026-05-02 21:15:48 UTC    552.0   348.0000   352.1863    -4.1863   -1.189
+force close put        P-BTC-77800-040526       BUY_TO_CLOSE   2026-05-02 21:25:00 UTC 2026-05-02 21:37:35 UTC    755.0   117.0000   222.7153  -105.7153  -47.467
+force close wing call  C-BTC-80800-040526       SELL_TO_CLOSE  2026-05-02 21:25:00 UTC 2026-05-02 21:29:53 UTC    293.0    49.0000    49.7744    -0.7744   -1.556
+force close wing put   P-BTC-75600-040526       SELL_TO_CLOSE  2026-05-02 21:25:00 UTC 2026-05-02 21:25:12 UTC     12.0    28.0000    29.0475    -1.0475   -3.606
+
+--- cycle 2026-05-08 n_ledger=14 net=0.1123 ---
+note                   symbol                   side           req_ts                 print_ts                  gap_s   print_px    mark_px       diff    diff%
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+entry short call       C-BTC-81000-100526       SELL           2026-05-08 05:30:00 UTC 2026-05-08 05:44:35 UTC    875.0   190.0000   186.6624     3.3376    1.788
+entry short put        P-BTC-78000-100526       SELL           2026-05-08 05:30:00 UTC 2026-05-08 05:19:59 UTC    601.0   149.0000   129.8890    19.1110   14.713
+entry wing call        C-BTC-83200-100526       BUY            2026-05-08 05:30:00 UTC 2026-05-08 05:30:28 UTC     28.0    31.0000    33.4696    -2.4696   -7.379
+entry wing put         P-BTC-77600-100526       BUY            2026-05-08 05:30:00 UTC 2026-05-08 05:25:28 UTC    272.0    93.0000    86.9606     6.0394    6.945
+adj1 exit put          P-BTC-78000-100526       BUY_TO_CLOSE   2026-05-08 08:50:00 UTC 2026-05-08 08:39:20 UTC    640.0    92.0000    78.9208    13.0792   16.572
+adj1 enter put         P-BTC-78800-100526       SELL           2026-05-08 08:50:00 UTC 2026-05-08 08:57:08 UTC    428.0   182.0000   176.7876     5.2124    2.948
+adj2 exit put          P-BTC-78800-100526       BUY_TO_CLOSE   2026-05-08 10:40:00 UTC 2026-05-08 10:51:07 UTC    667.0   123.0000   138.3955   -15.3955  -11.124
+adj2 enter put         P-BTC-79200-100526       SELL           2026-05-08 10:40:00 UTC 2026-05-08 10:44:14 UTC    254.0   195.0000   218.5775   -23.5775  -10.787
+adj2 partial wing call C-BTC-83200-100526       SELL_PARTIAL   2026-05-08 10:40:00 UTC 2026-05-08 10:50:32 UTC    632.0    24.0000    21.5568     2.4432   11.334
+adj2 partial wing put  P-BTC-77600-100526       SELL_PARTIAL   2026-05-08 10:40:00 UTC 2026-05-08 10:37:59 UTC    121.0    35.0000    36.3323    -1.3323   -3.667
+force close call       C-BTC-81000-100526       BUY_TO_CLOSE   2026-05-08 13:20:00 UTC 2026-05-08 13:20:54 UTC     54.0   135.0000   138.5053    -3.5053   -2.531
+force close put        P-BTC-79200-100526       BUY_TO_CLOSE   2026-05-08 13:20:00 UTC 2026-05-08 13:19:07 UTC     53.0   308.0000   297.6260    10.3740    3.486
+force close wing call  C-BTC-83200-100526       SELL_TO_CLOSE  2026-05-08 13:20:00 UTC 2026-05-08 13:15:01 UTC    299.0    11.0000    13.0403    -2.0403  -15.646
+force close wing put   P-BTC-77600-100526       SELL_TO_CLOSE  2026-05-08 13:20:00 UTC 2026-05-08 13:20:44 UTC     44.0    53.0000    54.3233    -1.3233   -2.436
+
+--- cycle 2026-05-14 n_ledger=16 net=1.1481 ---
+note                   symbol                   side           req_ts                 print_ts                  gap_s   print_px    mark_px       diff    diff%
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+entry short call       C-BTC-80800-160526       SELL           2026-05-14 05:30:00 UTC 2026-05-14 05:31:25 UTC     85.0   422.0000   422.9398    -0.9398   -0.222
+entry short put        P-BTC-78400-160526       SELL           2026-05-14 05:30:00 UTC 2026-05-14 05:39:30 UTC    570.0   407.0000   435.2886   -28.2886   -6.499
+entry wing call        C-BTC-82800-160526       BUY            2026-05-14 05:30:00 UTC 2026-05-14 05:21:40 UTC    500.0    84.0000    94.1251   -10.1251  -10.757
+entry wing put         P-BTC-76400-160526       BUY            2026-05-14 05:30:00 UTC 2026-05-14 05:25:15 UTC    285.0   121.0000   115.9308     5.0692    4.373
+adj1 exit put          P-BTC-78400-160526       BUY_TO_CLOSE   2026-05-14 14:20:00 UTC 2026-05-14 14:20:56 UTC     56.0   268.0000   262.7506     5.2494    1.998
+adj1 enter put         P-BTC-79600-160526       SELL           2026-05-14 14:20:00 UTC 2026-05-14 14:21:08 UTC     68.0   574.0000   583.3600    -9.3600   -1.604
+adj1 partial wing call C-BTC-82800-160526       SELL_PARTIAL   2026-05-14 14:20:00 UTC 2026-05-14 14:21:24 UTC     84.0   113.0000   124.8891   -11.8891   -9.520
+adj1 partial wing put  P-BTC-76400-160526       SELL_PARTIAL   2026-05-14 14:20:00 UTC 2026-05-14 14:19:27 UTC     33.0    63.0000    66.9844    -3.9844   -5.948
+adj2 exit put          P-BTC-79600-160526       BUY_TO_CLOSE   2026-05-14 14:50:00 UTC 2026-05-14 14:54:24 UTC    264.0   378.0000   373.3007     4.6993    1.259
+adj2 enter put         P-BTC-80400-160526       SELL           2026-05-14 14:50:00 UTC 2026-05-14 14:47:52 UTC    128.0   760.0000   633.7807   126.2193   19.915
+adj2 partial wing call C-BTC-82800-160526       SELL_PARTIAL   2026-05-14 14:50:00 UTC 2026-05-14 14:50:06 UTC      6.0   178.0000   196.7071   -18.7071   -9.510
+adj2 partial wing put  P-BTC-76400-160526       SELL_PARTIAL   2026-05-14 14:50:00 UTC 2026-05-14 14:49:18 UTC     42.0    44.0000    41.3487     2.6513    6.412
+force close call       C-BTC-80800-160526       BUY_TO_CLOSE   2026-05-14 15:55:00 UTC 2026-05-14 15:54:21 UTC     39.0  1128.0000  1110.5973    17.4027    1.567
+force close put        P-BTC-80400-160526       BUY_TO_CLOSE   2026-05-14 15:55:00 UTC 2026-05-14 16:01:59 UTC    419.0   452.0000   470.7654   -18.7654   -3.986
+force close wing call  C-BTC-82800-160526       SELL_TO_CLOSE  2026-05-14 15:55:00 UTC 2026-05-14 15:54:14 UTC     46.0   292.0000   288.9266     3.0734    1.064
+force close wing put   P-BTC-76400-160526       SELL_TO_CLOSE  2026-05-14 15:55:00 UTC 2026-05-14 15:56:08 UTC     68.0    39.0000    40.3935    -1.3935   -3.450
+
+--- cycle 2026-05-19 n_ledger=16 net=0.0801 ---
+note                   symbol                   side           req_ts                 print_ts                  gap_s   print_px    mark_px       diff    diff%
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+entry short call       C-BTC-79200-210526       SELL           2026-05-19 05:30:00 UTC 2026-05-19 05:23:41 UTC    379.0    97.0000   109.9679   -12.9679  -11.792
+entry short put        P-BTC-76000-210526       SELL           2026-05-19 05:30:00 UTC 2026-05-19 05:43:53 UTC    833.0   432.0000   477.2772   -45.2772   -9.487
+entry wing call        C-BTC-80000-210526       BUY            2026-05-19 05:30:00 UTC 2026-05-19 05:31:53 UTC    113.0    56.0000    57.6475    -1.6475   -2.858
+entry wing put         P-BTC-74000-210526       BUY            2026-05-19 05:30:00 UTC 2026-05-19 05:38:42 UTC    522.0   114.0000   129.9666   -15.9666  -12.285
+adj1 exit call         C-BTC-79200-210526       BUY_TO_CLOSE   2026-05-19 15:45:00 UTC 2026-05-19 15:45:58 UTC     58.0    63.0000    60.4281     2.5719    4.256
+adj1 enter call        C-BTC-77000-210526       SELL           2026-05-19 15:45:00 UTC 2026-05-19 15:55:04 UTC    604.0   516.0000   505.6912    10.3088    2.039
+adj1 partial wing call C-BTC-80000-210526       SELL_PARTIAL   2026-05-19 15:45:00 UTC 2026-05-19 15:45:11 UTC     11.0    29.0000    28.7845     0.2155    0.749
+adj1 partial wing put  P-BTC-74000-210526       SELL_PARTIAL   2026-05-19 15:45:00 UTC 2026-05-19 15:43:38 UTC     82.0   133.0000   136.6393    -3.6393   -2.663
+adj2 exit put          P-BTC-76000-210526       BUY_TO_CLOSE   2026-05-19 17:20:00 UTC 2026-05-19 17:20:07 UTC      7.0   331.0000   339.3894    -8.3894   -2.472
+adj2 enter put         P-BTC-76800-210526       SELL           2026-05-19 17:20:00 UTC 2026-05-19 17:24:22 UTC    262.0   596.0000   592.5020     3.4980    0.590
+adj2 partial wing call C-BTC-80000-210526       SELL_PARTIAL   2026-05-19 17:20:00 UTC 2026-05-19 17:20:45 UTC     45.0    36.0000    34.1720     1.8280    5.349
+adj2 partial wing put  P-BTC-74000-210526       SELL_PARTIAL   2026-05-19 17:20:00 UTC 2026-05-19 17:22:04 UTC    124.0    68.0000    70.1926    -2.1926   -3.124
+force close call       C-BTC-77000-210526       BUY_TO_CLOSE   2026-05-20 00:10:00 UTC 2026-05-20 00:13:09 UTC    189.0   400.0000   448.3046   -48.3046  -10.775
+force close put        P-BTC-76800-210526       BUY_TO_CLOSE   2026-05-20 00:10:00 UTC 2026-05-20 00:11:19 UTC     79.0   637.0000   621.1740    15.8260    2.548
+force close wing call  C-BTC-80000-210526       SELL_TO_CLOSE  2026-05-20 00:10:00 UTC 2026-05-20 00:12:49 UTC    169.0     7.1000     8.0014    -0.9014  -11.265
+force close wing put   P-BTC-74000-210526       SELL_TO_CLOSE  2026-05-20 00:10:00 UTC 2026-05-20 00:05:05 UTC    295.0    43.0000    50.3999    -7.3999  -14.682
+
+--- cycle 2026-05-20 n_ledger=16 net=0.6334 ---
+note                   symbol                   side           req_ts                 print_ts                  gap_s   print_px    mark_px       diff    diff%
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+entry short call       C-BTC-78000-220526       SELL           2026-05-20 05:30:00 UTC 2026-05-20 05:30:44 UTC     44.0   442.0000   439.0397     2.9603    0.674
+entry short put        P-BTC-76200-220526       SELL           2026-05-20 05:30:00 UTC 2026-05-20 05:15:08 UTC    892.0   404.0000   395.2610     8.7390    2.211
+entry wing call        C-BTC-80000-220526       BUY            2026-05-20 05:30:00 UTC 2026-05-20 05:33:12 UTC    192.0    74.0000    68.3382     5.6618    8.285
+entry wing put         P-BTC-74000-220526       BUY            2026-05-20 05:30:00 UTC 2026-05-20 05:33:32 UTC    212.0    90.8000    96.4237    -5.6237   -5.832
+adj1 exit put          P-BTC-76200-220526       BUY_TO_CLOSE   2026-05-20 09:55:00 UTC 2026-05-20 10:07:25 UTC    745.0   280.0000   303.2680   -23.2680   -7.672
+adj1 enter put         P-BTC-77000-220526       SELL           2026-05-20 09:55:00 UTC 2026-05-20 09:55:03 UTC      3.0   513.0000   511.2467     1.7533    0.343
+adj1 partial wing call C-BTC-80000-220526       SELL_PARTIAL   2026-05-20 09:55:00 UTC 2026-05-20 09:51:52 UTC    188.0    68.0000    70.1966    -2.1966   -3.129
+adj1 partial wing put  P-BTC-74000-220526       SELL_PARTIAL   2026-05-20 09:55:00 UTC 2026-05-20 09:52:58 UTC    122.0    64.0000    64.4673    -0.4673   -0.725
+adj2 exit call         C-BTC-78000-220526       BUY_TO_CLOSE   2026-05-20 13:40:00 UTC 2026-05-20 13:40:39 UTC     39.0   335.0000   338.9459    -3.9459   -1.164
+adj2 enter call        C-BTC-77200-220526       SELL           2026-05-20 13:40:00 UTC 2026-05-20 13:37:05 UTC    175.0   665.5000   664.0267     1.4733    0.222
+adj2 partial wing call C-BTC-80000-220526       SELL_PARTIAL   2026-05-20 13:40:00 UTC 2026-05-20 13:41:54 UTC    114.0    52.0000    56.2131    -4.2131   -7.495
+adj2 partial wing put  P-BTC-74000-220526       SELL_PARTIAL   2026-05-20 13:40:00 UTC 2026-05-20 13:40:30 UTC     30.0    91.0000    88.7258     2.2742    2.563
+force close call       C-BTC-77200-220526       BUY_TO_CLOSE   2026-05-20 14:55:00 UTC 2026-05-20 14:53:23 UTC     97.0   886.0000   892.4779    -6.4779   -0.726
+force close put        P-BTC-77000-220526       BUY_TO_CLOSE   2026-05-20 14:55:00 UTC 2026-05-20 14:55:44 UTC     44.0   455.0000   450.4713     4.5287    1.005
+force close wing call  C-BTC-80000-220526       SELL_TO_CLOSE  2026-05-20 14:55:00 UTC 2026-05-20 14:57:37 UTC    157.0    66.0000    71.3804    -5.3804   -7.538
+force close wing put   P-BTC-74000-220526       SELL_TO_CLOSE  2026-05-20 14:55:00 UTC 2026-05-20 14:58:57 UTC    237.0    62.0000    57.6490     4.3510    7.547
+
+--- cycle 2026-05-24 n_ledger=14 net=1.0429 ---
+note                   symbol                   side           req_ts                 print_ts                  gap_s   print_px    mark_px       diff    diff%
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+entry short call       C-BTC-77600-260526       SELL           2026-05-24 05:30:00 UTC 2026-05-24 05:42:24 UTC    744.0   380.0000   397.9047   -17.9047   -4.500
+entry short put        P-BTC-75600-260526       SELL           2026-05-24 05:30:00 UTC 2026-05-24 05:43:24 UTC    804.0   364.0000   333.6294    30.3706    9.103
+entry wing call        C-BTC-79600-260526       BUY            2026-05-24 05:30:00 UTC 2026-05-24 05:41:07 UTC    667.0    59.0000    61.1518    -2.1518   -3.519
+entry wing put         P-BTC-73200-260526       BUY            2026-05-24 05:30:00 UTC 2026-05-24 05:44:38 UTC    878.0    72.0000    63.3177     8.6823   13.712
+adj1 exit put          P-BTC-75600-260526       BUY_TO_CLOSE   2026-05-24 09:35:00 UTC 2026-05-24 09:49:22 UTC    862.0   219.0000   234.6819   -15.6819   -6.682
+adj1 enter put         P-BTC-75800-260526       SELL           2026-05-24 09:35:00 UTC 2026-05-24 09:49:22 UTC    862.0   260.0000   278.1203   -18.1203   -6.515
+adj2 exit put          P-BTC-75800-260526       BUY_TO_CLOSE   2026-05-25 00:45:00 UTC 2026-05-25 00:49:45 UTC    285.0   162.0000   193.6620   -31.6620  -16.349
+adj2 enter put         P-BTC-76600-260526       SELL           2026-05-25 00:45:00 UTC 2026-05-25 00:48:49 UTC    229.0   390.0000   400.1997   -10.1997   -2.549
+adj2 partial wing call C-BTC-79600-260526       SELL_PARTIAL   2026-05-25 00:45:00 UTC 2026-05-25 00:44:53 UTC      7.0    54.0000    54.0314    -0.0314   -0.058
+adj2 partial wing put  P-BTC-73200-260526       SELL_PARTIAL   2026-05-25 00:45:00 UTC 2026-05-25 00:49:43 UTC    283.0    23.0000    27.5386    -4.5386  -16.481
+force close call       C-BTC-77600-260526       BUY_TO_CLOSE   2026-05-25 02:10:00 UTC 2026-05-25 02:12:47 UTC    167.0   471.0000   458.5534    12.4466    2.714
+force close put        P-BTC-76600-260526       BUY_TO_CLOSE   2026-05-25 02:10:00 UTC 2026-05-25 02:08:00 UTC    120.0   240.0000   264.7071   -24.7071   -9.334
+force close wing call  C-BTC-79600-260526       SELL_TO_CLOSE  2026-05-25 02:10:00 UTC 2026-05-25 02:10:30 UTC     30.0    52.0000    51.2732     0.7268    1.417
+force close wing put   P-BTC-73200-260526       SELL_TO_CLOSE  2026-05-25 02:10:00 UTC 2026-05-25 02:09:35 UTC     25.0    12.0000    13.0482    -1.0482   -8.033
+
+--- cycle 2026-05-29 n_ledger=16 net=0.4898 ---
+note                   symbol                   side           req_ts                 print_ts                  gap_s   print_px    mark_px       diff    diff%
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+entry short call       C-BTC-74400-310526       SELL           2026-05-29 05:30:00 UTC 2026-05-29 05:41:38 UTC    698.0   223.0000   247.7898   -24.7898  -10.004
+entry short put        P-BTC-72800-310526       SELL           2026-05-29 05:30:00 UTC 2026-05-29 05:25:46 UTC    254.0   287.0000   288.3620    -1.3620   -0.472
+entry wing call        C-BTC-75600-310526       BUY            2026-05-29 05:30:00 UTC 2026-05-29 05:43:09 UTC    789.0    55.0000    56.4933    -1.4933   -2.643
+entry wing put         P-BTC-70800-310526       BUY            2026-05-29 05:30:00 UTC 2026-05-29 05:35:13 UTC    313.0    47.0000    47.5949    -0.5949   -1.250
+adj1 exit put          P-BTC-72800-310526       BUY_TO_CLOSE   2026-05-29 08:30:00 UTC 2026-05-29 08:36:15 UTC    375.0   200.0000   213.2032   -13.2032   -6.193
+adj1 enter put         P-BTC-73000-310526       SELL           2026-05-29 08:30:00 UTC 2026-05-29 08:25:47 UTC    253.0   250.0000   258.0157    -8.0157   -3.107
+adj1 partial wing call C-BTC-75600-310526       SELL_PARTIAL   2026-05-29 08:30:00 UTC 2026-05-29 08:27:15 UTC    165.0    52.0000    47.9518     4.0482    8.442
+adj1 partial wing put  P-BTC-70800-310526       SELL_PARTIAL   2026-05-29 08:30:00 UTC 2026-05-29 08:33:17 UTC    197.0    44.0000    41.6957     2.3043    5.527
+adj2 exit call         C-BTC-74400-310526       BUY_TO_CLOSE   2026-05-29 12:25:00 UTC 2026-05-29 12:25:39 UTC     39.0   163.0000   161.1361     1.8639    1.157
+adj2 enter call        C-BTC-73600-310526       SELL           2026-05-29 12:25:00 UTC 2026-05-29 12:26:18 UTC     78.0   411.0000   413.5166    -2.5166   -0.609
+adj2 partial wing call C-BTC-75600-310526       SELL_PARTIAL   2026-05-29 12:25:00 UTC 2026-05-29 12:24:39 UTC     21.0    31.0000    29.7858     1.2142    4.076
+adj2 partial wing put  P-BTC-70800-310526       SELL_PARTIAL   2026-05-29 12:25:00 UTC 2026-05-29 12:28:19 UTC    199.0    60.0000    60.4922    -0.4922   -0.814
+force close call       C-BTC-73600-310526       BUY_TO_CLOSE   2026-05-29 13:55:00 UTC 2026-05-29 14:08:40 UTC    820.0   249.9000   331.6770   -81.7770  -24.656
+force close put        P-BTC-73000-310526       BUY_TO_CLOSE   2026-05-29 13:55:00 UTC 2026-05-29 13:57:31 UTC    151.0   435.0000   454.1930   -19.1930   -4.226
+force close wing call  C-BTC-75600-310526       SELL_TO_CLOSE  2026-05-29 13:55:00 UTC 2026-05-29 13:58:27 UTC    207.0    24.0000    23.0792     0.9208    3.990
+force close wing put   P-BTC-70800-310526       SELL_TO_CLOSE  2026-05-29 13:55:00 UTC 2026-05-29 13:56:30 UTC     90.0    62.0000    66.8444    -4.8444   -7.247
+
+SUMMARY — gap distribution (seconds)
+  n fills with print match: 108 / 108
+  median: 190.50
+  p75:    446.00
+  p90:    757.70
+  p95:    849.25
+  max:    892.00
+  % gap <= 60s:   25.00%
+  % gap > 1 hour: 0.00%
+
+CROSSTAB — gap bucket × median |price diff %|
+bucket            n   med|diff%|    med gap_s
+----------------------------------------------
+<1min            27       2.4361        33.00
+1-10min          59       4.2257       197.00
+10-60min         22       8.3878       759.50
+>60min            0          n/a          n/a
+Spearman(gap, |diff%|) ≈ 0.4073  (>0 ⇒ gap badhne pe price error badhta)
+
+===== PART B: DUAL LEDGER — 2026-05-24 (largest |farak|) =====
+print net=1.042928  mark net=0.171616  farak=-0.871312
+
+(a) PRINT-BASED ledger
+  # note                   symbol                   side           req_ts                 used_print_ts             gap_s      price src           fee        run
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  1 entry short call       C-BTC-77600-260526       SELL           2026-05-24 05:30:00 UTC 2026-05-24 05:42:24 UTC    744.0   380.0000 print      0.0724     2.9676
+  2 entry short put        P-BTC-75600-260526       SELL           2026-05-24 05:30:00 UTC 2026-05-24 05:43:24 UTC    804.0   364.0000 print      0.0724     5.8072
+  3 entry wing call        C-BTC-79600-260526       BUY            2026-05-24 05:30:00 UTC 2026-05-24 05:41:07 UTC    667.0    59.0000 print      0.0195     5.3157
+  4 entry wing put         P-BTC-73200-260526       BUY            2026-05-24 05:30:00 UTC 2026-05-24 05:44:38 UTC    878.0    72.0000 print      0.0238     4.7159
+  5 adj1 exit put          P-BTC-75600-260526       BUY_TO_CLOSE   2026-05-24 09:35:00 UTC 2026-05-24 09:49:22 UTC    862.0   219.0000 print      0.0724     2.8916
+  6 adj1 enter put         P-BTC-75800-260526       SELL           2026-05-24 09:35:00 UTC 2026-05-24 09:49:22 UTC    862.0   260.0000 print      0.0363     3.8953
+  7 adj2 exit put          P-BTC-75800-260526       BUY_TO_CLOSE   2026-05-25 00:45:00 UTC 2026-05-25 00:49:45 UTC    285.0   162.0000 print      0.0268     3.2205
+  8 adj2 enter put         P-BTC-76600-260526       SELL           2026-05-25 00:45:00 UTC 2026-05-25 00:48:49 UTC    229.0   390.0000 print      0.0091     3.6014
+  9 adj2 partial wing call C-BTC-79600-260526       SELL_PARTIAL   2026-05-25 00:45:00 UTC 2026-05-25 00:44:53 UTC      7.0    61.0000 print      0.0076     3.7768
+ 10 adj2 partial wing put  P-BTC-73200-260526       SELL_PARTIAL   2026-05-25 00:45:00 UTC 2026-05-25 00:49:43 UTC    283.0    23.0000 print      0.0028     3.8430
+ 11 force close call       C-BTC-77600-260526       BUY_TO_CLOSE   2026-05-25 02:10:00 UTC 2026-05-25 02:12:47 UTC    167.0   471.0000 print      0.0091     3.3629
+ 12 force close put        P-BTC-76600-260526       BUY_TO_CLOSE   2026-05-25 02:10:00 UTC 2026-05-25 02:08:00 UTC    120.0   240.0000 print      0.0091     3.1137
+ 13 force close wing call  C-BTC-79600-260526       SELL_TO_CLOSE  2026-05-25 02:10:00 UTC 2026-05-25 02:10:30 UTC     30.0    55.0000 print      0.0023     3.1665
+ 14 force close wing put   P-BTC-73200-260526       SELL_TO_CLOSE  2026-05-25 02:10:00 UTC 2026-05-25 02:09:35 UTC     25.0    13.0000 print      0.0005     3.1789
+PRINT total (sim net)=1.042928  manual_ledger=3.178928
+
+(b) MARK-BASED ledger (symmetric slip 1.6500%)
+  # note                   symbol                   side           req_ts                 mark_close     adj_px       used src           fee        run
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+  1 entry short call       C-BTC-77600-260526       SELL           2026-05-24 05:30:00 UTC   397.9047   391.3393   391.3393 mark       0.0724     3.0583
+  2 entry short put        P-BTC-75600-260526       SELL           2026-05-24 05:30:00 UTC   333.6294   328.1246   328.1246 mark       0.0724     5.6109
+  3 entry wing call        C-BTC-79600-260526       BUY            2026-05-24 05:30:00 UTC    61.1518    62.1608    62.1608 mark       0.0205     5.0931
+  4 entry wing put         P-BTC-73200-260526       BUY            2026-05-24 05:30:00 UTC    63.3177    64.3624    64.3624 mark       0.0213     4.5569
+  5 adj1 exit put          P-BTC-75600-260526       BUY_TO_CLOSE   2026-05-24 09:40:00 UTC   226.6936   230.4341   230.4341 print      0.0726     2.6408
+  6 adj1 enter put         P-BTC-73200-260526       SELL           2026-05-24 09:40:00 UTC    37.4846    36.8661    36.8661 print      0.0061     2.7822
+  7 adj1 partial wing call C-BTC-79600-260526       SELL_PARTIAL   2026-05-24 09:40:00 UTC    65.8559    64.7693    64.7693 print      0.0107     3.0306
+  8 adj1 partial wing put  P-BTC-73200-260526       SELL_PARTIAL   2026-05-24 09:40:00 UTC    37.4846    36.8661    36.8661 print      0.0061     3.1719
+  9 adj2 exit put          P-BTC-73200-260526       BUY_TO_CLOSE   2026-05-24 23:45:00 UTC    25.0061    25.4187    25.4187 print      0.0042     3.0661
+ 10 adj2 enter put         P-BTC-73200-260526       SELL           2026-05-24 23:45:00 UTC    25.0061    24.5935    24.5935 print      0.0010     3.0896
+ 11 adj2 partial wing call C-BTC-79600-260526       SELL_PARTIAL   2026-05-24 23:45:00 UTC    63.2927    62.2484    62.2484 print      0.0077     3.2687
+ 12 adj2 partial wing put  P-BTC-73200-260526       SELL_PARTIAL   2026-05-24 23:45:00 UTC    25.0061    24.5935    24.5935 print      0.0030     3.3394
+ 13 force close call       C-BTC-77600-260526       BUY_TO_CLOSE   2026-05-25 02:10:00 UTC   458.5534   466.1195   466.1195 print      0.0091     2.8642
+ 14 force close put        P-BTC-73200-260526       BUY_TO_CLOSE   2026-05-25 02:10:00 UTC    13.0482    13.2635    13.2635 print      0.0005     2.8503
+ 15 force close wing call  C-BTC-79600-260526       SELL_TO_CLOSE  2026-05-25 02:10:00 UTC    51.2732    50.4272    50.4272 print      0.0021     2.8987
+ 16 force close wing put   P-BTC-73200-260526       SELL_TO_CLOSE  2026-05-25 02:10:00 UTC    13.0482    12.8329    12.8329 print      0.0005     2.9110
+MARK total (sim net)=0.171616  manual_ledger=2.910991
+
+CRITICAL: print vs mark PATH DIVERGED — different adj strikes and/or event times. Index-aligned price Δ is MISLEADING after entry.
+PRINT event sequence:
+  P01 2026-05-24 05:30:00 UTC  entry short call       C-BTC-77600-260526
+  P02 2026-05-24 05:30:00 UTC  entry short put        P-BTC-75600-260526
+  P03 2026-05-24 05:30:00 UTC  entry wing call        C-BTC-79600-260526
+  P04 2026-05-24 05:30:00 UTC  entry wing put         P-BTC-73200-260526
+  P05 2026-05-24 09:35:00 UTC  adj1 exit put          P-BTC-75600-260526
+  P06 2026-05-24 09:35:00 UTC  adj1 enter put         P-BTC-75800-260526
+  P07 2026-05-25 00:45:00 UTC  adj2 exit put          P-BTC-75800-260526
+  P08 2026-05-25 00:45:00 UTC  adj2 enter put         P-BTC-76600-260526
+  P09 2026-05-25 00:45:00 UTC  adj2 partial wing call C-BTC-79600-260526
+  P10 2026-05-25 00:45:00 UTC  adj2 partial wing put  P-BTC-73200-260526
+  P11 2026-05-25 02:10:00 UTC  force close call       C-BTC-77600-260526
+  P12 2026-05-25 02:10:00 UTC  force close put        P-BTC-76600-260526
+  P13 2026-05-25 02:10:00 UTC  force close wing call  C-BTC-79600-260526
+  P14 2026-05-25 02:10:00 UTC  force close wing put   P-BTC-73200-260526
+MARK event sequence:
+  M01 2026-05-24 05:30:00 UTC  entry short call       C-BTC-77600-260526
+  M02 2026-05-24 05:30:00 UTC  entry short put        P-BTC-75600-260526
+  M03 2026-05-24 05:30:00 UTC  entry wing call        C-BTC-79600-260526
+  M04 2026-05-24 05:30:00 UTC  entry wing put         P-BTC-73200-260526
+  M05 2026-05-24 09:40:00 UTC  adj1 exit put          P-BTC-75600-260526
+  M06 2026-05-24 09:40:00 UTC  adj1 enter put         P-BTC-73200-260526
+  M07 2026-05-24 09:40:00 UTC  adj1 partial wing call C-BTC-79600-260526
+  M08 2026-05-24 09:40:00 UTC  adj1 partial wing put  P-BTC-73200-260526
+  M09 2026-05-24 23:45:00 UTC  adj2 exit put          P-BTC-73200-260526
+  M10 2026-05-24 23:45:00 UTC  adj2 enter put         P-BTC-73200-260526
+  M11 2026-05-24 23:45:00 UTC  adj2 partial wing call C-BTC-79600-260526
+  M12 2026-05-24 23:45:00 UTC  adj2 partial wing put  P-BTC-73200-260526
+  M13 2026-05-25 02:10:00 UTC  force close call       C-BTC-77600-260526
+  M14 2026-05-25 02:10:00 UTC  force close put        P-BTC-73200-260526
+  M15 2026-05-25 02:10:00 UTC  force close wing call  C-BTC-79600-260526
+  M16 2026-05-25 02:10:00 UTC  force close wing put   P-BTC-73200-260526
+
+SIDE-BY-SIDE ENTRY ONLY (same 4 legs — fair price compare)
+note                   symbol                     print_px  mark_used        Δpx     Δcash≈
+----------------------------------------------------------------------------------------------------
+entry short call       C-BTC-77600-260526         380.0000   391.3393   -11.3393    -0.0907
+entry short put        P-BTC-75600-260526         364.0000   328.1246    35.8754     0.2870
+entry wing call        C-BTC-79600-260526          59.0000    62.1608    -3.1608     0.0253
+entry wing put         P-BTC-73200-260526          72.0000    64.3624     7.6376    -0.0611
+entry-only approx Δcash (print−mark used): 0.1605
+TOTALS: print=1.042928  mark=0.171616  farak(mark-print)=-0.871312
+Farak ka bada hissa PATH divergence (alag adj strikes/timing) se aa sakta hai — sirf entry fill noise se nahi.
+
+===== PART C: 1.65% vs ASYM vs PURE MARK =====
+SELL_X=1.59%  BUY_X=1.71%  SYM_X=1.65%
+
+print-based mean PnL over 7 paired days: 0.591513
+variant                                      mean PnL   vs print    n
+----------------------------------------------------------------------
+(1) symmetric 1.65%                            0.1836    -0.4079    7
+    2026-05-02  print=  0.6339  mark=  0.1925  farak= -0.4414
+    2026-05-08  print=  0.1123  mark=  0.2822  farak=  0.1699
+    2026-05-14  print=  1.1481  mark=  0.4115  farak= -0.7366
+    2026-05-19  print=  0.0801  mark= -0.2830  farak= -0.3631
+    2026-05-20  print=  0.6334  mark=  0.4039  farak= -0.2295
+    2026-05-24  print=  1.0429  mark=  0.1716  farak= -0.8713
+    2026-05-29  print=  0.4898  mark=  0.1064  farak= -0.3834
+(2) asymmetric sell-1.59 / buy+1.71            0.1839    -0.4076    7
+    2026-05-02  print=  0.6339  mark=  0.1928  farak= -0.4411
+    2026-05-08  print=  0.1123  mark=  0.2824  farak=  0.1702
+    2026-05-14  print=  1.1481  mark=  0.4120  farak= -0.7361
+    2026-05-19  print=  0.0801  mark= -0.2831  farak= -0.3632
+    2026-05-20  print=  0.6334  mark=  0.4044  farak= -0.2291
+    2026-05-24  print=  1.0429  mark=  0.1719  farak= -0.8710
+    2026-05-29  print=  0.4898  mark=  0.1066  farak= -0.3832
+(3) pure mark (no adj)                         0.2649    -0.3266    7
+    2026-05-02  print=  0.6339  mark=  0.1797  farak= -0.4542
+    2026-05-08  print=  0.1123  mark=  0.3763  farak=  0.2640
+    2026-05-14  print=  1.1481  mark=  0.6276  farak= -0.5205
+    2026-05-19  print=  0.0801  mark= -0.1925  farak= -0.2726
+    2026-05-20  print=  0.6334  mark=  0.3789  farak= -0.2546
+    2026-05-24  print=  1.0429  mark=  0.2933  farak= -0.7497
+    2026-05-29  print=  0.4898  mark=  0.1910  farak= -0.2988
+
+NOTE: agar (1)≈(2) aur dono (3) se alag → farak mostly pricing source/path; agar (3) print ke paas → adjustment zyada zimmedar.
+
+===== PART D: MISSING WINGS (nan mark cycles) =====
+--- cycle entry=2026-05-13 expiry=2026-05-15 entry_utc=2026-05-13 05:30:00+00:00 ---
+  short_call: symbol=C-BTC-82500-150526 strike=82500.0 print_px=379.0000
+    mark@exact_minute 2026-05-13 05:30:00 UTC: FOUND 389.3303539
+    rows in marks table for symbol: 14401
+    download_progress: ('done', 14401, 'ok')
+    CONCLUSION: mark OK at entry minute — not the failing leg.
+  short_put: symbol=P-BTC-80000-150526 strike=80000.0 print_px=450.0000
+    mark@exact_minute 2026-05-13 05:30:00 UTC: FOUND 447.31117773
+    rows in marks table for symbol: 14401
+    download_progress: ('done', 14401, 'ok')
+    CONCLUSION: mark OK at entry minute — not the failing leg.
+  wing_call: symbol=C-BTC-84500-150526 strike=84500.0 print_px=100.0000
+    mark@exact_minute 2026-05-13 05:30:00 UTC: FOUND 96.91013736
+    rows in marks table for symbol: 6536
+    download_progress: ('done', 6536, 'ok')
+    CONCLUSION: mark OK at entry minute — not the failing leg.
+  wing_put: symbol=P-BTC-78000-150526 strike=78000.0 print_px=117.0000
+    mark@exact_minute 2026-05-13 05:30:00 UTC: MISSING
+    rows in marks table for symbol: 0
+    download_progress: None
+    WHY: no mark rows — checking /v2/products/{symbol} ...
+    products status=200
+    product state=expired settlement_time=2026-05-15T12:00:00Z strike=78000 contract_type=put_options
+    entry spot=81074.50 strike=78000.00 |Δ|=3074.50 within ±6000? True
+    settlement in pilot month 2026-05? True (downloader keeps only May settlement_time)
+    CONCLUSION: in May products scope + band OK but NOT in download_progress — pagination/filter miss or never queued.
+
+--- cycle entry=2026-05-30 expiry=2026-06-01 entry_utc=2026-05-30 05:30:00+00:00 ---
+  short_call: symbol=C-BTC-74200-010626 strike=74200.0 print_px=258.0000
+    mark@exact_minute 2026-05-30 05:30:00 UTC: MISSING
+    rows in marks table for symbol: 0
+    download_progress: None
+    WHY: no mark rows — checking /v2/products/{symbol} ...
+    products status=200
+    product state=expired settlement_time=2026-06-01T12:00:00Z strike=74200 contract_type=call_options
+    entry spot=73507.50 strike=74200.00 |Δ|=692.50 within ±6000? True
+    settlement in pilot month 2026-05? False (downloader keeps only May settlement_time)
+    CONCLUSION: symbol EXISTS on Delta but settlement OUTSIDE May → May pilot products filter EXCLUDED it (by design). Not a ±6000 miss.
+  short_put: symbol=P-BTC-72800-010626 strike=72800.0 print_px=246.0000
+    mark@exact_minute 2026-05-30 05:30:00 UTC: MISSING
+    rows in marks table for symbol: 0
+    download_progress: None
+    WHY: no mark rows — checking /v2/products/{symbol} ...
+    products status=200
+    product state=expired settlement_time=2026-06-01T12:00:00Z strike=72800 contract_type=put_options
+    entry spot=73507.50 strike=72800.00 |Δ|=707.50 within ±6000? True
+    settlement in pilot month 2026-05? False (downloader keeps only May settlement_time)
+    CONCLUSION: symbol EXISTS on Delta but settlement OUTSIDE May → May pilot products filter EXCLUDED it (by design). Not a ±6000 miss.
+  wing_call: symbol=C-BTC-76000-010626 strike=76000.0 print_px=39.0000
+    mark@exact_minute 2026-05-30 05:30:00 UTC: MISSING
+    rows in marks table for symbol: 0
+    download_progress: None
+    WHY: no mark rows — checking /v2/products/{symbol} ...
+    products status=200
+    product state=expired settlement_time=2026-06-01T12:00:00Z strike=76000 contract_type=call_options
+    entry spot=73507.50 strike=76000.00 |Δ|=2492.50 within ±6000? True
+    settlement in pilot month 2026-05? False (downloader keeps only May settlement_time)
+    CONCLUSION: symbol EXISTS on Delta but settlement OUTSIDE May → May pilot products filter EXCLUDED it (by design). Not a ±6000 miss.
+  wing_put: symbol=P-BTC-70800-010626 strike=70800.0 print_px=45.0000
+    mark@exact_minute 2026-05-30 05:30:00 UTC: MISSING
+    rows in marks table for symbol: 0
+    download_progress: None
+    WHY: no mark rows — checking /v2/products/{symbol} ...
+    products status=200
+    product state=expired settlement_time=2026-06-01T12:00:00Z strike=70800 contract_type=put_options
+    entry spot=73507.50 strike=70800.00 |Δ|=2707.50 within ±6000? True
+    settlement in pilot month 2026-05? False (downloader keeps only May settlement_time)
+    CONCLUSION: symbol EXISTS on Delta but settlement OUTSIDE May → May pilot products filter EXCLUDED it (by design). Not a ±6000 miss.
+
+
+DONE.
