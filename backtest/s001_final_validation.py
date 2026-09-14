@@ -1270,6 +1270,53 @@ def part1_config_echo(lines: list[str]) -> bool:
     return True
 
 
+def half_cycle_metrics(
+    outs: list,
+    *,
+    half: str,
+    is_end: date,
+    d0: date,
+    d1: date,
+    split: int,
+    cal_days: int,
+    seed: int,
+) -> dict[str, float]:
+    """IS/OOS cycle-level + daily metrics for one trigger run."""
+    if half == "IS":
+        sub = [s for s in outs if s.entry_date <= is_end and math.isfinite(s.net)]
+        days = daily_series(sub, split, d0, is_end)
+        seed_off = 11
+    else:
+        oos_d0 = is_end + timedelta(days=1)
+        sub = [s for s in outs if s.entry_date > is_end and math.isfinite(s.net)]
+        days = daily_series(sub, cal_days - split, oos_d0, d1)
+        seed_off = 22
+    nets = [float(s.net) for s in sub]
+    holds = [float(s.hold_hours) for s in sub if math.isfinite(s.hold_hours)]
+    adjs = [float(s.n_adjustments) for s in sub]
+    mean_c = statistics.fmean(nets) if nets else float("nan")
+    worst = min(nets) if nets else float("nan")
+    p5 = float(eng.pctile(nets, 5.0)) if nets else float("nan")
+    sm = summarize_daily(sub, days, seed=seed + seed_off)
+    risk_adj = (
+        mean_c / abs(worst)
+        if math.isfinite(mean_c) and math.isfinite(worst) and abs(worst) > 1e-12
+        else float("nan")
+    )
+    return {
+        "n": float(len(sub)),
+        "mean_cycle": mean_c,
+        "mean_day": float(sm["mean_day"]),
+        "ci_lo": float(sm["ci_lo"]),
+        "worst": worst,
+        "mdd": float(sm["mdd"]),
+        "avg_adj": statistics.fmean(adjs) if adjs else float("nan"),
+        "avg_hold": statistics.fmean(holds) if holds else float("nan"),
+        "p5": p5,
+        "risk_adj": risk_adj,
+    }
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -1277,243 +1324,60 @@ def main() -> int:
         stream=sys.stderr,
     )
     lines: list[str] = []
-    checklist: dict[str, str] = {}
-    emit(lines, "S001 FINAL VALIDATION")
+    emit(lines, "S001 TRIGGER FINAL + DATA EXTENSION PATHS")
     emit(lines, "=" * 100)
     emit(lines, "")
 
-    # PART 1
-    if not part1_config_echo(lines):
-        checklist["PART 1 config echo"] = "DONE (MISMATCH — halted)"
-        for p in (
-            "PART 2 headline",
-            "PART 3 out-of-sample split",
-            "PART 4 parameter stability",
-            "PART 5 distribution",
-            "PART 6 slippage",
-            "PART 7 hand audit",
-            "PART 8 original comparison",
-        ):
-            checklist[p] = "SKIPPED — config mismatch"
-        emit(lines, "===== PART 9: COMPLETION CHECKLIST =====")
-        for k, v in checklist.items():
-            emit(lines, f"  [{v}] {k}")
-        text = "\n".join(lines) + "\n"
-        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        OUT_PATH.write_text(text, encoding="utf-8")
-        sys.stdout.write(text)
-        return 1
-    checklist["PART 1 config echo"] = "DONE"
-
-    logger.info("Loading data...")
+    logger.info("Loading cycles + spot (print-only)...")
     all_obs, day_span = sweep.load_cycles()
     idx = eng.build_trade_index()
     times, closes = ot.load_spot_1m()
     d0 = datetime.fromtimestamp(times[0], tz=UTC).date()
     d1 = datetime.fromtimestamp(times[-1], tz=UTC).date()
     base, skipped_prints = filter_and_rebuild_print_cycles(all_obs, idx)
-    logger.info(
-        "print-only cycles=%s skipped=%s day_span=%s",
-        len(base),
-        skipped_prints,
-        day_span,
+    emit(
+        lines,
+        f"print-only cycles: {len(base)}  (skipped non-print: {skipped_prints})  "
+        f"day_span={day_span}",
     )
-    emit(lines, f"Print-only cycles kept: {len(base)}  skipped (no print wings/shorts): {skipped_prints}")
-    emit(lines, "")
+    if not base:
+        emit(lines, "ERROR: no print-only cycles")
+        text = "\n".join(lines) + "\n"
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        OUT_PATH.write_text(text, encoding="utf-8")
+        sys.stdout.write(text)
+        return 1
 
-    # Final config run
-    logger.info("Running FINAL config...")
-    final_outs = run_with_reentry(
-        base,
-        idx,
-        times,
-        closes,
-        trigger_pct=float(CFG["adj_b_trigger_pct"]),
-        decrease_pct=float(CFG["adjustment_qty_decrease_pct"]),
-        profit_k=float(CFG["profit_target_k"]),
-        adj_mode=str(CFG["adjustment_mode"]),
-        wing_roll=bool(CFG["wing_roll_with_short_enabled"]),
-        slip=0.0,
-        allow_reentry=bool(CFG["same_day_reentry"]),
-    )
-    full_days = daily_series(final_outs, day_span, d0, d1)
-    cal_days = len(full_days)
-
-    # =====================================================================
-    # PART 2
-    # =====================================================================
-    emit(lines, "===== PART 2: HEADLINE =====")
-    sm = summarize_daily(final_outs, full_days, seed=BOOTSTRAP_SEED)
-    fees_pct_gross = (
-        100.0 * sm["fees_tot"] / sm["gross_tot"] if sm["gross_tot"] > 1e-12 else float("nan")
-    )
-    emit(lines, f"  n cycles:              {int(sm['n'])}")
-    emit(lines, f"  n calendar days:       {cal_days}")
-    emit(lines, f"  cycles per day:        {sm['cpd']:.4f}")
-    emit(lines, f"  mean/day:              {sm['mean_day']:.4f}")
-    emit(lines, f"  median/day:            {sm['median_day']:.4f}")
-    emit(lines, f"  std (daily):           {sm['std_day']:.4f}")
-    emit(lines, f"  bootstrap ci_lo:       {sm['ci_lo']:.4f}")
-    emit(lines, f"  bootstrap ci_hi:       {sm['ci_hi']:.4f}")
-    emit(lines, f"  worst cycle:           {sm['worst']:.4f}")
-    emit(lines, f"  best cycle:            {sm['best']:.4f}")
-    emit(lines, f"  max drawdown:          {sm['mdd']:.4f}")
-    emit(lines, f"  total P&L (period):    {sm['total']:.4f}")
-    emit(lines, f"  average hold hours:    {sm['avg_hold']:.2f}")
-    emit(lines, f"  avg adjustments/cycle: {sm['avg_adj']:.2f}")
-    emit(lines, f"  fees per day:          {sm['fees_day']:.4f}")
-    emit(lines, f"  fees as % of gross:    {fees_pct_gross:.2f}")
-    emit(lines, "")
-    checklist["PART 2 headline"] = "DONE"
-
-    # =====================================================================
-    # PART 3 OOS
-    # =====================================================================
-    emit(lines, "===== PART 3: OUT-OF-SAMPLE SPLIT =====")
+    # Calendar span for IS/OOS uses candle date range (same as prior validation)
+    full_placeholder = daily_series([], day_span, d0, d1)
+    cal_days = len(full_placeholder)
     split = int(cal_days * 0.60)
-    is_days_list = full_days[:split]
-    oos_days_list = full_days[split:]
     is_end = d0 + timedelta(days=split - 1)
-    is_outs = [s for s in final_outs if s.entry_date <= is_end]
-    oos_outs = [s for s in final_outs if s.entry_date > is_end]
-    # Rebuild daily for subsets with proper zero-fill length
-    is_sm = summarize_daily(
-        is_outs,
-        daily_series(is_outs, split, d0, is_end),
-        seed=BOOTSTRAP_SEED + 1,
-    )
     oos_d0 = is_end + timedelta(days=1)
-    oos_sm = summarize_daily(
-        oos_outs,
-        daily_series(oos_outs, cal_days - split, oos_d0, d1),
-        seed=BOOTSTRAP_SEED + 2,
-    )
-    emit(lines, f"IN-SAMPLE  = first 60% days ({d0} → {is_end})  n_days={split}")
-    emit(lines, f"OUT-SAMPLE = last 40% days ({oos_d0} → {d1})  n_days={cal_days - split}")
-    emit(lines, "")
+    emit(lines, f"calendar: {d0} -> {d1}  cal_days={cal_days}  day_span={day_span}")
+    emit(lines, f"IN-SAMPLE  = first 60% days ({d0} -> {is_end})  n_days={split}")
     emit(
         lines,
-        f"{'half':<12} {'n':>5} {'mean/day':>10} {'ci_lo':>9} {'worst':>9} {'mdd':>9}",
-    )
-    emit(lines, "-" * 60)
-    emit(
-        lines,
-        f"{'IN-SAMPLE':<12} {int(is_sm['n']):5d} {is_sm['mean_day']:10.4f} "
-        f"{is_sm['ci_lo']:9.4f} {is_sm['worst']:9.4f} {is_sm['mdd']:9.4f}",
+        f"OUT-SAMPLE = last 40% days ({oos_d0} -> {d1})  n_days={cal_days - split}",
     )
     emit(
         lines,
-        f"{'OUT-SAMPLE':<12} {int(oos_sm['n']):5d} {oos_sm['mean_day']:10.4f} "
-        f"{oos_sm['ci_lo']:9.4f} {oos_sm['worst']:9.4f} {oos_sm['mdd']:9.4f}",
+        "config: print-only, dec%=40, B_only, wings=2000 roll OFF, "
+        "PT k=1.0, qty=8, maker, hedge OFF",
     )
     emit(lines, "")
-    emit(lines, "Month-by-month:")
-    emit(
-        lines,
-        f"{'month':>8} {'n':>5} {'mean/day':>10} {'worst':>9} {'total':>10}",
-    )
-    emit(lines, "-" * 50)
-    by_month: dict[str, list[SimOut]] = defaultdict(list)
-    for s in final_outs:
-        if math.isfinite(s.net):
-            by_month[s.entry_date.strftime("%Y-%m")].append(s)
-    # All months in spot range
-    months: list[str] = []
-    cur = date(d0.year, d0.month, 1)
-    end_m = date(d1.year, d1.month, 1)
-    while cur <= end_m:
-        months.append(cur.strftime("%Y-%m"))
-        if cur.month == 12:
-            cur = date(cur.year + 1, 1, 1)
-        else:
-            cur = date(cur.year, cur.month + 1, 1)
-    pos_m = neg_m = 0
-    for m in months:
-        rows = by_month.get(m, [])
-        if not rows:
-            emit(lines, f"{m:>8} {0:5d} {'NOT AVAILABLE':>10} {'n/a':>9} {0.0:10.4f}")
-            continue
-        nets = [r.net for r in rows]
-        # mean/day within month: sum / days in month that fall in sample
-        y, mo = int(m[:4]), int(m[5:7])
-        if mo == 12:
-            nxt = date(y + 1, 1, 1)
-        else:
-            nxt = date(y, mo + 1, 1)
-        md0 = max(d0, date(y, mo, 1))
-        md1 = min(d1, nxt - timedelta(days=1))
-        n_mdays = (md1 - md0).days + 1
-        tot = sum(nets)
-        mean_d = tot / float(max(1, n_mdays))
-        if tot > 0:
-            pos_m += 1
-        elif tot < 0:
-            neg_m += 1
-        emit(
-            lines,
-            f"{m:>8} {len(rows):5d} {mean_d:10.4f} {min(nets):9.4f} {tot:10.4f}",
-        )
-    emit(lines, "")
-    emit(lines, f"Months positive: {pos_m}  |  Months negative: {neg_m}  |  listed: {len(months)}")
-    emit(lines, "")
-    checklist["PART 3 out-of-sample split"] = "DONE"
 
     # =====================================================================
-    # PART 4 stability
+    # PART A — TRIGGER FINAL
     # =====================================================================
-    emit(lines, "===== PART 4: PARAMETER STABILITY (IS vs OOS) =====")
-    emit(
-        lines,
-        f"{'parameter':<28} {'value':>6} {'IS mean/day':>12} {'OOS mean/day':>13} {'same winner?':>12}",
-    )
-    emit(lines, "-" * 80)
+    emit(lines, "===== PART A: TRIGGER FINAL (print-only, dec%=40) =====")
+    emit(lines, "")
+    TRIGGERS = [30.0, 40.0, 50.0, 60.0, 70.0]
+    by_trig: dict[float, dict[str, dict[str, float]]] = {}
+    full_meta: dict[float, dict[str, float]] = {}
 
-    def half_mean(outs: list[SimOut], half: str) -> float:
-        if half == "IS":
-            sub = [s for s in outs if s.entry_date <= is_end]
-            days = daily_series(sub, split, d0, is_end)
-        else:
-            sub = [s for s in outs if s.entry_date > is_end]
-            days = daily_series(sub, cal_days - split, oos_d0, d1)
-        if not days:
-            return float("nan")
-        return statistics.mean(days)
-
-    dec_is: dict[float, float] = {}
-    dec_oos: dict[float, float] = {}
-    for dec in (20.0, 30.0, 40.0, 50.0):
-        logger.info("PART4 dec%%=%s", dec)
-        outs = run_with_reentry(
-            base,
-            idx,
-            times,
-            closes,
-            trigger_pct=70.0,
-            decrease_pct=dec,
-            profit_k=1.0,
-            adj_mode="B_only",
-            wing_roll=False,
-            slip=0.0,
-        )
-        dec_is[dec] = half_mean(outs, "IS")
-        dec_oos[dec] = half_mean(outs, "OOS")
-
-    win_dec_is = max(dec_is, key=lambda k: dec_is[k])
-    win_dec_oos = max(dec_oos, key=lambda k: dec_oos[k])
-    for dec in (20.0, 30.0, 40.0, 50.0):
-        same = "yes" if win_dec_is == win_dec_oos == dec else (
-            "IS-win" if win_dec_is == dec else ("OOS-win" if win_dec_oos == dec else "no")
-        )
-        emit(
-            lines,
-            f"{'adj_qty_decrease_pct':<28} {dec:6.0f} {dec_is[dec]:12.4f} "
-            f"{dec_oos[dec]:13.4f} {same:>12}",
-        )
-
-    trig_is: dict[float, float] = {}
-    trig_oos: dict[float, float] = {}
-    for trig in (50.0, 70.0, 90.0):
-        logger.info("PART4 trigger=%s", trig)
+    for trig in TRIGGERS:
+        logger.info("PART A trigger=%s", trig)
         outs = run_with_reentry(
             base,
             idx,
@@ -1526,380 +1390,227 @@ def main() -> int:
             wing_roll=False,
             slip=0.0,
         )
-        trig_is[trig] = half_mean(outs, "IS")
-        trig_oos[trig] = half_mean(outs, "OOS")
+        is_m = half_cycle_metrics(
+            outs,
+            half="IS",
+            is_end=is_end,
+            d0=d0,
+            d1=d1,
+            split=split,
+            cal_days=cal_days,
+            seed=BOOTSTRAP_SEED + int(trig),
+        )
+        oos_m = half_cycle_metrics(
+            outs,
+            half="OOS",
+            is_end=is_end,
+            d0=d0,
+            d1=d1,
+            split=split,
+            cal_days=cal_days,
+            seed=BOOTSTRAP_SEED + int(trig),
+        )
+        by_trig[trig] = {"IS": is_m, "OOS": oos_m}
+        nets = [float(s.net) for s in outs if math.isfinite(s.net)]
+        adjs = [float(s.n_adjustments) for s in outs]
+        holds = [float(s.hold_hours) for s in outs if math.isfinite(s.hold_hours)]
+        mean_c = statistics.fmean(nets) if nets else float("nan")
+        worst = min(nets) if nets else float("nan")
+        full_meta[trig] = {
+            "avg_adj": statistics.fmean(adjs) if adjs else float("nan"),
+            "avg_hold": statistics.fmean(holds) if holds else float("nan"),
+            "mean_cycle": mean_c,
+            "worst": worst,
+            "risk_adj": (
+                mean_c / abs(worst)
+                if math.isfinite(mean_c) and math.isfinite(worst) and abs(worst) > 1e-12
+                else float("nan")
+            ),
+        }
 
-    win_tr_is = max(trig_is, key=lambda k: trig_is[k])
-    win_tr_oos = max(trig_oos, key=lambda k: trig_oos[k])
-    for trig in (50.0, 70.0, 90.0):
-        same = "yes" if win_tr_is == win_tr_oos == trig else (
-            "IS-win" if win_tr_is == trig else ("OOS-win" if win_tr_oos == trig else "no")
-        )
-        emit(
-            lines,
-            f"{'adj_b_trigger_pct':<28} {trig:6.0f} {trig_is[trig]:12.4f} "
-            f"{trig_oos[trig]:13.4f} {same:>12}",
-        )
-    emit(lines, "")
-    emit(
-        lines,
-        f"dec% winners: IS={win_dec_is:g} OOS={win_dec_oos:g}  |  "
-        f"trigger winners: IS={win_tr_is:g} OOS={win_tr_oos:g}",
-    )
-    if win_dec_is == 40 and win_dec_oos == 40 and win_tr_is == 70 and win_tr_oos == 70:
-        emit(lines, "VERDICT: dono halves mein 40 aur 70 hi jeete.")
-    else:
-        emit(
-            lines,
-            f"VERDICT: NAHI — dec% jeeta IS={win_dec_is:g}/OOS={win_dec_oos:g}; "
-            f"trigger jeeta IS={win_tr_is:g}/OOS={win_tr_oos:g}.",
-        )
-    emit(lines, "")
-    checklist["PART 4 parameter stability"] = "DONE"
-
-    # =====================================================================
-    # PART 5 distribution
-    # =====================================================================
-    emit(lines, "===== PART 5: DISTRIBUTION =====")
-    nets = [s.net for s in final_outs if math.isfinite(s.net)]
-    if not nets:
-        emit(lines, "NOT AVAILABLE — no cycles")
-        checklist["PART 5 distribution"] = "SKIPPED — no cycles"
-    else:
-        lo_n, hi_n = min(nets), max(nets)
-        n_buckets = 10
-        width = (hi_n - lo_n) / n_buckets if hi_n > lo_n else 1.0
-        counts = [0] * n_buckets
-        for x in nets:
-            bi = min(n_buckets - 1, int((x - lo_n) / width)) if width > 0 else 0
-            counts[bi] += 1
-        emit(lines, "Histogram (10 buckets):")
-        for i, c in enumerate(counts):
-            a = lo_n + i * width
-            b = a + width
-            emit(lines, f"  [{a:8.3f}, {b:8.3f}): {c}")
-        pcts = (1, 5, 10, 25, 50, 75, 90, 95, 99)
-        emit(lines, "Percentiles:")
-        for p in pcts:
-            emit(lines, f"  p{p}: {eng.pctile(nets, float(p)):.4f}")
-        wins = [x for x in nets if x > 0]
-        losses = [x for x in nets if x < 0]
-        emit(lines, f"  win rate: {100.0 * len(wins) / len(nets):.1f}%")
-        emit(
-            lines,
-            f"  avg win: {statistics.mean(wins) if wins else float('nan'):.4f}  |  "
-            f"avg loss: {statistics.mean(losses) if losses else float('nan'):.4f}",
-        )
-        # losing streak cycles
-        streak = max_streak = 0
-        for x in nets:
-            if x < 0:
-                streak += 1
-                max_streak = max(max_streak, streak)
-            else:
-                streak = 0
-        emit(lines, f"  longest losing streak (cycles): {max_streak}")
-        # longest losing period in days from running sum
-        cum = 0.0
-        peak = 0.0
-        dd_start = 0
-        best_len = 0
-        in_dd = False
-        start_i = 0
-        for i, x in enumerate(full_days):
-            cum += x
-            if cum >= peak:
-                peak = cum
-                if in_dd:
-                    best_len = max(best_len, i - start_i)
-                in_dd = False
-                start_i = i
-            else:
-                if not in_dd:
-                    in_dd = True
-                    start_i = dd_start
-                dd_start = start_i
-        if in_dd:
-            best_len = max(best_len, len(full_days) - start_i)
-        emit(lines, f"  longest losing period (days, running-sum DD): {best_len}")
-        emit(lines, "")
-        checklist["PART 5 distribution"] = "DONE"
-
-    # =====================================================================
-    # PART 6 slippage
-    # =====================================================================
-    emit(lines, "===== PART 6: EXECUTION ROBUSTNESS (slippage) =====")
-    emit(
-        lines,
-        f"{'slip%':>6} {'mean/day':>10} {'ci_lo':>9} {'worst':>9} {'%drop vs 0':>12}",
-    )
-    emit(lines, "-" * 55)
-    base_mean = sm["mean_day"]
-    slip_means: list[tuple[float, float]] = []
-    for si, slip_pct in enumerate((0.0, 2.0, 4.0, 8.0)):
-        logger.info("PART6 slip=%s%%", slip_pct)
-        outs = run_with_reentry(
-            base,
-            idx,
-            times,
-            closes,
-            trigger_pct=70.0,
-            decrease_pct=40.0,
-            profit_k=1.0,
-            adj_mode="B_only",
-            wing_roll=False,
-            slip=slip_pct / 100.0,
-        )
-        days = daily_series(outs, day_span, d0, d1)
-        ssm = summarize_daily(outs, days, seed=BOOTSTRAP_SEED + 50 + si)
-        drop = (
-            100.0 * (base_mean - ssm["mean_day"]) / base_mean
-            if abs(base_mean) > 1e-12
-            else float("nan")
-        )
-        slip_means.append((slip_pct, ssm["mean_day"]))
-        emit(
-            lines,
-            f"{slip_pct:6.0f} {ssm['mean_day']:10.4f} {ssm['ci_lo']:9.4f} "
-            f"{ssm['worst']:9.4f} {drop:12.1f}",
-        )
-    # Linear interpolate zero-crossing
-    zero_at = "NOT AVAILABLE"
-    for i in range(len(slip_means) - 1):
-        s0, m0 = slip_means[i]
-        s1, m1 = slip_means[i + 1]
-        if m0 > 0 >= m1:
-            # interpolate
-            frac = m0 / (m0 - m1) if abs(m0 - m1) > 1e-12 else 0.0
-            zero_at = f"{s0 + frac * (s1 - s0):.1f}%"
-            break
-        if m0 <= 0:
-            zero_at = f"<= {s0:.0f}%"
-            break
-    if zero_at == "NOT AVAILABLE" and slip_means[-1][1] > 0:
-        zero_at = f"> {slip_means[-1][0]:.0f}% (still positive at max tested)"
-    emit(lines, f"Edge zero around slippage: {zero_at}")
-    emit(lines, "")
-    checklist["PART 6 slippage"] = "DONE"
-
-    # =====================================================================
-    # PART 7 hand audit
-    # =====================================================================
-    emit(lines, "===== PART 7: HAND AUDIT =====")
-    ok_outs = [s for s in final_outs if math.isfinite(s.net)]
-    if len(ok_outs) < 3:
-        emit(lines, "NOT AVAILABLE — fewer than 3 cycles")
-        checklist["PART 7 hand audit"] = "SKIPPED — insufficient cycles"
-    else:
-        med = statistics.median([s.net for s in ok_outs])
-        typical = min(ok_outs, key=lambda s: abs(s.net - med))
-        worst = min(ok_outs, key=lambda s: s.net)
-        best = max(ok_outs, key=lambda s: s.net)
-        audit_days = {typical.entry_date, worst.entry_date, best.entry_date}
-        # Re-sim with ledgers
-        logger.info("PART7 ledger re-sim for %s", audit_days)
-        led_outs = run_with_reentry(
-            [o for o in base if o.entry_date in audit_days],
-            idx,
-            times,
-            closes,
-            trigger_pct=70.0,
-            decrease_pct=40.0,
-            profit_k=1.0,
-            adj_mode="B_only",
-            wing_roll=False,
-            slip=0.0,
-            collect_ledgers_for=audit_days,
-        )
-
-        def pick_match(target: SimOut) -> SimOut | None:
-            cands = [
-                s
-                for s in led_outs
-                if s.entry_date == target.entry_date and abs(s.net - target.net) < 0.05
-            ]
-            if cands:
-                return min(cands, key=lambda s: abs(s.net - target.net))
-            cands = [s for s in led_outs if s.entry_date == target.entry_date]
-            return cands[0] if cands else None
-
-        for label, target in (
-            ("(a) TYPICAL (near median)", typical),
-            ("(b) WORST", worst),
-            ("(c) BEST", best),
-        ):
-            emit(lines, f"--- {label}  entry_date={target.entry_date} net={target.net:.4f} ---")
-            s = pick_match(target)
-            if s is None or not s.ledger:
-                emit(lines, "NOT AVAILABLE — ledger empty")
-                continue
-            emit(
-                lines,
-                f"{'ts_utc':>12} {'symbol':<28} {'side':<14} {'qty':>3} "
-                f"{'price':>10} {'SRC':<8} {'fee':>8} {'runPnL':>10}",
-            )
-            for row in s.ledger:
-                emit(
-                    lines,
-                    f"{row.ts:12d} {row.symbol:<28} {row.side:<14} {row.qty:3d} "
-                    f"{row.price:10.4f} {row.price_source:<8} {row.fee:8.4f} "
-                    f"{row.running_pnl:10.4f}",
-                )
-            # Manual total from ledger notionals
-            m2 = 0.0
-            fee_sum = 0.0
-            for row in s.ledger:
-                fee_sum += row.fee
-                notional = row.price * qty_btc(row.qty)
-                if row.side in {"SELL", "SELL_TO_CLOSE", "SELL_PARTIAL"}:
-                    m2 += notional
-                elif row.side in {"BUY", "BUY_TO_CLOSE"}:
-                    m2 -= notional
-                elif row.side == "SETTLE":
-                    m2 += row.price  # pnl stuffed — use note
-            # Prefer settle cash from last SETTLE row note; recompute settle properly:
-            # Use running_pnl end vs reported net
-            manual_net = s.ledger_manual_total
-            # Better audit: notional path minus fees, but SETTLE row breaks it.
-            # Recompute without SETTLE using cash_pnl identity: reported net is source of truth
-            # Manual from non-settle sides:
-            m3 = 0.0
-            for row in s.ledger:
-                if row.side == "SETTLE":
-                    # extract pnl from note
-                    if "settle pnl=" in row.note:
-                        try:
-                            m3 += float(row.note.split("settle pnl=")[1])
-                        except ValueError:
-                            pass
-                    continue
-                notional = row.price * qty_btc(row.qty)
-                if row.side in {"SELL", "SELL_TO_CLOSE", "SELL_PARTIAL"}:
-                    m3 += notional
-                elif row.side in {"BUY", "BUY_TO_CLOSE"}:
-                    m3 -= notional
-            m3 -= fee_sum
-            # Notional sum != cash_pnl net: engine shrinks unadjusted short qty
-            # without a partial close (same as s001_adjustment_sweep / wing_final).
-            # Verify: (1) all PRICE_SOURCE=print (2) script net matches headline pick
-            sources = {row.price_source for row in s.ledger}
-            bad_src = sources - {"print", "intrinsic"}
-            emit(
-                lines,
-                f"  ledger notional-fees total: {m3:.4f}  "
-                "(informational; != cash_pnl when unadj leg qty shrinks)",
-            )
-            emit(lines, f"  script reported net:         {s.net:.4f}")
-            emit(lines, f"  headline cycle net:          {target.net:.4f}")
-            emit(lines, f"  PRICE_SOURCEs: {sorted(sources)}")
-            if bad_src:
-                emit(lines, f"  FLAG: non-print sources present: {bad_src}")
-            elif abs(s.net - target.net) > 0.05:
-                emit(lines, "  FLAG: ledger re-sim net != headline cycle net")
-            else:
-                emit(
-                    lines,
-                    "  MATCH: ledger re-sim net ≈ headline; all fills print/intrinsic",
-                )
+        for half_name, m in (("IN-SAMPLE", is_m), ("OUT-SAMPLE", oos_m)):
+            emit(lines, f"--- trigger={trig:g}  {half_name} ---")
+            emit(lines, f"  n cycles          = {int(m['n'])}")
+            emit(lines, f"  mean per CYCLE    = {m['mean_cycle']:.6f}")
+            emit(lines, f"  mean/day          = {m['mean_day']:.6f}")
+            emit(lines, f"  ci_lo             = {m['ci_lo']:.6f}")
+            emit(lines, f"  worst cycle       = {m['worst']:.6f}")
+            emit(lines, f"  max drawdown      = {m['mdd']:.6f}")
+            emit(lines, f"  avg adj/cycle     = {m['avg_adj']:.4f}")
+            emit(lines, f"  avg hold hours    = {m['avg_hold']:.4f}")
+            emit(lines, f"  p5 cycle PnL      = {m['p5']:.6f}")
+            emit(lines, f"  risk-adj (mean/|worst|) = {m['risk_adj']:.6f}")
             emit(lines, "")
-        checklist["PART 7 hand audit"] = "DONE"
 
-    # =====================================================================
-    # PART 8 original comparison
-    # =====================================================================
-    emit(lines, "===== PART 8: ORIGINAL vs FINAL =====")
-    logger.info("PART8 ORIGINAL config...")
-    orig_outs = run_with_reentry(
-        base,
-        idx,
-        times,
-        closes,
-        trigger_pct=90.0,
-        decrease_pct=20.0,
-        profit_k=None,
-        adj_mode="BOTH",
-        wing_roll=True,
-        slip=0.0,
-        allow_reentry=False,
-    )
-    # Hedge ON — allocate hedge daily PnL
-    hedge_cycles = hedge.reconstruct_hedge_cycles(
-        idx,
-        times,
-        closes,
-        min_hedge_dte=hedge.MIN_HEDGE_DTE_LIVE,
-        roll_dte=hedge.ROLL_DTE_LIVE,
-    )
-    hedge_daily: dict[date, float] = defaultdict(float)
-    n_hedge_ok = 0
-    for hc in hedge_cycles:
-        if hc.status != "OK" or hc.realized_pnl_usd is None:
-            continue
-        if hc.entry_date is None or hc.exit_date is None or not hc.days_held:
-            continue
-        n_hedge_ok += 1
-        per = float(hc.realized_pnl_usd) / float(max(1, hc.days_held))
-        d = hc.entry_date
-        while d <= hc.exit_date:
-            hedge_daily[d] += per
-            d += timedelta(days=1)
-
-    orig_basket_days = daily_series(orig_outs, day_span, d0, d1)
-    orig_combined_days: list[float] = []
-    d = d0
-    for i in range(len(orig_basket_days)):
-        orig_combined_days.append(orig_basket_days[i] + hedge_daily.get(d, 0.0))
-        d += timedelta(days=1)
-
-    orig_sm = summarize_daily(orig_outs, orig_combined_days, seed=BOOTSTRAP_SEED + 80)
-    # For fair metrics on ORIGINAL without inventing: also report basket-only
-    orig_b_only = summarize_daily(
-        orig_outs, orig_basket_days, seed=BOOTSTRAP_SEED + 81
-    )
-
-    emit(lines, f"ORIGINAL hedge cycles OK: {n_hedge_ok}")
+    emit(lines, "FINAL TABLE")
     emit(
         lines,
-        f"{'metric':<24} {'ORIGINAL':>12} {'FINAL':>12} {'farak':>12}",
+        f"{'trigger':>8} {'IS mean/cyc':>12} {'OOS mean/cyc':>13} "
+        f"{'IS worst':>10} {'OOS worst':>10} {'adj/cyc':>8} {'hold_h':>8} "
+        f"{'risk-adj IS|OOS':>18}",
     )
-    emit(lines, "-" * 64)
-    pairs = [
-        ("n_cycles", orig_sm["n"], sm["n"]),
-        ("mean/day", orig_sm["mean_day"], sm["mean_day"]),
-        ("ci_lo", orig_sm["ci_lo"], sm["ci_lo"]),
-        ("worst_cycle", orig_sm["worst"], sm["worst"]),
-        ("max_DD", orig_sm["mdd"], sm["mdd"]),
-        ("total_PnL", orig_sm["total"], sm["total"]),
-        ("avg_hold_h", orig_sm["avg_hold"], sm["avg_hold"]),
-        ("avg_adj", orig_sm["avg_adj"], sm["avg_adj"]),
-        ("fees/day", orig_sm["fees_day"], sm["fees_day"]),
-    ]
-    for name, a, b in pairs:
-        emit(lines, f"{name:<24} {a:12.4f} {b:12.4f} {b - a:12.4f}")
+    emit(lines, "-" * 100)
+    for trig in TRIGGERS:
+        is_m = by_trig[trig]["IS"]
+        oos_m = by_trig[trig]["OOS"]
+        fm = full_meta[trig]
+        emit(
+            lines,
+            f"{trig:8.0f} {is_m['mean_cycle']:12.4f} {oos_m['mean_cycle']:13.4f} "
+            f"{is_m['worst']:10.2f} {oos_m['worst']:10.2f} "
+            f"{fm['avg_adj']:8.3f} {fm['avg_hold']:8.2f} "
+            f"{is_m['risk_adj']:8.4f}|{oos_m['risk_adj']:7.4f}",
+        )
+    emit(lines, "")
+
+    mean_is_win = max(TRIGGERS, key=lambda t: by_trig[t]["IS"]["mean_cycle"])
+    mean_oos_win = max(TRIGGERS, key=lambda t: by_trig[t]["OOS"]["mean_cycle"])
+    risk_is_win = max(TRIGGERS, key=lambda t: by_trig[t]["IS"]["risk_adj"])
+    risk_oos_win = max(TRIGGERS, key=lambda t: by_trig[t]["OOS"]["risk_adj"])
+
+    def rank_score(t: float) -> float:
+        metrics = [
+            sorted(TRIGGERS, key=lambda x: by_trig[x]["IS"]["mean_cycle"], reverse=True),
+            sorted(TRIGGERS, key=lambda x: by_trig[x]["OOS"]["mean_cycle"], reverse=True),
+            sorted(TRIGGERS, key=lambda x: by_trig[x]["IS"]["risk_adj"], reverse=True),
+            sorted(TRIGGERS, key=lambda x: by_trig[x]["OOS"]["risk_adj"], reverse=True),
+        ]
+        return float(sum(m.index(t) + 1 for m in metrics))
+
+    best_compromise = min(TRIGGERS, key=rank_score)
+    both_mean = mean_is_win == mean_oos_win
+    both_risk = risk_is_win == risk_oos_win
+    if both_mean and both_risk and mean_is_win == risk_is_win:
+        verdict = (
+            f"VERDICT: trigger={mean_is_win:g} — dono halves pe mean AUR "
+            f"risk-adjusted dono pe best."
+        )
+    elif both_mean and both_risk:
+        verdict = (
+            f"VERDICT: mean pe trigger={mean_is_win:g} dono halves; "
+            f"risk-adj pe trigger={risk_is_win:g} dono halves — alag winners. "
+            f"Compromise (rank-sum): trigger={best_compromise:g}."
+        )
+    else:
+        verdict = (
+            f"VERDICT: ek hi trigger dono halves + dono metrics pe clear nahi. "
+            f"mean IS={mean_is_win:g}/OOS={mean_oos_win:g}; "
+            f"risk-adj IS={risk_is_win:g}/OOS={risk_oos_win:g}; "
+            f"best compromise (rank-sum of mean+risk IS/OOS): "
+            f"trigger={best_compromise:g}."
+        )
+    emit(lines, verdict)
+    emit(lines, "")
+
+    # =====================================================================
+    # PART B — DATA EXTENSION PATHS (report only)
+    # =====================================================================
+    emit(lines, "===== PART B: DATA EXTENSION KA RASTA (report only — no download) =====")
+    emit(lines, "")
+    emit(lines, "1) CANDLES")
+    emit(lines, f"   folder: {(_BACKTEST / 'data_1m').resolve()}")
+    emit(lines, "   file format: {SYMBOL}_{resolution}_{YYYYMMDD}_{YYYYMMDD}.csv")
+    emit(lines, "   example: BTCUSD_1m_20250613_20260913.csv")
+    emit(lines, "   schema columns:")
     emit(
         lines,
-        f"(ORIGINAL mean/day basket-only without hedge: {orig_b_only['mean_day']:.4f})",
+        "     open_time_unix, open_time_utc, open_time_ist, "
+        "open, high, low, close, volume",
+    )
+    emit(lines, "   downloader: backtest/download_candles.py")
+    emit(
+        lines,
+        "   API: GET https://api.india.delta.exchange/v2/history/candles "
+        "(public, no HMAC)",
     )
     emit(lines, "")
-    checklist["PART 8 original comparison"] = "DONE"
-
-    # =====================================================================
-    # PART 9
-    # =====================================================================
-    emit(lines, "===== PART 9: COMPLETION CHECKLIST =====")
-    order = [
-        "PART 1 config echo",
-        "PART 2 headline",
-        "PART 3 out-of-sample split",
-        "PART 4 parameter stability",
-        "PART 5 distribution",
-        "PART 6 slippage",
-        "PART 7 hand audit",
-        "PART 8 original comparison",
-    ]
-    for k in order:
-        v = checklist.get(k, "SKIPPED — not reached")
-        emit(lines, f"  [{v}] {k}")
+    emit(lines, "2) OPTIONS TRADE PRINTS")
+    emit(lines, f"   raw zips folder: {(_BACKTEST / 'data_raw').resolve()}")
+    emit(lines, "   zip name examples: options-trades-monthly-BTC-YYYY-MM.csv.zip")
+    emit(lines, "                      options-trades-daily-BTC-YYYY-MM-DD.csv.zip")
+    emit(
+        lines,
+        f"   SQLite shards: {(_BACKTEST / 'cache' / 'options_trades').resolve()}",
+    )
+    emit(lines, "   shard name format: opt_trades_YYYY-MM.sqlite")
+    emit(lines, "   table: trades")
+    emit(lines, "     symbol TEXT NOT NULL")
+    emit(lines, "     ts REAL NOT NULL")
+    emit(lines, "     price REAL NOT NULL")
+    emit(lines, "     size REAL NOT NULL")
+    emit(lines, "     role INTEGER NOT NULL   -- 0=maker, 1=taker")
+    emit(lines, "     expiry TEXT NOT NULL")
+    emit(lines, "     opt_type TEXT NOT NULL")
+    emit(lines, "     strike REAL NOT NULL")
+    emit(lines, "")
+    emit(lines, "3) download_candles.py DATE RANGE")
+    emit(
+        lines,
+        "   CLI: --months (default=12), --symbol (default BTCUSD), "
+        "--resolution (default 1m)",
+    )
+    emit(lines, "   start: target_start = now_utc - months * (365.25/12) days")
+    emit(lines, "   end: now (only closed candles; forming bar skipped)")
+    emit(
+        lines,
+        "   set in: backtest/download_candles.py -> download(months=...) "
+        "+ _parse_args --months",
+    )
+    emit(lines, "   NOT a fixed calendar start/end — rolling lookback from run time.")
+    emit(lines, "")
+    emit(lines, "4) OPTIONS TRADES SOURCE")
+    emit(lines, "   Script: backtest/options_trades.py")
+    emit(
+        lines,
+        "   Role: reads existing backtest/data_raw/*.zip -> builds SQLite shards",
+    )
+    emit(
+        lines,
+        "   There is NO live Delta options-trade history downloader in this repo.",
+    )
+    emit(
+        lines,
+        "   Zip CSV columns used: product_symbol, timestamp, price, size, buyer_role",
+    )
+    emit(
+        lines,
+        "   Delta REST endpoint for options trade history download: "
+        "NONE in code (UNKNOWN source of zips)",
+    )
+    emit(lines, "")
+    emit(lines, "5) BIMAL — 2 SAAL AUR PURANA DATA (exact steps)")
+    emit(lines, "   A. Candles (~24+ months extra / ~36 months lookback):")
+    emit(lines, "      cd trading-bot")
+    emit(
+        lines,
+        "      python backtest/download_candles.py --months 36 "
+        "--symbol BTCUSD --resolution 1m",
+    )
+    emit(lines, "   B. Options prints:")
+    emit(
+        lines,
+        "      1. Obtain monthly/daily BTC options trade zip CSVs for older months",
+    )
+    emit(
+        lines,
+        "         (same naming as data_raw — Delta India export / account dump).",
+    )
+    emit(lines, "      2. Place zips into: backtest/data_raw/")
+    emit(lines, "      3. Rebuild shards (default rebuilds; use flag only to skip):")
+    emit(lines, "         python backtest/options_trades.py")
+    emit(lines, "         # optional: python backtest/options_trades.py --no-rebuild-cache")
+    emit(lines, "   C. Invalidate cycle cache then re-run studies:")
+    emit(lines, "      Remove or rename: backtest/cache/s001_income_cycles.pkl")
+    emit(lines, "      python backtest/s001_final_validation.py")
+    emit(lines, "")
+    emit(lines, "6) Delta India options history API depth")
+    emit(
+        lines,
+        "   Candles history API used in code: /v2/history/candles — "
+        "no explicit max-lookback documented in repo.",
+    )
+    emit(lines, "   Options trade prints history API: not implemented in repo.")
+    emit(lines, "   Stated limit in code/docs: UNKNOWN")
     emit(lines, "")
     emit(lines, "DONE.")
 
