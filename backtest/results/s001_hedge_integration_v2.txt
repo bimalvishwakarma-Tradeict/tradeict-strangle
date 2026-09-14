@@ -1,0 +1,72 @@
+S001 HEDGE INTEGRATION v2 — live config, per-cycle combined
+====================================================================================================
+
+LIVE CONFIG (trading_bot.db confirmed): roll_dte=3 hard_dte=2 min_hold=10 min_hedge_dte=6 qty=4/leg month_1
+PRIOR RUN (v1) used min_hedge_dte=15 (WRONG — code/default/engine_measure proxy). Live is 6.
+
+----- min_hedge_dte impact on expiry selection -----
+Calendar days where month_1 expiry pick differs (min_dte 15 vs 6): 126 / 458 days with a resolvable pick.
+
+===== HEDGE CYCLES (live config, prints only) =====
+status             entry        exit         expiry        eDTE     atm    entry$     exit$  days      pnl$   bleed/d
+------------------------------------------------------------------------------------------------------------------------
+OK                 2025-07-04   2025-07-22   2025-07-25      21  109000   27.7320   33.5640    18    5.8320   -0.3240  ok
+OK                 2025-08-02   2025-08-26   2025-08-29      27  114000   33.2920   18.2240    24  -15.0680    0.6278  ok
+OK                 2025-08-26   2025-09-23   2025-09-26      31  110000   35.2800   14.4680    28  -20.8120    0.7433  ok
+OK                 2025-09-25   2025-10-28   2025-10-31      36  112000   34.9584   14.3920    33  -20.5664    0.6232  ok
+PRINT_UNAVAILABLE  2025-10-28   2025-11-25   2025-11-28      31  114000   40.2400       N/A   N/A       N/A       N/A  exit prints unavailable ATM=114000 exp=2025-11-28 on 2025-11-25
+PRINT_UNAVAILABLE  2025-12-03   2025-12-23   2025-12-26      23   93000   34.8800       N/A   N/A       N/A       N/A  exit prints unavailable ATM=93000 exp=2025-12-26 on 2025-12-23
+OK                 2025-12-29   2026-01-27   2026-01-30      32   90000   34.0960   10.4280    29  -23.6680    0.8161  ok
+OK                 2026-01-27   2026-02-24   2026-02-27      31   88000   29.4200  101.0760    28   71.6560   -2.5591  ok
+PRINT_UNAVAILABLE  2026-02-24   2026-03-24   2026-03-27      31   63000   32.4760       N/A   N/A       N/A       N/A  exit prints unavailable ATM=63000 exp=2026-03-27 on 2026-03-24
+OK                 2026-03-25   2026-04-21   2026-04-24      30   71000   31.8280   20.7200    27  -11.1080    0.4114  ok
+OK                 2026-04-26   2026-05-26   2026-05-29      33   78000   29.0080    7.3240    30  -21.6840    0.7228  ok
+PRINT_UNAVAILABLE  2026-05-26   2026-06-23   2026-06-26      31   77000   23.2360       N/A   N/A       N/A       N/A  exit prints unavailable ATM=77000 exp=2026-06-26 on 2026-06-23
+PRINT_UNAVAILABLE  2026-06-26   2026-07-28   2026-07-31      35   60000   25.9236       N/A   N/A       N/A       N/A  exit prints unavailable ATM=60000 exp=2026-07-31 on 2026-07-28
+PRINT_UNAVAILABLE  2026-07-29   2026-08-25   2026-08-28      30     N/A       N/A       N/A   N/A       N/A       N/A  no ATM prints for exp=2026-08-28 in [2026-07-29,2026-08-25)
+PRINT_UNAVAILABLE  2026-08-26   2026-09-22   2026-09-25      30     N/A       N/A       N/A   N/A       N/A       N/A  no ATM prints for exp=2026-09-25 in [2026-08-26,2026-09-22)
+
+OK=8  PRINT_UNAVAILABLE=7  listed=15
+bleed/day mean=0.132693 median=0.625529 min=-2.559143 max=0.816138
+
+===== FIX A: COMBINED PER HEDGE CYCLE (no day-smear) =====
+entry        exit         expiry        days  eDTE n_bsk   bsk_tot   hdg_pnl     bleed  combined
+--------------------------------------------------------------------------------------------------------------
+2025-07-04   2025-07-22   2025-07-25      18    21     9    6.7153    5.8320   -5.8320   12.5473
+2025-08-02   2025-08-26   2025-08-29      24    27    15   16.5263  -15.0680   15.0680    1.4583
+2025-08-26   2025-09-23   2025-09-26      28    31    11    9.8967  -20.8120   20.8120  -10.9153
+2025-09-25   2025-10-28   2025-10-31      33    36    25   31.9563  -20.5664   20.5664   11.3899
+2025-12-29   2026-01-27   2026-01-30      29    32    27   20.7389  -23.6680   23.6680   -2.9291
+2026-01-27   2026-02-24   2026-02-27      28    31    25   16.1661   71.6560  -71.6560   87.8221
+2026-03-25   2026-04-21   2026-04-24      27    30    25   18.7791  -11.1080   11.1080    7.6711
+2026-04-26   2026-05-26   2026-05-29      30    33    28   15.5825  -21.6840   21.6840   -6.1015
+
+effective independent n = 8  (one observation per OK hedge cycle; NOT 165 days)
+COMBINED per hedge-cycle: n=8  mean=12.6178  median=4.5647  min=-10.9153  max=87.8221  ci_lo=-2.5356  ci_hi=36.0909
+COMBINED per day (cycle_combined / days_held): n=8  mean=0.4787  median=0.1724  min=-0.3898  max=3.1365  ci_lo=-0.0793  ci_hi=1.3165
+Definition: combined = basket_total - bleed_lump, bleed_lump = entry_prem - exit_prem = -hedge_realized_PnL.
+
+===== FIX B: SENSITIVITY =====
+Crash-winner hedge cycle excluded in (3): entry=2026-01-27 exit=2026-02-24 bleed/day=-2.5591 pnl=71.6560
+
+scenario                                                   n       mean      ci_lo      ci_hi
+-----------------------------------------------------------------------------------------------
+(1) actual realized hedge P&L                              8    12.6178    -2.5356    36.0909
+(2) median bleed/day x days_held (drop crash skew)         8     0.0777    -3.3958     4.0686
+(3) actual, crash-winner hedge cycle removed               7     1.8744    -4.3496     7.8903
+median bleed/day used in (2) = 0.625529
+
+===== FIX C: MISSING CYCLES BIAS (realized vol) =====
+OK periods mean daily log-return std: 0.019752 (n=8)
+PRINT_UNAVAILABLE periods mean daily log-return std: 0.020812 (n=7)
+Missing cycles systematically: no difference (unavailable/OK vol ratio=1.054).
+
+===== FIX D: ROLL / MIN_DTE SENSITIVITY =====
+min_dte  roll  hard  n_ok  bleed_mean   bleed_med   comb_mean  comb_ci_lo
+-------------------------------------------------------------------------------------
+      6     3     2     8    0.132693    0.625529     12.6178     -2.5356
+      6     5     4     8    0.691225    0.697367     -1.7407     -7.4226
+      6    10     9     8    0.499878    0.469658      4.5225     -2.4076
+     15     3     2     8    0.132693    0.625529     12.6178     -2.5356
+
+END v2
