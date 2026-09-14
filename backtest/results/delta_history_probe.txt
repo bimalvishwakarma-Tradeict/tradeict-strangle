@@ -1,0 +1,122 @@
+DELTA INDIA HISTORY CANDLES PROBE
+==========================================================================================
+endpoint: GET https://api.india.delta.exchange/v2/history/candles
+docs note: max 2000 candles/response; MARK: for mark price; states=expired on /v2/products
+sleep between requests: 0.75s
+
+===== PROBE 1: AUTH =====
+request (no auth): params={'symbol': 'BTCUSD', 'resolution': '1h', 'start': 1789382054, 'end': 1789400054}
+status=200  rate-ish headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'HR-1lbjse70zF9RgRmOT8rc1tTjAte6dt3i59c70swZU4FEf0AKu8w=='}
+body sample: {"success": true, "result": [{"close": 78551.0, "high": 78654.5, "low": 78265.0, "open": 78479.0, "time": 1789398000, "volume": 689611.0}, {"close": 78488.0, "high": 78674.0, "low": 78133.0, "open": 78146.5, "time": 1789394400, "volume": 1250375.0}], "_result_len": 5, "_first_time": 1789398000, "_last_time": 1789383600}
+VERDICT: public (no API key) works = True  n_candles=5
+
+===== PROBE 2: RESOLUTIONS (BTCUSD, ~1 day window) =====
+window start=1789310054 (2026-09-13 14:34:14 UTC) end=1789396454 (2026-09-14 14:34:14 UTC)
+  1m   OK status=200 n=1440 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '9DKDVE9eT78l4Jf4CXyF0SOafXPk1Wr-aHSzv0YYPE69ZYyPNBg6jA=='} sample={"success": true, "result": [{"close": 78563.0, "high": 78645.5, "low": 78558.0, "open": 78604.0, "time": 1789396440, "volume": 13325.0}], "_result_len": 1440, "_first_time": 1789396440, "_last_time": 1789310100}
+  3m   OK status=200 n=480 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'cqxU-SwBLAvvcKPz6eyT9xqh7vSfPawDNLPm7-jHC_VvnvdYPei-1g=='} sample={"success": true, "result": [{"close": 78465.0, "high": 78645.5, "low": 78465.0, "open": 78617.0, "time": 1789396380, "volume": 50271.0}], "_result_len": 480, "_first_time": 1789396380, "_last_time": 1789310160}
+  5m   OK status=200 n=288 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'sQyQ0cbXuLz2BeVaX9yk-ncm8te2dxr-Xmvm4B7fIJwGx16UmpwDqA=='} sample={"success": true, "result": [{"close": 78563.0, "high": 78674.0, "low": 78344.0, "open": 78369.5, "time": 1789396200, "volume": 154239.0}], "_result_len": 288, "_first_time": 1789396200, "_last_time": 1789310100}
+  15m  OK status=200 n=96 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'rNRCbbdGPkBXn8hWyJXvtUj6tdWyBoY9bwGd11m1Ts4L_oHAukU2sg=='} sample={"success": true, "result": [{"close": 78398.0, "high": 78674.0, "low": 78303.0, "open": 78369.5, "time": 1789396200, "volume": 303729.0}], "_result_len": 96, "_first_time": 1789396200, "_last_time": 1789310700}
+  30m  OK status=200 n=48 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '7OhnFhGuSqIpesmhb_oKhHDilqQTDZCYgc4aTNg0FOYESKhsS7J01w=='} sample={"success": true, "result": [{"close": 78488.0, "high": 78674.0, "low": 78303.0, "open": 78369.5, "time": 1789396200, "volume": 478658.0}], "_result_len": 48, "_first_time": 1789396200, "_last_time": 1789311600}
+  1h   OK status=200 n=24 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'PEjAdgsDX-d2z2UD6SnGicDc-1LiVSuXT6LJSpN6j91ydFPFCU06eA=='} sample={"success": true, "result": [{"close": 78488.0, "high": 78674.0, "low": 78133.0, "open": 78146.5, "time": 1789394400, "volume": 1250375.0}], "_result_len": 24, "_first_time": 1789394400, "_last_time": 1789311600}
+  2h   OK status=200 n=12 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'EJ7meAfTtgm8G0p4AgID4GeNP3psAREggg9YkpV7o50bp2W56yzlFQ=='} sample={"success": true, "result": [{"close": 78551.0, "high": 78674.0, "low": 78133.0, "open": 78146.5, "time": 1789394400, "volume": 1939986.0}], "_result_len": 12, "_first_time": 1789394400, "_last_time": 1789315200}
+  4h   OK status=200 n=6 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '6efU-gs2h0KU5V4X6kvk9W8RoTNlBzoY2SyfCja7DXb85SicZsT9eg=='} sample={"success": true, "result": [{"close": 78551.0, "high": 78674.0, "low": 77449.0, "open": 77751.0, "time": 1789387200, "volume": 4326754.0}], "_result_len": 6, "_first_time": 1789387200, "_last_time": 1789315200}
+  6h   OK status=200 n=4 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '-Nhb4_mLGn4WfbXmcArFNCpwkIvToFA-1PjK6wH30G6HWLGOBKk1KA=='} sample={"success": true, "result": [{"close": 78644.0, "high": 78859.5, "low": 77449.0, "open": 77751.0, "time": 1789387200, "volume": 4923004.0}], "_result_len": 4, "_first_time": 1789387200, "_last_time": 1789322400}
+  12h  FAIL status=400 n=0 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'NcyowYF96MGBJ5DYclIrJ78lNI52jRcvJll6zaqsXsocteSpBadTmg=='} sample={"error": {"code": "bad_schema", "context": {"schema_errors": [{"code": "validation_error", "message": "Allowed values are 5s,1m,3m,5m,15m,30m,1h,2h,4h,6h,1d,1w", "param": "resolution"}]}}, "success": false}
+       error field: {'code': 'bad_schema', 'context': {'schema_errors': [{'code': 'validation_error', 'message': 'Allowed values are 5s,1m,3m,5m,15m,30m,1h,2h,4h,6h,1d,1w', 'param': 'resolution'}]}}
+  1d   OK status=200 n=1 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '7V2uMGaFR2iPrB7bLZglgC2GfF7nFwlsvP4aTqBwVxO1VXL6ILVc_w=='} sample={"success": true, "result": [{"close": 78647.5, "high": 78859.5, "low": 76360.5, "open": 76822.0, "time": 1789344000, "volume": 10802902.0}], "_result_len": 1, "_first_time": 1789344000, "_last_time": 1789344000}
+  1w   OK status=200 n=1 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'kEhZTloWbWxSf3gie9-C4AZTKYoHfer8X9YJvb2VO8tuLjE8aS7H6A=='} sample={"success": true, "result": [{"close": 78644.0, "high": 78859.5, "low": 76360.5, "open": 76822.0, "time": 1789344000, "volume": 10802982.0}], "_result_len": 1, "_first_time": 1789344000, "_last_time": 1789344000}
+WORKING: ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '1d', '1w']
+NOT WORKING / empty: ['12h']
+
+===== PROBE 3: OPTION SYMBOLS =====
+chosen from cache: symbol=C-BTC-125000-290825 expiry=2025-08-29
+trade ts range in shard: 2025-07-01 00:30:10 UTC -> 2025-07-31 23:46:40 UTC
+probe day window: 2025-07-16 00:00:00 UTC -> 2025-07-16 23:59:59 UTC
+--- (a) plain symbol: symbol=C-BTC-125000-290825 ---
+params={'symbol': 'C-BTC-125000-290825', 'resolution': '1h', 'start': 1752624000, 'end': 1752710399}
+status=200 n=20 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '_op_hZfOzCo5ZeJ4NLGENVEt4kSt0GcI4Gd2G04zKJYZkjA6eYVg2Q=='}
+body sample: {"success": true, "result": [{"close": 4194.0, "high": 4194.0, "low": 4194.0, "open": 4194.0, "time": 1752706800, "volume": 0}, {"close": 4194.0, "high": 4194.0, "low": 4194.0, "open": 4194.0, "time": 1752703200, "volume": 0}, {"close": 4194.0, "high": 4194.0, "low": 4194.0, "open": 4194.0, "time": 1752699600, "volume": 0}], "_result_len": 20, "_first_time": 1752706800, "_last_time": 1752638400}
+--- (b) MARK: prefix: symbol=MARK:C-BTC-125000-290825 ---
+params={'symbol': 'MARK:C-BTC-125000-290825', 'resolution': '1h', 'start': 1752624000, 'end': 1752710399}
+status=200 n=24 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'qV46g4hcCvvcBPu1bIF_lgow627cI9RXjy97HTnawXXveua1lO4Ycw=='}
+body sample: {"success": true, "result": [{"close": 3897.84489995, "high": 3966.86902123, "low": 3760.90832969, "open": 3864.73175123, "time": 1752706800, "volume": null}, {"close": 3864.73175123, "high": 4223.06710336, "low": 3847.72758563, "open": 4141.57652693, "time": 1752703200, "volume": null}, {"close": 4141.57652693, "high": 4466.66184886, "low": 4113.08148452, "open": 4403.11606828, "time": 1752699600, "volume": null}], "_result_len": 24, "_first_time": 1752706800, "_last_time": 1752624000}
+--- MARK 1m continuity check (MARK:C-BTC-125000-290825) ---
+params={'symbol': 'MARK:C-BTC-125000-290825', 'resolution': '1m', 'start': 1752624000, 'end': 1752710399}
+status=200 n_1m=1440 (1440 expected if continuous full day)
+headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'oXbnYGH3lFyQB0UxFrdkIK4zg0tJU8ZinJgljMncEUw4WPhBgtvZLw=='}
+body sample: {"success": true, "result": [{"close": 3897.84489995, "high": 3923.53996525, "low": 3897.84489995, "open": 3923.53996525, "time": 1752710340, "volume": null}, {"close": 3923.53996525, "high": 3934.19223749, "low": 3923.53996525, "open": 3930.26489122, "time": 1752710280, "volume": null}], "_result_len": 1440, "_first_time": 1752710340, "_last_time": 1752624000}
+time span first->last: 2025-07-16 23:59:00 UTC -> 2025-07-16 00:00:00 UTC
+gap_sec min/median/max: -60/-60/-60
+candles with volume==0: 1440/1440
+CONTINUOUS? n=1440 == 1440 → True (note: API max may cap below 1440; docs say max 2000)
+
+===== PROBE 4: HISTORY DEPTH =====
+--- BTCUSD: try 1y..8y ago (1 day of 1h candles each) ---
+years_ago=1 window=2025-09-13 16:34:14 UTC -> 2025-09-14 16:34:14 UTC
+  status=200 n=24 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'zFtOIhobX7XNTbS9wmmyyCbihsM9AY5nDSwOM96BwKTYWvujKJcUHQ=='}
+  sample: {"success": true, "result": [{"close": 115434.0, "high": 115511.5, "low": 115143.5, "open": 115174.5, "time": 1757865600, "volume": 120338.0}, {"close": 115176.0, "high": 115386.5, "low": 115143.5, "open": 115362.5, "time": 1757862000, "volume": 90516.0}], "_result_len": 24, "_first_time": 1757865600, "_last_time": 1757782800}
+years_ago=2 window=2024-09-13 16:34:14 UTC -> 2024-09-14 16:34:14 UTC
+  status=200 n=24 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'MvMYJEm0VhLkFU--de9rD1R5JJYX5HQ8d6ErUK-nW1sRvBTfiYIzjQ=='}
+  sample: {"success": true, "result": [{"close": 59969.5, "high": 59977.5, "low": 59822.5, "open": 59863.5, "time": 1726329600, "volume": 125865.0}, {"close": 59870.0, "high": 59947.5, "low": 59809.5, "open": 59906.5, "time": 1726326000, "volume": 115548.0}], "_result_len": 24, "_first_time": 1726329600, "_last_time": 1726246800}
+years_ago=3 window=2023-09-14 16:34:14 UTC -> 2023-09-15 16:34:14 UTC
+  status=200 n=0 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '9JJJfP7k2YN1D0L-Du2Ag6omqV7dQkc3VvzeiEy4M64DrMo25FssKA=='}
+  sample: {"success": true, "result": [], "_result_len": 0}
+years_ago=4 window=2022-09-14 16:34:14 UTC -> 2022-09-15 16:34:14 UTC
+  status=200 n=0 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'Ll3uIAZZjY_YexbBl88PQdch6q9WEdltTmyb2RYQZllq4QqaCMSzjw=='}
+  sample: {"success": true, "result": [], "_result_len": 0}
+years_ago=5 window=2021-09-14 16:34:14 UTC -> 2021-09-15 16:34:14 UTC
+  status=200 n=0 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'j7P_pn_ZtQE7SnDHK85YvhZ1KXBml4vsOUp45RQGenUeFSQ2kJpKkw=='}
+  sample: {"success": true, "result": [], "_result_len": 0}
+years_ago=6 window=2020-09-14 16:34:14 UTC -> 2020-09-15 16:34:14 UTC
+  status=200 n=0 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'wBFRHpMoB_5bGe6lFZykRFNQNrsALnS_-lH1bVvPBZ02xshMwy4boA=='}
+  sample: {"success": true, "result": [], "_result_len": 0}
+years_ago=7 window=2019-09-15 16:34:14 UTC -> 2019-09-16 16:34:14 UTC
+  status=200 n=0 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'YrF3M2O21HSstbepx_N8gLk6SM2q5fdtlsFHz-uqZCIJ-gxzIAfVag=='}
+  sample: {"success": true, "result": [], "_result_len": 0}
+years_ago=8 window=2018-09-15 16:34:14 UTC -> 2018-09-16 16:34:14 UTC
+  status=200 n=0 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'flqOIUnilVeNpI304KeJ3OH3WRcBFcySbKU-HRh8HNrjfL-abgmWBg=='}
+  sample: {"success": true, "result": [], "_result_len": 0}
+years_ago=10 (1d) window=2016-09-15 16:34:14 UTC -> 2016-09-16 16:34:14 UTC
+  status=200 n=0 sample={"success": true, "result": [], "_result_len": 0}
+BTCUSD year-tests with data: [1, 2]
+BTCUSD oldest candle time among probes (approx): 2024-09-14 16:00:00 UTC
+--- EXPIRED OPTION: same depth question (CRITICAL) ---
+during-life MARK:C-BTC-125000-290825 status=200 n=24 sample={"success": true, "result": [{"close": 3897.84489995, "high": 3966.86902123, "low": 3760.90832969, "open": 3864.73175123, "time": 1752706800, "volume": null}, {"close": 3864.73175123, "high": 4223.06710336, "low": 3847.72758563, "open": 4141.57652693, "time": 1752703200, "volume": null}], "_result_len": 24, "_first_time": 1752706800, "_last_time": 1752624000}
+during-life plain C-BTC-125000-290825 status=200 n=20 sample={"success": true, "result": [{"close": 4194.0, "high": 4194.0, "low": 4194.0, "open": 4194.0, "time": 1752706800, "volume": 0}, {"close": 4194.0, "high": 4194.0, "low": 4194.0, "open": 4194.0, "time": 1752703200, "volume": 0}], "_result_len": 20, "_first_time": 1752706800, "_last_time": 1752638400}
+AFTER expiry (2025-08-31 00:00:00 UTC) symbol=C-BTC-125000-290825 status=200 n=0 sample={"success": true, "result": [], "_result_len": 0}
+AFTER expiry (2025-08-31 00:00:00 UTC) symbol=MARK:C-BTC-125000-290825 status=200 n=0 sample={"success": true, "result": [], "_result_len": 0}
+1y BEFORE first trade symbol=C-BTC-125000-290825 status=200 n=0 sample={"success": true, "result": [], "_result_len": 0}
+1y BEFORE first trade symbol=MARK:C-BTC-125000-290825 status=200 n=0 sample={"success": true, "result": [], "_result_len": 0}
+CRITICAL Q: expired contract historical candles available? See during-life vs after-expiry counts above.
+
+===== PROBE 5: LIMITS =====
+request 3d of 1m (~4320 bars expected if uncapped): params={'symbol': 'BTCUSD', 'resolution': '1m', 'start': 1789140854, 'end': 1789400054}
+status=200 n_returned=4000 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'bMnTgch5AmSSLoJBUnJPps97GxsUzONiZPELWTIzeaJGOrl43YwnKg=='}
+sample: {"success": true, "result": [{"close": 78497.0, "high": 78538.0, "low": 78480.5, "open": 78499.0, "time": 1789400040, "volume": 10140.0}, {"close": 78498.5, "high": 78503.5, "low": 78429.0, "open": 78466.5, "time": 1789399980, "volume": 14189.0}], "_result_len": 4000, "_first_time": 1789400040, "_last_time": 1789160100}
+EMPIRICAL MAX (this call): 4000  (docs claim 2000)
+rate probe: 5 sequential BTCUSD 1h calls, sleep=0.75s
+  req#1 status=200 n=1 latency_s=0.186 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '7fjywW_ed9Nv1HPDia01TK3qHdoazJxW6o8P_tclhr_wymCwVR_g7A=='}
+  req#2 status=200 n=1 latency_s=0.189 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '0TRKD7lQ-DsD2mMiWK-sW9bCEiOwviFWVUSqCcFQEWRqAG_ZL1vpBw=='}
+  req#3 status=200 n=1 latency_s=0.178 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'coz4zb5WVgJEOFGqxBKqH1ODzzcfBP0QweHGeNr4ATWsEgSmAsUXpw=='}
+  req#4 status=200 n=1 latency_s=0.184 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': '-NXiXunMX2VemzvgzaJxxrqY47eaDeenyPYkbEEDP1_XuH_nRtgYvw=='}
+  req#5 status=200 n=1 latency_s=0.183 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'aOJgz9FkMrjk31jDBBBuDWFhkYhx1DS3XFDAV673c-PyQ4G6mKUgkA=='}
+SAFE RATE (conservative from this probe): ~1 req / 0.75s (no 429 seen). If headers empty, treat docs/unknown.
+
+===== PROBE 6: EXPIRED SYMBOLS LIST =====
+--- products try #1 params={'contract_types': 'call_options,put_options', 'states': 'expired', 'underlying_asset_symbols': 'BTC', 'page_size': 5} ---
+status=200 n_in_page=5 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'KeaNVBWGLd6tUyL5IyvolN8sWNbhlvAiL67v5qxowCY4h_7fhIZCFQ=='}
+sample symbols: ['C-BTC-75400-140926|state=expired|exp=2026-09-14T12:00:00Z', 'P-BTC-75400-140926|state=expired|exp=2026-09-14T12:00:00Z', 'C-BTC-75800-140926|state=expired|exp=2026-09-14T12:00:00Z', 'P-BTC-75800-140926|state=expired|exp=2026-09-14T12:00:00Z', 'C-BTC-75400-130926|state=expired|exp=2026-09-13T12:00:00Z']
+body sample: {"meta": {"after": "g3QAAAACdwJpZGIAAlQfdwpjcmVhdGVkX2F0dAAAAA13C21pY3Jvc2Vjb25kaAJhAGEAdwZzZWNvbmRhCncIY2FsZW5kYXJ3E0VsaXhpci5DYWxlbmRhci5JU093BW1vbnRoYQl3Cl9fc3RydWN0X193D0VsaXhpci5EYXRlVGltZXcKdXRjX29mZnNldGEAdwpzdGRfb2Zmc2V0YQB3BHllYXJiAAAH6ncEaG91cmEJdwNkYXlhDXcJem9uZV9hYmJybQAAAANVVEN3Bm1pbnV0ZWEjdwl0aW1lX3pvbmVtAAAAB0V0Yy9VVEM=", "limit": 5, "before": null, "total_count": 10000}, "success": true, "result": [{"maintenance_margin_scaling_factor": "0.000001", "is_quanto": false, "contract_type": "call_options", "state": "expired", "underlying_asset": {"id": 13, "name": "Bitcoin", "networks": [], "symbol": "BTC", "precision": 8, "base_withdrawal_fee": "0", "interest_credit": false, "interest_slabs": null, "kyc_deposit_limit": "0", "kyc_withdrawal_limit": "0", "min_withdrawal_amount": "0", "minimum_precision": 4, "sort_priority": 1, "variable_withdrawal_fee": "0"}, "maintenance_margin": "0.25", "trading_status": "operational", "max_leverage_notional": "200000", "auction_finish_time": null, "maker_commission_rate": "0.0001", "impact_size": 200, "auction_start_time": "2026-09-13T12:00:13Z", "contract_value": "0.001", "taker_commission_rate": "0.0001", "spot_index": {"id": 14, "conf... [truncated, len=21747]
+meta: {"after": "g3QAAAACdwJpZGIAAlQfdwpjcmVhdGVkX2F0dAAAAA13C21pY3Jvc2Vjb25kaAJhAGEAdwZzZWNvbmRhCncIY2FsZW5kYXJ3E0VsaXhpci5DYWxlbmRhci5JU093BW1vbnRoYQl3Cl9fc3RydWN0X193D0VsaXhpci5EYXRlVGltZXcKdXRjX29mZnNldGEAdwpzdGRfb2Zmc2V0YQB3BHllYXJiAAAH6ncEaG91cmEJdwNkYXlhDXcJem9uZV9hYmJybQAAAANVVEN3Bm1pbnV0ZWEjdwl0aW1lX3pvbmVtAAAAB0V0Yy9VVEM=", "limit": 5, "before": null, "total_count": 10000}
+--- products try #2 params={'contract_types': 'call_options', 'states': 'expired,settled', 'underlying_asset_symbols': 'BTC', 'page_size': 5} ---
+status=200 n_in_page=5 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'd2TtjiNUHgHQm6q6pP6Hzg7x1XeNmuNU_Xasd8rSCtzWURRlcNKHUA=='}
+sample symbols: ['C-BTC-75400-140926|state=expired|exp=2026-09-14T12:00:00Z', 'C-BTC-75800-140926|state=expired|exp=2026-09-14T12:00:00Z', 'C-BTC-75400-130926|state=expired|exp=2026-09-13T12:00:00Z', 'C-BTC-80600-120926|state=expired|exp=2026-09-12T12:00:00Z', 'C-BTC-79800-140926|state=expired|exp=2026-09-14T12:00:00Z']
+body sample: {"meta": {"after": "g3QAAAACdwJpZGIAAlOCdwpjcmVhdGVkX2F0dAAAAA13C21pY3Jvc2Vjb25kaAJhAGEAdwZzZWNvbmRhDncIY2FsZW5kYXJ3E0VsaXhpci5DYWxlbmRhci5JU093BW1vbnRoYQl3Cl9fc3RydWN0X193D0VsaXhpci5EYXRlVGltZXcKdXRjX29mZnNldGEAdwpzdGRfb2Zmc2V0YQB3BHllYXJiAAAH6ncEaG91cmEOdwNkYXlhC3cJem9uZV9hYmJybQAAAANVVEN3Bm1pbnV0ZWEPdwl0aW1lX3pvbmVtAAAAB0V0Yy9VVEM=", "limit": 5, "before": null, "total_count": 10000}, "success": true, "result": [{"contract_unit_currency": "BTC", "maintenance_margin": "0.25", "liquidation_penalty_factor": "0.5", "state": "expired", "short_description": "BTC  Call", "impact_size": 200, "basis_factor_max_limit": "10.95", "maker_commission_rate": "0.0001", "annualized_funding": "10.95", "maintenance_margin_scaling_factor": "0.000001", "insurance_fund_margin_contribution": "5", "auction_finish_time": null, "contract_type": "call_options", "strike_price": "75400", "settling_asset": {"id": 14, "name": "US Dollar", "networks": [{"network": "INR_BANKING", "base_withdrawal_fee": "0", "min_withdrawal_amount": "0.000000000000000000", "variable_withdrawal_fee": "0", "allowed_deposit_groups": null, "deposit_status": "enabled", "memo_required": false, "min_deposit_amount": "0.000000000000000000... [truncated, len=21752]
+meta: {"after": "g3QAAAACdwJpZGIAAlOCdwpjcmVhdGVkX2F0dAAAAA13C21pY3Jvc2Vjb25kaAJhAGEAdwZzZWNvbmRhDncIY2FsZW5kYXJ3E0VsaXhpci5DYWxlbmRhci5JU093BW1vbnRoYQl3Cl9fc3RydWN0X193D0VsaXhpci5EYXRlVGltZXcKdXRjX29mZnNldGEAdwpzdGRfb2Zmc2V0YQB3BHllYXJiAAAH6ncEaG91cmEOdwNkYXlhC3cJem9uZV9hYmJybQAAAANVVEN3Bm1pbnV0ZWEPdwl0aW1lX3pvbmVtAAAAB0V0Yy9VVEM=", "limit": 5, "before": null, "total_count": 10000}
+--- products try #3 params={'contract_types': 'call_options,put_options', 'states': 'expired', 'page_size': 5} ---
+status=200 n_in_page=5 headers={'x-amz-cf-pop': 'DEL51-P1', 'x-amz-cf-id': 'EsCykEU1Z8QexiI0tzMAXUGoFqidsk0niKSvPpGN2UuCpYqbAa-Y_g=='}
+sample symbols: ['C-XAUT-4230-140926|state=expired|exp=2026-09-14T16:00:00Z', 'P-XAUT-4230-140926|state=expired|exp=2026-09-14T16:00:00Z', 'C-XAUT-4240-140926|state=expired|exp=2026-09-14T16:00:00Z', 'P-XAUT-4240-140926|state=expired|exp=2026-09-14T16:00:00Z', 'C-XAUT-4250-140926|state=expired|exp=2026-09-14T16:00:00Z']
+body sample: {"meta": {"after": "g3QAAAACdwJpZGIAAlS-dwpjcmVhdGVkX2F0dAAAAA13C21pY3Jvc2Vjb25kaAJhAGEAdwZzZWNvbmRhFncIY2FsZW5kYXJ3E0VsaXhpci5DYWxlbmRhci5JU093BW1vbnRoYQl3Cl9fc3RydWN0X193D0VsaXhpci5EYXRlVGltZXcKdXRjX29mZnNldGEAdwpzdGRfb2Zmc2V0YQB3BHllYXJiAAAH6ncEaG91cmEJdwNkYXlhDncJem9uZV9hYmJybQAAAANVVEN3Bm1pbnV0ZWEjdwl0aW1lX3pvbmVtAAAAB0V0Yy9VVEM=", "limit": 5, "before": null, "total_count": 10000}, "success": true, "result": [{"maintenance_margin_scaling_factor": "0.0000025", "is_quanto": false, "contract_type": "call_options", "state": "expired", "maintenance_margin": "0.5", "trading_status": "operational", "impact_size": 200, "max_leverage_notional": "100000", "auction_finish_time": null, "maker_commission_rate": "0.0001", "auction_start_time": "2026-09-14T13:10:22Z", "contract_value": "0.001", "taker_commission_rate": "0.0001", "spot_index": {"id": 435, "config": {"price_alert_enabled": true, "price_alert_group": "gold_token", "quoting_asset": "USD", "service_id": 17, "underlying_asset": "XAUT"}, "description": "XAUT token spot price index quoted in USD", "symbol": ".DEXAUTUSD", "constituent_exchanges": [], "constituent_indices": {"expression": "${e1} * ${e2}", "indices": {"e1": ".DEXAUTUSD... [truncated, len=21734]
+meta: {"after": "g3QAAAACdwJpZGIAAlS-dwpjcmVhdGVkX2F0dAAAAA13C21pY3Jvc2Vjb25kaAJhAGEAdwZzZWNvbmRhFncIY2FsZW5kYXJ3E0VsaXhpci5DYWxlbmRhci5JU093BW1vbnRoYQl3Cl9fc3RydWN0X193D0VsaXhpci5EYXRlVGltZXcKdXRjX29mZnNldGEAdwpzdGRfb2Zmc2V0YQB3BHllYXJiAAAH6ncEaG91cmEJdwNkYXlhDncJem9uZV9hYmJybQAAAANVVEN3Bm1pbnV0ZWEjdwl0aW1lX3pvbmVtAAAAB0V0Yy9VVEM=", "limit": 5, "before": null, "total_count": 10000}
+
+DONE.
