@@ -1,0 +1,142 @@
+S001 WING ROLL — live path report + OFF/ON wing-distance compare
+====================================================================================================
+FIXED: dte2 B_only trig70 maker B25 qty=8 entry=11:00 IST  HEDGE=OFF
+Configs: wing ∈ {3000,2000,1500,1000} × roll OFF/ON = 8
+
+===== PART A: LIVE wing_roll CODE READ (no changes) =====
+
+1) plan.wing_roll TRUE kab hota hai?
+   Adj B planner — adjustment.py:3150-3185:
+     wing_roll_with_short_enabled (default True) AND open same-side wing
+     AND new short would CROSS wing:
+       call: new_k >= wing_k  (lines 3166-3168)
+       put:  new_k <= wing_k  (lines 3167-3169)
+   Adj A path — logic.py:1532-1572 (same cross test; skip clamp when roll on).
+
+2) Naya wing strike kaise chuna jata hai?
+   adjustment.py:1634-1662 → resolve_wing_strikes (wing_select.py)
+   Inputs: NEW short_call_k / short_put_k after adj (plan.new_strike on
+   triggered side), mode=wing_strike_mode (default 'points'),
+   points_away=wing_points_away (default 2000).
+   Points pick: call = nearest strike >= short+points; put <= short-points;
+   else chain_end farthest OTM (wing_select.py:148-196).
+   Only SAME-SIDE pick used: wing_call if triggered call else wing_put
+   (adjustment.py:1658-1662).
+
+3) Wing qty on roll?
+   Old wing close: quantity=wing_leg.quantity or new_qty
+   (adjustment.py:1808-1810).
+   New wing buy: wing_qty = int(new_qty)  (adjustment.py:1847-1859).
+   Other wing later cut to new_qty via _reduce_open_wings_to_qty
+   (adjustment.py:2374-2391; rolled wing id skipped).
+
+4) wing_roll_active → FALSE kab?
+   NOTE: user cited ~line 1395; current file sets False at
+   adjustment.py:1588-1593 — plan.wing_roll was True but no open
+   same-side wing leg (wing_call/wing_put) found → skip roll,
+   continue short-only adjustment.
+
+5) wing_roll=True around former ~1720?
+   Current line 1720 is legacy SL cancel (not wing_roll).
+   wing_roll=True on AdjustmentResult at adjustment.py:1918 —
+   WING_ROLL_ABORT after old wing closed but NEW wing entry failed;
+   triggered side left flat (is_partial=True). Also returned on
+   success path as wing_roll=wing_roll_active (e.g. :2186, :2949).
+
+===== PART B: BACKTEST wing_roll IMPLEMENTATION =====
+WING_ROLL_OFF: qty decrease → SELL_PARTIAL wings only (no re-strike).
+WING_ROLL_ON: if new short crosses same-side wing → close that wing,
+  pick new wing via pick_wing_strikes(=points resolve), buy at new_qty;
+  other wing SELL_PARTIAL to new_qty. Comments cite live lines.
+
+===== PART C: COMPARE (8 configs) =====
+
+----- wing=3000  WING_ROLL_OFF  n=300  wing_roll_events=0 -----
+  mean/day=0.6175  ci_lo=0.5262  ci_hi=0.7089
+  worst=-2.6454  mdd=2.6454  net_credit/cycle=5.7850
+  post-adj theo>entry: 31.0%  avg_extra=+3.2683  max_extra=+17.7265
+  entry (n=300): call_gap avg=2622.3 worst(min)=600.0 | put_gap avg=2730.7 worst(min)=400.0 | theo avg=20.8680 worst(max)=25.9920
+  after_adj_1 (n=300): call_gap avg=3128.7 worst(min)=1200.0 | put_gap avg=3227.0 worst(min)=1200.0 | theo avg=19.5410 worst(max)=37.1326
+  after_adj_2 (n=300): call_gap avg=3615.0 worst(min)=1600.0 | put_gap avg=3638.3 worst(min)=1200.0 | theo avg=15.0961 worst(max)=27.1069
+  force_exit (n=299): call_gap avg=3621.7 worst(min)=1600.0 | put_gap avg=3640.5 worst(min)=1200.0 | theo avg=15.1123 worst(max)=27.1069
+
+----- wing=3000  WING_ROLL_ON  n=300  wing_roll_events=0 -----
+  mean/day=0.6175  ci_lo=0.5254  ci_hi=0.7098
+  worst=-2.6454  mdd=2.6454  net_credit/cycle=5.7850
+  post-adj theo>entry: 31.0%  avg_extra=+3.2683  max_extra=+17.7265
+  entry (n=300): call_gap avg=2622.3 worst(min)=600.0 | put_gap avg=2730.7 worst(min)=400.0 | theo avg=20.8680 worst(max)=25.9920
+  after_adj_1 (n=300): call_gap avg=3128.7 worst(min)=1200.0 | put_gap avg=3227.0 worst(min)=1200.0 | theo avg=19.5410 worst(max)=37.1326
+  after_adj_2 (n=300): call_gap avg=3615.0 worst(min)=1600.0 | put_gap avg=3638.3 worst(min)=1200.0 | theo avg=15.0961 worst(max)=27.1069
+  force_exit (n=299): call_gap avg=3621.7 worst(min)=1600.0 | put_gap avg=3640.5 worst(min)=1200.0 | theo avg=15.1123 worst(max)=27.1069
+
+----- wing=2000  WING_ROLL_OFF  n=300  wing_roll_events=0 -----
+  mean/day=0.5905  ci_lo=0.4961  ci_hi=0.6829
+  worst=-3.7110  mdd=3.8674  net_credit/cycle=5.0854
+  post-adj theo>entry: 61.0%  avg_extra=+3.6481  max_extra=+19.1180
+  entry (n=300): call_gap avg=1950.3 worst(min)=600.0 | put_gap avg=1993.7 worst(min)=400.0 | theo avg=14.0459 worst(max)=18.7851
+  after_adj_1 (n=300): call_gap avg=2456.7 worst(min)=1200.0 | put_gap avg=2490.0 worst(min)=1200.0 | theo avg=15.4374 worst(max)=32.9580
+  after_adj_2 (n=300): call_gap avg=2943.0 worst(min)=1600.0 | put_gap avg=2901.3 worst(min)=1200.0 | theo avg=12.5983 worst(max)=23.7000
+  force_exit (n=299): call_gap avg=2947.5 worst(min)=1600.0 | put_gap avg=2901.0 worst(min)=1200.0 | theo avg=12.6062 worst(max)=23.7000
+
+----- wing=2000  WING_ROLL_ON  n=300  wing_roll_events=0 -----
+  mean/day=0.5905  ci_lo=0.4995  ci_hi=0.6829
+  worst=-3.7110  mdd=3.8674  net_credit/cycle=5.0854
+  post-adj theo>entry: 61.0%  avg_extra=+3.6481  max_extra=+19.1180
+  entry (n=300): call_gap avg=1950.3 worst(min)=600.0 | put_gap avg=1993.7 worst(min)=400.0 | theo avg=14.0459 worst(max)=18.7851
+  after_adj_1 (n=300): call_gap avg=2456.7 worst(min)=1200.0 | put_gap avg=2490.0 worst(min)=1200.0 | theo avg=15.4374 worst(max)=32.9580
+  after_adj_2 (n=300): call_gap avg=2943.0 worst(min)=1600.0 | put_gap avg=2901.3 worst(min)=1200.0 | theo avg=12.5983 worst(max)=23.7000
+  force_exit (n=299): call_gap avg=2947.5 worst(min)=1600.0 | put_gap avg=2901.0 worst(min)=1200.0 | theo avg=12.6062 worst(max)=23.7000
+
+----- wing=1500  WING_ROLL_OFF  n=302  wing_roll_events=0 -----
+  mean/day=0.5673  ci_lo=0.4785  ci_hi=0.6596
+  worst=-2.6454  mdd=2.8591  net_credit/cycle=4.4870
+  post-adj theo>entry: 77.2%  avg_extra=+3.8156  max_extra=+19.8612
+  entry (n=302): call_gap avg=1592.4 worst(min)=600.0 | put_gap avg=1607.9 worst(min)=400.0 | theo avg=11.1323 worst(max)=17.2802
+  after_adj_1 (n=302): call_gap avg=2098.7 worst(min)=800.0 | put_gap avg=2101.0 worst(min)=1000.0 | theo avg=13.4480 worst(max)=30.7285
+  after_adj_2 (n=302): call_gap avg=2586.8 worst(min)=1400.0 | put_gap avg=2513.6 worst(min)=1200.0 | theo avg=11.2871 worst(max)=22.5821
+  force_exit (n=301): call_gap avg=2590.0 worst(min)=1400.0 | put_gap avg=2512.0 worst(min)=1200.0 | theo avg=11.2905 worst(max)=22.5821
+
+----- wing=1500  WING_ROLL_ON  n=302  wing_roll_events=0 -----
+  mean/day=0.5673  ci_lo=0.4756  ci_hi=0.6591
+  worst=-2.6454  mdd=2.8591  net_credit/cycle=4.4870
+  post-adj theo>entry: 77.2%  avg_extra=+3.8156  max_extra=+19.8612
+  entry (n=302): call_gap avg=1592.4 worst(min)=600.0 | put_gap avg=1607.9 worst(min)=400.0 | theo avg=11.1323 worst(max)=17.2802
+  after_adj_1 (n=302): call_gap avg=2098.7 worst(min)=800.0 | put_gap avg=2101.0 worst(min)=1000.0 | theo avg=13.4480 worst(max)=30.7285
+  after_adj_2 (n=302): call_gap avg=2586.8 worst(min)=1400.0 | put_gap avg=2513.6 worst(min)=1200.0 | theo avg=11.2871 worst(max)=22.5821
+  force_exit (n=301): call_gap avg=2590.0 worst(min)=1400.0 | put_gap avg=2512.0 worst(min)=1200.0 | theo avg=11.2905 worst(max)=22.5821
+
+----- wing=1000  WING_ROLL_OFF  n=301  wing_roll_events=0 -----
+  mean/day=0.5793  ci_lo=0.4791  ci_hi=0.6780
+  worst=-4.7465  mdd=5.5244  net_credit/cycle=3.2897
+  post-adj theo>entry: 90.4%  avg_extra=+4.5319  max_extra=+20.5451
+  entry (n=301): call_gap avg=1026.9 worst(min)=600.0 | put_gap avg=1034.2 worst(min)=400.0 | theo avg=7.0172 worst(max)=13.6556
+  after_adj_1 (n=301): call_gap avg=1531.6 worst(min)=200.0 | put_gap avg=1528.9 worst(min)=400.0 | theo avg=10.5201 worst(max)=28.6766
+  after_adj_2 (n=301): call_gap avg=2021.3 worst(min)=800.0 | put_gap avg=1938.9 worst(min)=800.0 | theo avg=9.3865 worst(max)=20.8457
+  force_exit (n=300): call_gap avg=2024.7 worst(min)=800.0 | put_gap avg=1935.3 worst(min)=800.0 | theo avg=9.3836 worst(max)=20.8457
+
+----- wing=1000  WING_ROLL_ON  n=301  wing_roll_events=0 -----
+  mean/day=0.5793  ci_lo=0.4802  ci_hi=0.6800
+  worst=-4.7465  mdd=5.5244  net_credit/cycle=3.2897
+  post-adj theo>entry: 90.4%  avg_extra=+4.5319  max_extra=+20.5451
+  entry (n=301): call_gap avg=1026.9 worst(min)=600.0 | put_gap avg=1034.2 worst(min)=400.0 | theo avg=7.0172 worst(max)=13.6556
+  after_adj_1 (n=301): call_gap avg=1531.6 worst(min)=200.0 | put_gap avg=1528.9 worst(min)=400.0 | theo avg=10.5201 worst(max)=28.6766
+  after_adj_2 (n=301): call_gap avg=2021.3 worst(min)=800.0 | put_gap avg=1938.9 worst(min)=800.0 | theo avg=9.3865 worst(max)=20.8457
+  force_exit (n=300): call_gap avg=2024.7 worst(min)=800.0 | put_gap avg=1935.3 worst(min)=800.0 | theo avg=9.3836 worst(max)=20.8457
+
+===== FINAL TABLE =====
+  wing roll   mean/day     ci_lo     worst  theo_entry theo_wstage   %widen
+-------------------------------------------------------------------------------------
+  3000  OFF     0.6175    0.5262   -2.6454     18.2150     21.8812    31.0%
+  3000   ON     0.6175    0.5254   -2.6454     18.2150     21.8812    31.0%
+  2000  OFF     0.5905    0.4961   -3.7110     10.9146     16.2712    61.0%
+  2000   ON     0.5905    0.4995   -3.7110     10.9146     16.2712    61.0%
+  1500  OFF     0.5673    0.4785   -2.6454      7.5130     14.0762    77.2%
+  1500   ON     0.5673    0.4756   -2.6454      7.5130     14.0762    77.2%
+  1000  OFF     0.5793    0.4791   -4.7465      4.7103     11.1125    90.4%
+  1000   ON     0.5793    0.4802   -4.7465      4.7103     11.1125    90.4%
+
+Note: B_only rolls the untested short INWARD → rarely crosses the wing,
+so WING_ROLL_ON events may be near zero; gap widening is mostly from
+keeping old wings while short moves in (SELL_PARTIAL path).
+
+END
