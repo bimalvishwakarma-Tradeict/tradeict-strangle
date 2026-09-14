@@ -385,6 +385,8 @@ def simulate_with_adjustments(
     idx: eng.TradeIndex,
     times: list[int],
     closes: list[float],
+    *,
+    basket_qty: int | None = None,
 ) -> CycleResult:
     assert cfg.trigger_pct is not None
     mode = cfg.adjustment.upper()  # A_ONLY | B_ONLY | BOTH
@@ -398,8 +400,8 @@ def simulate_with_adjustments(
     short_role_s = short_role()
     long_role_s = long_role()
 
-    qty = ORIGINAL_BASKET_QTY
-    original_qty = ORIGINAL_BASKET_QTY
+    original_qty = max(1, int(basket_qty) if basket_qty is not None else ORIGINAL_BASKET_QTY)
+    qty = original_qty
     sc_k = float(o.short_call_k)
     sp_k = float(o.short_put_k)
     sc_entry = float(o.short_call.price)

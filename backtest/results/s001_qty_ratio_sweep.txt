@@ -1,0 +1,70 @@
+S001 BASKET QTY RATIO SWEEP — 5 pre-registered configs
+====================================================================================================
+FIXED: dte=2 B_only trig70 maker B25 wings=2000 entry=11:00 IST hedge=4/leg long ATM straddle roll=3 hard=2 min_hold=10 min_dte=6
+SWEEP: basket_qty_pct_of_hedge = [200, 250, 300, 350, 400] → qty = ceil(4 × pct/100)
+Hedge cost (deterministic): 0.6255 USD/day (median bleed from hedge integration v2 Fix B)
+bootstrap_n=10000 seed=20260914
+
+----- pct=200%  basket_qty=8 -----
+  n=300  skipped=0
+  basket mean/cycle=0.8975  median=0.8161  std=1.2494
+  ci_lo=0.7559  ci_hi=1.0393
+  worst=-3.7110  p1=-2.2932  p5=-0.8520  mdd=3.8674
+  premium_sold/cycle=13.7306  fees/cycle=0.6043
+  cycles_per_day=0.657895  (n/day_span, day_span=456)
+  combined/day = mean×cpd − 0.6255 = -0.0350  (ci_lo=-0.1282 ci_hi=0.0582)
+  margin_APPROX=73.07  RoM_ann=-0.1751  worst/margin=-5.08%
+
+----- pct=250%  basket_qty=10 -----
+  n=300  skipped=0
+  basket mean/cycle=0.8996  median=0.8109  std=1.7392
+  ci_lo=0.7031  ci_hi=1.1003
+  worst=-5.8520  p1=-3.6832  p5=-1.5118  mdd=7.9379
+  premium_sold/cycle=18.1099  fees/cycle=0.7952
+  cycles_per_day=0.657895  (n/day_span, day_span=456)
+  combined/day = mean×cpd − 0.6255 = -0.0337  (ci_lo=-0.1629 ci_hi=0.0984)
+  margin_APPROX=83.34  RoM_ann=-0.1476  worst/margin=-7.02%
+
+----- pct=300%  basket_qty=12 -----
+  n=300  skipped=0
+  basket mean/cycle=1.0414  median=0.9466  std=2.0340
+  ci_lo=0.8154  ci_hi=1.2747
+  worst=-6.8454  p1=-4.2933  p5=-1.6933  mdd=9.6178
+  premium_sold/cycle=21.2612  fees/cycle=0.9360
+  cycles_per_day=0.657895  (n/day_span, day_span=456)
+  combined/day = mean×cpd − 0.6255 = 0.0596  (ci_lo=-0.0890 ci_hi=0.2131)
+  margin_APPROX=93.61  RoM_ann=0.2327  worst/margin=-7.31%
+
+----- pct=350%  basket_qty=14 -----
+  n=300  skipped=0
+  basket mean/cycle=1.3483  median=1.2273  std=2.3594
+  ci_lo=1.0790  ci_hi=1.6152
+  worst=-7.7075  p1=-4.8313  p5=-1.9564  mdd=9.1603
+  premium_sold/cycle=24.9752  fees/cycle=1.0973
+  cycles_per_day=0.657895  (n/day_span, day_span=456)
+  combined/day = mean×cpd − 0.6255 = 0.2615  (ci_lo=0.0844 ci_hi=0.4371)
+  margin_APPROX=103.88  RoM_ann=0.9196  worst/margin=-7.42%
+
+----- pct=400%  basket_qty=16 -----
+  n=300  skipped=0
+  basket mean/cycle=1.4902  median=1.3655  std=2.6533
+  ci_lo=1.1910  ci_hi=1.7915
+  worst=-8.7009  p1=-5.4414  p5=-2.1893  mdd=10.5835
+  premium_sold/cycle=28.1265  fees/cycle=1.2381
+  cycles_per_day=0.657895  (n/day_span, day_span=456)
+  combined/day = mean×cpd − 0.6255 = 0.3549  (ci_lo=0.1581 ci_hi=0.5531)
+  margin_APPROX=114.15  RoM_ann=1.1355  worst/margin=-7.62%
+
+MARGIN APPROX formula (NOT Delta SPAN):
+  5×initial_short_credit + wing_debit + hedge_debit_proxy (32.0 USD for 4-lot ATM straddle)
+
+===== SUMMARY =====
+ qty%  qty  bsk_mean  comb/day     ci_lo     worst   margin  RoM_ann     n
+--------------------------------------------------------------------------------
+  200    8    0.8975   -0.0350   -0.1282   -3.7110    73.07  -0.1751   300
+  250   10    0.8996   -0.0337   -0.1629   -5.8520    83.34  -0.1476   300
+  300   12    1.0414    0.0596   -0.0890   -6.8454    93.61   0.2327   300
+  350   14    1.3483    0.2615    0.0844   -7.7075   103.88   0.9196   300
+  400   16    1.4902    0.3549    0.1581   -8.7009   114.15   1.1355   300
+
+END
