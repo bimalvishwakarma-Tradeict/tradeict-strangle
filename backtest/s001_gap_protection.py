@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-S001 gap protection + live wing_roll ON/OFF compare.
+S001 gap-widening fixes — FIX_NONE / FIX_1 (wing follows) / FIX_2 (short inward limit).
 
-PART A: document live wing_roll path (read-only from adjustment.py / logic.py)
-PART B: backtest sim copies live wing_roll behaviour
-PART C: wing_dist × roll OFF/ON (8 configs)
+PART A: document min_short_gap_points (read-only)
+PART B: three-fix comparison @ wing=2000
+PART C: side-by-side ledger for 2026-02-09
 
-Output: backtest/results/s001_wing_roll.txt
+Output: backtest/results/s001_gap_fixes.txt
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import logging
 import math
 import statistics
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -40,14 +40,31 @@ logger = logging.getLogger("s001_gap_protection")
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
 RESULTS_DIR = _BACKTEST / "results"
-OUT_PATH = RESULTS_DIR / "s001_wing_roll.txt"
+OUT_PATH = RESULTS_DIR / "s001_gap_fixes.txt"
 
 WINNER_CFG = sweep.SweepCfg(dte=2, adjustment="B_only", trigger_pct=70.0)
 BASKET_QTY = 8
-WING_DISTS = (3000.0, 2000.0, 1500.0, 1000.0)
+WING_POINTS = 2000.0
+LEDGER_DATE = date(2026, 2, 9)
 BOOTSTRAP_N = eng.BOOTSTRAP_N
 BOOTSTRAP_SEED = eng.BOOTSTRAP_SEED
 CV = eng.CONTRACT_VALUE
+
+FIX_NONE = "FIX_NONE"
+FIX_1 = "FIX_1"  # wing follows short
+FIX_2 = "FIX_2"  # short inward limit vs wing
+FIXES = (FIX_NONE, FIX_1, FIX_2)
+
+
+@dataclass
+class LedgerRow:
+    symbol: str
+    side: str
+    strike: float
+    qty: int
+    price: float
+    fee: float
+    note: str = ""
 
 
 @dataclass
@@ -78,27 +95,9 @@ class StageRun:
     stages: list[StageSnap]
     entry_theo: float
     entry_net_credit: float
-    n_wing_rolls: int = 0
-
-
-@dataclass
-class CfgRow:
-    wing: float
-    roll_on: bool
-    n: int
-    mean_day: float
-    ci_lo: float
-    ci_hi: float
-    worst: float
-    mdd: float
-    net_credit: float
-    entry_theo_avg: float
-    worst_stage_theo_avg: float
-    pct_widened: float
-    avg_extra: float
-    max_extra: float
-    n_wing_rolls: int
-    gap_lines: list[str]
+    extra_wing_cost: float = 0.0  # FIX_1: net debit from wing re-establish
+    premium_foregone: float = 0.0  # FIX_2: credit lost vs unconstrained
+    ledger: list[LedgerRow] = field(default_factory=list)
 
 
 def emit(lines: list[str], line: str = "") -> None:
@@ -167,7 +166,6 @@ def make_stage(
     sp_px: float,
     wc_px: float | None,
     wp_px: float | None,
-    wing_distance_fallback: float | None,
 ) -> StageSnap:
     theo, cg, pg = theo_max_loss_arith(
         sc_k=sc_k,
@@ -179,7 +177,7 @@ def make_stage(
         wc_px=wc_px,
         wp_px=wp_px,
         qty=short_qty,
-        wing_distance_fallback=wing_distance_fallback,
+        wing_distance_fallback=WING_POINTS,
     )
     return StageSnap(
         label=label,
@@ -200,7 +198,7 @@ def make_stage(
     )
 
 
-def filter_wing(obs: list[eng.CycleObs], wing: float) -> list[eng.CycleObs]:
+def filter_base(obs: list[eng.CycleObs]) -> list[eng.CycleObs]:
     out: list[eng.CycleObs] = []
     for o in obs:
         if o.short_dte != 2:
@@ -211,7 +209,7 @@ def filter_wing(obs: list[eng.CycleObs], wing: float) -> list[eng.CycleObs]:
             continue
         if o.entry_hhmm != "11:00":
             continue
-        if o.wing_points != wing:
+        if o.wing_points != WING_POINTS:
             continue
         if o.wing_call is None or o.wing_put is None:
             continue
@@ -219,63 +217,100 @@ def filter_wing(obs: list[eng.CycleObs], wing: float) -> list[eng.CycleObs]:
     return out
 
 
-def would_cross_wing(
-    leg: str, new_k: float, wc_k: float | None, wp_k: float | None
-) -> bool:
-    """
-    Live detect — adjustment.py:3166-3169 (Adj B) and logic.py:1564-1567 (Adj A):
-      call: new_k >= wing_k ; put: new_k <= wing_k
-    """
-    if leg == "call" and wc_k is not None:
-        return float(new_k) >= float(wc_k) - 1e-9
-    if leg == "put" and wp_k is not None:
-        return float(new_k) <= float(wp_k) + 1e-9
-    return False
-
-
-def partial_reduce_wings(
+def append_led(
+    ledger: list[LedgerRow] | None,
     *,
+    symbol: str,
+    side: str,
+    strike: float,
     qty: int,
-    new_qty: int,
-    wc_entry: float | None,
-    wp_entry: float | None,
-    wc_now: float | None,
-    wp_now: float | None,
-    spot: float,
-    realized: float,
-    fees: float,
-) -> tuple[float, float]:
-    """decrease_step wing qty cut — adjustment.py ~2374/_reduce_open_wings_to_qty."""
-    closed = qty - int(new_qty)
-    if closed <= 0:
-        return realized, fees
-    if wc_now is not None and wp_now is not None and wc_entry is not None and wp_entry is not None:
-        realized += eng.cash_pnl(wc_entry, wc_now, closed, is_long=True)
-        realized += eng.cash_pnl(wp_entry, wp_now, closed, is_long=True)
-        fees += eng.option_fee(wc_now, spot, closed) + eng.option_fee(
-            wp_now, spot, closed
+    price: float,
+    fee: float,
+    note: str = "",
+) -> None:
+    if ledger is None:
+        return
+    ledger.append(
+        LedgerRow(
+            symbol=symbol,
+            side=side,
+            strike=float(strike),
+            qty=int(qty),
+            price=float(price),
+            fee=float(fee),
+            note=note,
         )
-    return realized, fees
+    )
 
 
-def simulate_with_stages(
+def clamp_short_vs_wing(
+    leg: str,
+    wanted_k: float,
+    wc_k: float | None,
+    wp_k: float | None,
+    min_gap: float,
+    idx: eng.TradeIndex,
+    exp: date,
+) -> float:
+    """
+    FIX_2: new short may not come closer than min_gap points to same-side wing.
+      call: new_k <= wing_call - min_gap
+      put:  new_k >= wing_put + min_gap
+    Clamp to nearest available strike on the allowed side of the bound.
+    """
+    strikes = sorted(idx.strikes_by_expiry.get(exp) or set())
+    if not strikes:
+        return wanted_k
+    if leg == "call" and wc_k is not None:
+        limit = float(wc_k) - float(min_gap)
+        if wanted_k <= limit + 1e-9:
+            return wanted_k
+        # too close to wing — pick highest strike <= limit
+        allowed = [k for k in strikes if k <= limit + 1e-9 and k > 0]
+        if not allowed:
+            return wanted_k
+        return float(max(allowed))
+    if leg == "put" and wp_k is not None:
+        limit = float(wp_k) + float(min_gap)
+        if wanted_k >= limit - 1e-9:
+            return wanted_k
+        allowed = [k for k in strikes if k >= limit - 1e-9]
+        if not allowed:
+            return wanted_k
+        return float(min(allowed))
+    return wanted_k
+
+
+def premium_at_strike(
+    idx: eng.TradeIndex,
+    exp: date,
+    leg: str,
+    strike: float,
+    when: datetime,
+    role: str,
+) -> float | None:
+    fill = eng.nearest_print_prefer(
+        idx,
+        eng.format_symbol("C" if leg == "call" else "P", strike, exp),
+        when,
+        eng.PRINT_WINDOW_SEC,
+        role,
+    )
+    if fill is None or fill.price <= 0:
+        return None
+    return float(fill.price)
+
+
+def simulate_fix(
     o: eng.CycleObs,
     idx: eng.TradeIndex,
     times: list[int],
     closes: list[float],
     *,
-    wing_points: float,
-    wing_roll_enabled: bool,
+    fix_mode: str,
     basket_qty: int = BASKET_QTY,
+    collect_ledger: bool = False,
 ) -> StageRun:
-    """
-    Mirror sweep.simulate_with_adjustments + live wing_roll path.
-
-    wing_roll_enabled=False → WING_ROLL_OFF: only SELL_PARTIAL on qty step
-      (prior backtest baseline for Adj B; never re-strikes wings).
-    wing_roll_enabled=True → WING_ROLL_ON: when short would cross same-side
-      wing, roll that wing only (adjustment.py 1559-1847).
-    """
     cfg = WINNER_CFG
     assert cfg.trigger_pct is not None
     adj_b_trig = sweep.adj_b_pct_from_trigger(float(cfg.trigger_pct))
@@ -296,6 +331,7 @@ def simulate_with_stages(
     wp_entry = float(o.wing_put.price) if o.wing_put is not None else None
     wing_qty = qty if wc_k is not None else 0
 
+    ledger: list[LedgerRow] | None = [] if collect_ledger else None
     spot_e = float(o.spot_entry)
     fees = eng.option_fee(sc_entry, spot_e, qty) + eng.option_fee(sp_entry, spot_e, qty)
     if wc_entry is not None and wp_entry is not None:
@@ -303,7 +339,49 @@ def simulate_with_stages(
             wp_entry, spot_e, qty
         )
 
-    stages: list[StageSnap] = [
+    append_led(
+        ledger,
+        symbol=o.short_call.symbol,
+        side="SELL",
+        strike=sc_k,
+        qty=qty,
+        price=sc_entry,
+        fee=eng.option_fee(sc_entry, spot_e, qty),
+        note="entry short call",
+    )
+    append_led(
+        ledger,
+        symbol=o.short_put.symbol,
+        side="SELL",
+        strike=sp_k,
+        qty=qty,
+        price=sp_entry,
+        fee=eng.option_fee(sp_entry, spot_e, qty),
+        note="entry short put",
+    )
+    if o.wing_call is not None and o.wing_put is not None:
+        append_led(
+            ledger,
+            symbol=o.wing_call.symbol,
+            side="BUY",
+            strike=float(wc_k or 0),
+            qty=qty,
+            price=float(wc_entry or 0),
+            fee=eng.option_fee(float(wc_entry or 0), spot_e, qty),
+            note="entry wing call",
+        )
+        append_led(
+            ledger,
+            symbol=o.wing_put.symbol,
+            side="BUY",
+            strike=float(wp_k or 0),
+            qty=qty,
+            price=float(wp_entry or 0),
+            fee=eng.option_fee(float(wp_entry or 0), spot_e, qty),
+            note="entry wing put",
+        )
+
+    stages = [
         make_stage(
             "entry",
             sc_k,
@@ -316,15 +394,15 @@ def simulate_with_stages(
             sp_entry,
             wc_entry,
             wp_entry,
-            wing_points,
         )
     ]
     entry_nc = stages[0].net_credit
-    entry_theo = theo_max_simple(wing_points, entry_nc, qty)
+    entry_theo = theo_max_simple(WING_POINTS, entry_nc, qty)
 
     realized = 0.0
+    extra_wing_cost = 0.0
+    premium_foregone = 0.0
     adj_count = 0
-    n_wing_rolls = 0
     closed_early = False
     t0 = int(o.entry_utc.timestamp())
     settle_dt = datetime(exp.year, exp.month, exp.day, 12, 0, tzinfo=UTC)
@@ -338,6 +416,7 @@ def simulate_with_stages(
             stages=stages,
             entry_theo=entry_theo,
             entry_net_credit=entry_nc,
+            ledger=ledger or [],
         )
 
     t = t0 + sweep.MONITOR_STEP_SEC
@@ -392,7 +471,6 @@ def simulate_with_stages(
                     sp_entry,
                     wc_entry,
                     wp_entry,
-                    wing_points,
                 )
             )
             exit_pnl = eng.cash_pnl(sc_entry, sc_now, qty, is_long=False) + eng.cash_pnl(
@@ -402,9 +480,7 @@ def simulate_with_stages(
                 sp_now, spot, qty
             )
             if (
-                wc_k is not None
-                and wp_k is not None
-                and wc_entry is not None
+                wc_entry is not None
                 and wp_entry is not None
                 and wc_now is not None
                 and wp_now is not None
@@ -416,6 +492,16 @@ def simulate_with_stages(
                 )
             realized += exit_pnl
             fees += exit_fee
+            append_led(
+                ledger,
+                symbol="FORCE_EXIT",
+                side="CLOSE_ALL",
+                strike=0,
+                qty=qty,
+                price=0,
+                fee=exit_fee,
+                note=f"force exit net_leg≈{exit_pnl:.4f}",
+            )
             closed_early = True
             break
 
@@ -439,7 +525,6 @@ def simulate_with_stages(
                     sp_entry,
                     wc_entry,
                     wp_entry,
-                    wing_points,
                 )
             )
             exit_pnl = eng.cash_pnl(sc_entry, sc_now, qty, is_long=False) + eng.cash_pnl(
@@ -464,7 +549,6 @@ def simulate_with_stages(
             closed_early = True
             break
 
-        # Adj B strike — same as sweep
         tested = "put" if leg == "call" else "call"
         p_target = sp_now if tested == "put" else sc_now
         other_k = sp_k if leg == "call" else sc_k
@@ -480,62 +564,110 @@ def simulate_with_stages(
         if not res.success or res.strike is None or res.premium is None:
             t += sweep.MONITOR_STEP_SEC
             continue
-        new_k = float(res.strike)
-        fill = eng.nearest_print_prefer(
+
+        wanted_k = float(res.strike)
+        unconstrained_px = float(res.premium)
+        fill0 = eng.nearest_print_prefer(
             idx,
-            eng.format_symbol("C" if leg == "call" else "P", new_k, exp),
+            eng.format_symbol("C" if leg == "call" else "P", wanted_k, exp),
             when,
             eng.PRINT_WINDOW_SEC,
             short_role_s,
         )
-        new_fill_px = float(fill.price) if fill is not None else float(res.premium)
+        if fill0 is not None and fill0.price > 0:
+            unconstrained_px = float(fill0.price)
 
-        # --- Live wing_roll detect (adjustment.py:3150-3171) ---
-        crosses = would_cross_wing(leg, new_k, wc_k, wp_k)
-        do_wing_roll = bool(wing_roll_enabled and crosses)
+        new_k = wanted_k
+        new_fill_px = unconstrained_px
+        if fix_mode == FIX_2:
+            clamped = clamp_short_vs_wing(
+                leg, wanted_k, wc_k, wp_k, WING_POINTS, idx, exp
+            )
+            if abs(clamped - wanted_k) > 1e-9:
+                px_c = premium_at_strike(
+                    idx, exp, leg, clamped, when, short_role_s
+                )
+                if px_c is None:
+                    t += sweep.MONITOR_STEP_SEC
+                    continue
+                # foregone = credit we would have at unconstrained vs clamped
+                # (higher premium usually nearer ATM)
+                premium_foregone += max(
+                    0.0,
+                    (unconstrained_px - px_c) * qty_btc(int(new_qty)),
+                )
+                new_k = clamped
+                new_fill_px = px_c
+                append_led(
+                    ledger,
+                    symbol="FIX2_CLAMP",
+                    side="LIMIT",
+                    strike=new_k,
+                    qty=int(new_qty),
+                    price=new_fill_px,
+                    fee=0.0,
+                    note=f"wanted={wanted_k:.0f}→clamp={new_k:.0f}",
+                )
 
-        # WING_ROLL_ON but no same-side wing open → live sets wing_roll_active=False
-        # (adjustment.py:1588-1593). Treat as no roll.
-        if do_wing_roll:
-            if leg == "call" and (wc_k is None or wc_entry is None):
-                do_wing_roll = False
-            if leg == "put" and (wp_k is None or wp_entry is None):
-                do_wing_roll = False
-
-        # If roll ON and crosses: pre-select new wing via pick_wing_strikes
-        # (live: resolve_wing_strikes points mode — adjustment.py:1634-1662)
-        new_wing_k: float | None = None
-        new_wing_px: float | None = None
-        if do_wing_roll:
-            # After this adj, shorts will be (new_k on triggered, other unchanged)
-            sc_after = new_k if leg == "call" else sc_k
-            sp_after = new_k if leg == "put" else sp_k
-            wk = eng.pick_wing_strikes(idx, exp, sc_after, sp_after, wing_points)
-            if wk is None:
-                # live WING_ROLL_ABORT: no wing beyond new short — skip adj
-                # (adjustment.py:1663-1684)
+        # FIX_1: pre-resolve new wings BEFORE mutating (avoid half-adj)
+        fix1_wings: tuple[float, float, float, float] | None = None
+        if fix_mode == FIX_1:
+            if wc_now is None or wp_now is None:
                 t += sweep.MONITOR_STEP_SEC
                 continue
-            wc_pick_k, wp_pick_k = wk
-            new_wing_k = wc_pick_k if leg == "call" else wp_pick_k
-            wfill = eng.nearest_print_prefer(
+            sc_after = new_k if leg == "call" else sc_k
+            sp_after = new_k if leg == "put" else sp_k
+            wk = eng.pick_wing_strikes(idx, exp, sc_after, sp_after, WING_POINTS)
+            if wk is None:
+                t += sweep.MONITOR_STEP_SEC
+                continue
+            nwc_k, nwp_k = wk
+            wcf = eng.nearest_print_prefer(
                 idx,
-                eng.format_symbol("C" if leg == "call" else "P", new_wing_k, exp),
+                eng.format_symbol("C", nwc_k, exp),
                 when,
                 eng.PRINT_WINDOW_SEC,
                 long_role_s,
             )
-            if wfill is None or wfill.price <= 0:
+            wpf = eng.nearest_print_prefer(
+                idx,
+                eng.format_symbol("P", nwp_k, exp),
+                when,
+                eng.PRINT_WINDOW_SEC,
+                long_role_s,
+            )
+            if wcf is None or wpf is None or wcf.price <= 0 or wpf.price <= 0:
                 t += sweep.MONITOR_STEP_SEC
                 continue
-            new_wing_px = float(wfill.price)
+            fix1_wings = (nwc_k, nwp_k, float(wcf.price), float(wpf.price))
 
-        # --- Execute short exit + entry ---
+        # Exit old short + enter new
         if leg == "call":
             exit_px = sc_now
             realized += eng.cash_pnl(sc_entry, exit_px, qty, is_long=False)
-            fees += eng.option_fee(exit_px, spot, qty)
-            fees += eng.option_fee(new_fill_px, spot, int(new_qty))
+            fee_x = eng.option_fee(exit_px, spot, qty)
+            fee_e = eng.option_fee(new_fill_px, spot, int(new_qty))
+            fees += fee_x + fee_e
+            append_led(
+                ledger,
+                symbol=eng.format_symbol("C", sc_k, exp),
+                side="BUY_TO_CLOSE",
+                strike=sc_k,
+                qty=qty,
+                price=exit_px,
+                fee=fee_x,
+                note=f"adj{adj_count + 1} exit call",
+            )
+            append_led(
+                ledger,
+                symbol=eng.format_symbol("C", new_k, exp),
+                side="SELL",
+                strike=new_k,
+                qty=int(new_qty),
+                price=new_fill_px,
+                fee=fee_e,
+                note=f"adj{adj_count + 1} enter call",
+            )
             sc_k = new_k
             sc_entry = new_fill_px
             sc_base = new_fill_px
@@ -543,64 +675,126 @@ def simulate_with_stages(
         else:
             exit_px = sp_now
             realized += eng.cash_pnl(sp_entry, exit_px, qty, is_long=False)
-            fees += eng.option_fee(exit_px, spot, qty)
-            fees += eng.option_fee(new_fill_px, spot, int(new_qty))
+            fee_x = eng.option_fee(exit_px, spot, qty)
+            fee_e = eng.option_fee(new_fill_px, spot, int(new_qty))
+            fees += fee_x + fee_e
+            append_led(
+                ledger,
+                symbol=eng.format_symbol("P", sp_k, exp),
+                side="BUY_TO_CLOSE",
+                strike=sp_k,
+                qty=qty,
+                price=exit_px,
+                fee=fee_x,
+                note=f"adj{adj_count + 1} exit put",
+            )
+            append_led(
+                ledger,
+                symbol=eng.format_symbol("P", new_k, exp),
+                side="SELL",
+                strike=new_k,
+                qty=int(new_qty),
+                price=new_fill_px,
+                fee=fee_e,
+                note=f"adj{adj_count + 1} enter put",
+            )
             sp_k = new_k
             sp_entry = new_fill_px
             sp_base = new_fill_px
             sc_base = new_fill_px
 
-        # --- Wings ---
+        # Wings
         if wc_k is not None and wp_k is not None and wc_entry is not None and wp_entry is not None:
-            if do_wing_roll and new_wing_k is not None and new_wing_px is not None:
-                # Live sequence after short flat (adjustment.py:1795-1862):
-                # 1) close OLD same-side wing (qty = wing_leg.quantity or new_qty)
-                # 2) buy NEW wing at wing_qty = new_qty
-                # Other wing: later reduced to new_qty (2374-2391)
-                n_wing_rolls += 1
-                old_wing_qty = qty  # before decrease; live uses wing_leg.quantity
-                if leg == "call":
-                    if wc_now is not None:
-                        realized += eng.cash_pnl(
-                            wc_entry, wc_now, old_wing_qty, is_long=True
-                        )
-                        fees += eng.option_fee(wc_now, spot, old_wing_qty)
-                    wc_k = float(new_wing_k)
-                    wc_entry = float(new_wing_px)
-                    fees += eng.option_fee(wc_entry, spot, int(new_qty))
-                    # other wing (put) partial to new_qty
-                    closed = qty - int(new_qty)
-                    if closed > 0 and wp_now is not None:
-                        realized += eng.cash_pnl(wp_entry, wp_now, closed, is_long=True)
-                        fees += eng.option_fee(wp_now, spot, closed)
-                else:
-                    if wp_now is not None:
-                        realized += eng.cash_pnl(
-                            wp_entry, wp_now, old_wing_qty, is_long=True
-                        )
-                        fees += eng.option_fee(wp_now, spot, old_wing_qty)
-                    wp_k = float(new_wing_k)
-                    wp_entry = float(new_wing_px)
-                    fees += eng.option_fee(wp_entry, spot, int(new_qty))
-                    closed = qty - int(new_qty)
-                    if closed > 0 and wc_now is not None:
-                        realized += eng.cash_pnl(wc_entry, wc_now, closed, is_long=True)
-                        fees += eng.option_fee(wc_now, spot, closed)
+            if fix_mode == FIX_1 and fix1_wings is not None and wc_now is not None and wp_now is not None:
+                nwc_k, nwp_k, nwc_px, nwp_px = fix1_wings
+                realized += eng.cash_pnl(wc_entry, wc_now, qty, is_long=True)
+                realized += eng.cash_pnl(wp_entry, wp_now, qty, is_long=True)
+                fee_wx = eng.option_fee(wc_now, spot, qty) + eng.option_fee(
+                    wp_now, spot, qty
+                )
+                fees += fee_wx
+                append_led(
+                    ledger,
+                    symbol=eng.format_symbol("C", wc_k, exp),
+                    side="SELL_TO_CLOSE",
+                    strike=wc_k,
+                    qty=qty,
+                    price=wc_now,
+                    fee=eng.option_fee(wc_now, spot, qty),
+                    note="FIX1 exit old wing call",
+                )
+                append_led(
+                    ledger,
+                    symbol=eng.format_symbol("P", wp_k, exp),
+                    side="SELL_TO_CLOSE",
+                    strike=wp_k,
+                    qty=qty,
+                    price=wp_now,
+                    fee=eng.option_fee(wp_now, spot, qty),
+                    note="FIX1 exit old wing put",
+                )
+                fee_we = eng.option_fee(nwc_px, spot, int(new_qty)) + eng.option_fee(
+                    nwp_px, spot, int(new_qty)
+                )
+                fees += fee_we
+                buy_new = (nwc_px + nwp_px) * qty_btc(int(new_qty))
+                keep_val = (wc_now + wp_now) * qty_btc(int(new_qty))
+                fee_partial = eng.option_fee(wc_now, spot, qty - int(new_qty)) + eng.option_fee(
+                    wp_now, spot, qty - int(new_qty)
+                )
+                extra_wing_cost += (buy_new - keep_val) + fee_we + (fee_wx - fee_partial)
+                append_led(
+                    ledger,
+                    symbol=eng.format_symbol("C", nwc_k, exp),
+                    side="BUY",
+                    strike=nwc_k,
+                    qty=int(new_qty),
+                    price=nwc_px,
+                    fee=eng.option_fee(nwc_px, spot, int(new_qty)),
+                    note="FIX1 new wing call",
+                )
+                append_led(
+                    ledger,
+                    symbol=eng.format_symbol("P", nwp_k, exp),
+                    side="BUY",
+                    strike=nwp_k,
+                    qty=int(new_qty),
+                    price=nwp_px,
+                    fee=eng.option_fee(nwp_px, spot, int(new_qty)),
+                    note="FIX1 new wing put",
+                )
+                wc_k, wp_k = nwc_k, nwp_k
+                wc_entry, wp_entry = nwc_px, nwp_px
                 wing_qty = int(new_qty)
             else:
-                # WING_ROLL_OFF or no cross: SELL_PARTIAL only (baseline)
-                # Live with roll disabled clamps Adj A; Adj B rarely crosses.
-                realized, fees = partial_reduce_wings(
-                    qty=qty,
-                    new_qty=int(new_qty),
-                    wc_entry=wc_entry,
-                    wp_entry=wp_entry,
-                    wc_now=wc_now,
-                    wp_now=wp_now,
-                    spot=float(spot),
-                    realized=realized,
-                    fees=fees,
-                )
+                # FIX_NONE / FIX_2: SELL_PARTIAL only
+                closed = qty - int(new_qty)
+                if closed > 0 and wc_now is not None and wp_now is not None:
+                    realized += eng.cash_pnl(wc_entry, wc_now, closed, is_long=True)
+                    realized += eng.cash_pnl(wp_entry, wp_now, closed, is_long=True)
+                    fees += eng.option_fee(wc_now, spot, closed) + eng.option_fee(
+                        wp_now, spot, closed
+                    )
+                    append_led(
+                        ledger,
+                        symbol=eng.format_symbol("C", wc_k, exp),
+                        side="SELL_PARTIAL",
+                        strike=wc_k,
+                        qty=closed,
+                        price=wc_now,
+                        fee=eng.option_fee(wc_now, spot, closed),
+                        note="partial wing call",
+                    )
+                    append_led(
+                        ledger,
+                        symbol=eng.format_symbol("P", wp_k, exp),
+                        side="SELL_PARTIAL",
+                        strike=wp_k,
+                        qty=closed,
+                        price=wp_now,
+                        fee=eng.option_fee(wp_now, spot, closed),
+                        note="partial wing put",
+                    )
                 wing_qty = int(new_qty)
 
         qty = int(new_qty)
@@ -618,7 +812,6 @@ def simulate_with_stages(
                 sp_entry,
                 wc_entry,
                 wp_entry,
-                wing_points,
             )
         )
         t += sweep.MONITOR_STEP_SEC
@@ -651,7 +844,9 @@ def simulate_with_stages(
         stages=stages,
         entry_theo=entry_theo,
         entry_net_credit=entry_nc,
-        n_wing_rolls=n_wing_rolls,
+        extra_wing_cost=extra_wing_cost,
+        premium_foregone=premium_foregone,
+        ledger=ledger or [],
     )
 
 
@@ -662,43 +857,10 @@ def stage_of(r: StageRun, label: str) -> StageSnap | None:
     return None
 
 
-def gap_summary_lines(runs: list[StageRun]) -> list[str]:
-    out: list[str] = []
-    for label in ("entry", "after_adj_1", "after_adj_2", "force_exit"):
-        call_gaps: list[float] = []
-        put_gaps: list[float] = []
-        theos: list[float] = []
-        n_have = 0
-        for r in runs:
-            s = stage_of(r, label)
-            if s is None:
-                continue
-            n_have += 1
-            if s.call_gap is not None:
-                call_gaps.append(s.call_gap)
-            if s.put_gap is not None:
-                put_gaps.append(s.put_gap)
-            theos.append(s.theo_max_loss)
-        if not call_gaps:
-            out.append(f"  {label}: n=0 NOT AVAILABLE")
-            continue
-        out.append(
-            f"  {label} (n={n_have}): "
-            f"call_gap avg={statistics.mean(call_gaps):.1f} "
-            f"worst(min)={min(call_gaps):.1f} | "
-            f"put_gap avg={statistics.mean(put_gaps):.1f} "
-            f"worst(min)={min(put_gaps):.1f} | "
-            f"theo avg={statistics.mean(theos):.4f} "
-            f"worst(max)={max(theos):.4f}"
-        )
-    return out
-
-
-def widen_stats(runs: list[StageRun]) -> tuple[float, float, float, float]:
-    """Returns pct_widened, avg_extra, max_extra, avg_worst_stage_theo."""
+def widen_stats(runs: list[StageRun]) -> tuple[float, float, float]:
     widen_n = 0
     extras: list[float] = []
-    worst_stage_theos: list[float] = []
+    worst_all: list[float] = []
     for r in runs:
         by_lab = {s.label: s for s in r.stages}
         entry = by_lab.get("entry")
@@ -709,131 +871,88 @@ def widen_stats(runs: list[StageRun]) -> tuple[float, float, float, float]:
             for lab in ("after_adj_1", "after_adj_2", "force_exit")
             if lab in by_lab
         ]
-        all_t = [entry.theo_max_loss] + post
-        worst_stage_theos.append(max(all_t))
+        worst_all.append(max([entry.theo_max_loss] + post))
         if post and max(post) > entry.theo_max_loss + 1e-12:
             widen_n += 1
             extras.append(max(post) - entry.theo_max_loss)
     n = max(1, len(runs))
     pct = 100.0 * widen_n / n
-    avg_ex = statistics.mean(extras) if extras else 0.0
-    max_ex = max(extras) if extras else 0.0
-    avg_w = statistics.mean(worst_stage_theos) if worst_stage_theos else float("nan")
-    return pct, avg_ex, max_ex, avg_w
+    worst_theo = max(worst_all) if worst_all else float("nan")
+    return pct, worst_theo, statistics.mean(extras) if extras else 0.0
 
 
-def emit_part_a_report(lines: list[str]) -> None:
-    emit(lines, "===== PART A: LIVE wing_roll CODE READ (no changes) =====")
+def gap_block(lines: list[str], runs: list[StageRun]) -> None:
+    for label in ("entry", "after_adj_1", "after_adj_2", "force_exit"):
+        cg: list[float] = []
+        pg: list[float] = []
+        th: list[float] = []
+        n = 0
+        for r in runs:
+            s = stage_of(r, label)
+            if s is None:
+                continue
+            n += 1
+            if s.call_gap is not None:
+                cg.append(s.call_gap)
+            if s.put_gap is not None:
+                pg.append(s.put_gap)
+            th.append(s.theo_max_loss)
+        if not cg:
+            emit(lines, f"  {label}: NOT AVAILABLE")
+            continue
+        emit(
+            lines,
+            f"  {label} (n={n}): call_gap avg={statistics.mean(cg):.1f} "
+            f"worst(min)={min(cg):.1f} | put_gap avg={statistics.mean(pg):.1f} "
+            f"worst(min)={min(pg):.1f} | theo avg={statistics.mean(th):.4f} "
+            f"worst(max)={max(th):.4f}",
+        )
+
+
+def emit_part_a(lines: list[str]) -> None:
+    emit(lines, "===== PART A: min_short_gap_points (code read) =====")
     emit(lines, "")
-    emit(lines, "1) plan.wing_roll TRUE kab hota hai?")
     emit(
         lines,
-        "   Adj B planner — adjustment.py:3150-3185:",
+        "Verdict: NOT related to wing gap. It is the minimum distance between",
+    )
+    emit(lines, "the TWO SHORT strikes (call short vs put short) after Adj B.")
+    emit(lines, "")
+    emit(lines, "Evidence:")
+    emit(
+        lines,
+        "  models.py:510-512 — comment: 'Min points between the two short",
+    )
+    emit(lines, "  strikes after Adj B (0 = one strike step)'")
+    emit(
+        lines,
+        "  adj_b.py:120-133, 213-273 — select_adj_b_strike gap guard vs",
     )
     emit(
         lines,
-        "     wing_roll_with_short_enabled (default True) AND open same-side wing",
+        "  other_short_strike; required_gap = max(strike_step, min_gap)",
     )
     emit(
         lines,
-        "     AND new short would CROSS wing:",
+        "  when min_gap>0, else one strike step. call must sit ABOVE put short",
     )
+    emit(lines, "  by required_gap; put BELOW call short.")
     emit(
         lines,
-        "       call: new_k >= wing_k  (lines 3166-3168)",
-    )
-    emit(
-        lines,
-        "       put:  new_k <= wing_k  (lines 3167-3169)",
-    )
-    emit(
-        lines,
-        "   Adj A path — logic.py:1532-1572 (same cross test; skip clamp when roll on).",
+        "  adjustment.py:2998-3072 — read at Adj B plan time only (not entry).",
     )
     emit(lines, "")
-    emit(lines, "2) Naya wing strike kaise chuna jata hai?")
-    emit(
-        lines,
-        "   adjustment.py:1634-1662 → resolve_wing_strikes (wing_select.py)",
-    )
-    emit(
-        lines,
-        "   Inputs: NEW short_call_k / short_put_k after adj (plan.new_strike on",
-    )
-    emit(
-        lines,
-        "   triggered side), mode=wing_strike_mode (default 'points'),",
-    )
-    emit(
-        lines,
-        "   points_away=wing_points_away (default 2000).",
-    )
-    emit(
-        lines,
-        "   Points pick: call = nearest strike >= short+points; put <= short-points;",
-    )
-    emit(
-        lines,
-        "   else chain_end farthest OTM (wing_select.py:148-196).",
-    )
-    emit(
-        lines,
-        "   Only SAME-SIDE pick used: wing_call if triggered call else wing_put",
-    )
-    emit(lines, "   (adjustment.py:1658-1662).")
+    emit(lines, "When does it apply? Adjustment (Adj B) only — not entry.")
     emit(lines, "")
-    emit(lines, "3) Wing qty on roll?")
     emit(
         lines,
-        "   Old wing close: quantity=wing_leg.quantity or new_qty",
-    )
-    emit(lines, "   (adjustment.py:1808-1810).")
-    emit(
-        lines,
-        "   New wing buy: wing_qty = int(new_qty)  (adjustment.py:1847-1859).",
+        "If set 0→2000: Adj B refuses new untested shorts closer than 2000 pts",
     )
     emit(
         lines,
-        "   Other wing later cut to new_qty via _reduce_open_wings_to_qty",
+        "to the OTHER short (may skip adj or pick farther OTM). Does NOT keep",
     )
-    emit(lines, "   (adjustment.py:2374-2391; rolled wing id skipped).")
-    emit(lines, "")
-    emit(lines, "4) wing_roll_active → FALSE kab?")
-    emit(
-        lines,
-        "   NOTE: user cited ~line 1395; current file sets False at",
-    )
-    emit(
-        lines,
-        "   adjustment.py:1588-1593 — plan.wing_roll was True but no open",
-    )
-    emit(
-        lines,
-        "   same-side wing leg (wing_call/wing_put) found → skip roll,",
-    )
-    emit(lines, "   continue short-only adjustment.")
-    emit(lines, "")
-    emit(lines, "5) wing_roll=True around former ~1720?")
-    emit(
-        lines,
-        "   Current line 1720 is legacy SL cancel (not wing_roll).",
-    )
-    emit(
-        lines,
-        "   wing_roll=True on AdjustmentResult at adjustment.py:1918 —",
-    )
-    emit(
-        lines,
-        "   WING_ROLL_ABORT after old wing closed but NEW wing entry failed;",
-    )
-    emit(
-        lines,
-        "   triggered side left flat (is_partial=True). Also returned on",
-    )
-    emit(
-        lines,
-        "   success path as wing_roll=wing_roll_active (e.g. :2186, :2949).",
-    )
+    emit(lines, "short↔wing distance at 2000.")
     emit(lines, "")
 
 
@@ -844,161 +963,183 @@ def main() -> int:
         stream=sys.stderr,
     )
     lines: list[str] = []
-    emit(lines, "S001 WING ROLL — live path report + OFF/ON wing-distance compare")
+    emit(lines, "S001 GAP FIXES — FIX_NONE / FIX_1 wing-follows / FIX_2 inward-limit")
     emit(lines, "=" * 100)
     emit(
         lines,
-        "FIXED: dte2 B_only trig70 maker B25 qty=8 entry=11:00 IST  HEDGE=OFF",
+        "Baseline: dte2 B_only trig70 maker B25 wing=2000 qty=8 11:00 IST HEDGE=OFF",
     )
-    emit(lines, "Configs: wing ∈ {3000,2000,1500,1000} × roll OFF/ON = 8")
     emit(lines, "")
 
-    emit_part_a_report(lines)
+    emit_part_a(lines)
 
     logger.info("Loading cache + index...")
     all_obs, day_span = sweep.load_cycles()
+    base = filter_base(all_obs)
+    logger.info("base cycles=%s day_span=%s", len(base), day_span)
     idx = eng.build_trade_index()
     times, closes = ot.load_spot_1m()
 
-    emit(lines, "===== PART B: BACKTEST wing_roll IMPLEMENTATION =====")
-    emit(
-        lines,
-        "WING_ROLL_OFF: qty decrease → SELL_PARTIAL wings only (no re-strike).",
-    )
-    emit(
-        lines,
-        "WING_ROLL_ON: if new short crosses same-side wing → close that wing,",
-    )
-    emit(
-        lines,
-        "  pick new wing via pick_wing_strikes(=points resolve), buy at new_qty;",
-    )
-    emit(lines, "  other wing SELL_PARTIAL to new_qty. Comments cite live lines.")
+    emit(lines, "===== PART B: THREE FIXES =====")
     emit(lines, "")
 
-    emit(lines, "===== PART C: COMPARE (8 configs) =====")
-    emit(lines, "")
+    table_rows: list[dict[str, float | str]] = []
+    ledger_by_fix: dict[str, list[LedgerRow]] = {}
+    sample_o = next((o for o in base if o.entry_date == LEDGER_DATE), None)
 
-    rows: list[CfgRow] = []
-    cfg_i = 0
-    for wing in WING_DISTS:
-        cycles = filter_wing(all_obs, wing)
-        for roll_on in (False, True):
-            label = "ON" if roll_on else "OFF"
-            logger.info(
-                "Config wing=%s roll=%s cycles=%s", int(wing), label, len(cycles)
-            )
-            runs: list[StageRun] = []
-            for i, o in enumerate(cycles):
-                if (i + 1) % 50 == 0:
-                    logger.info(
-                        "  sim %s/%s wing=%s roll=%s",
-                        i + 1,
-                        len(cycles),
-                        int(wing),
-                        label,
-                    )
-                runs.append(
-                    simulate_with_stages(
-                        o,
-                        idx,
-                        times,
-                        closes,
-                        wing_points=wing,
-                        wing_roll_enabled=roll_on,
-                        basket_qty=BASKET_QTY,
-                    )
+    for fi, fix in enumerate(FIXES):
+        logger.info("Running %s ...", fix)
+        runs: list[StageRun] = []
+        for i, o in enumerate(base):
+            if (i + 1) % 50 == 0:
+                logger.info("  %s %s/%s", fix, i + 1, len(base))
+            want_led = sample_o is not None and o.entry_date == LEDGER_DATE
+            runs.append(
+                simulate_fix(
+                    o,
+                    idx,
+                    times,
+                    closes,
+                    fix_mode=fix,
+                    collect_ledger=want_led,
                 )
-            nets = [r.net for r in runs if math.isfinite(r.net)]
-            dates = [r.entry_date for r in runs if math.isfinite(r.net)]
-            if not nets:
-                emit(lines, f"wing={int(wing)} roll={label}: NOT AVAILABLE")
-                continue
-            mean, lo, hi = eng.bootstrap_mean_ci(
-                nets, BOOTSTRAP_N, BOOTSTRAP_SEED + cfg_i * 17
             )
-            cfg_i += 1
-            cpd = len(nets) / float(max(1, day_span))
-            chron = [n for _, n in sorted(zip(dates, nets), key=lambda z: z[0])]
-            mdd = eng.max_drawdown(chron)
-            credits = [r.entry_net_credit for r in runs]
-            entry_theos = [r.entry_theo for r in runs]
-            pct_w, avg_ex, max_ex, worst_stage_avg = widen_stats(runs)
-            n_rolls = sum(r.n_wing_rolls for r in runs)
-            g_lines = gap_summary_lines(runs)
+        if sample_o is not None:
+            for r in runs:
+                if r.entry_date == LEDGER_DATE and r.ledger:
+                    ledger_by_fix[fix] = r.ledger
+                    break
 
-            row = CfgRow(
-                wing=wing,
-                roll_on=roll_on,
-                n=len(nets),
-                mean_day=mean * cpd,
-                ci_lo=lo * cpd,
-                ci_hi=hi * cpd,
-                worst=min(nets),
-                mdd=mdd,
-                net_credit=statistics.mean(credits),
-                entry_theo_avg=statistics.mean(entry_theos),
-                worst_stage_theo_avg=worst_stage_avg,
-                pct_widened=pct_w,
-                avg_extra=avg_ex,
-                max_extra=max_ex,
-                n_wing_rolls=n_rolls,
-                gap_lines=g_lines,
-            )
-            rows.append(row)
+        nets = [r.net for r in runs if math.isfinite(r.net)]
+        dates = [r.entry_date for r in runs if math.isfinite(r.net)]
+        mean, lo, hi = eng.bootstrap_mean_ci(
+            nets, BOOTSTRAP_N, BOOTSTRAP_SEED + fi * 19
+        )
+        cpd = len(nets) / float(max(1, day_span))
+        chron = [n for _, n in sorted(zip(dates, nets), key=lambda z: z[0])]
+        mdd = eng.max_drawdown(chron)
+        credits = [r.entry_net_credit for r in runs]
+        extra = [r.extra_wing_cost for r in runs]
+        forgone = [r.premium_foregone for r in runs]
+        entry_theo = statistics.mean([r.entry_theo for r in runs])
+        pct_w, worst_theo, _avg_ex = widen_stats(runs)
 
-            emit(
-                lines,
-                f"----- wing={int(wing)}  WING_ROLL_{label}  n={row.n}  "
-                f"wing_roll_events={n_rolls} -----",
-            )
-            emit(
-                lines,
-                f"  mean/day={row.mean_day:.4f}  ci_lo={row.ci_lo:.4f}  "
-                f"ci_hi={row.ci_hi:.4f}",
-            )
-            emit(
-                lines,
-                f"  worst={row.worst:.4f}  mdd={row.mdd:.4f}  "
-                f"net_credit/cycle={row.net_credit:.4f}",
-            )
-            emit(
-                lines,
-                f"  post-adj theo>entry: {row.pct_widened:.1f}%  "
-                f"avg_extra=+{row.avg_extra:.4f}  max_extra=+{row.max_extra:.4f}",
-            )
-            for gl in g_lines:
-                emit(lines, gl)
-            emit(lines, "")
+        emit(lines, f"----- {fix}  n={len(nets)} -----")
+        emit(
+            lines,
+            f"  mean/day={mean * cpd:.4f}  median={statistics.median(nets):.4f}  "
+            f"ci_lo={lo * cpd:.4f}  ci_hi={hi * cpd:.4f}",
+        )
+        emit(
+            lines,
+            f"  worst={min(nets):.4f}  mdd={mdd:.4f}  "
+            f"net_credit/cycle={statistics.mean(credits):.4f}",
+        )
+        emit(
+            lines,
+            f"  extra_wing_cost/cycle={statistics.mean(extra):.4f}  "
+            f"premium_foregone/cycle={statistics.mean(forgone):.4f}",
+        )
+        emit(
+            lines,
+            f"  %widen={pct_w:.1f}%  WORST_theo_sample={worst_theo:.4f}  "
+            f"theo_entry_avg={entry_theo:.4f}",
+        )
+        gap_block(lines, runs)
+        emit(lines, "")
+
+        table_rows.append(
+            {
+                "fix": fix,
+                "mean_day": mean * cpd,
+                "ci_lo": lo * cpd,
+                "worst": min(nets),
+                "theo_entry": entry_theo,
+                "theo_worst": worst_theo,
+                "pct_widen": pct_w,
+                "extra": statistics.mean(extra)
+                if fix == FIX_1
+                else (
+                    statistics.mean(forgone) if fix == FIX_2 else 0.0
+                ),
+            }
+        )
 
     emit(lines, "===== FINAL TABLE =====")
     emit(
         lines,
-        f"{'wing':>6} {'roll':>4} {'mean/day':>10} {'ci_lo':>9} {'worst':>9} "
-        f"{'theo_entry':>11} {'theo_wstage':>11} {'%widen':>8}",
+        f"{'fix':<10} {'mean/day':>10} {'ci_lo':>9} {'worst':>9} "
+        f"{'theo_entry':>11} {'theo_WORST':>11} {'%widen':>8} {'extra_cost':>11}",
     )
-    emit(lines, "-" * 85)
-    for r in rows:
+    emit(lines, "-" * 95)
+    for r in table_rows:
         emit(
             lines,
-            f"{int(r.wing):6d} {'ON' if r.roll_on else 'OFF':>4} "
-            f"{r.mean_day:10.4f} {r.ci_lo:9.4f} {r.worst:9.4f} "
-            f"{r.entry_theo_avg:11.4f} {r.worst_stage_theo_avg:11.4f} "
-            f"{r.pct_widened:7.1f}%",
+            f"{str(r['fix']):<10} {float(r['mean_day']):10.4f} "
+            f"{float(r['ci_lo']):9.4f} {float(r['worst']):9.4f} "
+            f"{float(r['theo_entry']):11.4f} {float(r['theo_worst']):11.4f} "
+            f"{float(r['pct_widen']):7.1f}% {float(r['extra']):11.4f}",
         )
+    emit(
+        lines,
+        "extra_cost column: FIX_1 = avg extra wing roll cost; "
+        "FIX_2 = avg premium foregone; FIX_NONE = 0",
+    )
     emit(lines, "")
-    emit(
-        lines,
-        "Note: B_only rolls the untested short INWARD → rarely crosses the wing,",
-    )
-    emit(
-        lines,
-        "so WING_ROLL_ON events may be near zero; gap widening is mostly from",
-    )
-    emit(
-        lines,
-        "keeping old wings while short moves in (SELL_PARTIAL path).",
-    )
+
+    emit(lines, "===== PART C: LEDGER 2026-02-09 (three fixes side-by-side) =====")
+    if sample_o is None or len(ledger_by_fix) < 3:
+        emit(
+            lines,
+            f"NOT AVAILABLE — no cycle on {LEDGER_DATE} or ledger missing "
+            f"(found={list(ledger_by_fix.keys())})",
+        )
+    else:
+        emit(
+            lines,
+            f"entry_date={LEDGER_DATE}  "
+            f"shorts={sample_o.short_call_k:.0f}/{sample_o.short_put_k:.0f}  "
+            f"wings={sample_o.wing_call_k}/{sample_o.wing_put_k}",
+        )
+        emit(lines, "")
+        max_rows = max(len(ledger_by_fix[f]) for f in FIXES)
+        emit(
+            lines,
+            f"{'#':>3} | "
+            f"{'NONE side/k/q/px/fee':<42} | "
+            f"{'FIX1 side/k/q/px/fee':<42} | "
+            f"{'FIX2 side/k/q/px/fee':<42}",
+        )
+        emit(lines, "-" * 140)
+
+        def fmt(rows: list[LedgerRow], i: int) -> str:
+            if i >= len(rows):
+                return f"{'—':<42}"
+            r = rows[i]
+            return (
+                f"{r.side[:12]:<12} {r.strike:7.0f} q{r.qty:<2d} "
+                f"{r.price:7.1f} f{r.fee:5.3f}"
+            )[:42].ljust(42)
+
+        for i in range(max_rows):
+            emit(
+                lines,
+                f"{i:3d} | {fmt(ledger_by_fix[FIX_NONE], i)} | "
+                f"{fmt(ledger_by_fix[FIX_1], i)} | "
+                f"{fmt(ledger_by_fix[FIX_2], i)}",
+            )
+        emit(lines, "")
+        emit(lines, "Notes (FIX_NONE / FIX_1 / FIX_2):")
+        for fix in FIXES:
+            rows = ledger_by_fix[fix]
+            emit(lines, f"  {fix}: {len(rows)} rows")
+            for r in rows:
+                if r.note:
+                    emit(
+                        lines,
+                        f"    {r.side} k={r.strike:.0f} q={r.qty} "
+                        f"px={r.price:.2f} fee={r.fee:.4f} [{r.note}]",
+                    )
     emit(lines, "")
     emit(lines, "END")
 

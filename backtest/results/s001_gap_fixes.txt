@@ -1,0 +1,136 @@
+S001 GAP FIXES — FIX_NONE / FIX_1 wing-follows / FIX_2 inward-limit
+====================================================================================================
+Baseline: dte2 B_only trig70 maker B25 wing=2000 qty=8 11:00 IST HEDGE=OFF
+
+===== PART A: min_short_gap_points (code read) =====
+
+Verdict: NOT related to wing gap. It is the minimum distance between
+the TWO SHORT strikes (call short vs put short) after Adj B.
+
+Evidence:
+  models.py:510-512 — comment: 'Min points between the two short
+  strikes after Adj B (0 = one strike step)'
+  adj_b.py:120-133, 213-273 — select_adj_b_strike gap guard vs
+  other_short_strike; required_gap = max(strike_step, min_gap)
+  when min_gap>0, else one strike step. call must sit ABOVE put short
+  by required_gap; put BELOW call short.
+  adjustment.py:2998-3072 — read at Adj B plan time only (not entry).
+
+When does it apply? Adjustment (Adj B) only — not entry.
+
+If set 0→2000: Adj B refuses new untested shorts closer than 2000 pts
+to the OTHER short (may skip adj or pick farther OTM). Does NOT keep
+short↔wing distance at 2000.
+
+===== PART B: THREE FIXES =====
+
+----- FIX_NONE  n=300 -----
+  mean/day=0.5905  median=0.8161  ci_lo=0.4973  ci_hi=0.6837
+  worst=-3.7110  mdd=3.8674  net_credit/cycle=5.0854
+  extra_wing_cost/cycle=0.0000  premium_foregone/cycle=0.0000
+  %widen=61.0%  WORST_theo_sample=32.9580  theo_entry_avg=10.9146
+  entry (n=300): call_gap avg=1950.3 worst(min)=600.0 | put_gap avg=1993.7 worst(min)=400.0 | theo avg=14.0459 worst(max)=18.7851
+  after_adj_1 (n=300): call_gap avg=2456.7 worst(min)=1200.0 | put_gap avg=2490.0 worst(min)=1200.0 | theo avg=15.4374 worst(max)=32.9580
+  after_adj_2 (n=300): call_gap avg=2943.0 worst(min)=1600.0 | put_gap avg=2901.3 worst(min)=1200.0 | theo avg=12.5983 worst(max)=23.7000
+  force_exit (n=299): call_gap avg=2947.5 worst(min)=1600.0 | put_gap avg=2901.0 worst(min)=1200.0 | theo avg=12.6062 worst(max)=23.7000
+
+----- FIX_1  n=300 -----
+  mean/day=0.2139  median=0.4872  ci_lo=0.0411  ci_hi=0.3729
+  worst=-13.0106  mdd=28.3508  net_credit/cycle=5.0854
+  extra_wing_cost/cycle=0.9103  premium_foregone/cycle=0.0000
+  %widen=3.7%  WORST_theo_sample=23.7456  theo_entry_avg=10.9146
+  entry (n=300): call_gap avg=1950.3 worst(min)=600.0 | put_gap avg=1993.7 worst(min)=400.0 | theo avg=14.0459 worst(max)=18.7851
+  after_adj_1 (n=284): call_gap avg=1993.7 worst(min)=1200.0 | put_gap avg=2016.2 worst(min)=1400.0 | theo avg=11.1658 worst(max)=23.7456
+  after_adj_2 (n=281): call_gap avg=2008.2 worst(min)=1600.0 | put_gap avg=2012.5 worst(min)=1400.0 | theo avg=7.4714 worst(max)=15.8304
+  force_exit (n=281): call_gap avg=2008.2 worst(min)=1600.0 | put_gap avg=2012.5 worst(min)=1400.0 | theo avg=7.4714 worst(max)=15.8304
+
+----- FIX_2  n=300 -----
+  mean/day=0.5930  median=0.8161  ci_lo=0.4994  ci_hi=0.6882
+  worst=-3.7110  mdd=3.8674  net_credit/cycle=5.0854
+  extra_wing_cost/cycle=0.0000  premium_foregone/cycle=0.0030
+  %widen=61.7%  WORST_theo_sample=32.9580  theo_entry_avg=10.9146
+  entry (n=300): call_gap avg=1950.3 worst(min)=600.0 | put_gap avg=1993.7 worst(min)=400.0 | theo avg=14.0459 worst(max)=18.7851
+  after_adj_1 (n=300): call_gap avg=2468.7 worst(min)=1200.0 | put_gap avg=2501.3 worst(min)=1200.0 | theo avg=15.4680 worst(max)=32.9580
+  after_adj_2 (n=300): call_gap avg=2951.0 worst(min)=1600.0 | put_gap avg=2917.3 worst(min)=1400.0 | theo avg=12.6404 worst(max)=23.7000
+  force_exit (n=299): call_gap avg=2955.5 worst(min)=1600.0 | put_gap avg=2917.1 worst(min)=1400.0 | theo avg=12.6483 worst(max)=23.7000
+
+===== FINAL TABLE =====
+fix          mean/day     ci_lo     worst  theo_entry  theo_WORST   %widen  extra_cost
+-----------------------------------------------------------------------------------------------
+FIX_NONE       0.5905    0.4973   -3.7110     10.9146     32.9580    61.0%      0.0000
+FIX_1          0.2139    0.0411  -13.0106     10.9146     23.7456     3.7%      0.9103
+FIX_2          0.5930    0.4994   -3.7110     10.9146     32.9580    61.7%      0.0030
+extra_cost column: FIX_1 = avg extra wing roll cost; FIX_2 = avg premium foregone; FIX_NONE = 0
+
+===== PART C: LEDGER 2026-02-09 (three fixes side-by-side) =====
+entry_date=2026-02-09  shorts=73200/70000  wings=75200.0/68000.0
+
+  # | NONE side/k/q/px/fee                       | FIX1 side/k/q/px/fee                       | FIX2 side/k/q/px/fee                      
+--------------------------------------------------------------------------------------------------------------------------------------------
+  0 | SELL           73200 q8    473.0 f0.067    | SELL           73200 q8    473.0 f0.067    | SELL           73200 q8    473.0 f0.067   
+  1 | SELL           70000 q8    991.0 f0.067    | SELL           70000 q8    991.0 f0.067    | SELL           70000 q8    991.0 f0.067   
+  2 | BUY            75200 q8    154.1 f0.051    | BUY            75200 q8    154.1 f0.051    | BUY            75200 q8    154.1 f0.051   
+  3 | BUY            68000 q8    508.7 f0.067    | BUY            68000 q8    508.7 f0.067    | BUY            68000 q8    508.7 f0.067   
+  4 | BUY_TO_CLOSE   73200 q8    307.0 f0.067    | BUY_TO_CLOSE   73200 q8    307.0 f0.067    | BUY_TO_CLOSE   73200 q8    307.0 f0.067   
+  5 | SELL           71000 q6   1000.0 f0.050    | SELL           71000 q6   1000.0 f0.050    | SELL           71000 q6   1000.0 f0.050   
+  6 | SELL_PARTIAL   75200 q2    100.0 f0.008    | SELL_TO_CLOS   75200 q8    100.0 f0.033    | SELL_PARTIAL   75200 q2    100.0 f0.008   
+  7 | SELL_PARTIAL   68000 q2    556.0 f0.017    | SELL_TO_CLOS   68000 q8    556.0 f0.067    | SELL_PARTIAL   68000 q2    556.0 f0.017   
+  8 | BUY_TO_CLOSE   71000 q6    683.0 f0.049    | BUY            73200 q6    307.0 f0.050    | BUY_TO_CLOSE   71000 q6    683.0 f0.049   
+  9 | SELL           70600 q4    912.0 f0.033    | BUY            68000 q6    556.0 f0.050    | SELL           70600 q4    912.0 f0.033   
+ 10 | SELL_PARTIAL   75200 q2     60.0 f0.005    | BUY_TO_CLOSE   71000 q6    662.0 f0.049    | SELL_PARTIAL   75200 q2     60.0 f0.005   
+ 11 | SELL_PARTIAL   68000 q2    888.0 f0.016    | SELL           70400 q4    900.0 f0.033    | SELL_PARTIAL   68000 q2    888.0 f0.016   
+ 12 | CLOSE_ALL          0 q4      0.0 f0.106    | SELL_TO_CLOS   73200 q6    197.0 f0.049    | CLOSE_ALL          0 q4      0.0 f0.106   
+ 13 | —                                          | SELL_TO_CLOS   68000 q6    888.0 f0.049    | —                                         
+ 14 | —                                          | BUY            72400 q4    399.0 f0.033    | —                                         
+ 15 | —                                          | BUY            68000 q4    888.0 f0.033    | —                                         
+ 16 | —                                          | CLOSE_ALL          0 q4      0.0 f0.121    | —                                         
+
+Notes (FIX_NONE / FIX_1 / FIX_2):
+  FIX_NONE: 13 rows
+    SELL k=73200 q=8 px=473.00 fee=0.0670 [entry short call]
+    SELL k=70000 q=8 px=991.00 fee=0.0670 [entry short put]
+    BUY k=75200 q=8 px=154.06 fee=0.0509 [entry wing call]
+    BUY k=68000 q=8 px=508.74 fee=0.0670 [entry wing put]
+    BUY_TO_CLOSE k=73200 q=8 px=307.00 fee=0.0666 [adj1 exit call]
+    SELL k=71000 q=6 px=1000.00 fee=0.0499 [adj1 enter call]
+    SELL_PARTIAL k=75200 q=2 px=100.00 fee=0.0083 [partial wing call]
+    SELL_PARTIAL k=68000 q=2 px=556.00 fee=0.0166 [partial wing put]
+    BUY_TO_CLOSE k=71000 q=6 px=683.00 fee=0.0493 [adj2 exit call]
+    SELL k=70600 q=4 px=912.00 fee=0.0329 [adj2 enter call]
+    SELL_PARTIAL k=75200 q=2 px=60.00 fee=0.0050 [partial wing call]
+    SELL_PARTIAL k=68000 q=2 px=888.00 fee=0.0164 [partial wing put]
+    CLOSE_ALL k=0 q=4 px=0.00 fee=0.1056 [force exit net_leg≈-1.5712]
+  FIX_1: 17 rows
+    SELL k=73200 q=8 px=473.00 fee=0.0670 [entry short call]
+    SELL k=70000 q=8 px=991.00 fee=0.0670 [entry short put]
+    BUY k=75200 q=8 px=154.06 fee=0.0509 [entry wing call]
+    BUY k=68000 q=8 px=508.74 fee=0.0670 [entry wing put]
+    BUY_TO_CLOSE k=73200 q=8 px=307.00 fee=0.0666 [adj1 exit call]
+    SELL k=71000 q=6 px=1000.00 fee=0.0499 [adj1 enter call]
+    SELL_TO_CLOSE k=75200 q=8 px=100.00 fee=0.0330 [FIX1 exit old wing call]
+    SELL_TO_CLOSE k=68000 q=8 px=556.00 fee=0.0666 [FIX1 exit old wing put]
+    BUY k=73200 q=6 px=307.00 fee=0.0499 [FIX1 new wing call]
+    BUY k=68000 q=6 px=556.00 fee=0.0499 [FIX1 new wing put]
+    BUY_TO_CLOSE k=71000 q=6 px=662.00 fee=0.0490 [adj2 exit call]
+    SELL k=70400 q=4 px=900.00 fee=0.0327 [adj2 enter call]
+    SELL_TO_CLOSE k=73200 q=6 px=197.00 fee=0.0488 [FIX1 exit old wing call]
+    SELL_TO_CLOSE k=68000 q=6 px=888.00 fee=0.0490 [FIX1 exit old wing put]
+    BUY k=72400 q=4 px=399.00 fee=0.0327 [FIX1 new wing call]
+    BUY k=68000 q=4 px=888.00 fee=0.0327 [FIX1 new wing put]
+    CLOSE_ALL k=0 q=4 px=0.00 fee=0.1210 [force exit net_leg≈-2.3080]
+  FIX_2: 13 rows
+    SELL k=73200 q=8 px=473.00 fee=0.0670 [entry short call]
+    SELL k=70000 q=8 px=991.00 fee=0.0670 [entry short put]
+    BUY k=75200 q=8 px=154.06 fee=0.0509 [entry wing call]
+    BUY k=68000 q=8 px=508.74 fee=0.0670 [entry wing put]
+    BUY_TO_CLOSE k=73200 q=8 px=307.00 fee=0.0666 [adj1 exit call]
+    SELL k=71000 q=6 px=1000.00 fee=0.0499 [adj1 enter call]
+    SELL_PARTIAL k=75200 q=2 px=100.00 fee=0.0083 [partial wing call]
+    SELL_PARTIAL k=68000 q=2 px=556.00 fee=0.0166 [partial wing put]
+    BUY_TO_CLOSE k=71000 q=6 px=683.00 fee=0.0493 [adj2 exit call]
+    SELL k=70600 q=4 px=912.00 fee=0.0329 [adj2 enter call]
+    SELL_PARTIAL k=75200 q=2 px=60.00 fee=0.0050 [partial wing call]
+    SELL_PARTIAL k=68000 q=2 px=888.00 fee=0.0164 [partial wing put]
+    CLOSE_ALL k=0 q=4 px=0.00 fee=0.1056 [force exit net_leg≈-1.5712]
+
+END
