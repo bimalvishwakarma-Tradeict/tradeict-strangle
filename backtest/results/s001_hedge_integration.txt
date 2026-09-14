@@ -1,0 +1,103 @@
+S001 HEDGE INTEGRATION — diagnostic + measurement
+====================================================================================================
+
+===== PART 1: HEDGE STRUCTURE (from live code — not guessed) =====
+
+1) hedge_expiry_mode = month_1 — what expiry?
+   resolve_hedge_expiry_date (backend/core/hedge_theta.py:128-201):
+   fetches Delta get_available_expiries, picks row where key == 'month_1'.
+   Key assignment (backend/core/time_utils.py:480-514 get_expiry_label_key):
+   month_N = N-th upcoming last-Friday monthly in the future expiry list.
+   So month_1 = nearest upcoming monthly (last Friday of a month) still listed.
+   Then open_hedge may call enforce_min_hedge_dte (hedge_theta.py:204+, wired hedge_lifecycle.py:686-697)
+   when min_hedge_dte_enabled: if calendar DTE < min_hedge_dte (default 15), advance to a further monthly.
+
+2) Structure — single option or straddle/strangle?
+   LONG ATM STRADDLE (buy call + buy put, same strike).
+   open_hedge docstring + ATM resolve: backend/engine/hedge_lifecycle.py:616-617, 717-732.
+   Legs persisted as call_* and put_* on HedgePosition (same file ~1019+); not a single option, not a strangle.
+
+3) Strike selection
+   annotate_atm(chain, spot) → ATM strike nearest spot (hedge_lifecycle.py:717-722).
+   Both call_product_id and put_product_id taken from that ATM row.
+
+4) hedge_qty_lots = 4 — per leg or total?
+   PER LEG (same qty on call and put).
+   auto_trade_engine.py:2998-3059 (pct_of_hedge path):
+   hedge_qty = max(1, int(settings.hedge_qty_lots)); open_hedge(..., quantity_override=hedge_qty).
+   open_hedge uses that qty for BOTH legs (hedge_lifecycle.py:627-634, 993+, HedgePosition.quantity=qty).
+   So hedge_qty_lots=4 → 4-lot long call + 4-lot long put (not 4 total).
+
+5) Roll timing — hedge_roll_dte / hard / min_hold
+   CODE DEFAULTS (models.py / routes_auto_trade.py Field defaults):
+   hedge_roll_dte default=10 (models.py ~393; routes_auto_trade.py:90)
+   hedge_roll_hard_dte default=5 (models.py ~395; routes_auto_trade.py:91)
+   hedge_min_hold_days default=10 (models.py ~422; routes_auto_trade.py:95)
+   LIVE DB values: NOT AVAILABLE in this repo session (no trading.db here) — do not assume.
+   TASK / S001_CONFIG_SEMANTICS.md §6 EXAMPLE values: roll_dte=3, hard_dte=2, min_hold=10.
+   Exact roll behaviour (hedge_lifecycle.py:3183-3263):
+   - calendar_dte <= roll_dte and status=active → status=pending_close
+   - pending_close + calendar_dte <= hard_dte + force enabled → close HEDGE_ROLL
+   - pending_close + zero open baskets → close HEDGE_ROLL (soft execute)
+   - pending_close + open baskets + dte > hard → WAIT (do not close yet)
+   min_hold blocks STRUCTURE TARGET only (hedge_lifecycle.py:2841-2890); does NOT block roll/SL/expiry.
+   After HEDGE_ROLL close, maybe_auto_reopen_after_roll (:1937-2013) opens next hedge if flags allow.
+
+THIS MEASUREMENT uses roll_dte=3, hard_dte=2, min_hold=10, min_hedge_dte=15, qty=4/leg — matching the task example (not the code Field defaults of 10/5).
+Standalone hedge (no baskets): soft execute closes on first day calendar_dte <= 3.
+
+===== PART 2: REAL HEDGE CYCLES (prints only) =====
+qty=4/leg  entry=11:00 IST  entry_window=1800s  exit_window=3600s  roll_dte=3  min_hedge_dte=15
+IV surface: NOT USED for hedge (rule).
+
+status             entry        exit         expiry           atm    entry$     exit$  days      pnl$   bleed/d     d_idx  note
+--------------------------------------------------------------------------------------------------------------------------------------------
+OK                 2025-07-04   2025-07-22   2025-07-25    109000   27.7320   33.5640    18    5.8320   -0.3240    7967.5  ok
+OK                 2025-08-02   2025-08-26   2025-08-29    114000   33.2920   18.2240    24  -15.0680    0.6278   -3938.5  ok
+OK                 2025-08-26   2025-09-23   2025-09-26    110000   35.2800   14.4680    28  -20.8120    0.7433    2716.0  ok
+OK                 2025-09-25   2025-10-28   2025-10-31    112000   34.9584   14.3920    33  -20.5664    0.6232    1954.5  ok
+PRINT_UNAVAILABLE  2025-10-28   2025-11-25   2025-11-28    114000   40.2400       N/A   N/A       N/A       N/A       N/A  exit prints unavailable for ATM=114000 exp=2025-11-28 on 2025-11-25
+PRINT_UNAVAILABLE  2025-12-03   2025-12-23   2025-12-26     93000   34.8800       N/A   N/A       N/A       N/A       N/A  exit prints unavailable for ATM=93000 exp=2025-12-26 on 2025-12-23
+OK                 2025-12-29   2026-01-27   2026-01-30     90000   34.0960   10.4280    29  -23.6680    0.8161   -1566.5  ok
+OK                 2026-01-27   2026-02-24   2026-02-27     88000   29.4200  101.0760    28   71.6560   -2.5591  -25654.5  ok
+PRINT_UNAVAILABLE  2026-02-24   2026-03-24   2026-03-27     63000   32.4760       N/A   N/A       N/A       N/A       N/A  exit prints unavailable for ATM=63000 exp=2026-03-27 on 2026-03-24
+OK                 2026-03-25   2026-04-21   2026-04-24     71000   31.8280   20.7200    27  -11.1080    0.4114    4710.0  ok
+OK                 2026-04-26   2026-05-26   2026-05-29     78000   29.0080    7.3240    30  -21.6840    0.7228   -1235.5  ok
+PRINT_UNAVAILABLE  2026-05-26   2026-06-23   2026-06-26     77000   23.2360       N/A   N/A       N/A       N/A       N/A  exit prints unavailable for ATM=77000 exp=2026-06-26 on 2026-06-23
+PRINT_UNAVAILABLE  2026-06-26   2026-07-28   2026-07-31     60000   25.9236       N/A   N/A       N/A       N/A       N/A  exit prints unavailable for ATM=60000 exp=2026-07-31 on 2026-07-28
+PRINT_UNAVAILABLE  2026-07-29   2026-08-25   2026-08-28       N/A       N/A       N/A   N/A       N/A       N/A       N/A  no ATM long-straddle prints for expiry=2026-08-28 in [2026-07-29, 2026-08-25)
+PRINT_UNAVAILABLE  2026-08-26   2026-09-22   2026-09-25       N/A       N/A       N/A   N/A       N/A       N/A       N/A  no ATM long-straddle prints for expiry=2026-09-25 in [2026-08-26, 2026-09-22)
+
+Cycles OK (real prints): 8  |  PRINT_UNAVAILABLE: 7  |  attempts listed: 15
+OK-cycle summary:
+  bleed/day  mean=0.132693  median=0.625529  min=-2.559143  max=0.816138
+  realized$  mean=-4.4273  median=-17.8172  min=-23.6680  max=71.6560
+  days_held  mean=27.1
+
+===== PART 3: COMBINED P&L (WINNER basket + hedge bleed) =====
+WINNER = dte2 B_only trig70 maker B25 wing2000 qty8 entry 11:00 IST
+Per day: combined = basket_cycle_net - hedge_bleed_that_day (only days with BOTH).
+
+Winner basket entry-days: 300  |  combined days (both): 165  |  skipped basket-without-hedge: 135  |  skipped hedge-without-basket: 52
+
+metric                   basket alone    hedge alone       combined
+--------------------------------------------------------------------
+mean per day                   0.8264        -0.1142         0.7123
+median                         0.7836        -0.6232         0.3824
+std                            1.2262         1.1610         1.6356
+worst day                     -3.7110        -0.8161        -3.0155
+bootstrap ci_lo                0.6414        -0.2844         0.4601
+bootstrap ci_hi                1.0127         0.0652         0.9636
+max_drawdown (run sum)         3.8674        55.2100         7.2117
+
+Note: hedge alone column = -bleed_per_day on that calendar day (long-theta expected negative).
+bootstrap_n=10000 seed=20260914 day_span=456
+
+===== PART 4: BREAK-EVEN =====
+On the 165 overlapping days, mean hedge bleed/day = 0.114176 USD.
+Break-even: each WINNER basket cycle must earn at least 0.114176 USD to exactly cover that day's hedge bleed.
+Mojooda WINNER mean on those days = 0.826431 USD/cycle (cited sweep mean was ~+0.90).
+Result: basket mean is ABOVE break-even by 0.712255 USD/cycle.
+Combined mean (basket - bleed) = 0.712255 USD/day.
+
+END
