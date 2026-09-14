@@ -1,0 +1,61 @@
+RESOLUTION + STRIKE BAND TEST
+================================================================================
+generated_utc=2026-09-14T21:12:13.253232+00:00
+NO new candle download
+
+print-only cycles total=60 skipped=1446; May 2026=9
+
+===== PART B: 1m vs 5m RESAMPLED MARK (May 2026) =====
+Config: dte=2 B_only trigger=70 maker B25 wings=2000 qty=8 11:00 IST hedge=OFF dec%=40 profit_k=1.0 slip=0 (pure mark)
+marks_db=D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\cache\option_marks\marks_2026-05.sqlite
+monitor_step_sec=300 (sim already steps 5m)
+
+symbols_with_marks=31/36 1m_bars=183376 5m_bars=36700
+cycles rebuilt 1m=7 fail=2 | 5m=7 fail=2
+paired cycle days=7
+
+cycle date         1m PnL       5m PnL        farak
+----------------------------------------------------
+2026-05-02           0.18         0.20         0.02
+2026-05-08           0.38        -0.18        -0.56
+2026-05-14           0.63         0.80         0.18
+2026-05-19          -0.19        -0.19         0.00
+2026-05-20           0.38         0.43         0.05
+2026-05-24           0.29         0.25        -0.04
+2026-05-29           0.19         0.28         0.09
+
+n_paired=7
+mean_1m_PnL=0.2649
+mean_|farak|=0.1339
+mean_|farak| / |mean_1m_PnL| % = 50.5355
+cycles_adj_TIME_different=7
+mean_|adj_time_diff|_minutes (among cycles with paired ts diffs)=52.5000  (n=7)
+cycles_adj_STRIKE_different=2
+
+===== PART C: STRIKE BAND vs ENTRY SPOT (all usable cycles) =====
+n_cycles=60
+
+--- short legs (n=120) ---
+max=3856.00
+p99=2397.69
+p95=2233.50
+p90=1882.10
+median=1219.00
+
+--- wing legs (n=120) ---
+max=4502.00
+p99=4362.86
+p95=4234.07
+p90=3875.50
+median=3225.25
+
+--- adjustment legs (n=120) ---
+max=2074.00
+p99=1937.08
+p95=1231.50
+p90=1058.40
+median=503.00
+
+ALL legs n=360 p99=4277.32 max=4502.00
+band ±4300 points rakhne se 99% legs cover ho jaati hain (raw p99=4277.32; short_p99=2397.69 wing_p99=4362.86 adj_p99=1937.08)
+

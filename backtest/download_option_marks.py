@@ -58,6 +58,7 @@ BYTES_PER_MARK_ROW = 173.0
 MINUTES_PER_REQUEST = float(MAX_CANDLES)
 
 CACHE_DIR = _BACKTEST / "cache" / "option_marks"
+PRODUCTS_DB = _BACKTEST / "cache" / "products_btc_options.sqlite"
 RESULTS_DIR = _BACKTEST / "results"
 DRYRUN_OUT = RESULTS_DIR / "dryrun_symbols.txt"
 
@@ -154,6 +155,77 @@ def parse_product_row(row: dict[str, Any]) -> OptProduct | None:
     return OptProduct(symbol=sym, expiry=exp, opt_type=opt, strike=strike)
 
 
+def init_products_db(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS products (
+            symbol TEXT PRIMARY KEY,
+            product_id INTEGER,
+            contract_type TEXT,
+            strike REAL,
+            expiry_date TEXT,
+            launch_time TEXT,
+            state TEXT,
+            raw_json TEXT
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def upsert_product_page(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> int:
+    """Write API page to disk immediately (before further processing)."""
+    n = 0
+    for row in rows:
+        sym = str(row.get("symbol") or "").strip()
+        if not sym:
+            continue
+        sett = str(row.get("settlement_time") or "")
+        expiry_date = sett[:10] if len(sett) >= 10 else None
+        try:
+            strike = float(row.get("strike_price")) if row.get("strike_price") is not None else None
+        except (TypeError, ValueError):
+            strike = None
+        pid = row.get("id")
+        try:
+            product_id = int(pid) if pid is not None else None
+        except (TypeError, ValueError):
+            product_id = None
+        launch = row.get("launch_time") or row.get("auction_start_time") or row.get("created_at")
+        conn.execute(
+            """
+            INSERT INTO products(
+                symbol, product_id, contract_type, strike, expiry_date,
+                launch_time, state, raw_json
+            ) VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                product_id=excluded.product_id,
+                contract_type=excluded.contract_type,
+                strike=excluded.strike,
+                expiry_date=excluded.expiry_date,
+                launch_time=excluded.launch_time,
+                state=excluded.state,
+                raw_json=excluded.raw_json
+            """,
+            (
+                sym,
+                product_id,
+                str(row.get("contract_type") or "") or None,
+                strike,
+                expiry_date,
+                str(launch) if launch is not None else None,
+                str(row.get("state") or "") or None,
+                json.dumps(row, separators=(",", ":"), ensure_ascii=False),
+            ),
+        )
+        n += 1
+    conn.commit()
+    return n
+
+
 def http_get_json(
     client: httpx.Client,
     path: str,
@@ -186,86 +258,120 @@ def http_get_json(
     return resp.status_code, payload, resp.text[:500]
 
 
+def products_db_stats(path: Path = PRODUCTS_DB) -> dict[str, Any]:
+    if not path.is_file():
+        return {"exists": False, "n_rows": 0, "size_bytes": 0, "path": str(path)}
+    conn = sqlite3.connect(str(path))
+    try:
+        n = int(conn.execute("SELECT COUNT(*) FROM products").fetchone()[0])
+    finally:
+        conn.close()
+    return {
+        "exists": True,
+        "n_rows": n,
+        "size_bytes": int(path.stat().st_size),
+        "path": str(path),
+    }
+
+
 def fetch_all_btc_option_products(
     client: httpx.Client,
     lines: list[str] | None,
+    *,
+    products_conn: sqlite3.Connection | None = None,
 ) -> ProductsFetchResult:
     """
     Paginate /v2/products until meta.after is exhausted.
     FIX 1: do NOT early-stop on calendar month / oldest_on_page.
+    Rule: each API page is written to disk BEFORE in-memory processing.
     """
     by_sym: dict[str, OptProduct] = {}
     after: str | None = None
     pages = 0
     total_count: int | None = None
     raw_rows_seen = 0
+    rows_persisted = 0
     max_pages = 500  # safety; 500*500 = 250k rows
     complete = False
 
-    while pages < max_pages:
-        params: dict[str, Any] = {
-            "contract_types": "call_options,put_options",
-            "states": "expired,settled,live",
-            "underlying_asset_symbols": "BTC",
-            "page_size": PAGE_SIZE,
-        }
-        if after:
-            params["after"] = after
-        st, payload, raw = http_get_json(client, PRODUCTS_PATH, params)
-        time.sleep(SLEEP_S)
-        pages += 1
-        if st != 200 or not isinstance(payload, dict):
-            emit(lines, f"products page={pages} FAIL status={st} raw={raw}")
-            break
-        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-        if total_count is None and meta.get("total_count") is not None:
-            try:
-                total_count = int(meta["total_count"])
-            except (TypeError, ValueError):
-                total_count = None
-        rows = payload.get("result") or []
-        if not isinstance(rows, list) or not rows:
-            emit(lines, f"products page={pages} empty result — stop")
-            complete = True
-            break
-        raw_rows_seen += len(rows)
-        n_new = 0
-        oldest_on_page: str | None = None
-        newest_on_page: str | None = None
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            sett = str(row.get("settlement_time") or "")
-            day = sett[:10]
-            if len(day) == 10:
-                if oldest_on_page is None or day < oldest_on_page:
-                    oldest_on_page = day
-                if newest_on_page is None or day > newest_on_page:
-                    newest_on_page = day
-            prod = parse_product_row(row)
-            if prod is None:
-                continue
-            if prod.symbol not in by_sym:
-                n_new += 1
-            by_sym[prod.symbol] = prod
-        emit(
-            lines,
-            f"products page={pages} rows={len(rows)} new={n_new} "
-            f"unique_so_far={len(by_sym)} "
-            f"oldest={oldest_on_page} newest={newest_on_page} "
-            f"total_count={total_count}",
-        )
-        after_val = meta.get("after")
-        if not after_val:
-            emit(lines, f"products pagination complete at page={pages} (no after)")
-            complete = True
-            break
-        after = str(after_val)
+    if products_conn is None:
+        products_conn = init_products_db(PRODUCTS_DB)
+        own_conn = True
     else:
-        emit(lines, f"WARNING: hit max_pages={max_pages} — pagination may be incomplete")
-        complete = False
+        own_conn = False
 
-    return ProductsFetchResult(
+    try:
+        while pages < max_pages:
+            params: dict[str, Any] = {
+                "contract_types": "call_options,put_options",
+                "states": "expired,settled,live",
+                "underlying_asset_symbols": "BTC",
+                "page_size": PAGE_SIZE,
+            }
+            if after:
+                params["after"] = after
+            st, payload, raw = http_get_json(client, PRODUCTS_PATH, params)
+            time.sleep(SLEEP_S)
+            pages += 1
+            if st != 200 or not isinstance(payload, dict):
+                emit(lines, f"products page={pages} FAIL status={st} raw={raw}")
+                break
+            meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+            if total_count is None and meta.get("total_count") is not None:
+                try:
+                    total_count = int(meta["total_count"])
+                except (TypeError, ValueError):
+                    total_count = None
+            rows = payload.get("result") or []
+            if not isinstance(rows, list) or not rows:
+                emit(lines, f"products page={pages} empty result — stop")
+                complete = True
+                break
+            raw_rows_seen += len(rows)
+
+            # Disk first — never keep API product rows memory-only.
+            dict_rows = [r for r in rows if isinstance(r, dict)]
+            n_wrote = upsert_product_page(products_conn, dict_rows)
+            rows_persisted += n_wrote
+
+            n_new = 0
+            oldest_on_page: str | None = None
+            newest_on_page: str | None = None
+            for row in dict_rows:
+                sett = str(row.get("settlement_time") or "")
+                day = sett[:10]
+                if len(day) == 10:
+                    if oldest_on_page is None or day < oldest_on_page:
+                        oldest_on_page = day
+                    if newest_on_page is None or day > newest_on_page:
+                        newest_on_page = day
+                prod = parse_product_row(row)
+                if prod is None:
+                    continue
+                if prod.symbol not in by_sym:
+                    n_new += 1
+                by_sym[prod.symbol] = prod
+            emit(
+                lines,
+                f"products page={pages} rows={len(rows)} persisted={n_wrote} "
+                f"new={n_new} unique_so_far={len(by_sym)} "
+                f"oldest={oldest_on_page} newest={newest_on_page} "
+                f"total_count={total_count}",
+            )
+            after_val = meta.get("after")
+            if not after_val:
+                emit(lines, f"products pagination complete at page={pages} (no after)")
+                complete = True
+                break
+            after = str(after_val)
+        else:
+            emit(lines, f"WARNING: hit max_pages={max_pages} — pagination may be incomplete")
+            complete = False
+    finally:
+        if own_conn:
+            products_conn.close()
+
+    result = ProductsFetchResult(
         products=list(by_sym.values()),
         total_count=total_count,
         pages=pages,
@@ -273,6 +379,12 @@ def fetch_all_btc_option_products(
         raw_rows_seen=raw_rows_seen,
         complete=complete,
     )
+    # Attach persist stats for callers via emit (dataclass unchanged).
+    emit(
+        lines,
+        f"products persisted_upserts={rows_persisted} db={PRODUCTS_DB}",
+    )
+    return result
 
 
 def filter_live_window(
@@ -764,6 +876,39 @@ def run_download(months: int) -> int:
     return 0
 
 
+def run_save_products() -> int:
+    """PART A: paginate products and permanently persist full API rows."""
+    lines: list[str] = []
+    emit(lines, "=== SAVE PRODUCTS ===")
+    emit(lines, f"db={PRODUCTS_DB}")
+    emit(lines, "NO candle download — products metadata only")
+    emit(lines, "")
+    with httpx.Client() as client:
+        conn = init_products_db(PRODUCTS_DB)
+        try:
+            fetch = fetch_all_btc_option_products(client, lines, products_conn=conn)
+        finally:
+            conn.close()
+    stats = products_db_stats(PRODUCTS_DB)
+    size_mb = stats["size_bytes"] / (1024 * 1024) if stats["size_bytes"] else 0.0
+    emit(lines, "")
+    emit(lines, "===== PERSIST VERIFY =====")
+    emit(lines, f"pages={fetch.pages}")
+    emit(lines, f"raw_rows_seen={fetch.raw_rows_seen}")
+    emit(lines, f"unique_symbols={fetch.unique}")
+    emit(lines, f"api_total_count={fetch.total_count}")
+    emit(lines, f"pagination_complete={fetch.complete}")
+    emit(lines, f"n_rows_saved={stats['n_rows']}")
+    emit(lines, f"file_size_bytes={stats['size_bytes']}")
+    emit(lines, f"file_size_mb={size_mb:.2f}")
+    logger.info(
+        "SAVE PRODUCTS n_rows=%s size_mb=%.2f",
+        stats["n_rows"],
+        size_mb,
+    )
+    return 0
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Delta India option MARK candle downloader")
     p.add_argument(
@@ -777,6 +922,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Build symbol list + checks only; do not download candles",
     )
+    p.add_argument(
+        "--save-products",
+        action="store_true",
+        help="Paginate all BTC option products and save full rows to SQLite (no candles)",
+    )
     return p.parse_args(argv)
 
 
@@ -787,6 +937,8 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stderr,
     )
     args = _parse_args(argv)
+    if args.save_products:
+        return run_save_products()
     if args.months < 1:
         emit(None, "ERROR: --months must be >= 1")
         return 2
