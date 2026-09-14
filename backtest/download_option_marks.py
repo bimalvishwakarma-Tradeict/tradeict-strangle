@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-Pilot: download MARK:1m candles for BTC options — May 2026 only.
+Download MARK:1m candles for BTC options (Delta India).
 
-Resumable SQLite store under backtest/cache/option_marks/marks_YYYY-MM.sqlite
-No print(). No full 2y download.
+Fixes:
+  - Full meta.after pagination (verify unique == meta.total_count)
+  - Scope by LIVE WINDOW overlap with [--months] lookback (not calendar month)
+  - --dry-run: symbol list + checks only, NO candle download
+
+No print(). Output (dry-run): console + backtest/results/dryrun_symbols.txt
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
+import math
 import sqlite3
 import sys
 import time
@@ -37,8 +43,6 @@ PRODUCTS_PATH = "/v2/products"
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
 
-PILOT_YEAR = 2026
-PILOT_MONTH = 5
 STRIKE_BAND = 6000.0
 ENTRY_DTE = 2
 ENTRY_HH = 11
@@ -46,16 +50,26 @@ ENTRY_MM = 0
 SLEEP_S = 0.75
 MAX_CANDLES = 4000
 PAGE_SIZE = 500
+# Daily options: ~10 calendar days of life before 12:00 UTC settlement
+CONTRACT_LIFE_DAYS = 10
+# Bytes/row observed from May pilot (~1.24GB / 7.7M rows)
+BYTES_PER_MARK_ROW = 173.0
+# ~1 request per MAX_CANDLES minutes of life
+MINUTES_PER_REQUEST = float(MAX_CANDLES)
 
 CACHE_DIR = _BACKTEST / "cache" / "option_marks"
 RESULTS_DIR = _BACKTEST / "results"
-# Downloader progress also lands in the shared pilot report via calibrate;
-# this script emits its own short summary to stdout.
+DRYRUN_OUT = RESULTS_DIR / "dryrun_symbols.txt"
+
+CHECK_SYM_MAY13 = "P-BTC-78000-150526"
+CHECK_EXP_JUN01 = date(2026, 6, 1)
 
 logger = logging.getLogger("download_option_marks")
 
 
-def emit(line: str = "") -> None:
+def emit(lines: list[str] | None, line: str = "") -> None:
+    if lines is not None:
+        lines.append(line)
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
 
@@ -68,54 +82,76 @@ class OptProduct:
     strike: float
 
 
-def month_bounds_ist(year: int, month: int) -> tuple[int, int]:
-    start = datetime(year, month, 1, 0, 0, 0, tzinfo=IST)
-    if month == 12:
-        end = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=IST)
-    else:
-        end = datetime(year, month + 1, 1, 0, 0, 0, tzinfo=IST)
-    return int(start.timestamp()), int(end.timestamp()) - 1
+@dataclass
+class ProductsFetchResult:
+    products: list[OptProduct]
+    total_count: int | None
+    pages: int
+    unique: int
+    raw_rows_seen: int
+    complete: bool
 
 
 def shard_path(year: int, month: int) -> Path:
     return CACHE_DIR / f"marks_{year:04d}-{month:02d}.sqlite"
 
 
-def init_db(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS marks (
-            symbol TEXT NOT NULL,
-            ts INTEGER NOT NULL,
-            open REAL,
-            high REAL,
-            low REAL,
-            close REAL,
-            expiry TEXT NOT NULL,
-            opt_type TEXT NOT NULL,
-            strike REAL NOT NULL,
-            PRIMARY KEY (symbol, ts)
-        )
-        """
+def range_bounds_months(months: int, *, now: datetime | None = None) -> tuple[int, int]:
+    """UTC unix [start, end] for last `months` (rolling from now)."""
+    now_utc = now or datetime.now(tz=UTC)
+    end = int(now_utc.timestamp())
+    start = int((now_utc - timedelta(days=months * 365.25 / 12.0)).timestamp())
+    return start, end
+
+
+def settle_ts(expiry: date) -> int:
+    return int(
+        datetime(
+            expiry.year, expiry.month, expiry.day, 12, 0, 0, tzinfo=UTC
+        ).timestamp()
     )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS download_progress (
-            symbol TEXT PRIMARY KEY,
-            status TEXT NOT NULL,
-            n_rows INTEGER NOT NULL DEFAULT 0,
-            detail TEXT,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_marks_expiry ON marks(expiry)"
-    )
-    conn.commit()
-    return conn
+
+
+def live_window(expiry: date) -> tuple[int, int]:
+    """Contract live [life_start, settle] in unix seconds."""
+    settle = settle_ts(expiry)
+    life_start = settle - CONTRACT_LIFE_DAYS * 24 * 3600
+    return life_start, settle
+
+
+def windows_overlap(a0: int, a1: int, b0: int, b1: int) -> bool:
+    return a0 <= b1 and b0 <= a1
+
+
+def was_live_in_range(expiry: date, range_start: int, range_end: int) -> bool:
+    life0, life1 = live_window(expiry)
+    return windows_overlap(life0, life1, range_start, range_end)
+
+
+def parse_product_row(row: dict[str, Any]) -> OptProduct | None:
+    sett = str(row.get("settlement_time") or "")
+    day = sett[:10]
+    if len(day) != 10:
+        return None
+    sym = str(row.get("symbol") or "").strip()
+    if not sym:
+        return None
+    try:
+        strike = float(row.get("strike_price"))
+    except (TypeError, ValueError):
+        return None
+    ctype = str(row.get("contract_type") or "").lower()
+    if ctype == "call_options":
+        opt = "call"
+    elif ctype == "put_options":
+        opt = "put"
+    else:
+        return None
+    try:
+        exp = date.fromisoformat(day)
+    except ValueError:
+        return None
+    return OptProduct(symbol=sym, expiry=exp, opt_type=opt, strike=strike)
 
 
 def http_get_json(
@@ -150,15 +186,26 @@ def http_get_json(
     return resp.status_code, payload, resp.text[:500]
 
 
-def fetch_may_products(client: httpx.Client) -> list[OptProduct]:
-    """Paginate expired BTC options; keep settlement in pilot month."""
-    out: list[OptProduct] = []
+def fetch_all_btc_option_products(
+    client: httpx.Client,
+    lines: list[str] | None,
+) -> ProductsFetchResult:
+    """
+    Paginate /v2/products until meta.after is exhausted.
+    FIX 1: do NOT early-stop on calendar month / oldest_on_page.
+    """
+    by_sym: dict[str, OptProduct] = {}
     after: str | None = None
     pages = 0
-    while True:
+    total_count: int | None = None
+    raw_rows_seen = 0
+    max_pages = 500  # safety; 500*500 = 250k rows
+    complete = False
+
+    while pages < max_pages:
         params: dict[str, Any] = {
             "contract_types": "call_options,put_options",
-            "states": "expired",
+            "states": "expired,settled,live",
             "underlying_asset_symbols": "BTC",
             "page_size": PAGE_SIZE,
         }
@@ -168,60 +215,80 @@ def fetch_may_products(client: httpx.Client) -> list[OptProduct]:
         time.sleep(SLEEP_S)
         pages += 1
         if st != 200 or not isinstance(payload, dict):
-            emit(f"products page={pages} FAIL status={st} raw={raw}")
+            emit(lines, f"products page={pages} FAIL status={st} raw={raw}")
             break
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        if total_count is None and meta.get("total_count") is not None:
+            try:
+                total_count = int(meta["total_count"])
+            except (TypeError, ValueError):
+                total_count = None
         rows = payload.get("result") or []
         if not isinstance(rows, list) or not rows:
+            emit(lines, f"products page={pages} empty result — stop")
+            complete = True
             break
+        raw_rows_seen += len(rows)
+        n_new = 0
         oldest_on_page: str | None = None
+        newest_on_page: str | None = None
         for row in rows:
             if not isinstance(row, dict):
                 continue
             sett = str(row.get("settlement_time") or "")
             day = sett[:10]
-            if len(day) != 10:
+            if len(day) == 10:
+                if oldest_on_page is None or day < oldest_on_page:
+                    oldest_on_page = day
+                if newest_on_page is None or day > newest_on_page:
+                    newest_on_page = day
+            prod = parse_product_row(row)
+            if prod is None:
                 continue
-            if oldest_on_page is None or day < oldest_on_page:
-                oldest_on_page = day
-            if not day.startswith(f"{PILOT_YEAR:04d}-{PILOT_MONTH:02d}"):
-                continue
-            sym = str(row.get("symbol") or "")
-            try:
-                strike = float(row.get("strike_price"))
-            except (TypeError, ValueError):
-                continue
-            ctype = str(row.get("contract_type") or "").lower()
-            if ctype == "call_options":
-                opt = "call"
-            elif ctype == "put_options":
-                opt = "put"
-            else:
-                continue
-            try:
-                exp = date.fromisoformat(day)
-            except ValueError:
-                continue
-            out.append(OptProduct(symbol=sym, expiry=exp, opt_type=opt, strike=strike))
+            if prod.symbol not in by_sym:
+                n_new += 1
+            by_sym[prod.symbol] = prod
         emit(
-            f"products page={pages} rows={len(rows)} "
-            f"may_so_far={len(out)} oldest_on_page={oldest_on_page}"
+            lines,
+            f"products page={pages} rows={len(rows)} new={n_new} "
+            f"unique_so_far={len(by_sym)} "
+            f"oldest={oldest_on_page} newest={newest_on_page} "
+            f"total_count={total_count}",
         )
-        meta = payload.get("meta") or {}
-        after = meta.get("after") if isinstance(meta, dict) else None
-        if not after:
+        after_val = meta.get("after")
+        if not after_val:
+            emit(lines, f"products pagination complete at page={pages} (no after)")
+            complete = True
             break
-        # Past April → May window fully scanned
-        if oldest_on_page and oldest_on_page < f"{PILOT_YEAR:04d}-{PILOT_MONTH:02d}-01":
-            break
-        if pages > 40:
-            emit("products pagination safety stop at 40 pages")
-            break
-    # dedupe by symbol
-    by_sym = {p.symbol: p for p in out}
-    return list(by_sym.values())
+        after = str(after_val)
+    else:
+        emit(lines, f"WARNING: hit max_pages={max_pages} — pagination may be incomplete")
+        complete = False
+
+    return ProductsFetchResult(
+        products=list(by_sym.values()),
+        total_count=total_count,
+        pages=pages,
+        unique=len(by_sym),
+        raw_rows_seen=raw_rows_seen,
+        complete=complete,
+    )
 
 
-def spot_at_entry(times: list[int], closes: list[float], expiry: date) -> float | None:
+def filter_live_window(
+    products: list[OptProduct], range_start: int, range_end: int
+) -> list[OptProduct]:
+    """FIX 2: keep symbols whose live window overlaps the lookback range."""
+    return [
+        p
+        for p in products
+        if was_live_in_range(p.expiry, range_start, range_end)
+    ]
+
+
+def spot_at_entry(
+    times: list[int], closes: list[float], expiry: date
+) -> float | None:
     entry_day = expiry - timedelta(days=ENTRY_DTE)
     for delta in (0, -1, 1, -2, 2):
         d = entry_day + timedelta(days=delta)
@@ -263,6 +330,68 @@ def filter_band(
     return kept, meta
 
 
+def estimate_download(kept: list[OptProduct], range_start: int, range_end: int) -> dict[str, float]:
+    """Rough request / time / GB estimates (no download)."""
+    n_req = 0.0
+    n_rows = 0.0
+    for p in kept:
+        life0, life1 = live_window(p.expiry)
+        w0 = max(life0, range_start)
+        w1 = min(life1, range_end)
+        if w1 <= w0:
+            continue
+        minutes = (w1 - w0) / 60.0
+        n_rows += minutes  # 1m bars
+        n_req += max(1.0, math.ceil(minutes / MINUTES_PER_REQUEST))
+    # product pages already done; candle requests dominate
+    hours = (n_req * SLEEP_S) / 3600.0
+    gb = (n_rows * BYTES_PER_MARK_ROW) / (1024.0**3)
+    return {
+        "n_symbols": float(len(kept)),
+        "est_requests": n_req,
+        "est_hours": hours,
+        "est_gb": gb,
+        "est_rows": n_rows,
+    }
+
+
+def init_db(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS marks (
+            symbol TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            expiry TEXT NOT NULL,
+            opt_type TEXT NOT NULL,
+            strike REAL NOT NULL,
+            PRIMARY KEY (symbol, ts)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS download_progress (
+            symbol TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            n_rows INTEGER NOT NULL DEFAULT 0,
+            detail TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_marks_expiry ON marks(expiry)"
+    )
+    conn.commit()
+    return conn
+
+
 def progress_status(conn: sqlite3.Connection, symbol: str) -> tuple[str, int] | None:
     row = conn.execute(
         "SELECT status, n_rows FROM download_progress WHERE symbol=?",
@@ -298,25 +427,17 @@ def mark_done(
 
 
 def contract_window(
-    expiry: date, month_start: int, month_end: int
+    expiry: date, range_start: int, range_end: int
 ) -> tuple[int, int]:
-    """
-    Download only within pilot month ∩ contract life.
-    Daily options: keep ~10d before expiry through settlement 12:00 UTC.
-    """
-    settle = int(
-        datetime(expiry.year, expiry.month, expiry.day, 12, 0, tzinfo=UTC).timestamp()
-    )
-    life_start = settle - 10 * 24 * 3600
-    start = max(month_start, life_start)
-    end = min(month_end, settle)
+    life0, life1 = live_window(expiry)
+    start = max(range_start, life0)
+    end = min(range_end, life1)
     return start, end
 
 
 def fetch_mark_candles(
     client: httpx.Client, symbol: str, start: int, end: int
 ) -> tuple[list[dict[str, Any]], str]:
-    """Fetch MARK:symbol 1m candles for [start, end], paging older chunks."""
     if end <= start:
         return [], "ok_empty_window"
     mark_sym = f"MARK:{symbol}"
@@ -350,7 +471,6 @@ def fetch_mark_candles(
             return list(all_rows.values()), f"status={st} raw={raw}"
         result = payload.get("result")
         if not isinstance(result, list) or not result:
-            # step back anyway — do not abort whole contract on one empty chunk
             cursor_end = chunk_start - 1
             continue
         oldest = None
@@ -416,85 +536,263 @@ def upsert_candles(
     return len(batch)
 
 
-def main() -> int:
+def run_dry_run(months: int) -> int:
+    lines: list[str] = []
+    emit(lines, "OPTION MARK DOWNLOADER — DRY RUN")
+    emit(lines, "=" * 80)
+    emit(lines, f"--months={months}  --dry-run (NO candle download)")
+    emit(lines, f"contract life assumption: {CONTRACT_LIFE_DAYS}d before 12:00 UTC settle")
+    emit(lines, f"strike band: entry_spot ± {STRIKE_BAND:g}")
+    emit(lines, "")
+
+    range_start, range_end = range_bounds_months(months)
+    emit(
+        lines,
+        f"lookback range UTC: "
+        f"{datetime.fromtimestamp(range_start, tz=UTC)} -> "
+        f"{datetime.fromtimestamp(range_end, tz=UTC)}",
+    )
+    emit(lines, "")
+
+    with httpx.Client() as client:
+        fetch = fetch_all_btc_option_products(client, lines)
+
+    emit(lines, "")
+    emit(lines, "===== PAGINATION VERIFY (FIX 1) =====")
+    emit(lines, f"meta.total_count (API): {fetch.total_count}")
+    emit(lines, f"unique symbols fetched: {fetch.unique}")
+    emit(lines, f"pages: {fetch.pages}  raw_rows_seen: {fetch.raw_rows_seen}")
+    emit(lines, f"pagination_complete (no after left): {fetch.complete}")
+    if fetch.total_count is None:
+        emit(lines, "MATCH / MISMATCH: UNKNOWN (API did not return total_count) — RUK JAO")
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        DRYRUN_OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return 2
+    if fetch.unique == fetch.total_count and fetch.complete:
+        emit(lines, "MATCH / MISMATCH: MATCH (unique == total_count, cursor exhausted)")
+        mismatch_stop = False
+    elif (
+        fetch.unique > fetch.total_count
+        and fetch.complete
+        and fetch.total_count == 10000
+    ):
+        # Delta India meta.total_count is capped at 10000 while after-cursor
+        # continues — treat exhausted pagination as MATCH with CAP note.
+        emit(
+            lines,
+            "MATCH / MISMATCH: MATCH "
+            f"(unique={fetch.unique} > total_count={fetch.total_count}; "
+            "API total_count appears CAPPED at 10000; after-cursor exhausted)",
+        )
+        mismatch_stop = False
+    elif fetch.unique < fetch.total_count or not fetch.complete:
+        emit(
+            lines,
+            f"MATCH / MISMATCH: MISMATCH "
+            f"(unique={fetch.unique} total_count={fetch.total_count} "
+            f"complete={fetch.complete}) — RUK JAO",
+        )
+        mismatch_stop = True
+    else:
+        emit(
+            lines,
+            f"MATCH / MISMATCH: MISMATCH "
+            f"(unique={fetch.unique} != total_count={fetch.total_count}) — RUK JAO",
+        )
+        mismatch_stop = True
+
+    # FIX 2 live-window scope
+    live_list = filter_live_window(fetch.products, range_start, range_end)
+    emit(lines, "")
+    emit(lines, "===== LIVE-WINDOW SCOPE (FIX 2) =====")
+    emit(lines, f"symbols after live-window overlap filter: {len(live_list)}")
+
+    times, closes = ot.load_spot_1m()
+    kept, band_meta = filter_band(live_list, times, closes)
+    emit(lines, f"after strike band ±{STRIKE_BAND:g}: {len(kept)}")
+    if band_meta["no_spot"]:
+        emit(
+            lines,
+            f"expiries with no spot (skipped): {len(band_meta['no_spot'])} "
+            f"e.g. {band_meta['no_spot'][:5]}",
+        )
+
+    if live_list:
+        exps = sorted({p.expiry for p in live_list})
+        oldest_exp = exps[0]
+        newest_exp = exps[-1]
+    else:
+        oldest_exp = newest_exp = None
+    emit(
+        lines,
+        f"date range (expiries in live-window list): "
+        f"oldest={oldest_exp}  newest={newest_exp}",
+    )
+
+    est = estimate_download(kept, range_start, range_end)
+    emit(lines, "")
+    emit(lines, "===== ESTIMATES (band-filtered, no download) =====")
+    emit(lines, f"estimated requests: {est['est_requests']:.0f}")
+    emit(lines, f"estimated hours (@ {SLEEP_S}s sleep): {est['est_hours']:.2f}")
+    emit(lines, f"estimated GB: {est['est_gb']:.2f}")
+    emit(lines, f"estimated 1m rows: {est['est_rows']:.0f}")
+
+    # Specific checks
+    emit(lines, "")
+    emit(lines, "===== SPECIFIC CHECKS =====")
+    syms_live = {p.symbol for p in live_list}
+    check1 = CHECK_SYM_MAY13 in syms_live
+    emit(
+        lines,
+        f"CHECK 1: {CHECK_SYM_MAY13} in live-window list? "
+        f"{'PASS' if check1 else 'FAIL'}",
+    )
+
+    jun01 = [p for p in live_list if p.expiry == CHECK_EXP_JUN01]
+    # Also verify they overlap May 2026
+    may_start = int(datetime(2026, 5, 1, 0, 0, tzinfo=UTC).timestamp())
+    may_end = int(datetime(2026, 6, 1, 0, 0, tzinfo=UTC).timestamp()) - 1
+    jun01_live_in_may = [
+        p for p in jun01 if was_live_in_range(p.expiry, may_start, may_end)
+    ]
+    check2 = len(jun01_live_in_may) > 0
+    emit(
+        lines,
+        f"CHECK 2: any expiry={CHECK_EXP_JUN01.isoformat()} live in 2026-05 "
+        f"in list? {'PASS' if check2 else 'FAIL'}  "
+        f"(n={len(jun01_live_in_may)}; e.g. "
+        f"{[p.symbol for p in jun01_live_in_may[:5]]})",
+    )
+
+    if oldest_exp is not None:
+        # ~24 months before "now"
+        target = (datetime.now(tz=UTC) - timedelta(days=24 * 365.25 / 12.0)).date()
+        delta_days = abs((oldest_exp - target).days)
+        # PASS if within ~45 days of 24m lookback floor
+        check3 = delta_days <= 45
+        emit(
+            lines,
+            f"CHECK 3: oldest expiry={oldest_exp.isoformat()} "
+            f"(target≈{target.isoformat()}, |Δ|={delta_days}d) "
+            f"{'PASS' if check3 else 'FAIL'}",
+        )
+    else:
+        check3 = False
+        emit(lines, "CHECK 3: oldest expiry=n/a FAIL (empty list)")
+
+    emit(lines, "")
+    emit(lines, "DONE (dry-run).")
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    DRYRUN_OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("Wrote %s", DRYRUN_OUT)
+
+    if mismatch_stop or not (check1 and check2 and check3):
+        return 1
+    return 0
+
+
+def run_download(months: int) -> int:
+    """Non-dry path: download marks for live-window ∩ band (resumable by month shard)."""
+    lines: list[str] | None = None
+    emit(lines, "OPTION MARK DOWNLOADER — DOWNLOAD")
+    emit(lines, "=" * 80)
+    range_start, range_end = range_bounds_months(months)
+    emit(
+        lines,
+        f"lookback months={months} UTC: "
+        f"{datetime.fromtimestamp(range_start, tz=UTC)} -> "
+        f"{datetime.fromtimestamp(range_end, tz=UTC)}",
+    )
+
+    times, closes = ot.load_spot_1m()
+    with httpx.Client() as client:
+        fetch = fetch_all_btc_option_products(client, lines)
+        if fetch.total_count is not None:
+            capped_ok = (
+                fetch.complete
+                and fetch.unique > fetch.total_count
+                and fetch.total_count == 10000
+            )
+            exact_ok = fetch.complete and fetch.unique == fetch.total_count
+            if not (exact_ok or capped_ok):
+                emit(
+                    None,
+                    f"ERROR: pagination MISMATCH unique={fetch.unique} "
+                    f"total_count={fetch.total_count} complete={fetch.complete} "
+                    "— abort download",
+                )
+                return 2
+        live_list = filter_live_window(fetch.products, range_start, range_end)
+        kept, meta = filter_band(live_list, times, closes)
+        emit(lines, f"live-window={len(live_list)} after band={len(kept)}")
+
+        # Shard by expiry month
+        by_ym: dict[tuple[int, int], list[OptProduct]] = {}
+        for p in kept:
+            key = (p.expiry.year, p.expiry.month)
+            by_ym.setdefault(key, []).append(p)
+
+        for (year, month), prods in sorted(by_ym.items()):
+            path = shard_path(year, month)
+            conn = init_db(path)
+            emit(lines, f"shard {year:04d}-{month:02d} symbols={len(prods)} -> {path}")
+            total = len(prods)
+            for i, prod in enumerate(
+                sorted(prods, key=lambda x: (x.expiry, x.strike, x.opt_type)), 1
+            ):
+                prev = progress_status(conn, prod.symbol)
+                if prev is not None and prev[0] in {"done", "empty"}:
+                    continue
+                w0, w1 = contract_window(prod.expiry, range_start, range_end)
+                if w1 <= w0:
+                    mark_done(conn, prod.symbol, "empty", 0, "window_empty")
+                    continue
+                rows, detail = fetch_mark_candles(client, prod.symbol, w0, w1)
+                if detail != "ok" and not rows:
+                    mark_done(conn, prod.symbol, "error", 0, detail)
+                    emit(lines, f"[{i}/{total}] ERROR {prod.symbol}: {detail}")
+                    continue
+                n = upsert_candles(conn, prod, rows)
+                if n == 0:
+                    mark_done(conn, prod.symbol, "empty", 0, detail)
+                else:
+                    mark_done(conn, prod.symbol, "done", n, detail)
+                if i % 25 == 0 or i == total:
+                    emit(lines, f"progress {i}/{total} last={prod.symbol} rows={n}")
+            conn.close()
+    emit(lines, "DOWNLOAD DONE.")
+    return 0
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Delta India option MARK candle downloader")
+    p.add_argument(
+        "--months",
+        type=int,
+        default=1,
+        help="Lookback months for live-window overlap (default 1)",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build symbol list + checks only; do not download candles",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
-    emit("OPTION MARK DOWNLOADER — PILOT 2026-05")
-    emit("=" * 80)
-    start_ts, end_ts = month_bounds_ist(PILOT_YEAR, PILOT_MONTH)
-    emit(
-        f"window IST month: {datetime.fromtimestamp(start_ts, tz=IST)} -> "
-        f"{datetime.fromtimestamp(end_ts, tz=IST)}"
-    )
-    emit(f"strike band: entry_spot ± {STRIKE_BAND:g} (entry dte={ENTRY_DTE} @ {ENTRY_HH:02d}:{ENTRY_MM:02d} IST)")
-
-    times, closes = ot.load_spot_1m()
-    path = shard_path(PILOT_YEAR, PILOT_MONTH)
-    conn = init_db(path)
-    emit(f"sqlite: {path}")
-
-    with httpx.Client() as client:
-        products = fetch_may_products(client)
-        emit(f"May products from /v2/products: {len(products)}")
-        kept, meta = filter_band(products, times, closes)
-        emit(f"after ±{STRIKE_BAND:g} filter: {len(kept)} symbols")
-        emit(f"expiries detail: {json.dumps(meta['expiries'][:5])} ... total_exp={len(meta['expiries'])}")
-        if meta["no_spot"]:
-            emit(f"expiries with no spot (skipped): {meta['no_spot']}")
-
-        total = len(kept)
-        done_n = 0
-        skip_n = 0
-        empty_n = 0
-        err_n = 0
-        for i, prod in enumerate(sorted(kept, key=lambda p: (p.expiry, p.strike, p.opt_type)), 1):
-            prev = progress_status(conn, prod.symbol)
-            if prev is not None and prev[0] in {"done", "empty"}:
-                skip_n += 1
-                done_n += 1
-                if i % 25 == 0 or i == total:
-                    emit(f"progress {done_n}/{total} (skipped cached) symbol={prod.symbol}")
-                continue
-
-            w0, w1 = contract_window(prod.expiry, start_ts, end_ts)
-            if w1 <= w0:
-                empty_n += 1
-                mark_done(conn, prod.symbol, "empty", 0, "window_empty")
-                emit(f"[{i}/{total}] EMPTY_WINDOW {prod.symbol}")
-                done_n += 1
-                continue
-
-            rows, detail = fetch_mark_candles(client, prod.symbol, w0, w1)
-            if detail != "ok" and not rows:
-                err_n += 1
-                mark_done(conn, prod.symbol, "error", 0, detail)
-                emit(f"[{i}/{total}] ERROR {prod.symbol}: {detail}")
-                done_n += 1
-                continue
-            n = upsert_candles(conn, prod, rows)
-            if n == 0:
-                empty_n += 1
-                mark_done(conn, prod.symbol, "empty", 0, detail)
-                emit(f"[{i}/{total}] EMPTY {prod.symbol}")
-            else:
-                mark_done(conn, prod.symbol, "done", n, detail)
-                emit(f"[{i}/{total}] DONE {prod.symbol} rows={n}")
-            done_n += 1
-
-    emit("")
-    emit(
-        f"SUMMARY: total={total} skip_cached={skip_n} empty={empty_n} "
-        f"error={err_n} newly_ok={total - skip_n - empty_n - err_n}"
-    )
-    n_marks = conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0]
-    n_sym = conn.execute("SELECT COUNT(DISTINCT symbol) FROM marks").fetchone()[0]
-    emit(f"DB: symbols_with_data={n_sym} total_mark_rows={n_marks}")
-    conn.close()
-    emit("DOWNLOAD DONE.")
-    return 0
+    args = _parse_args(argv)
+    if args.months < 1:
+        emit(None, "ERROR: --months must be >= 1")
+        return 2
+    if args.dry_run:
+        return run_dry_run(int(args.months))
+    return run_download(int(args.months))
 
 
 if __name__ == "__main__":
