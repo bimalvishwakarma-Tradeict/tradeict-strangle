@@ -316,10 +316,14 @@ class IVSurface:
                 break
         return best
 
-    def _anchor_fits(self, bucket: int) -> list[SmileFit]:
+    def _anchor_fits(
+        self, bucket: int, exclude_expiry: date | None = None
+    ) -> list[SmileFit]:
         """Direct (non-interpolated) smiles in this bucket, sorted by T."""
         rows: list[SmileFit] = []
         for exp in self.expiries_by_bucket.get(bucket, []):
+            if exclude_expiry is not None and exp == exclude_expiry:
+                continue
             fit = self.smiles.get((bucket, exp))
             if fit is None or fit.interpolated:
                 continue
@@ -329,7 +333,7 @@ class IVSurface:
         return rows
 
     def _resolve_smile(
-        self, ts: float, expiry: date
+        self, ts: float, expiry: date, *, force_term: bool = False
     ) -> tuple[SmileFit | None, dict[str, Any]]:
         """
         Return a smile for (ts, expiry). Prefer stored fit; otherwise
@@ -337,6 +341,9 @@ class IVSurface:
         fits in the same bucket. If only one side exists, scale the nearest
         smile's (a,b,c) by T/T_ref (constant-vol extrapolation) so illiquid
         monthlies remain priceable.
+
+        force_term=True: ignore this expiry's stored smile and rebuild from
+        neighbouring tenors only (validation of interp/extrap path).
         """
         b = self._nearest_bucket(float(ts))
         if b is None:
@@ -347,22 +354,23 @@ class IVSurface:
                 "rms": None,
                 "interpolated": False,
             }
-        stored = self.smiles.get((b, expiry))
-        if stored is not None and stored.T > T_MIN_YEARS and stored.F > 0:
-            return stored, {
-                "supported": True,
-                "bucket": b,
-                "n_trades": stored.n_trades,
-                "rms": stored.rms,
-                "interpolated": stored.interpolated,
-                "F": stored.F,
-                "spot": stored.spot,
-                "a": stored.a,
-                "b": stored.b,
-                "c": stored.c,
-                "T": stored.T,
-                "reason": "interpolated" if stored.interpolated else "direct_fit",
-            }
+        if not force_term:
+            stored = self.smiles.get((b, expiry))
+            if stored is not None and stored.T > T_MIN_YEARS and stored.F > 0:
+                return stored, {
+                    "supported": True,
+                    "bucket": b,
+                    "n_trades": stored.n_trades,
+                    "rms": stored.rms,
+                    "interpolated": stored.interpolated,
+                    "F": stored.F,
+                    "spot": stored.spot,
+                    "a": stored.a,
+                    "b": stored.b,
+                    "c": stored.c,
+                    "T": stored.T,
+                    "reason": "interpolated" if stored.interpolated else "direct_fit",
+                }
 
         mid_ts = b + BUCKET_SEC // 2
         now = datetime.fromtimestamp(mid_ts, tz=UTC)
@@ -377,7 +385,7 @@ class IVSurface:
                 "interpolated": False,
             }
 
-        anchors = self._anchor_fits(b)
+        anchors = self._anchor_fits(b, exclude_expiry=expiry if force_term else None)
         if not anchors:
             return None, {
                 "supported": False,
@@ -454,10 +462,16 @@ class IVSurface:
             "reason": reason,
         }
 
-    def quality(self, ts: float | datetime, expiry: date) -> dict[str, Any]:
+    def quality(
+        self,
+        ts: float | datetime,
+        expiry: date,
+        *,
+        force_term: bool = False,
+    ) -> dict[str, Any]:
         if isinstance(ts, datetime):
             ts = ts.timestamp()
-        _fit, q = self._resolve_smile(float(ts), expiry)
+        _fit, q = self._resolve_smile(float(ts), expiry, force_term=force_term)
         return q
 
     def iv(self, ts: float | datetime, strike: float, expiry: date) -> float | None:
@@ -472,13 +486,15 @@ class IVSurface:
         strike: float,
         expiry: date,
         option_type: str,
+        *,
+        force_term: bool = False,
     ) -> PriceResult:
         if isinstance(ts, datetime):
             now = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
             ts_f = now.timestamp()
         else:
             ts_f = float(ts)
-        fit, q = self._resolve_smile(ts_f, expiry)
+        fit, q = self._resolve_smile(ts_f, expiry, force_term=force_term)
         if fit is None or not q.get("supported"):
             return PriceResult(
                 price=float("nan"),
