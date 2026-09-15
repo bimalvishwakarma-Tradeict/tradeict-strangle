@@ -3063,6 +3063,28 @@ class AdjustmentExecutor:
             return None
 
         flat = flatten_unified_option_chain(chain)
+
+        # Resolve same-side open wing strike for selection filter (no DB inside adj_b).
+        wing_strike_for_select: float | None = None
+        wing_leg_obj: Any | None = None
+        roll_enabled = True
+        try:
+            from backend.core.basket_legs import basket_legs as _basket_legs
+            from backend.database import get_or_create_auto_settings
+
+            bl = _basket_legs(trade, db_session)
+            wing_leg_obj = bl.get("wing_call") if leg == "call" else bl.get("wing_put")
+            cfg = get_or_create_auto_settings(db_session)
+            roll_enabled = bool(
+                getattr(cfg, "wing_roll_with_short_enabled", True)
+            )
+            if wing_leg_obj is not None:
+                wk = float(getattr(wing_leg_obj, "strike", 0) or 0)
+                if wk > 0:
+                    wing_strike_for_select = wk
+        except Exception as wing_exc:
+            logger.warning("Adj B wing strike resolve failed: %s", wing_exc)
+
         result = select_adj_b_strike(
             leg_type=leg,
             p_target=float(p_target),
@@ -3070,7 +3092,35 @@ class AdjustmentExecutor:
             spot=float(spot),
             other_short_strike=other_short_strike,
             min_short_gap_points=min_gap,
+            wing_strike=wing_strike_for_select,
         )
+
+        # Log selection-time wing filter hits (live observability).
+        wing_rejects = [
+            c
+            for c in (result.candidates_considered or [])
+            if c.get("rejected") == "at_or_beyond_wing"
+        ]
+        if wing_rejects and wing_strike_for_select is not None:
+            worst = max(
+                wing_rejects,
+                key=lambda c: float(c.get("premium") or 0),
+            )
+            log_and_buffer(
+                "ADJ_B_WING_CLAMP",
+                trade_id,
+                {
+                    "leg": leg,
+                    "wing_strike": float(wing_strike_for_select),
+                    "rejected_strike": float(worst.get("strike") or 0),
+                    "clamped_strike": (
+                        float(result.strike) if result.strike is not None else None
+                    ),
+                    "p_target": round(float(result.p_target or p_target), 4),
+                    "reason": "selection_filter_at_or_beyond_wing",
+                    "n_rejected": len(wing_rejects),
+                },
+            )
 
         untested_base = float(
             getattr(untested_leg, "trigger_baseline_premium", None)
@@ -3101,6 +3151,7 @@ class AdjustmentExecutor:
                     "skip_reason": result.skip_reason,
                     "candidates": result.candidates_considered[:20],
                     "untested_leg": leg,
+                    "wing_strike": wing_strike_for_select,
                 },
             )
             logger.info(
@@ -3133,6 +3184,7 @@ class AdjustmentExecutor:
                 "other_short_strike": other_short_strike,
                 "spot": round(float(spot), 2),
                 "atm": round(float(result.atm_strike or 0), 2),
+                "wing_strike": wing_strike_for_select,
             },
         )
         logger.info(
@@ -3147,39 +3199,165 @@ class AdjustmentExecutor:
             result.chosen_why,
         )
 
-        # Wing roll flag when moving short would cross the open wing
+        # Wing roll / clamp safety net after selection
         wing_roll = False
         wing_old_strike: float | None = None
-        try:
-            from backend.core.basket_legs import basket_legs as _basket_legs
-            from backend.database import get_or_create_auto_settings
+        plan_strike = float(result.strike)
+        plan_product_id = int(result.product_id)
+        plan_symbol = str(result.symbol or "")
+        plan_premium = float(result.premium or 0)
 
-            bl = _basket_legs(trade, db_session)
-            wing = bl.get("wing_call") if leg == "call" else bl.get("wing_put")
-            cfg = get_or_create_auto_settings(db_session)
-            roll_enabled = bool(
-                getattr(cfg, "wing_roll_with_short_enabled", True)
+        if wing_strike_for_select is not None and wing_strike_for_select > 0:
+            wing_k = float(wing_strike_for_select)
+            new_k = float(plan_strike)
+            crosses = (
+                (leg == "call" and new_k >= wing_k - 1e-9)
+                or (leg == "put" and new_k <= wing_k + 1e-9)
             )
-            if wing is not None and roll_enabled:
-                wing_k = float(getattr(wing, "strike", 0) or 0)
-                new_k = float(result.strike)
-                crosses = (
-                    (leg == "call" and new_k >= wing_k - 1e-9)
-                    or (leg == "put" and new_k <= wing_k + 1e-9)
-                )
-                if crosses and wing_k > 0:
+            if crosses:
+                if roll_enabled:
+                    # Unchanged roll-ON path: flag roll, keep selected strike.
                     wing_roll = True
                     wing_old_strike = wing_k
-        except Exception as wing_exc:
-            logger.warning("Adj B wing_roll detect failed: %s", wing_exc)
+                else:
+                    # Roll OFF: clamp inside wing (Adj A style); abort if dead_end.
+                    from backend.engine.wing_exit import clamp_short_strike_inside_wing
+
+                    avail = []
+                    for cr in flat:
+                        try:
+                            avail.append(float(cr.get("strike") or 0))
+                        except (TypeError, ValueError):
+                            continue
+                    current_short = float(
+                        getattr(untested_leg, "strike", 0) or 0
+                    )
+                    clamped, clamp_status = clamp_short_strike_inside_wing(
+                        leg=leg,
+                        wanted_strike=new_k,
+                        wing_strike=wing_k,
+                        available_strikes=avail,
+                        current_short_strike=current_short,
+                    )
+                    if clamp_status == "dead_end" or clamped is None:
+                        log_and_buffer(
+                            "ADJ_B_WING_CLAMP",
+                            trade_id,
+                            {
+                                "leg": leg,
+                                "wing_strike": wing_k,
+                                "rejected_strike": new_k,
+                                "clamped_strike": None,
+                                "p_target": round(float(p_target), 4),
+                                "reason": "post_plan_dead_end",
+                                "clamp_status": clamp_status,
+                                "current_short": current_short,
+                            },
+                        )
+                        logger.critical(
+                            "[ADJ_B_WING_CLAMP] trade=%s leg=%s dead_end "
+                            "wanted=%s wing=%s — abort plan",
+                            trade_id,
+                            leg,
+                            new_k,
+                            wing_k,
+                        )
+                        return None
+
+                    if abs(float(clamped) - new_k) > 1e-9:
+                        crow: dict[str, Any] | None = None
+                        for row in flat:
+                            opt = str(
+                                row.get("option_type")
+                                or row.get("type")
+                                or row.get("contract_type")
+                                or ""
+                            ).lower()
+                            if leg == "call" and "call" not in opt:
+                                continue
+                            if leg == "put" and "put" not in opt:
+                                continue
+                            try:
+                                k = float(row.get("strike") or 0)
+                            except (TypeError, ValueError):
+                                continue
+                            if abs(k - float(clamped)) < 0.01:
+                                crow = row
+                                break
+                        if crow is None:
+                            log_and_buffer(
+                                "ADJ_B_WING_CLAMP",
+                                trade_id,
+                                {
+                                    "leg": leg,
+                                    "wing_strike": wing_k,
+                                    "rejected_strike": new_k,
+                                    "clamped_strike": float(clamped),
+                                    "p_target": round(float(p_target), 4),
+                                    "reason": "clamped_strike_missing_on_chain",
+                                },
+                            )
+                            return None
+                        pid_raw = crow.get("product_id") or crow.get("id")
+                        try:
+                            pid = int(pid_raw) if pid_raw is not None else 0
+                        except (TypeError, ValueError):
+                            pid = 0
+                        if pid <= 0:
+                            log_and_buffer(
+                                "ADJ_B_WING_CLAMP",
+                                trade_id,
+                                {
+                                    "leg": leg,
+                                    "wing_strike": wing_k,
+                                    "rejected_strike": new_k,
+                                    "clamped_strike": float(clamped),
+                                    "p_target": round(float(p_target), 4),
+                                    "reason": "clamped_product_id_missing",
+                                },
+                            )
+                            return None
+                        prem_c = 0.0
+                        for key in (
+                            "mark_price",
+                            "mark",
+                            "best_bid",
+                            "bid",
+                            "premium",
+                        ):
+                            try:
+                                v = float(crow.get(key) or 0)
+                            except (TypeError, ValueError):
+                                v = 0.0
+                            if v > 0:
+                                prem_c = v
+                                break
+                        log_and_buffer(
+                            "ADJ_B_WING_CLAMP",
+                            trade_id,
+                            {
+                                "leg": leg,
+                                "wing_strike": wing_k,
+                                "rejected_strike": new_k,
+                                "clamped_strike": float(clamped),
+                                "p_target": round(float(p_target), 4),
+                                "reason": "post_plan_clamp",
+                                "clamp_status": clamp_status,
+                            },
+                        )
+                        plan_strike = float(clamped)
+                        plan_product_id = int(pid)
+                        plan_symbol = str(crow.get("symbol") or "")
+                        if prem_c > 0:
+                            plan_premium = prem_c
 
         return AdjustmentPlan(
             exit_leg_type=leg,
             exit_leg_symbol=str(untested_leg.symbol),
-            new_strike=float(result.strike),
-            new_product_id=int(result.product_id),
-            new_symbol=str(result.symbol or ""),
-            target_premium=float(result.premium or 0),
+            new_strike=float(plan_strike),
+            new_product_id=int(plan_product_id),
+            new_symbol=str(plan_symbol),
+            target_premium=float(plan_premium),
             other_leg_premium=float(p_target),
             wing_roll=bool(wing_roll),
             wing_old_strike=wing_old_strike,

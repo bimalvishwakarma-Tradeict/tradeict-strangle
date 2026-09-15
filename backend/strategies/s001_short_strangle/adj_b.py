@@ -119,6 +119,7 @@ def select_adj_b_strike(
     other_short_strike: float,
     min_short_gap_points: float = 0.0,
     strike_step: float | None = None,
+    wing_strike: float | None = None,
 ) -> AdjBStrikeResult:
     """
     Pick a nearer-OTM strike for the untested side (Adj B).
@@ -131,6 +132,8 @@ def select_adj_b_strike(
       5. Gap guard vs other short (+ optional min_short_gap_points);
          if violated, try next further-OUT candidates
       6. If none survive → skip (never force ITM / equal / cross)
+      7. Optional open-wing guard: call < wing_strike, put > wing_strike
+         (strict). If wing_strike is None, this filter is skipped.
     """
     leg = str(leg_type or "").lower().strip()
     if leg not in ("call", "put"):
@@ -145,6 +148,14 @@ def select_adj_b_strike(
     other_k = float(other_short_strike or 0)
     min_gap = max(0.0, float(min_short_gap_points or 0))
     spot_f = float(spot or 0)
+    wing_k: float | None = None
+    if wing_strike is not None:
+        try:
+            wk = float(wing_strike)
+        except (TypeError, ValueError):
+            wk = 0.0
+        if wk > 0:
+            wing_k = wk
 
     if p_tgt <= 0 or spot_f <= 0:
         return AdjBStrikeResult(
@@ -245,6 +256,22 @@ def select_adj_b_strike(
                 }
             )
             continue
+        # Open-wing guard: stay STRICTLY inside wing (toward ATM)
+        if wing_k is not None:
+            beyond_wing = (
+                (leg == "call" and r.strike >= wing_k - 1e-9)
+                or (leg == "put" and r.strike <= wing_k + 1e-9)
+            )
+            if beyond_wing:
+                considered.append(
+                    {
+                        "strike": r.strike,
+                        "premium": r.premium,
+                        "rejected": "at_or_beyond_wing",
+                        "wing_strike": wing_k,
+                    }
+                )
+                continue
         pool.append(r)
         considered.append(
             {
