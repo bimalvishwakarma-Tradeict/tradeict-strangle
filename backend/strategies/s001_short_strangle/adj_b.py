@@ -6,6 +6,66 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class AdjBNoStrikeInsideWing(Exception):
+    """Adj B abort: open wing active but no valid short strike inside it."""
+
+    def __init__(self, details: dict[str, Any]) -> None:
+        self.details = details
+        super().__init__("ADJ_B_NO_STRIKE_INSIDE_WING")
+
+
+def resolve_adj_b_wing_strike(wing_leg: Any | None) -> float | None:
+    """
+    Wing strike for Adj B filter only when leg is OPEN and quantity > 0.
+
+    Closed / zero-qty / missing → None (no wing filter; prior behaviour).
+    """
+    if wing_leg is None:
+        return None
+    status = str(getattr(wing_leg, "status", "") or "").lower()
+    if status != "open":
+        return None
+    try:
+        qty = int(getattr(wing_leg, "quantity", 0) or 0)
+    except (TypeError, ValueError):
+        qty = 0
+    if qty <= 0:
+        return None
+    try:
+        wk = float(getattr(wing_leg, "strike", 0) or 0)
+    except (TypeError, ValueError):
+        wk = 0.0
+    if wk <= 0:
+        return None
+    return wk
+
+
+def is_adj_b_no_strike_inside_wing(
+    result: Any,
+    wing_strike: float | None,
+) -> bool:
+    """
+    True when failure is specifically: every pre-wing-eligible candidate
+    was rejected as at_or_beyond_wing (nothing left inside the wing).
+    """
+    if wing_strike is None or float(wing_strike) <= 0:
+        return False
+    if getattr(result, "success", False):
+        return False
+    considered = list(getattr(result, "candidates_considered", None) or [])
+    pre_wing: list[dict[str, Any]] = []
+    for c in considered:
+        if not isinstance(c, dict):
+            continue
+        rej = c.get("rejected")
+        if rej in ("itm", "premium_not_below_target"):
+            continue
+        pre_wing.append(c)
+    if not pre_wing:
+        return False
+    return all(c.get("rejected") == "at_or_beyond_wing" for c in pre_wing)
+
+
 @dataclass
 class AdjBCandidate:
     strike: float

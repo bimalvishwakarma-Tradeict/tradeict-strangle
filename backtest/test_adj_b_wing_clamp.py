@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Adj B wing clamp unit checks (selection filter + Adj A clamp unchanged).
+Adj B wing clamp unit checks (selection filter + open/qty guard + forced exit).
 
 No print(). Output: console via sys.stdout.
 """
@@ -9,16 +9,21 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 _BACKTEST = Path(__file__).resolve().parent
 _ROOT = _BACKTEST.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend.engine.wing_exit import clamp_short_strike_inside_wing  # noqa: E402
 from backend.strategies.s001_short_strangle.adj_b import (  # noqa: E402
+    AdjBNoStrikeInsideWing,
+    is_adj_b_no_strike_inside_wing,
+    resolve_adj_b_wing_strike,
     select_adj_b_strike,
 )
+from backend.strategies.base_strategy import AdjustmentResult  # noqa: E402
+from backend.engine.wing_exit import clamp_short_strike_inside_wing  # noqa: E402
 
 
 def emit(line: str = "") -> None:
@@ -28,17 +33,15 @@ def emit(line: str = "") -> None:
 
 def put_chain() -> list[dict]:
     """Put marks: farther OTM (lower K) = cheaper; wing at 73200."""
-    # spot ~75000 → ATM ~75000; puts <= ATM are OTM
     rows = []
-    # strike, premium (below a high p_target so they survive premium filter)
     specs = [
-        (71000, 40.0),  # beyond wing (further OTM than wing 73200) — reject
-        (72000, 55.0),  # beyond wing
-        (73200, 80.0),  # == wing — reject
-        (74000, 95.0),  # inside wing (toward ATM)
-        (74500, 110.0),  # inside, nearer ATM, highest prem among inside
-        (75000, 130.0),  # ATM-ish
-        (76000, 200.0),  # ITM for put (strike > ATM) — rejected by ITM
+        (71000, 40.0),
+        (72000, 55.0),
+        (73200, 80.0),
+        (74000, 95.0),
+        (74500, 110.0),
+        (75000, 130.0),
+        (76000, 200.0),
     ]
     for k, prem in specs:
         rows.append(
@@ -56,12 +59,12 @@ def put_chain() -> list[dict]:
 
 def call_chain() -> list[dict]:
     specs = [
-        (78000, 40.0),  # beyond wing 76000
+        (78000, 40.0),
         (77000, 55.0),
-        (76000, 80.0),  # == wing
-        (75500, 95.0),  # inside
-        (75000, 110.0),  # inside highest among inside-ish
-        (74000, 200.0),  # ITM call (strike < ATM)
+        (76000, 80.0),
+        (75500, 95.0),
+        (75000, 110.0),
+        (74000, 200.0),
     ]
     rows = []
     for k, prem in specs:
@@ -78,66 +81,8 @@ def call_chain() -> list[dict]:
     return rows
 
 
-def main() -> int:
-    emit("ADJ B WING CLAMP TESTS")
-    emit("=" * 60)
-    failed = 0
-
-    # --- case 1: wing open, candidate at/beyond wing → rejected ---
-    emit("")
-    emit("CASE 1: put wing=73200 — candidates at/beyond wing rejected")
-    r1 = select_adj_b_strike(
-        leg_type="put",
-        p_target=150.0,
-        chain=put_chain(),
-        spot=75000.0,
-        other_short_strike=78000.0,  # call short far above
-        wing_strike=73200.0,
-    )
-    wing_rej = [
-        c
-        for c in r1.candidates_considered
-        if c.get("rejected") == "at_or_beyond_wing"
-    ]
-    rej_ks = sorted(float(c["strike"]) for c in wing_rej)
-    ok1 = (
-        r1.success
-        and r1.strike is not None
-        and float(r1.strike) > 73200.0
-        and 73200.0 in rej_ks
-        and 72000.0 in rej_ks
-        and 71000.0 in rej_ks
-    )
-    emit(f"  chosen={r1.strike} wing_rejects={rej_ks} success={r1.success}")
-    emit(f"  RESULT: {'PASS' if ok1 else 'FAIL'}")
-    if not ok1:
-        failed += 1
-
-    # --- case 2: wing open, candidate inside → accept ---
-    emit("")
-    emit("CASE 2: put wing=73200 — inside candidate accepted")
-    r2 = select_adj_b_strike(
-        leg_type="put",
-        p_target=150.0,
-        chain=put_chain(),
-        spot=75000.0,
-        other_short_strike=78000.0,
-        wing_strike=73200.0,
-    )
-    # Highest premium among survivors inside wing: 75000@130 then 74500@110...
-    # 75000 is ATM (not ITM for put: strike > atm rejected; atm = nearest to spot)
-    # atm from strikes ≈ 75000; put ITM if strike > atm → 76000 ITM
-    # survivors inside: 74000, 74500, 75000 — highest prem 75000@130
-    ok2 = r2.success and r2.strike is not None and float(r2.strike) > 73200.0
-    emit(f"  chosen={r2.strike} prem={r2.premium} why={r2.chosen_why[:80] if r2.chosen_why else ''}")
-    emit(f"  RESULT: {'PASS' if ok2 else 'FAIL'}")
-    if not ok2:
-        failed += 1
-
-    # --- case 3: all candidates beyond wing → no_valid_strike ---
-    emit("")
-    emit("CASE 3: all surviving premiums are beyond wing → abort/no_valid")
-    only_beyond = [
+def only_beyond_wing_chain() -> list[dict]:
+    return [
         {
             "option_type": "put",
             "strike": 71000.0,
@@ -159,19 +104,95 @@ def main() -> int:
             "product_id": 73200,
             "symbol": "P-BTC-73200-010526",
         },
-        # ITM filler so ATM exists near spot
         {
             "option_type": "put",
             "strike": 75000.0,
-            "mark_price": 200.0,  # >= p_target → premium reject
+            "mark_price": 200.0,
             "product_id": 75000,
             "symbol": "P-BTC-75000-010526",
         },
     ]
+
+
+def result_to_forced_exit_flags(
+    select_result: object, wing_k: float | None
+) -> AdjustmentResult:
+    """Mirror execute() branching for Adj B plan failure."""
+    if is_adj_b_no_strike_inside_wing(select_result, wing_k):
+        return AdjustmentResult(
+            success=False,
+            requires_basket_exit=True,
+            close_basket=True,
+            exit_reason="ADJ_B_NO_STRIKE_INSIDE_WING",
+            error_message="ADJ_B_NO_STRIKE_INSIDE_WING",
+        )
+    return AdjustmentResult(
+        success=False,
+        requires_basket_exit=False,
+        close_basket=False,
+        error_message="ADJ_B_SKIPPED_NO_STRIKE",
+    )
+
+
+def main() -> int:
+    emit("ADJ B WING CLAMP TESTS")
+    emit("=" * 60)
+    failed = 0
+
+    # --- case 1 ---
+    emit("")
+    emit("CASE 1: put wing=73200 — candidates at/beyond wing rejected")
+    r1 = select_adj_b_strike(
+        leg_type="put",
+        p_target=150.0,
+        chain=put_chain(),
+        spot=75000.0,
+        other_short_strike=78000.0,
+        wing_strike=73200.0,
+    )
+    wing_rej = [
+        c
+        for c in r1.candidates_considered
+        if c.get("rejected") == "at_or_beyond_wing"
+    ]
+    rej_ks = sorted(float(c["strike"]) for c in wing_rej)
+    ok1 = (
+        r1.success
+        and r1.strike is not None
+        and float(r1.strike) > 73200.0
+        and 73200.0 in rej_ks
+        and 72000.0 in rej_ks
+        and 71000.0 in rej_ks
+    )
+    emit(f"  chosen={r1.strike} wing_rejects={rej_ks} success={r1.success}")
+    emit(f"  RESULT: {'PASS' if ok1 else 'FAIL'}")
+    if not ok1:
+        failed += 1
+
+    # --- case 2 ---
+    emit("")
+    emit("CASE 2: put wing=73200 — inside candidate accepted")
+    r2 = select_adj_b_strike(
+        leg_type="put",
+        p_target=150.0,
+        chain=put_chain(),
+        spot=75000.0,
+        other_short_strike=78000.0,
+        wing_strike=73200.0,
+    )
+    ok2 = r2.success and r2.strike is not None and float(r2.strike) > 73200.0
+    emit(f"  chosen={r2.strike} prem={r2.premium}")
+    emit(f"  RESULT: {'PASS' if ok2 else 'FAIL'}")
+    if not ok2:
+        failed += 1
+
+    # --- case 3 ---
+    emit("")
+    emit("CASE 3: all surviving premiums are beyond wing → abort/no_valid")
     r3 = select_adj_b_strike(
         leg_type="put",
         p_target=150.0,
-        chain=only_beyond,
+        chain=only_beyond_wing_chain(),
         spot=75000.0,
         other_short_strike=78000.0,
         wing_strike=73200.0,
@@ -182,7 +203,7 @@ def main() -> int:
     if not ok3:
         failed += 1
 
-    # --- case 4: no wing → old behaviour (may pick wing-level / far OTM) ---
+    # --- case 4 ---
     emit("")
     emit("CASE 4: wing_strike=None — no wing filter (old behaviour)")
     r4 = select_adj_b_strike(
@@ -196,24 +217,23 @@ def main() -> int:
     no_wing_rej = [
         c for c in r4.candidates_considered if c.get("rejected") == "at_or_beyond_wing"
     ]
-    # Without wing filter, highest prem below 150 among non-ITM is 75000@130
-    # (76000 is ITM). Same as with wing for this chain — also check that
-    # 73200 is NOT rejected as at_or_beyond_wing.
-    ok4 = r4.success and len(no_wing_rej) == 0
-    # And 73200 can be in pool (rejected=None) if premium qualifies
     considered_732 = [
         c for c in r4.candidates_considered if abs(float(c["strike"]) - 73200) < 1e-9
     ]
-    ok4 = ok4 and bool(considered_732) and considered_732[0].get("rejected") is None
-    emit(f"  chosen={r4.strike} wing_rej_count={len(no_wing_rej)} row732={considered_732}")
+    ok4 = (
+        r4.success
+        and len(no_wing_rej) == 0
+        and bool(considered_732)
+        and considered_732[0].get("rejected") is None
+    )
+    emit(f"  chosen={r4.strike} wing_rej_count={len(no_wing_rej)}")
     emit(f"  RESULT: {'PASS' if ok4 else 'FAIL'}")
     if not ok4:
         failed += 1
 
-    # --- case 5: Adj A clamp helper unchanged ---
+    # --- case 5 ---
     emit("")
     emit("CASE 5: Adj A clamp_short_strike_inside_wing unchanged")
-    # From existing test_wing_exit semantics: call wanted past wing → clamp
     clamped, status = clamp_short_strike_inside_wing(
         leg="call",
         wanted_strike=85000.0,
@@ -229,13 +249,132 @@ def main() -> int:
         available_strikes=[70000.0, 71000.0, 72000.0],
         current_short_strike=72000.0,
     )
-    # put: want 70000 <= wing 71000 → crosses; cands with k < 72000 and k > 71000 → none → dead_end
     ok5b = status_d == "dead_end" and dead is None
     ok5 = ok5a and ok5b
     emit(f"  call clamp status={status} clamped={clamped}")
     emit(f"  put dead_end status={status_d} clamped={dead}")
     emit(f"  RESULT: {'PASS' if ok5 else 'FAIL'}")
     if not ok5:
+        failed += 1
+
+    # --- case 6: CLOSED wing → no filter ---
+    emit("")
+    emit("CASE 6: wing CLOSED → resolve returns None (filter off)")
+    closed_wing = SimpleNamespace(status="closed", quantity=8, strike=73200.0)
+    wk6 = resolve_adj_b_wing_strike(closed_wing)
+    r6 = select_adj_b_strike(
+        leg_type="put",
+        p_target=150.0,
+        chain=put_chain(),
+        spot=75000.0,
+        other_short_strike=78000.0,
+        wing_strike=wk6,
+    )
+    rej6 = [
+        c for c in r6.candidates_considered if c.get("rejected") == "at_or_beyond_wing"
+    ]
+    ok6 = wk6 is None and len(rej6) == 0 and r6.success
+    emit(f"  resolve={wk6} wing_rej={len(rej6)} chosen={r6.strike}")
+    emit(f"  RESULT: {'PASS' if ok6 else 'FAIL'}")
+    if not ok6:
+        failed += 1
+
+    # --- case 7: OPEN qty=0 → no filter ---
+    emit("")
+    emit("CASE 7: wing OPEN qty=0 → resolve returns None (filter off)")
+    zero_wing = SimpleNamespace(status="open", quantity=0, strike=73200.0)
+    wk7 = resolve_adj_b_wing_strike(zero_wing)
+    r7 = select_adj_b_strike(
+        leg_type="put",
+        p_target=150.0,
+        chain=put_chain(),
+        spot=75000.0,
+        other_short_strike=78000.0,
+        wing_strike=wk7,
+    )
+    rej7 = [
+        c for c in r7.candidates_considered if c.get("rejected") == "at_or_beyond_wing"
+    ]
+    ok7 = wk7 is None and len(rej7) == 0 and r7.success
+    emit(f"  resolve={wk7} wing_rej={len(rej7)} chosen={r7.strike}")
+    emit(f"  RESULT: {'PASS' if ok7 else 'FAIL'}")
+    if not ok7:
+        failed += 1
+
+    # --- case 8: all beyond wing → basket exit flags ---
+    emit("")
+    emit("CASE 8: all candidates beyond wing → forced basket EXIT (not skip)")
+    open_wing = SimpleNamespace(status="open", quantity=8, strike=73200.0)
+    wk8 = resolve_adj_b_wing_strike(open_wing)
+    r8 = select_adj_b_strike(
+        leg_type="put",
+        p_target=150.0,
+        chain=only_beyond_wing_chain(),
+        spot=75000.0,
+        other_short_strike=78000.0,
+        wing_strike=wk8,
+    )
+    force = is_adj_b_no_strike_inside_wing(r8, wk8)
+    flags = result_to_forced_exit_flags(r8, wk8)
+    # Exception path used by live execute
+    raised = False
+    try:
+        if force:
+            raise AdjBNoStrikeInsideWing(
+                {
+                    "leg": "put",
+                    "wing_strike": wk8,
+                    "p_target": 150.0,
+                    "n_candidates": len(r8.candidates_considered),
+                    "reject_reasons": r8.candidates_considered,
+                    "reason": "no_strike_inside_wing_selection",
+                }
+            )
+    except AdjBNoStrikeInsideWing:
+        raised = True
+    ok8 = (
+        wk8 == 73200.0
+        and (not r8.success)
+        and force
+        and flags.requires_basket_exit is True
+        and flags.close_basket is True
+        and flags.error_message == "ADJ_B_NO_STRIKE_INSIDE_WING"
+        and raised
+    )
+    emit(
+        f"  force={force} exit={flags.requires_basket_exit} "
+        f"close={flags.close_basket} msg={flags.error_message} raised={raised}"
+    )
+    emit(f"  RESULT: {'PASS' if ok8 else 'FAIL'}")
+    if not ok8:
+        failed += 1
+
+    # --- case 9: empty chain / no wing → skip, NOT exit ---
+    emit("")
+    emit("CASE 9: empty chain → skip behaviour (no forced exit)")
+    r9 = select_adj_b_strike(
+        leg_type="put",
+        p_target=150.0,
+        chain=[],
+        spot=75000.0,
+        other_short_strike=78000.0,
+        wing_strike=None,
+    )
+    force9 = is_adj_b_no_strike_inside_wing(r9, None)
+    flags9 = result_to_forced_exit_flags(r9, None)
+    ok9 = (
+        (not r9.success)
+        and (not force9)
+        and flags9.requires_basket_exit is False
+        and flags9.close_basket is False
+        and flags9.error_message == "ADJ_B_SKIPPED_NO_STRIKE"
+    )
+    emit(
+        f"  success={r9.success} force={force9} "
+        f"exit={flags9.requires_basket_exit} msg={flags9.error_message}"
+    )
+    emit(f"  RESULT: {'PASS' if ok9 else 'FAIL'}")
+    if not ok9:
         failed += 1
 
     # Bonus: call wing filter
@@ -264,6 +403,18 @@ def main() -> int:
     emit(f"  chosen={rc.strike} rejects={sorted(call_rej)}")
     emit(f"  RESULT: {'PASS' if okc else 'FAIL'}")
     if not okc:
+        failed += 1
+
+    # Bonus: OPEN qty>0 resolves strike
+    emit("")
+    emit("BONUS: open qty>0 wing resolves strike")
+    wk_ok = resolve_adj_b_wing_strike(
+        SimpleNamespace(status="open", quantity=6, strike=73200.0)
+    )
+    okb = wk_ok == 73200.0
+    emit(f"  resolve={wk_ok}")
+    emit(f"  RESULT: {'PASS' if okb else 'FAIL'}")
+    if not okb:
         failed += 1
 
     emit("")

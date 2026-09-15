@@ -28,6 +28,13 @@ from backend.strategies.s001_short_strangle.config import UNDERLYING_SYMBOLS
 logger = logging.getLogger(__name__)
 
 
+# Re-export Adj B wing helpers (defined in adj_b — keep import path stable).
+from backend.strategies.s001_short_strangle.adj_b import (  # noqa: E402
+    AdjBNoStrikeInsideWing,
+    is_adj_b_no_strike_inside_wing,
+    resolve_adj_b_wing_strike,
+)
+
 class AdjustmentError(Exception):
     """Raised for adjustment precondition failures (missing legs, etc.)."""
 
@@ -566,6 +573,30 @@ class AdjustmentExecutor:
                         current_strike=float(triggered_leg.strike),
                         untouched_leg_offer=float(other_leg_current_offer),
                     )
+            except AdjBNoStrikeInsideWing as wing_ex:
+                details = dict(getattr(wing_ex, "details", None) or {})
+                details.setdefault("leg", triggered_leg_type)
+                log_and_buffer(
+                    "ADJ_B_FORCED_EXIT",
+                    int(trade.id),
+                    details,
+                )
+                logger.critical(
+                    "[ADJ_B_FORCED_EXIT] trade=%s leg=%s wing=%s — %s",
+                    trade.id,
+                    triggered_leg_type,
+                    details.get("wing_strike"),
+                    details.get("reason"),
+                )
+                return AdjustmentResult(
+                    success=False,
+                    is_partial=False,
+                    requires_basket_exit=True,
+                    close_basket=True,
+                    exit_reason="ADJ_B_NO_STRIKE_INSIDE_WING",
+                    old_strike=float(triggered_leg.strike),
+                    error_message="ADJ_B_NO_STRIKE_INSIDE_WING",
+                )
             except Exception as exc:
                 msg = str(exc)
                 # Wing cross-guard dead_end — keep trade ACTIVE, no orders.
@@ -3064,7 +3095,8 @@ class AdjustmentExecutor:
 
         flat = flatten_unified_option_chain(chain)
 
-        # Resolve same-side open wing strike for selection filter (no DB inside adj_b).
+        # Resolve same-side wing strike for selection filter (no DB inside adj_b).
+        # Only OPEN wings with quantity > 0 — never CLOSED fallback from basket_legs.
         wing_strike_for_select: float | None = None
         wing_leg_obj: Any | None = None
         roll_enabled = True
@@ -3078,10 +3110,7 @@ class AdjustmentExecutor:
             roll_enabled = bool(
                 getattr(cfg, "wing_roll_with_short_enabled", True)
             )
-            if wing_leg_obj is not None:
-                wk = float(getattr(wing_leg_obj, "strike", 0) or 0)
-                if wk > 0:
-                    wing_strike_for_select = wk
+            wing_strike_for_select = resolve_adj_b_wing_strike(wing_leg_obj)
         except Exception as wing_exc:
             logger.warning("Adj B wing strike resolve failed: %s", wing_exc)
 
@@ -3140,6 +3169,25 @@ class AdjustmentExecutor:
             untested_prem = float(getattr(untested_leg, "initial_premium", 0) or 0)
 
         if not result.success or result.strike is None or not result.product_id:
+            if is_adj_b_no_strike_inside_wing(result, wing_strike_for_select):
+                raise AdjBNoStrikeInsideWing(
+                    {
+                        "leg": leg,
+                        "wing_strike": float(wing_strike_for_select or 0),
+                        "p_target": round(float(result.p_target or p_target), 4),
+                        "n_candidates": len(result.candidates_considered or []),
+                        "reject_reasons": [
+                            {
+                                "strike": c.get("strike"),
+                                "rejected": c.get("rejected"),
+                                "premium": c.get("premium"),
+                            }
+                            for c in (result.candidates_considered or [])[:40]
+                        ],
+                        "reason": "no_strike_inside_wing_selection",
+                        "skip_reason": result.skip_reason,
+                    }
+                )
             log_and_buffer(
                 "ADJ_B_SKIPPED_NO_STRIKE",
                 trade_id,
@@ -3256,13 +3304,29 @@ class AdjustmentExecutor:
                         )
                         logger.critical(
                             "[ADJ_B_WING_CLAMP] trade=%s leg=%s dead_end "
-                            "wanted=%s wing=%s — abort plan",
+                            "wanted=%s wing=%s — forced basket exit",
                             trade_id,
                             leg,
                             new_k,
                             wing_k,
                         )
-                        return None
+                        raise AdjBNoStrikeInsideWing(
+                            {
+                                "leg": leg,
+                                "wing_strike": wing_k,
+                                "p_target": round(float(p_target), 4),
+                                "n_candidates": len(flat),
+                                "reject_reasons": [
+                                    {
+                                        "wanted_strike": new_k,
+                                        "rejected": "post_plan_dead_end",
+                                        "clamp_status": clamp_status,
+                                        "current_short": current_short,
+                                    }
+                                ],
+                                "reason": "no_strike_inside_wing_post_plan_clamp",
+                            }
+                        )
 
                     if abs(float(clamped) - new_k) > 1e-9:
                         crow: dict[str, Any] | None = None
