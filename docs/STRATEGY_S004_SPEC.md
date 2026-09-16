@@ -1,3 +1,5 @@
+> Mirror copy. Authoritative version Claude project mein: claude/STRATEGY_S004_SPEC.md
+
 # Strategy S004 — Spec (DRAFT)
 
 **Status: DRAFT — build is NOT approved.**  

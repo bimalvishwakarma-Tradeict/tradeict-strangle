@@ -1,3 +1,5 @@
+> Mirror copy. Authoritative version Claude project mein: claude/SESSION_HANDOFF_2026-09-16.md
+
 # Session handoff — 2026-09-16
 
 **Audience:** next Cursor / Claude session, or any engineer picking up the bot.  
@@ -129,25 +131,24 @@ Treat these as the research lock deltas that mattered in the final validation sw
 4. Wings → **2000 pts**, `wing_roll_with_short_enabled` → **0**  
 5. `hedge_enabled` → **0**; profit target **k=1.0**
 
-### Sizing “22 USD”
+### Sizing 22 USD
 
-**TBD** in this session — not found as a locked S001 `capital_per_lot` / fee constant in the final-validation CFG. Do not confuse with S003 cost floors (~23 / ~53 BTC points). Confirm with PM before treating as live sizing.
+**max loss per basket = 22 USD (S001_FINAL_CONFIG §3)**
 
 ---
 
-## 6. Code defects D1–D7 (live / shared paths)
-
-Numbering below is for **this handoff**. If Claude PM used a different D-list, reconcile on next sync (**TBD**).
+## 6. Code defects (live / shared paths)
 
 | ID | Defect | Status | Commit(s) | Deploy |
 |----|--------|--------|-----------|--------|
-| **D1** | Adj B could select / cross the **open wing** strike | **FIXED** (selection filter + post-plan clamp; roll-ON path untouched) | `bfbeeb6` | **Pending** server `git pull` + import check + restart when safe |
-| **D2** | Adj B wing filter used **CLOSED** / qty=0 wing via `basket_legs` fallback | **FIXED** (`resolve_adj_b_wing_strike`: open + qty>0 only) | `0f6ae65` | **Pending** deploy |
-| **D3** | No strike inside wing → skip + **30s retry loop** (basket stays open) | **FIXED** → forced basket exit `ADJ_B_NO_STRIKE_INSIDE_WING` / `ADJ_B_FORCED_EXIT` | `0f6ae65` | **Pending** deploy |
-| **D4** | Startup `db_audit` CHECK 4 closed **all** slave option positions (no bot/trade/hedge scope) | **FIXED** — shared `scope_live_positions_for_closed_master_recovery`; structured `DB_AUDIT_CHECK4_*` logs | `4e12d6f` | **Pending** deploy |
-| **D5** | Mark downloader pulled **full short-dated life** (slow) | **FIXED** (backtest only) `--tail-days` | `7d37ab5` | N/A (local / backtest machine) |
-| **D6** | **TBD** — not assigned in this Cursor session | TBD | — | — |
-| **D7** | **TBD** — not assigned in this Cursor session | TBD | — | — |
+| **D1** | `db_audit` CHECK 4 closed **all** slave option positions (no bot/trade/hedge scope) | **FIXED** — shared `scope_live_positions_for_closed_master_recovery`; structured `DB_AUDIT_CHECK4_*` logs | `4e12d6f` | **Pending** server `git pull` + import check + restart when safe |
+| **D2** | `compute_decrease_step_qty` uses `floor()` — not proportional to remaining qty | **OPEN** | — | — |
+| **D3** | Wing `SELL_PARTIAL` uses fixed **2** lots | **OPEN** | — | — |
+| **D4** | Adj B wing collision / cross open wing (selection + closed-wing fallback + no-strike forced exit) | **FIXED** | `bfbeeb6` + `0f6ae65` | **Pending** deploy |
+| **D6** | `LEDGER_RECONCILE` reports `findings=3` every cycle | **OPEN** | — | — |
+| **D7** | `trade_reconcile.py:312-369` does not detect same-product long+short collision | **OPEN** | — | — |
+
+There is **no D5** defect in this numbering.
 
 **Tests:** `backtest/test_adj_b_wing_clamp.py`, `backtest/test_db_audit_check4.py` (run after pull).
 
@@ -158,11 +159,11 @@ Numbering below is for **this handoff**. If Claude PM used a different D-list, r
 
 ## 7. Pending list
 
-1. **Server deploy** of D1–D4 (`git pull` → import OK → restart when no mid-adjustment).  
+1. **Server deploy** of D1 + D4 (`git pull` → import OK → restart when no mid-adjustment).  
 2. **Finish / monitor** 24‑month mark download (`--tail-days 5`); then rebuild multi-month S001 mark path.  
 3. Re-run mark-vs-print calibration on fuller history (1.65% may move).  
-4. Reconcile Claude PM **D6/D7** and **S001 “22 USD sizing”** wording.  
-5. **S004** — draft only; **do not build** until approved (`docs/STRATEGY_S004_SPEC.md`).  
+4. Open live defects: **D2**, **D3**, **D6**, **D7** (see §6).  
+5. **S004** — cost gate research (`backtest/s004_gate.py`); live build still needs approved spec.  
 6. Live `auto_trade_settings` vs research-locked CFG — confirm what is actually live (**TBD**).  
 7. Optional: wipe / ignore stale `frontend/trading_bot.db` on server (never use it).
 
