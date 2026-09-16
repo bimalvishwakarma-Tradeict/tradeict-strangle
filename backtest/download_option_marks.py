@@ -13,7 +13,7 @@ Flags:
   --sleep SECONDS   rate control between candle requests
   --tail-days N     short-dated options: only last N days (default 5);
                     monthlies (life > 14d) still download full life
-  --dry-run / --save-products  (existing)
+  --dry-run / --save-products / --resume-report  (existing + report)
 
 Rule: every API response is written to disk BEFORE processing.
 No print(). Completeness: console + backtest/results/completeness_YYYY-MM.txt
@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import sqlite3
+from collections import defaultdict
 import sys
 import time
 from dataclasses import dataclass
@@ -66,6 +67,8 @@ PAGE_SIZE = 500
 CONTRACT_LIFE_DAYS = 10
 SHORT_DATED_MAX_LIFE_DAYS = 14
 DEFAULT_TAIL_DAYS = 5
+EDGE_TOL_SEC = 6 * 3600
+RESUME_REQUEST_SEC = 1.05  # measured live download 2026-09-16 ~12:01 IST
 BYTES_PER_MARK_ROW = 173.0
 MINUTES_PER_REQUEST = float(MAX_CANDLES)
 RATE_TEST_SLEEP = 0.35
@@ -76,6 +79,8 @@ PRODUCTS_DB = _BACKTEST / "cache" / "products_btc_options.sqlite"
 SPOT_CACHE_DB = _BACKTEST / "cache" / "spot_btc_entry.sqlite"
 RESULTS_DIR = _BACKTEST / "results"
 DRYRUN_OUT = RESULTS_DIR / "dryrun_symbols.txt"
+RESUME_REPORT_OUT = RESULTS_DIR / "resume_report.txt"
+MARK_DOWNLOAD_LOG = RESULTS_DIR / "mark_download.log"
 RAW_CANDLES_DIR = CACHE_DIR / "raw_candles"
 
 CHECK_SYM_MAY13 = "P-BTC-78000-150526"
@@ -965,6 +970,153 @@ def symbol_has_gap(conn: sqlite3.Connection, symbol: str, w0: int, w1: int) -> b
     return not symbol_covers_window(conn, symbol, w0, w1)
 
 
+def parse_win_tag(detail: str) -> tuple[int, int] | None:
+    """Parse win=w0-w1 from progress detail (may be prefixed before '|')."""
+    if not detail:
+        return None
+    head = detail.split("|", 1)[0]
+    if not head.startswith("win="):
+        return None
+    body = head[4:]
+    if "-" not in body:
+        return None
+    a, b = body.split("-", 1)
+    try:
+        return int(a), int(b)
+    except ValueError:
+        return None
+
+
+def detail_with_win_tag(detail: str, w0: int, w1: int) -> str:
+    """Persist tagged download window on successful fetch: win=w0-w1|rest."""
+    win = f"win={int(w0)}-{int(w1)}"
+    rest = detail or ""
+    if rest.startswith("win="):
+        rest = rest.split("|", 1)[1] if "|" in rest else ""
+    if rest:
+        return f"{win}|{rest}"
+    return win
+
+
+def symbol_mark_ts_bounds(
+    conn: sqlite3.Connection, symbol: str
+) -> tuple[int | None, int | None]:
+    row = conn.execute(
+        "SELECT MIN(ts), MAX(ts) FROM marks WHERE symbol=?",
+        (symbol,),
+    ).fetchone()
+    if row is None or row[0] is None or row[1] is None:
+        return None, None
+    return int(row[0]), int(row[1])
+
+
+RESUME_SKIP_DECISIONS = frozenset(
+    {
+        "skip_empty",
+        "skip_same_window",
+        "skip_short_done_end_ok",
+        "skip_long_edges_ok",
+    }
+)
+
+RESUME_REFETCH_DECISIONS = frozenset(
+    {
+        "refetch_short_end_missing",
+        "refetch_long_start_missing",
+        "refetch_long_end_missing",
+        "retry_error",
+        "not_started",
+        "fetch",
+        "fetch_force",
+    }
+)
+
+
+def classify_resume_decision(
+    *,
+    force: bool,
+    prev: tuple[str, int, str] | None,
+    w0: int,
+    w1: int,
+    mn: int | None,
+    mx: int | None,
+    is_short_dated: bool,
+) -> str:
+    """
+    Resume decision for skip vs refetch (no HTTP).
+    Short-dated done: end edge only. Long-life done: both edges.
+    """
+    if force:
+        return "fetch_force"
+    if prev is None:
+        return "not_started"
+    status, _n, detail = prev
+    if status == "empty":
+        return "skip_empty"
+    if status == "error":
+        return "retry_error"
+    if status != "done":
+        return "fetch"
+    tagged = parse_win_tag(detail)
+    if tagged is not None:
+        tw0, tw1 = tagged
+        if tw0 <= w0 and tw1 >= w1:
+            return "skip_same_window"
+    if is_short_dated:
+        if mx is None or mx < w1 - EDGE_TOL_SEC:
+            return "refetch_short_end_missing"
+        return "skip_short_done_end_ok"
+    if mn is None or mn > w0 + EDGE_TOL_SEC:
+        return "refetch_long_start_missing"
+    if mx is None or mx < w1 - EDGE_TOL_SEC:
+        return "refetch_long_end_missing"
+    return "skip_long_edges_ok"
+
+
+def estimate_candle_requests(w0: int, w1: int) -> int:
+    """HTTP candle requests for window [w0, w1] at MAX_CANDLES per call."""
+    mins = expected_candles_for_window(w0, w1)
+    if mins <= 0:
+        return 0
+    return int(math.ceil(mins / float(MAX_CANDLES)))
+
+
+def old_density_would_refetch(
+    conn: sqlite3.Connection,
+    symbol: str,
+    w0: int,
+    w1: int,
+    prev: tuple[str, int, str] | None,
+) -> bool:
+    """Previous skip rule: status done + failing 98% density → refetch."""
+    if prev is None or prev[0] != "done":
+        return False
+    return not symbol_covers_window(conn, symbol, w0, w1)
+
+
+def setup_download_logging() -> None:
+    """Append WARNING+ and module INFO (excl. httpx) to mark_download.log."""
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    if any(
+        isinstance(h, logging.FileHandler)
+        and getattr(h, "baseFilename", "") == str(MARK_DOWNLOAD_LOG.resolve())
+        for h in logger.handlers
+    ):
+        return
+    fh = logging.FileHandler(MARK_DOWNLOAD_LOG, mode="a", encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.addFilter(
+        lambda record: record.name == logger.name  # type: ignore[arg-type]
+    )
+    fh.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logger.addHandler(fh)
+    logger.setLevel(logging.INFO)
+
+
 def fetch_mark_candles(
     client: httpx.Client,
     symbol: str,
@@ -1299,26 +1451,26 @@ def download_one_symbol(
     w0, w1 = download_window(prod, tail_days=int(tail_days))
     expected = expected_candles_for_window(w0, w1)
     prev = progress_status(conn, prod.symbol)
-    if not force and prev is not None and prev[0] in {"done", "empty"}:
-        # Resume: required window covered (extra history is fine, not incomplete)
-        if prev[0] == "empty":
-            return SymbolDownloadResult(
-                symbol=prod.symbol,
-                status=prev[0],
-                n_rows=prev[1],
-                expected=expected,
-                detail=f"skipped_existing:{prev[2]}",
-                has_gap=True,
-            )
-        if symbol_covers_window(conn, prod.symbol, w0, w1):
-            return SymbolDownloadResult(
-                symbol=prod.symbol,
-                status=prev[0],
-                n_rows=prev[1],
-                expected=expected,
-                detail=f"skipped_existing_covers_window:{prev[2]}",
-                has_gap=False,
-            )
+    mn, mx = symbol_mark_ts_bounds(conn, prod.symbol)
+    decision = classify_resume_decision(
+        force=force,
+        prev=prev,
+        w0=w0,
+        w1=w1,
+        mn=mn,
+        mx=mx,
+        is_short_dated=is_short_dated_option(prod),
+    )
+    if decision in RESUME_SKIP_DECISIONS:
+        assert prev is not None
+        return SymbolDownloadResult(
+            symbol=prod.symbol,
+            status=prev[0],
+            n_rows=prev[1],
+            expected=expected,
+            detail=f"{decision}:{prev[2]}",
+            has_gap=symbol_has_gap(conn, prod.symbol, w0, w1),
+        )
     if w1 <= w0:
         mark_done(conn, prod.symbol, "empty", 0, "window_empty")
         return SymbolDownloadResult(
@@ -1338,10 +1490,11 @@ def download_one_symbol(
         return SymbolDownloadResult(
             prod.symbol, "empty", 0, expected, detail, True
         )
-    mark_done(conn, prod.symbol, "done", n, detail)
+    detail_tagged = detail_with_win_tag(detail, w0, w1)
+    mark_done(conn, prod.symbol, "done", n, detail_tagged)
     has_gap = symbol_has_gap(conn, prod.symbol, w0, w1)
     return SymbolDownloadResult(
-        prod.symbol, "done", n, expected, detail, has_gap
+        prod.symbol, "done", n, expected, detail_tagged, has_gap
     )
 
 
@@ -1561,6 +1714,13 @@ def run_month_download(
         results: list[SymbolDownloadResult] = []
         total = len(kept)
         emit(lines, f"downloading {total} symbols -> {shard}")
+        logger.info(
+            "SHARD start %04d-%02d symbols=%d path=%s",
+            year,
+            month,
+            total,
+            shard,
+        )
         t0 = time.time()
         for i, prod in enumerate(kept, 1):
             r = download_one_symbol(
@@ -1582,6 +1742,13 @@ def run_month_download(
                 )
         main_elapsed = time.time() - t0
         emit(lines, f"main download elapsed_s={main_elapsed:.1f} 429s={_429_COUNT}")
+        logger.info(
+            "SHARD end %04d-%02d elapsed_s=%.1f path=%s",
+            year,
+            month,
+            main_elapsed,
+            shard,
+        )
 
         emit_completeness_report(
             lines,
@@ -1689,6 +1856,14 @@ def run_download(
             )
             emit(lines, f"shard {year:04d}-{month:02d} symbols={len(prods_sorted)} -> {path}")
             total = len(prods_sorted)
+            shard_t0 = time.time()
+            logger.info(
+                "SHARD start %04d-%02d symbols=%d path=%s",
+                year,
+                month,
+                total,
+                path,
+            )
             for i, prod in enumerate(prods_sorted, 1):
                 r = download_one_symbol(
                     client,
@@ -1705,8 +1880,221 @@ def run_download(
                         lines,
                         f"progress {i}/{total} last={prod.symbol} rows={r.n_rows}",
                     )
+            logger.info(
+                "SHARD end %04d-%02d elapsed_s=%.1f path=%s",
+                year,
+                month,
+                time.time() - shard_t0,
+                path,
+            )
             conn.close()
     emit(lines, "DOWNLOAD DONE.")
+    return 0
+
+
+def _ts_utc_iso(ts: int | None) -> str:
+    if ts is None:
+        return "n/a"
+    return datetime.fromtimestamp(int(ts), tz=UTC).isoformat()
+
+
+def run_resume_report(
+    *,
+    month_filter: str | None,
+    tail_days: int,
+) -> int:
+    """Classify resume decisions per shard without candle HTTP (DB read-only)."""
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+    lines: list[str] = []
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    emit(lines, "OPTION MARK DOWNLOADER — RESUME REPORT (no candle HTTP)")
+    emit(lines, "=" * 80)
+    emit(lines, f"tail_days={tail_days}  EDGE_TOL_SEC={EDGE_TOL_SEC}")
+    emit(lines, f"month_filter={month_filter or 'ALL_SHARDS_ON_DISK'}")
+    emit(lines, "")
+
+    products = load_products_from_db()
+    if not products:
+        emit(lines, f"ERROR: no products in {PRODUCTS_DB}")
+        RESUME_REPORT_OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return 1
+
+    times, closes = ot.load_spot_1m()
+    spot_conn = init_spot_cache()
+    spot_http_calls = 0
+
+    shard_paths = sorted(CACHE_DIR.glob("marks_*.sqlite"))
+    if month_filter:
+        try:
+            y, m = parse_year_month(month_filter)
+        except ValueError as exc:
+            emit(lines, f"ERROR: {exc}")
+            RESUME_REPORT_OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            spot_conn.close()
+            return 2
+        want = shard_path(y, m)
+        shard_paths = [want] if want.is_file() else []
+
+    if not shard_paths:
+        emit(lines, "ERROR: no mark shards matched")
+        RESUME_REPORT_OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        spot_conn.close()
+        return 1
+
+    emit(lines, f"products_from_db={len(products)}")
+    emit(lines, f"shards={len(shard_paths)}")
+    emit(
+        lines,
+        "remaining shards not on disk (2025-05 to 2026-09 except 2026-05): "
+        "not estimated here",
+    )
+    emit(lines, "")
+
+    grand: dict[str, int] = defaultdict(int)
+    grand_requests = 0
+    grand_n_short = 0
+    grand_n_long = 0
+    grand_old_density = 0
+
+    for path in shard_paths:
+        stem = path.stem.replace("marks_", "")
+        try:
+            year, month = parse_year_month(stem)
+        except ValueError:
+            emit(lines, f"SKIP bad shard name {path.name}")
+            continue
+
+        month_prods = [
+            p
+            for p in products
+            if p.expiry.year == year and p.expiry.month == month
+        ]
+        kept, _meta = filter_band(
+            month_prods,
+            times,
+            closes,
+            client=None,
+            spot_conn=spot_conn,
+            raw_dir=None,
+        )
+
+        counts: dict[str, int] = defaultdict(int)
+        old_density_refetch = 0
+        n_short = 0
+        n_long = 0
+        est_requests = 0
+        examples_long_start: list[str] = []
+
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            for prod in kept:
+                short = is_short_dated_option(prod)
+                if short:
+                    n_short += 1
+                else:
+                    n_long += 1
+                w0, w1 = download_window(prod, tail_days=int(tail_days))
+                prev = progress_status(conn, prod.symbol)
+                mn, mx = symbol_mark_ts_bounds(conn, prod.symbol)
+                decision = classify_resume_decision(
+                    force=False,
+                    prev=prev,
+                    w0=w0,
+                    w1=w1,
+                    mn=mn,
+                    mx=mx,
+                    is_short_dated=short,
+                )
+                counts[decision] += 1
+                if old_density_would_refetch(conn, prod.symbol, w0, w1, prev):
+                    old_density_refetch += 1
+                if decision in RESUME_REFETCH_DECISIONS:
+                    est_requests += estimate_candle_requests(w0, w1)
+
+                if (
+                    decision == "refetch_long_start_missing"
+                    and len(examples_long_start) < 5
+                ):
+                    examples_long_start.append(
+                        f"  {prod.symbol}  w0={w0} w1={w1}  "
+                        f"MIN={_ts_utc_iso(mn)}  MAX={_ts_utc_iso(mx)}"
+                    )
+        finally:
+            conn.close()
+
+        total_refetch = sum(counts[d] for d in RESUME_REFETCH_DECISIONS)
+        est_hours = est_requests * RESUME_REQUEST_SEC / 3600.0
+
+        for k, v in counts.items():
+            grand[k] += v
+        grand_requests += est_requests
+        grand_n_short += n_short
+        grand_n_long += n_long
+        grand_old_density += old_density_refetch
+
+        emit(lines, f"----- SHARD {stem} -----")
+        emit(lines, f"path={path}")
+        emit(lines, f"total={len(kept)}  n_short={n_short}  n_long={n_long}")
+        emit(lines, f"skip_same_window={counts['skip_same_window']}")
+        emit(lines, f"skip_short_done_end_ok={counts['skip_short_done_end_ok']}")
+        emit(lines, f"skip_long_edges_ok={counts['skip_long_edges_ok']}")
+        emit(lines, f"skip_empty={counts['skip_empty']}")
+        emit(
+            lines,
+            f"refetch_short_end_missing={counts['refetch_short_end_missing']}",
+        )
+        emit(
+            lines,
+            f"refetch_long_start_missing={counts['refetch_long_start_missing']}",
+        )
+        emit(
+            lines,
+            f"refetch_long_end_missing={counts['refetch_long_end_missing']}",
+        )
+        emit(lines, f"retry_error={counts['retry_error']}")
+        emit(lines, f"not_started={counts['not_started']}")
+        emit(lines, f"total_refetch={total_refetch}")
+        emit(lines, f"old_density_would_refetch={old_density_refetch}")
+        emit(lines, f"estimated_requests={est_requests}")
+        emit(lines, f"estimated_hours={est_hours:.2f}")
+        emit(lines, "examples refetch_long_start_missing:")
+        if examples_long_start:
+            emit(lines, "\n".join(examples_long_start))
+        else:
+            emit(lines, "  (none)")
+        emit(lines, "")
+
+    grand_refetch = sum(grand[d] for d in RESUME_REFETCH_DECISIONS)
+    grand_hours = grand_requests * RESUME_REQUEST_SEC / 3600.0
+    emit(lines, "===== GRAND TOTAL (shards on disk only) =====")
+    emit(lines, f"n_short={grand_n_short}  n_long={grand_n_long}")
+    emit(lines, f"skip_same_window={grand['skip_same_window']}")
+    emit(lines, f"skip_short_done_end_ok={grand['skip_short_done_end_ok']}")
+    emit(lines, f"skip_long_edges_ok={grand['skip_long_edges_ok']}")
+    emit(lines, f"skip_empty={grand['skip_empty']}")
+    emit(lines, f"refetch_short_end_missing={grand['refetch_short_end_missing']}")
+    emit(
+        lines,
+        f"refetch_long_start_missing={grand['refetch_long_start_missing']}",
+    )
+    emit(lines, f"refetch_long_end_missing={grand['refetch_long_end_missing']}")
+    emit(lines, f"retry_error={grand['retry_error']}")
+    emit(lines, f"not_started={grand['not_started']}")
+    emit(lines, f"total_refetch={grand_refetch}")
+    emit(lines, f"old_density_would_refetch={grand_old_density}")
+    emit(lines, f"estimated_requests={grand_requests}")
+    emit(lines, f"estimated_hours={grand_hours:.2f}")
+    emit(lines, "")
+
+    spot_conn.close()
+    emit(lines, f"spot_http_calls={spot_http_calls}")
+    emit(lines, "DONE.")
+    RESUME_REPORT_OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("Wrote %s", RESUME_REPORT_OUT)
     return 0
 
 
@@ -1783,6 +2171,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Paginate all BTC option products and save full rows to SQLite (no candles)",
     )
+    p.add_argument(
+        "--resume-report",
+        action="store_true",
+        help="Classify resume skip/refetch per shard (read-only DB, no candle HTTP)",
+    )
     return p.parse_args(argv)
 
 
@@ -1792,46 +2185,61 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
-    args = _parse_args(argv)
-    if args.sleep <= 0:
-        emit(None, "ERROR: --sleep must be > 0")
-        return 2
-    if int(args.tail_days) < 1:
-        emit(None, "ERROR: --tail-days must be >= 1")
-        return 2
-    set_sleep(float(args.sleep))
-    tail_days = int(args.tail_days)
-
-    if args.save_products:
-        return run_save_products()
-
-    if args.dry_run:
-        months = int(args.months) if args.months is not None else 24
-        if months < 1:
-            emit(None, "ERROR: --months must be >= 1")
+    setup_download_logging()
+    try:
+        args = _parse_args(argv)
+        if args.sleep <= 0:
+            emit(None, "ERROR: --sleep must be > 0")
             return 2
-        return run_dry_run(months, tail_days=tail_days)
-
-    if args.month:
-        try:
-            year, month = parse_year_month(args.month)
-        except ValueError as exc:
-            emit(None, f"ERROR: {exc}")
+        if int(args.tail_days) < 1:
+            emit(None, "ERROR: --tail-days must be >= 1")
             return 2
-        return run_month_download(
-            year, month, sleep_s=float(args.sleep), tail_days=tail_days
+        set_sleep(float(args.sleep))
+        tail_days = int(args.tail_days)
+
+        if args.resume_report:
+            return run_resume_report(
+                month_filter=args.month,
+                tail_days=tail_days,
+            )
+
+        if args.save_products:
+            return run_save_products()
+
+        if args.dry_run:
+            months = int(args.months) if args.months is not None else 24
+            if months < 1:
+                emit(None, "ERROR: --months must be >= 1")
+                return 2
+            return run_dry_run(months, tail_days=tail_days)
+
+        if args.month:
+            try:
+                year, month = parse_year_month(args.month)
+            except ValueError as exc:
+                emit(None, f"ERROR: {exc}")
+                return 2
+            return run_month_download(
+                year, month, sleep_s=float(args.sleep), tail_days=tail_days
+            )
+
+        if args.months is not None:
+            if args.months < 1:
+                emit(None, "ERROR: --months must be >= 1")
+                return 2
+            return run_download(
+                int(args.months), sleep_s=float(args.sleep), tail_days=tail_days
+            )
+
+        emit(
+            None,
+            "ERROR: provide --month YYYY-MM or --months N "
+            "(or --dry-run / --save-products / --resume-report)",
         )
-
-    if args.months is not None:
-        if args.months < 1:
-            emit(None, "ERROR: --months must be >= 1")
-            return 2
-        return run_download(
-            int(args.months), sleep_s=float(args.sleep), tail_days=tail_days
-        )
-
-    emit(None, "ERROR: provide --month YYYY-MM or --months N (or --dry-run / --save-products)")
-    return 2
+        return 2
+    except Exception:
+        logger.exception("FATAL download_option_marks crashed")
+        raise
 
 
 if __name__ == "__main__":
