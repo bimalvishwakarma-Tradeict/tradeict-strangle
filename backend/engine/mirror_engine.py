@@ -20,6 +20,10 @@ from backend.core.bot_logger import log_and_buffer
 from backend.core.delta_client import DeltaClient
 from backend.core.encryption import decrypt
 from backend.core.fees import compute_entry_spread_usd
+from backend.core.slave_orphan_scope import (
+    collect_master_bot_managed_pids,
+    scope_live_positions_for_closed_master_recovery,
+)
 from backend.core.time_utils import get_utc_now
 from backend.database import SessionLocal, get_active_slave_accounts
 from backend.models import (
@@ -9830,8 +9834,6 @@ class MirrorEngine:
 
         Caller MUST hold the per-slave lock.
         """
-        from backend.models import Leg
-
         client = self._get_slave_client(slave)
         try:
             try:
@@ -9855,28 +9857,19 @@ class MirrorEngine:
                 return "unreachable"
 
             # Prefer master leg product_ids; never close whole book or foreign shorts
-            master_pids: set[int] = set()
-            for lg in (
-                db.query(Leg)
-                .filter(
-                    Leg.trade_id == int(master_trade_id),
-                    Leg.is_bot_managed.is_(True),
-                )
-                .all()
-            ):
-                try:
-                    pid = int(getattr(lg, "product_id", 0) or 0)
-                except (TypeError, ValueError):
-                    continue
-                if pid > 0:
-                    master_pids.add(pid)
-
+            master_pids = collect_master_bot_managed_pids(db, int(master_trade_id))
             bot_owned = self._bot_owned_product_ids(db, int(slave.id))
             protected_hedge_pids = self._structure_hedge_pids_for_slave(
                 db, int(slave.id)
             )
+            scope = scope_live_positions_for_closed_master_recovery(
+                live_positions,
+                master_pids=master_pids,
+                bot_owned=bot_owned,
+                protected_hedge_pids=protected_hedge_pids,
+            )
 
-            if not master_pids:
+            if scope.empty_master_pids:
                 log_and_buffer(
                     "SLAVE_SWEEP",
                     int(master_trade_id),
@@ -9904,16 +9897,12 @@ class MirrorEngine:
                 )
                 return "close_failed"
 
-            live_nonzero: list[dict[str, Any]] = []
-            for pos in live_positions or []:
-                try:
-                    pid = int(pos.get("product_id") or 0)
-                    size = float(pos.get("size") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if pid <= 0 or abs(size) <= 0:
-                    continue
-                if pid not in bot_owned:
+            for sk in scope.skipped:
+                reason = str(sk.get("reason") or "")
+                pid = int(sk.get("product_id") or 0)
+                size = float(sk.get("size") or 0)
+                symbol = str(sk.get("symbol") or "")
+                if reason == "foreign":
                     log_and_buffer(
                         "SLAVE_FOREIGN",
                         int(master_trade_id),
@@ -9921,14 +9910,12 @@ class MirrorEngine:
                             "slave": int(slave.id),
                             "product_id": pid,
                             "size": size,
-                            "symbol": str(pos.get("product_symbol") or ""),
+                            "symbol": symbol,
                             "path": "_recover_slave_under_closed_master",
                             "note": "left untouched (not bot-owned)",
                         },
                     )
-                    continue
-                # Structure hedge longs must survive basket/sweep closes
-                if pid in protected_hedge_pids and size > 0:
+                elif reason == "hedge":
                     log_and_buffer(
                         "SLAVE_HEDGE_PROTECTED",
                         int(master_trade_id),
@@ -9939,8 +9926,23 @@ class MirrorEngine:
                             "path": "_recover_slave_under_closed_master",
                         },
                     )
-                    continue
-                live_nonzero.append(pos)
+                elif reason == "different_trade":
+                    # Same leave-untouched outcome as before for non-master pids
+                    # that somehow passed bot_owned; do not close under this row.
+                    log_and_buffer(
+                        "SLAVE_FOREIGN",
+                        int(master_trade_id),
+                        {
+                            "slave": int(slave.id),
+                            "product_id": pid,
+                            "size": size,
+                            "symbol": symbol,
+                            "path": "_recover_slave_under_closed_master",
+                            "note": "left untouched (different_trade)",
+                        },
+                    )
+
+            live_nonzero: list[dict[str, Any]] = list(scope.closable)
 
             if not live_nonzero:
                 # Already flat on exchange — still end attribution windows
@@ -10088,6 +10090,9 @@ class MirrorEngine:
                     continue
                 # Structure hedge longs are expected to remain
                 if pid in protected_hedge_pids and size > 0:
+                    continue
+                # Other bot-owned trades on this slave are out of scope
+                if pid not in master_pids:
                     continue
                 remaining.append({"product_id": pid, "size": size})
 

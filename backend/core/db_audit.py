@@ -227,6 +227,7 @@ async def verify_db_consistency(
 
         # CHECK 4: Non-closed SlaveTrades under a non-ACTIVE master.
         # NEVER flip status in DB alone — verify/close live Delta positions first.
+        # Scope closes like SLAVE_SWEEP (_recover_slave_under_closed_master).
         closed_trade_ids = [
             int(t.id)
             for t in db.query(Trade)
@@ -243,10 +244,19 @@ async def verify_db_consistency(
                 )
                 .all()
             )
+            from backend.core.bot_logger import log_and_buffer
             from backend.core.delta_client import DeltaClient
             from backend.core.encryption import decrypt
-            from backend.engine.mirror_engine import is_virtual_slave_trade
+            from backend.engine.mirror_engine import (
+                MirrorEngine,
+                is_virtual_slave_trade,
+            )
+            from backend.core.slave_orphan_scope import (
+                collect_master_bot_managed_pids,
+                scope_live_positions_for_closed_master_recovery,
+            )
 
+            mirror_helpers = MirrorEngine()
             closed_orphans = 0
             for st in orphan_slave_trades:
                 slave = (
@@ -305,105 +315,23 @@ async def verify_db_consistency(
                         if pid > 0 and abs(size) > 0:
                             live.append(pos)
 
-                    if live:
-                        logger.warning(
-                            "[DB_AUDIT] Slave '%s' SlaveTrade %s has %s live "
-                            "option positions under closed master %s — "
-                            "attempting reduce_only close",
-                            slave.name,
-                            st.id,
-                            len(live),
-                            st.master_trade_id,
+                    master_tid = int(st.master_trade_id)
+                    try:
+                        log_and_buffer(
+                            "DB_AUDIT_CHECK4_START",
+                            master_tid,
+                            {
+                                "slave": int(slave.id),
+                                "slave_name": str(slave.name or ""),
+                                "slave_trade_id": int(st.id),
+                                "live_count": len(live),
+                                "status": str(st.status),
+                            },
                         )
-                        for pos in live:
-                            pid = int(pos.get("product_id") or 0)
-                            size = float(pos.get("size") or 0)
-                            close_size = max(1, abs(int(size)))
-                            is_long = size > 0
-                            try:
-                                await client.close_position(
-                                    product_id=pid,
-                                    size=close_size,
-                                    is_long=is_long,
-                                )
-                            except Exception as close_exc:
-                                side = "sell" if is_long else "buy"
-                                try:
-                                    await client.place_order(
-                                        product_id=pid,
-                                        size=close_size,
-                                        side=side,
-                                        reduce_only=True,
-                                    )
-                                except Exception as retry_exc:
-                                    logger.critical(
-                                        "[DB_AUDIT] Slave '%s' close FAILED "
-                                        "pid=%s: %s / %s — leaving "
-                                        "status=exit_failed",
-                                        slave.name,
-                                        pid,
-                                        close_exc,
-                                        retry_exc,
-                                    )
-                                    st.status = "exit_failed"
-                                    st.last_error = (
-                                        f"db_audit_close_failed: {retry_exc}"
-                                    )[:500]
-                                    st.error_count = (
-                                        int(st.error_count or 0) + 1
-                                    )
-                                    st.last_updated = get_utc_now()
-                                    db.commit()
-                                    warnings += 1
-                                    break
-                        else:
-                            # All closes attempted — re-verify
-                            try:
-                                verify = await client.get_option_positions()
-                            except Exception as verify_exc:
-                                logger.critical(
-                                    "[DB_AUDIT] Slave '%s' verify unreachable "
-                                    "after close (%s) — leaving status=%s",
-                                    slave.name,
-                                    verify_exc,
-                                    st.status,
-                                )
-                                warnings += 1
-                                continue
-                            still = [
-                                p
-                                for p in (verify or [])
-                                if abs(float(p.get("size") or 0)) > 0
-                            ]
-                            if still:
-                                logger.critical(
-                                    "[DB_AUDIT] Slave '%s' still has %s "
-                                    "positions after close — status=exit_failed",
-                                    slave.name,
-                                    len(still),
-                                )
-                                st.status = "exit_failed"
-                                st.last_error = (
-                                    f"db_audit_still_open: {len(still)} positions"
-                                )[:500]
-                                st.error_count = int(st.error_count or 0) + 1
-                                st.last_updated = get_utc_now()
-                                db.commit()
-                                warnings += 1
-                            else:
-                                st.status = "closed"
-                                st.last_error = None
-                                st.last_updated = get_utc_now()
-                                closed_orphans += 1
-                                fixes += 1
-                                db.commit()
-                                logger.warning(
-                                    "[DB_AUDIT] SlaveTrade %s closed after "
-                                    "verified Delta flat (master %s)",
-                                    st.id,
-                                    st.master_trade_id,
-                                )
-                    else:
+                    except Exception:
+                        pass
+
+                    if not live:
                         # Verified empty book — safe to mark closed
                         logger.warning(
                             "[DB_AUDIT] SlaveTrade %s status=%s under closed "
@@ -412,12 +340,323 @@ async def verify_db_consistency(
                             st.status,
                             st.master_trade_id,
                         )
+                        try:
+                            log_and_buffer(
+                                "DB_AUDIT_CHECK4_SUMMARY",
+                                master_tid,
+                                {
+                                    "slave": int(slave.id),
+                                    "slave_trade_id": int(st.id),
+                                    "live": 0,
+                                    "closable": 0,
+                                    "skipped": 0,
+                                    "closed_ok": True,
+                                    "outcome": "empty_book_mark_closed",
+                                },
+                            )
+                        except Exception:
+                            pass
                         st.status = "closed"
                         st.last_error = None
                         st.last_updated = get_utc_now()
                         closed_orphans += 1
                         fixes += 1
                         db.commit()
+                        continue
+
+                    master_pids = collect_master_bot_managed_pids(
+                        db, master_tid
+                    )
+                    bot_owned = mirror_helpers._bot_owned_product_ids(
+                        db, int(slave.id)
+                    )
+                    protected_hedge_pids = (
+                        mirror_helpers._structure_hedge_pids_for_slave(
+                            db, int(slave.id)
+                        )
+                    )
+                    scope = scope_live_positions_for_closed_master_recovery(
+                        live,
+                        master_pids=master_pids,
+                        bot_owned=bot_owned,
+                        protected_hedge_pids=protected_hedge_pids,
+                    )
+
+                    for sk in scope.skipped:
+                        logger.warning(
+                            "[DB_AUDIT] CHECK4 skip slave='%s' st=%s "
+                            "pid=%s symbol=%s size=%s reason=%s",
+                            slave.name,
+                            st.id,
+                            sk.get("product_id"),
+                            sk.get("symbol"),
+                            sk.get("size"),
+                            sk.get("reason"),
+                        )
+                        try:
+                            log_and_buffer(
+                                "DB_AUDIT_CHECK4_SKIP",
+                                master_tid,
+                                {
+                                    "slave": int(slave.id),
+                                    "slave_trade_id": int(st.id),
+                                    "product_id": sk.get("product_id"),
+                                    "symbol": sk.get("symbol"),
+                                    "size": sk.get("size"),
+                                    "reason": sk.get("reason"),
+                                },
+                            )
+                        except Exception:
+                            pass
+
+                    closable = list(scope.closable)
+                    if scope.empty_master_pids or not closable:
+                        # Live book non-empty but nothing in scope — do NOT
+                        # lie that the SlaveTrade is closed; sweep will retry.
+                        logger.critical(
+                            "[DB_AUDIT] CHECK4 slave='%s' SlaveTrade %s "
+                            "under closed master %s — live=%s closable=0 "
+                            "empty_master_pids=%s skipped=%s — leaving "
+                            "status=%s for SLAVE_SWEEP",
+                            slave.name,
+                            st.id,
+                            master_tid,
+                            len(live),
+                            scope.empty_master_pids,
+                            len(scope.skipped),
+                            st.status,
+                        )
+                        try:
+                            log_and_buffer(
+                                "DB_AUDIT_CHECK4_SUMMARY",
+                                master_tid,
+                                {
+                                    "slave": int(slave.id),
+                                    "slave_trade_id": int(st.id),
+                                    "live": len(live),
+                                    "closable": 0,
+                                    "skipped": len(scope.skipped),
+                                    "closed_ok": False,
+                                    "outcome": "no_closable_leave_status",
+                                    "empty_master_pids": scope.empty_master_pids,
+                                    "status_left": str(st.status),
+                                },
+                            )
+                        except Exception:
+                            pass
+                        warnings += 1
+                        continue
+
+                    logger.warning(
+                        "[DB_AUDIT] Slave '%s' SlaveTrade %s has %s live "
+                        "(%s in-scope) under closed master %s — "
+                        "attempting reduce_only close",
+                        slave.name,
+                        st.id,
+                        len(live),
+                        len(closable),
+                        st.master_trade_id,
+                    )
+
+                    for pos in closable:
+                        pid = int(pos.get("product_id") or 0)
+                        size = float(pos.get("size") or 0)
+                        close_size = max(1, abs(int(size)))
+                        is_long = size > 0
+                        symbol = str(
+                            pos.get("product_symbol") or pos.get("symbol") or ""
+                        )
+                        try:
+                            await client.close_position(
+                                product_id=pid,
+                                size=close_size,
+                                is_long=is_long,
+                            )
+                            try:
+                                log_and_buffer(
+                                    "DB_AUDIT_CHECK4_CLOSE",
+                                    master_tid,
+                                    {
+                                        "slave": int(slave.id),
+                                        "slave_trade_id": int(st.id),
+                                        "product_id": pid,
+                                        "symbol": symbol,
+                                        "size": size,
+                                        "outcome": "ok",
+                                    },
+                                )
+                            except Exception:
+                                pass
+                        except Exception as close_exc:
+                            side = "sell" if is_long else "buy"
+                            try:
+                                await client.place_order(
+                                    product_id=pid,
+                                    size=close_size,
+                                    side=side,
+                                    reduce_only=True,
+                                )
+                                try:
+                                    log_and_buffer(
+                                        "DB_AUDIT_CHECK4_CLOSE",
+                                        master_tid,
+                                        {
+                                            "slave": int(slave.id),
+                                            "slave_trade_id": int(st.id),
+                                            "product_id": pid,
+                                            "symbol": symbol,
+                                            "size": size,
+                                            "outcome": "ok_retry",
+                                        },
+                                    )
+                                except Exception:
+                                    pass
+                            except Exception as retry_exc:
+                                logger.critical(
+                                    "[DB_AUDIT] Slave '%s' close FAILED "
+                                    "pid=%s: %s / %s — leaving "
+                                    "status=exit_failed",
+                                    slave.name,
+                                    pid,
+                                    close_exc,
+                                    retry_exc,
+                                )
+                                try:
+                                    log_and_buffer(
+                                        "DB_AUDIT_CHECK4_CLOSE",
+                                        master_tid,
+                                        {
+                                            "slave": int(slave.id),
+                                            "slave_trade_id": int(st.id),
+                                            "product_id": pid,
+                                            "symbol": symbol,
+                                            "size": size,
+                                            "outcome": "failed",
+                                            "error": str(retry_exc)[:200],
+                                        },
+                                    )
+                                    log_and_buffer(
+                                        "DB_AUDIT_CHECK4_SUMMARY",
+                                        master_tid,
+                                        {
+                                            "slave": int(slave.id),
+                                            "slave_trade_id": int(st.id),
+                                            "live": len(live),
+                                            "closable": len(closable),
+                                            "skipped": len(scope.skipped),
+                                            "closed_ok": False,
+                                            "outcome": "close_failed",
+                                        },
+                                    )
+                                except Exception:
+                                    pass
+                                st.status = "exit_failed"
+                                st.last_error = (
+                                    f"db_audit_close_failed: {retry_exc}"
+                                )[:500]
+                                st.error_count = (
+                                    int(st.error_count or 0) + 1
+                                )
+                                st.last_updated = get_utc_now()
+                                db.commit()
+                                warnings += 1
+                                break
+                    else:
+                        # All closes attempted — re-verify in-scope only
+                        try:
+                            verify = await client.get_option_positions()
+                        except Exception as verify_exc:
+                            logger.critical(
+                                "[DB_AUDIT] Slave '%s' verify unreachable "
+                                "after close (%s) — leaving status=%s",
+                                slave.name,
+                                verify_exc,
+                                st.status,
+                            )
+                            warnings += 1
+                            continue
+                        verify_live: list[dict[str, Any]] = []
+                        for p in verify or []:
+                            try:
+                                vpid = int(p.get("product_id") or 0)
+                                vsz = float(p.get("size") or 0)
+                            except (TypeError, ValueError):
+                                continue
+                            if vpid > 0 and abs(vsz) > 0:
+                                verify_live.append(p)
+                        verify_scope = (
+                            scope_live_positions_for_closed_master_recovery(
+                                verify_live,
+                                master_pids=set(scope.master_pids),
+                                bot_owned=set(scope.bot_owned),
+                                protected_hedge_pids=set(
+                                    scope.protected_hedge_pids
+                                ),
+                            )
+                        )
+                        still = list(verify_scope.closable)
+                        if still:
+                            logger.critical(
+                                "[DB_AUDIT] Slave '%s' still has %s "
+                                "in-scope positions after close — "
+                                "status=exit_failed",
+                                slave.name,
+                                len(still),
+                            )
+                            try:
+                                log_and_buffer(
+                                    "DB_AUDIT_CHECK4_SUMMARY",
+                                    master_tid,
+                                    {
+                                        "slave": int(slave.id),
+                                        "slave_trade_id": int(st.id),
+                                        "live": len(live),
+                                        "closable": len(closable),
+                                        "skipped": len(scope.skipped),
+                                        "still_in_scope": len(still),
+                                        "closed_ok": False,
+                                        "outcome": "still_open",
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            st.status = "exit_failed"
+                            st.last_error = (
+                                f"db_audit_still_open: {len(still)} positions"
+                            )[:500]
+                            st.error_count = int(st.error_count or 0) + 1
+                            st.last_updated = get_utc_now()
+                            db.commit()
+                            warnings += 1
+                        else:
+                            st.status = "closed"
+                            st.last_error = None
+                            st.last_updated = get_utc_now()
+                            closed_orphans += 1
+                            fixes += 1
+                            db.commit()
+                            logger.warning(
+                                "[DB_AUDIT] SlaveTrade %s closed after "
+                                "verified in-scope Delta flat (master %s)",
+                                st.id,
+                                st.master_trade_id,
+                            )
+                            try:
+                                log_and_buffer(
+                                    "DB_AUDIT_CHECK4_SUMMARY",
+                                    master_tid,
+                                    {
+                                        "slave": int(slave.id),
+                                        "slave_trade_id": int(st.id),
+                                        "live": len(live),
+                                        "closable": len(closable),
+                                        "skipped": len(scope.skipped),
+                                        "closed_ok": True,
+                                        "outcome": "closed",
+                                    },
+                                )
+                            except Exception:
+                                pass
                 finally:
                     await client.close()
 
