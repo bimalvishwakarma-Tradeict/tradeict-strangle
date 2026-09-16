@@ -4,6 +4,10 @@ Lightweight options trade management bot for Delta Exchange India.
 **Strategy:** S001 — Short Strangle with Dynamic Adjustment  
 **Model:** User initiates trades → Bot manages (monitor, adjust, target/SL, pre-expiry close)
 
+## Current state
+
+As of **2026-09-16**: S001 research is print-constrained (~4% usable days); a resumable MARK:1m download (`--tail-days 5`, ~19h estimate) is the active data path; live fixes for Adj B wing scope and db_audit CHECK 4 are on `main` pending server deploy. See [docs/SESSION_HANDOFF_2026-09-16.md](docs/SESSION_HANDOFF_2026-09-16.md) and the S004 draft [docs/STRATEGY_S004_SPEC.md](docs/STRATEGY_S004_SPEC.md) (not approved to build).
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -66,7 +70,9 @@ UI will be available at `http://localhost:5173`
 
 | Document | Description |
 |----------|-------------|
-| [claude/SESSION_2026-08-29_BOT_CHANGES.md](claude/SESSION_2026-08-29_BOT_CHANGES.md) | **Latest** — B1–B8: basket sizing, ATM straddle, structure-wide hedge SL |
+| [docs/SESSION_HANDOFF_2026-09-16.md](docs/SESSION_HANDOFF_2026-09-16.md) | **Latest handoff** — paths, mark download, data limits, D1–D7, pending |
+| [docs/STRATEGY_S004_SPEC.md](docs/STRATEGY_S004_SPEC.md) | S004 **DRAFT** — not approved to build |
+| [claude/SESSION_2026-08-29_BOT_CHANGES.md](claude/SESSION_2026-08-29_BOT_CHANGES.md) | B1–B8: basket sizing, ATM straddle, structure-wide hedge SL |
 | [docs/SESSION_2026-08-16_CHANGES.md](docs/SESSION_2026-08-16_CHANGES.md) | Aug 16 session — exit funnel, adjustment target, bracket orders |
 | [docs/HEDGE_MODE_SPEC.md](docs/HEDGE_MODE_SPEC.md) | Hedge mode design spec (partially superseded by session records above) |
 
