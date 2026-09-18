@@ -603,6 +603,92 @@ class CycleResult:
     profit_mode: str = ""
     profit_target_usd: float = 0.0
     avg_applied_slip_pct: float = 0.0
+    arm: str = ""
+    window: str = ""
+    tp_touched: bool = False
+    exit_mtm: float = 0.0
+    hours_to_adj1: float | None = None
+    hours_to_adj2: float | None = None
+
+
+SKIP_NO_CHAIN = "skipped_no_chain"
+SKIP_NO_STRIKE = "skipped_no_strike_at_target"
+SKIP_NO_WING = "skipped_no_wing"
+SKIP_NO_MARK = "skipped_no_mark"
+SKIP_OTHER = "skipped_other"
+SKIP_REASONS = (
+    SKIP_NO_CHAIN,
+    SKIP_NO_STRIKE,
+    SKIP_NO_WING,
+    SKIP_NO_MARK,
+    SKIP_OTHER,
+)
+
+
+@dataclass
+class SkipAccount:
+    days_in_window: int = 0
+    cycles_entered: int = 0
+    skipped_no_chain: int = 0
+    skipped_no_strike_at_target: int = 0
+    skipped_no_wing: int = 0
+    skipped_no_mark: int = 0
+    skipped_other: int = 0
+    examples: dict[str, list[str]] = field(default_factory=dict)
+
+    def record_skip(self, reason: str, day: date) -> None:
+        if reason not in SKIP_REASONS:
+            reason = SKIP_OTHER
+        cur = int(getattr(self, reason, 0))
+        setattr(self, reason, cur + 1)
+        ex = self.examples.setdefault(reason, [])
+        ds = day.isoformat()
+        if ds not in ex and len(ex) < 5:
+            ex.append(ds)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "days_in_window": self.days_in_window,
+            "cycles_entered": self.cycles_entered,
+            "skipped_no_chain": self.skipped_no_chain,
+            "skipped_no_strike_at_target": self.skipped_no_strike_at_target,
+            "skipped_no_wing": self.skipped_no_wing,
+            "skipped_no_mark": self.skipped_no_mark,
+            "skipped_other": self.skipped_other,
+            "skip_examples": {k: list(v) for k, v in self.examples.items()},
+        }
+
+
+def arm_label(cfg: dict[str, Any]) -> str:
+    if cfg.get("arm_name"):
+        return str(cfg["arm_name"])
+    pm = str(cfg.get("premium_mode") or "fixed")
+    tp = float(cfg.get("tp_pct") or 0.0)
+    sm = float(cfg.get("slip_mult", 1.0))
+    return f"{pm}_tp{tp:.0f}_slip{sm:g}"
+
+
+def baseline_old_live_cfg(base_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Purana live config arm for P4 paired comparison."""
+    c = dict(base_cfg)
+    c.update(
+        {
+            "arm_name": "BASELINE_OLD_LIVE",
+            "adj_mode": "BOTH",
+            "adj_b_trigger": 90.0,
+            "dec_pct": 20.0,
+            "hedge": "off",
+            "profit_mode": "none",
+            "premium_mode": "fixed",
+            "target_premium_per_side": 150.0,
+            "wing_points": 2000.0,
+            "wing_roll": True,
+            "qty_lots": 8,
+            "slip_mult": 1.0,
+            "tp_pct": 0.0,
+        }
+    )
+    return c
 
 
 def qty_btc(qty: int) -> float:
@@ -627,18 +713,21 @@ def simulate_cycle(
     expiry: date,
     cfg: dict[str, Any],
     slip_model: str,
-) -> CycleResult | None:
-    """Run one basket from entry_ts until exit. None if cannot enter."""
+) -> tuple[CycleResult | None, str | None]:
+    """
+    Run one basket from entry_ts until exit.
+    Returns (CycleResult, None) on entry, or (None, skip_reason) if cannot enter.
+    """
     if expiry == SKIP_EXPIRY:
         logger.info("skip expiry %s", expiry)
-        return None
+        return None, SKIP_OTHER
 
     conn = store.conn(day)
     if conn is None:
-        return None
+        return None, SKIP_NO_MARK
     cts = resolve_mark_ts(conn, expiry, entry_ts)
     if cts is None:
-        return None
+        return None, SKIP_NO_MARK
 
     spot, spot_src = resolve_forward(store, spot_map, expiry, entry_ts)
     logger.info(
@@ -650,16 +739,16 @@ def simulate_cycle(
         spot,
     )
     if spot is None or spot <= 0:
-        return None
+        return None, SKIP_OTHER
 
     calls = load_chain(conn, expiry, cts, "call")
     puts = load_chain(conn, expiry, cts, "put")
     if not calls or not puts:
-        return None
+        return None, SKIP_NO_CHAIN
 
     atm = pick_atm_straddle_marks(calls, puts, spot)
     if atm is None:
-        return None
+        return None, SKIP_NO_CHAIN
     _atm_k, atm_c, atm_p = atm
     atm_straddle = atm_c + atm_p
     premium_mode = str(cfg.get("premium_mode") or "fixed").lower()
@@ -678,7 +767,7 @@ def simulate_cycle(
     )
     picked = pick_strangle_by_premium_marks(calls, puts, spot, target_prem)
     if picked is None:
-        return None
+        return None, SKIP_NO_STRIKE
     call_row, put_row = picked
 
     all_strikes = sorted(
@@ -691,12 +780,12 @@ def simulate_cycle(
         float(cfg["wing_points"]),
     )
     if wings is None:
-        return None
+        return None, SKIP_NO_WING
     wing_c_k, wing_p_k = wings
     wing_c_row = find_symbol(calls, wing_c_k)
     wing_p_row = find_symbol(puts, wing_p_k)
     if wing_c_row is None or wing_p_row is None:
-        return None
+        return None, SKIP_NO_WING
 
     dte_entry = max(0.0, hours_to_expiry(entry_ts, expiry) / 24.0)
     qty0 = int(cfg["qty_lots"])
@@ -791,6 +880,8 @@ def simulate_cycle(
     worst_mtm = 0.0
     exit_reason = ""
     exit_ts = entry_ts
+    exit_mtm = 0.0
+    tp_touched = False
     slip_exit_samples: list[float] = []
 
     ts = entry_ts + MONITOR_STEP_SEC
@@ -835,16 +926,20 @@ def simulate_cycle(
             mtm += signed_long_upnl(wing_p.entry_fill, mwp, wing_p.qty)
         net_mtm = mtm - fees_so_far
         worst_mtm = min(worst_mtm, net_mtm)
+        if profit_target is not None and net_mtm >= profit_target:
+            tp_touched = True
 
         # --- exits priority: TP → pre-expiry → max-adj gate on trigger → Adj B ---
         if profit_target is not None and net_mtm >= profit_target:
             exit_reason = "PROFIT_TARGET"
             exit_ts = ts
+            exit_mtm = net_mtm
             break
 
         if is_pre_expiry(ts, expiry):
             exit_reason = "PRE_EXPIRY"
             exit_ts = ts
+            exit_mtm = net_mtm
             break
 
         # Adj B only when both shorts open
@@ -874,6 +969,7 @@ def simulate_cycle(
                 if adj_count >= max_adj:
                     exit_reason = "MAX_ADJUSTMENTS_REACHED"
                     exit_ts = ts
+                    exit_mtm = net_mtm
                     break
 
                 # decrease step qty for this upcoming adj number
@@ -886,6 +982,7 @@ def simulate_cycle(
                 if close_basket or new_qty is None:
                     exit_reason = "QTY_DECREASE_EXHAUSTED"
                     exit_ts = ts
+                    exit_mtm = net_mtm
                     break
 
                 tested_prem = mc if tested == "call" else mp
@@ -924,6 +1021,7 @@ def simulate_cycle(
                 if is_adj_b_no_strike_inside_wing(res, wing_k):
                     exit_reason = "ADJ_B_NO_STRIKE_INSIDE_WING"
                     exit_ts = ts
+                    exit_mtm = net_mtm
                     break
                 if not res.success or res.strike is None:
                     ts += MONITOR_STEP_SEC
@@ -1149,35 +1247,50 @@ def simulate_cycle(
         if (entry_slips or slip_exit_samples)
         else 0.0
     )
+    h_adj1 = (
+        (adj_events[0].ts - entry_ts) / 3600.0 if len(adj_events) >= 1 else None
+    )
+    h_adj2 = (
+        (adj_events[1].ts - entry_ts) / 3600.0 if len(adj_events) >= 2 else None
+    )
 
-    return CycleResult(
-        entry_date=day,
-        entry_ts=entry_ts,
-        call_strike=float(call_row["strike"]),
-        put_strike=float(put_row["strike"]),
-        entry_prem_c=float(call_row["mark_price"]),
-        entry_prem_p=float(put_row["mark_price"]),
-        qty=qty0,
-        wing_c=wing_c_k,
-        wing_p=wing_p_k,
-        n_adjustments=adj_count,
-        adj_events=adj_events,
-        exit_ts=exit_ts,
-        exit_reason=exit_reason,
-        hold_hours=hold_h,
-        gross_pnl=gross,
-        fees=fees,
-        slippage_cost=slip_cost,
-        net_pnl=net,
-        worst_mtm=worst_mtm,
-        applied_slip_entry=avg_entry_slip,
-        applied_slip_exit=avg_exit_slip,
-        spot_source=spot_src,
-        premium_mode=premium_mode,
-        target_premium=target_prem,
-        profit_mode=profit_mode,
-        profit_target_usd=float(profit_target or 0.0),
-        avg_applied_slip_pct=avg_applied,
+    return (
+        CycleResult(
+            entry_date=day,
+            entry_ts=entry_ts,
+            call_strike=float(call_row["strike"]),
+            put_strike=float(put_row["strike"]),
+            entry_prem_c=float(call_row["mark_price"]),
+            entry_prem_p=float(put_row["mark_price"]),
+            qty=qty0,
+            wing_c=wing_c_k,
+            wing_p=wing_p_k,
+            n_adjustments=adj_count,
+            adj_events=adj_events,
+            exit_ts=exit_ts,
+            exit_reason=exit_reason,
+            hold_hours=hold_h,
+            gross_pnl=gross,
+            fees=fees,
+            slippage_cost=slip_cost,
+            net_pnl=net,
+            worst_mtm=worst_mtm,
+            applied_slip_entry=avg_entry_slip,
+            applied_slip_exit=avg_exit_slip,
+            spot_source=spot_src,
+            premium_mode=premium_mode,
+            target_premium=target_prem,
+            profit_mode=profit_mode,
+            profit_target_usd=float(profit_target or 0.0),
+            avg_applied_slip_pct=avg_applied,
+            arm=arm_label(cfg),
+            window=str(cfg.get("window") or ""),
+            tp_touched=tp_touched,
+            exit_mtm=float(exit_mtm),
+            hours_to_adj1=h_adj1,
+            hours_to_adj2=h_adj2,
+        ),
+        None,
     )
 
 
@@ -1454,7 +1567,10 @@ def simulate_synthetic_cycle(
 # Runner / stats
 # ---------------------------------------------------------------------------
 def summarize_cycles(
-    cycles: list[CycleResult], d0: date, d1: date
+    cycles: list[CycleResult],
+    d0: date,
+    d1: date,
+    skips: SkipAccount | None = None,
 ) -> dict[str, Any]:
     n = len(cycles)
     day_span = max(1, (d1 - d0).days + 1)
@@ -1473,7 +1589,19 @@ def summarize_cycles(
     holds = [c.hold_hours for c in cycles]
     mean_p, lo, hi = day_clustered_ci_daily(daily, BOOTSTRAP_N, BOOTSTRAP_SEED)
     worst = min(cycles, key=lambda c: c.net_pnl) if cycles else None
-    return {
+
+    adj1_h = [c.hours_to_adj1 for c in cycles if c.hours_to_adj1 is not None]
+    adj2_h = [c.hours_to_adj2 for c in cycles if c.hours_to_adj2 is not None]
+    tp_touch_pct = (
+        100.0 * sum(1 for c in cycles if c.tp_touched) / n if n else float("nan")
+    )
+    force2 = [
+        c.exit_mtm
+        for c in cycles
+        if c.n_adjustments >= 2 and c.exit_reason == "MAX_ADJUSTMENTS_REACHED"
+    ]
+
+    out: dict[str, Any] = {
         "n_cycles": n,
         "mean_day": mean_day,
         "ci_lo": lo,
@@ -1494,7 +1622,69 @@ def summarize_cycles(
         )
         if cycles
         else float("nan"),
+        "med_hours_to_adj1": float(statistics.median(adj1_h))
+        if adj1_h
+        else float("nan"),
+        "med_hours_to_adj2": float(statistics.median(adj2_h))
+        if adj2_h
+        else float("nan"),
+        "tp_touched_pct": tp_touch_pct,
+        "med_exit_mtm_after_2adj": float(statistics.median(force2))
+        if force2
+        else float("nan"),
     }
+    if skips is not None:
+        out.update(skips.as_dict())
+    return out
+
+
+def paired_cycle_diff_ci(
+    arm_cycles: list[CycleResult],
+    baseline_cycles: list[CycleResult],
+    n: int,
+    seed: int,
+) -> tuple[float, float, float, int]:
+    """
+    Same-date cycle-by-cycle (arm − baseline) diffs.
+    Day-clustered bootstrap of the mean of those diffs.
+    Returns (mean, ci_lo, ci_hi, n_paired).
+    """
+    arm_by: dict[date, list[float]] = defaultdict(list)
+    base_by: dict[date, list[float]] = defaultdict(list)
+    for c in arm_cycles:
+        arm_by[c.entry_date].append(c.net_pnl)
+    for c in baseline_cycles:
+        base_by[c.entry_date].append(c.net_pnl)
+
+    by_day_diffs: dict[date, list[float]] = {}
+    all_diffs: list[float] = []
+    for d in sorted(set(arm_by) & set(base_by)):
+        a = arm_by[d]
+        b = base_by[d]
+        k = min(len(a), len(b))
+        diffs = [a[i] - b[i] for i in range(k)]
+        if diffs:
+            by_day_diffs[d] = diffs
+            all_diffs.extend(diffs)
+    if not all_diffs:
+        return float("nan"), float("nan"), float("nan"), 0
+    mean = float(statistics.fmean(all_diffs))
+    days = sorted(by_day_diffs)
+    rng = random.Random(seed)
+    means: list[float] = []
+    for _ in range(n):
+        sample: list[float] = []
+        for _d in days:
+            day = days[rng.randrange(len(days))]
+            sample.extend(by_day_diffs[day])
+        if sample:
+            means.append(float(statistics.fmean(sample)))
+    if not means:
+        return mean, float("nan"), float("nan"), len(all_diffs)
+    means.sort()
+    lo = means[int(0.025 * (len(means) - 1))]
+    hi = means[int(0.975 * (len(means) - 1))]
+    return mean, float(lo), float(hi), len(all_diffs)
 
 
 def day_clustered_ci_daily(
@@ -1539,7 +1729,9 @@ def max_drawdown(daily: list[float]) -> float:
     return float(dd)
 
 
-def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
+def run(
+    cfg: dict[str, Any],
+) -> tuple[list[str], list[CycleResult], SkipAccount]:
     lines: list[str] = []
     lines.extend(parity_checklist_lines(wing_roll=bool(cfg["wing_roll"])))
 
@@ -1548,8 +1740,9 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
 
     lines.append("===== S001 MARK ENGINE =====")
     lines.append(f"generated_utc={datetime.now(tz=UTC).isoformat()}")
+    lines.append(f"arm={arm_label(cfg)} window={cfg.get('window')}")
     lines.append(f"config={cfg}")
-    lines.append(f"window={cfg['from_date']} .. {cfg['to_date']}")
+    lines.append(f"window_dates={cfg['from_date']} .. {cfg['to_date']}")
     pm = str(cfg.get("premium_mode") or "fixed")
     if pm == "b25":
         lines.append(
@@ -1574,7 +1767,7 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
     spot_path = find_spot_csv()
     if spot_path is None:
         lines.append("ERROR: no BTCUSD_1m_*.csv")
-        return lines, []
+        return lines, [], SkipAccount()
     spot_map = load_spot_map(spot_path)
     lines.append(f"spot_csv={spot_path.name} bars={len(spot_map)}")
 
@@ -1584,6 +1777,7 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
     d0: date = cfg["from_date"]
     d1: date = cfg["to_date"]
     cycles: list[CycleResult] = []
+    skips = SkipAccount(days_in_window=max(0, (d1 - d0).days + 1))
 
     day = d0
     while day <= d1:
@@ -1595,7 +1789,7 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
 
         pending_ts: int | None = entry_ts
         while pending_ts is not None and entries_today < MAX_ENTRIES_PER_DAY:
-            cyc = simulate_cycle(
+            cyc, skip_reason = simulate_cycle(
                 store,
                 spot_map,
                 day=day,
@@ -1606,12 +1800,14 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
             )
             pending_ts = None
             if cyc is None:
+                skips.record_skip(skip_reason or SKIP_OTHER, day)
                 break
             cycles.append(cyc)
+            skips.cycles_entered += 1
             entries_today += 1
             logger.info(
                 "day=%s cycle#%d exit=%s net=%.4f adj=%d prem_mode=%s "
-                "target_prem=%.2f profit_tgt=%s",
+                "target_prem=%.2f profit_tgt=%s tp_touched=%s",
                 day,
                 entries_today,
                 cyc.exit_reason,
@@ -1620,6 +1816,7 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
                 cyc.premium_mode,
                 cyc.target_premium,
                 cyc.profit_target_usd,
+                cyc.tp_touched,
             )
             # same-day reentry only after profit target
             if cyc.exit_reason != "PROFIT_TARGET":
@@ -1637,11 +1834,21 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
     # --- summary ---
     n = len(cycles)
     lines.append(f"n_cycles={n}")
+    lines.append(
+        f"skips days={skips.days_in_window} entered={skips.cycles_entered} "
+        f"no_chain={skips.skipped_no_chain} "
+        f"no_strike={skips.skipped_no_strike_at_target} "
+        f"no_wing={skips.skipped_no_wing} "
+        f"no_mark={skips.skipped_no_mark} "
+        f"other={skips.skipped_other}"
+    )
+    for reason, ex in skips.examples.items():
+        lines.append(f"  examples_{reason}={','.join(ex)}")
     if n == 0:
         lines.append("No cycles completed.")
-        return lines, cycles
+        return lines, cycles, skips
 
-    stats = summarize_cycles(cycles, d0, d1)
+    stats = summarize_cycles(cycles, d0, d1, skips)
     nets = [c.net_pnl for c in cycles]
     median_net = float(statistics.median(nets))
     holds = [c.hold_hours for c in cycles]
@@ -1665,6 +1872,14 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
         f"median={stats['hold_med']:.2f} "
         f"min={min(holds):.2f} max={max(holds):.2f}"
     )
+    lines.append(
+        f"med_hours_to_adj1={stats['med_hours_to_adj1']:.2f} "
+        f"med_hours_to_adj2={stats['med_hours_to_adj2']:.2f}"
+    )
+    lines.append(f"tp_touched_pct={stats['tp_touched_pct']:.1f}")
+    lines.append(
+        f"med_exit_mtm_after_2adj={stats['med_exit_mtm_after_2adj']:.6f}"
+    )
     lines.append(f"fees_per_day={stats['fees_day']:.6f}")
     lines.append(f"slippage_cost_per_day={stats['slip_day']:.6f}")
     lines.append(f"avg_applied_slip_pct={stats['avg_slip_pct']:.4f}")
@@ -1676,39 +1891,88 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
             f"locked_tp_usd={cycles[0].profit_target_usd:.4f}"
         )
     lines.append("")
-    return lines, cycles
+    return lines, cycles, skips
+
+
+def _fmt_num(x: Any, width: int = 8, prec: int = 4) -> str:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return f"{'nan':>{width}}"
+    if math.isnan(v):
+        return f"{'nan':>{width}}"
+    return f"{v:{width}.{prec}f}"
 
 
 def format_matrix_table(rows: list[dict[str, Any]]) -> list[str]:
-    rows_sorted = sorted(rows, key=lambda r: r["mean_day"], reverse=True)
-    hdr = (
-        f"{'prem':>5} {'tp%':>4} {'slip':>4} {'n':>3} "
-        f"{'mean/day':>10} {'ci_lo':>9} {'ci_hi':>9} "
-        f"{'worst':>9} {'maxDD':>9} {'adj/c':>5} "
-        f"{'hold_med':>8} {'fees/d':>8} {'slip/d':>8}  exit_mix"
+    rows_sorted = sorted(
+        rows, key=lambda r: r.get("mean_day", float("-inf")), reverse=True
     )
-    out = ["===== MATRIX (sorted by mean/day desc) =====", hdr]
+    out: list[str] = ["===== MATRIX (sorted by mean/day desc) ====="]
+    hdr = (
+        f"{'arm':<28} {'n':>3} {'ent':>3} {'mean/day':>9} "
+        f"{'ci_lo':>8} {'ci_hi':>8} {'vsB_mn':>8} {'vsB_lo':>8} {'vsB_hi':>8} "
+        f"{'skipS':>5} {'tp%':>5} {'adj1h':>6} {'adj2h':>6} {'exMTM2':>8}  exit_mix"
+    )
+    out.append(hdr)
     for r in rows_sorted:
-        mix = ",".join(f"{k[:8]}={v:.0f}%" for k, v in r["exit_mix"].items())
+        mix = ",".join(
+            f"{k[:8]}={v:.0f}%" for k, v in (r.get("exit_mix") or {}).items()
+        )
+        skip_strike = int(r.get("skipped_no_strike_at_target") or 0)
         out.append(
-            f"{r['premium_mode']:>5} {r['tp_pct']:4.0f} {r['slip_mult']:4.1f} "
-            f"{r['n_cycles']:3d} "
-            f"{r['mean_day']:10.4f} {r['ci_lo']:9.4f} {r['ci_hi']:9.4f} "
-            f"{r['worst_net']:9.4f} {r['max_dd']:9.4f} {r['adj_per']:5.2f} "
-            f"{r['hold_med']:8.2f} {r['fees_day']:8.4f} {r['slip_day']:8.4f}  "
+            f"{str(r.get('arm', '')):<28} "
+            f"{int(r.get('n_cycles') or 0):3d} "
+            f"{int(r.get('cycles_entered') or 0):3d} "
+            f"{_fmt_num(r.get('mean_day'), 9, 4)} "
+            f"{_fmt_num(r.get('ci_lo'), 8, 4)} "
+            f"{_fmt_num(r.get('ci_hi'), 8, 4)} "
+            f"{_fmt_num(r.get('paired_mean'), 8, 4)} "
+            f"{_fmt_num(r.get('paired_ci_lo'), 8, 4)} "
+            f"{_fmt_num(r.get('paired_ci_hi'), 8, 4)} "
+            f"{skip_strike:5d} "
+            f"{_fmt_num(r.get('tp_touched_pct'), 5, 1)} "
+            f"{_fmt_num(r.get('med_hours_to_adj1'), 6, 2)} "
+            f"{_fmt_num(r.get('med_hours_to_adj2'), 6, 2)} "
+            f"{_fmt_num(r.get('med_exit_mtm_after_2adj'), 8, 4)}  "
             f"{mix}"
         )
     out.append("")
+    out.append("===== SKIP ACCOUNTING =====")
     out.append(
-        "16 combos tested — best-of-16 bias; "
+        f"{'arm':<28} {'days':>4} {'ent':>3} "
+        f"{'no_ch':>5} {'no_st':>5} {'no_wg':>5} {'no_mk':>5} {'other':>5}"
+    )
+    for r in rows_sorted:
+        out.append(
+            f"{str(r.get('arm', '')):<28} "
+            f"{int(r.get('days_in_window') or 0):4d} "
+            f"{int(r.get('cycles_entered') or 0):3d} "
+            f"{int(r.get('skipped_no_chain') or 0):5d} "
+            f"{int(r.get('skipped_no_strike_at_target') or 0):5d} "
+            f"{int(r.get('skipped_no_wing') or 0):5d} "
+            f"{int(r.get('skipped_no_mark') or 0):5d} "
+            f"{int(r.get('skipped_other') or 0):5d}"
+        )
+        ex = r.get("skip_examples") or {}
+        for reason in SKIP_REASONS:
+            dates = ex.get(reason) or []
+            if dates:
+                out.append(f"  {reason}: {', '.join(dates)}")
+    out.append("")
+    out.append(
+        f"{len(rows)} combos tested — best-of-N bias; "
         "final selection OOS window pe hi honi chahiye"
     )
+    out.append("P4 note: paired vs BASELINE_OLD_LIVE needs paired_ci_lo > 0")
     return out
 
 
 def write_cycles_csv(cycles: list[CycleResult]) -> None:
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     cols = [
+        "arm",
+        "window",
         "date",
         "entry_ts",
         "call_strike",
@@ -1735,6 +1999,10 @@ def write_cycles_csv(cycles: list[CycleResult]) -> None:
         "target_premium",
         "profit_mode",
         "profit_target_usd",
+        "tp_touched",
+        "exit_mtm",
+        "hours_to_adj1",
+        "hours_to_adj2",
         "spot_source",
     ]
     with OUT_CSV.open("w", newline="", encoding="utf-8") as f:
@@ -1747,6 +2015,8 @@ def write_cycles_csv(cycles: list[CycleResult]) -> None:
             )
             w.writerow(
                 {
+                    "arm": c.arm,
+                    "window": c.window,
                     "date": c.entry_date.isoformat(),
                     "entry_ts": c.entry_ts,
                     "call_strike": c.call_strike,
@@ -1773,6 +2043,14 @@ def write_cycles_csv(cycles: list[CycleResult]) -> None:
                     "target_premium": f"{c.target_premium:.4f}",
                     "profit_mode": c.profit_mode,
                     "profit_target_usd": f"{c.profit_target_usd:.6f}",
+                    "tp_touched": int(c.tp_touched),
+                    "exit_mtm": f"{c.exit_mtm:.6f}",
+                    "hours_to_adj1": (
+                        f"{c.hours_to_adj1:.4f}" if c.hours_to_adj1 is not None else ""
+                    ),
+                    "hours_to_adj2": (
+                        f"{c.hours_to_adj2:.4f}" if c.hours_to_adj2 is not None else ""
+                    ),
                     "spot_source": c.spot_source,
                 }
             )
@@ -1808,11 +2086,18 @@ def build_cfg(args: argparse.Namespace) -> dict[str, Any]:
         "to_date": date.fromisoformat(args.to_date),
         "slip_model": str(args.slip_model),
         "slip_mult": float(args.slip_mult),
+        "window": str(args.window),
+        "matrix_include_baseline": bool(
+            getattr(args, "matrix_include_baseline", True)
+        ),
     }
 
 
-def run_matrix(base_cfg: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
-    """16 combos: premium_mode × tp_pct × slip_mult; other knobs locked."""
+def run_matrix(
+    base_cfg: dict[str, Any],
+) -> tuple[list[str], list[dict[str, Any]], list[CycleResult]]:
+    """16 locked combos (+ optional BASELINE_OLD_LIVE)."""
+    include_baseline = bool(base_cfg.get("matrix_include_baseline", True))
     combos = [
         (pm, tp, sm)
         for pm in ("fixed", "b25")
@@ -1820,44 +2105,101 @@ def run_matrix(base_cfg: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]
         for sm in (1.0, 1.5)
     ]
     rows: list[dict[str, Any]] = []
+    all_cycles: list[CycleResult] = []
+    baseline_cycles: list[CycleResult] = []
     lines: list[str] = [
         "===== S001 MARK ENGINE MATRIX =====",
         f"generated_utc={datetime.now(tz=UTC).isoformat()}",
-        f"window={base_cfg['from_date']} .. {base_cfg['to_date']}",
-        "locked: dec=40 adj_b=70 B_only hedge=off wing=2000 wing_roll=on "
+        f"window_tag={base_cfg.get('window')} "
+        f"dates={base_cfg['from_date']} .. {base_cfg['to_date']}",
+        "locked arms: dec=40 adj_b=70 B_only hedge=off wing=2000 wing_roll=on "
         "qty=8 entry=11:00 IST dte=2 profit_mode=pct_of_credit",
-        f"n_combos={len(combos)}",
+        f"include_baseline={include_baseline}",
+        f"n_locked_combos={len(combos)}",
         "",
     ]
+
+    if include_baseline:
+        bcfg = baseline_old_live_cfg(base_cfg)
+        t0 = time.time()
+        _bl, baseline_cycles, bskips = run(bcfg)
+        elapsed = time.time() - t0
+        st = summarize_cycles(
+            baseline_cycles, bcfg["from_date"], bcfg["to_date"], bskips
+        )
+        row = {
+            "arm": "BASELINE_OLD_LIVE",
+            "premium_mode": "fixed",
+            "tp_pct": 0.0,
+            "slip_mult": 1.0,
+            "paired_mean": float("nan"),
+            "paired_ci_lo": float("nan"),
+            "paired_ci_hi": float("nan"),
+            "paired_n": 0,
+            **st,
+            "elapsed_sec": elapsed,
+        }
+        rows.append(row)
+        all_cycles.extend(baseline_cycles)
+        logger.info(
+            "matrix baseline BASELINE_OLD_LIVE n=%d mean/day=%.4f elapsed=%.1fs",
+            st["n_cycles"],
+            st["mean_day"],
+            elapsed,
+        )
+
     for pm, tp, sm in combos:
         cfg = dict(base_cfg)
         cfg["premium_mode"] = pm
         cfg["tp_pct"] = tp
         cfg["slip_mult"] = sm
         cfg["profit_mode"] = "pct_of_credit"
+        cfg["dec_pct"] = 40.0
+        cfg["adj_b_trigger"] = 70.0
+        cfg["adj_mode"] = "B_only"
+        cfg["hedge"] = "off"
+        cfg["wing_points"] = 2000.0
+        cfg["wing_roll"] = True
+        cfg["qty_lots"] = 8
+        cfg.pop("arm_name", None)
+        name = arm_label(cfg)
         t0 = time.time()
-        _combo_lines, cycles = run(cfg)
+        _combo_lines, cycles, skips = run(cfg)
         elapsed = time.time() - t0
-        st = summarize_cycles(cycles, cfg["from_date"], cfg["to_date"])
+        st = summarize_cycles(cycles, cfg["from_date"], cfg["to_date"], skips)
+        p_mean = p_lo = p_hi = float("nan")
+        p_n = 0
+        if include_baseline and baseline_cycles:
+            p_mean, p_lo, p_hi, p_n = paired_cycle_diff_ci(
+                cycles, baseline_cycles, BOOTSTRAP_N, BOOTSTRAP_SEED
+            )
         row = {
+            "arm": name,
             "premium_mode": pm,
             "tp_pct": tp,
             "slip_mult": sm,
+            "paired_mean": p_mean,
+            "paired_ci_lo": p_lo,
+            "paired_ci_hi": p_hi,
+            "paired_n": p_n,
             **st,
             "elapsed_sec": elapsed,
         }
         rows.append(row)
+        all_cycles.extend(cycles)
         logger.info(
-            "matrix combo prem=%s tp=%.0f slip=%.1f n=%d mean/day=%.4f elapsed=%.1fs",
-            pm,
-            tp,
-            sm,
+            "matrix combo %s n=%d mean/day=%.4f paired_mean=%.4f "
+            "paired_ci=[%.4f,%.4f] elapsed=%.1fs",
+            name,
             st["n_cycles"],
             st["mean_day"],
+            p_mean,
+            p_lo,
+            p_hi,
             elapsed,
         )
     lines.extend(format_matrix_table(rows))
-    return lines, rows
+    return lines, rows, all_cycles
 
 
 def main() -> None:
@@ -1902,28 +2244,41 @@ def main() -> None:
     )
     ap.add_argument("--slip-mult", type=float, default=1.0)
     ap.add_argument(
+        "--window",
+        type=str,
+        default="IS",
+        choices=("IS", "OOS"),
+        help="Tag written to CSV (IS/OOS)",
+    )
+    ap.add_argument(
         "--matrix",
         action="store_true",
         help="Run 16-combo matrix (premium×tp_pct×slip_mult)",
+    )
+    ap.add_argument(
+        "--matrix-include-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include BASELINE_OLD_LIVE arm + paired CI (default: on)",
     )
     args = ap.parse_args()
     cfg = build_cfg(args)
 
     t0 = time.time()
     if args.matrix:
-        lines, rows = run_matrix(cfg)
+        lines, rows, all_cycles = run_matrix(cfg)
         elapsed = time.time() - t0
         lines.append(f"elapsed_sec={elapsed:.1f}")
+        write_cycles_csv(all_cycles)
         OUT_TXT.parent.mkdir(parents=True, exist_ok=True)
         OUT_TXT.write_text("\n".join(lines) + "\n", encoding="utf-8")
         logger.info("wrote %s", OUT_TXT)
         logger.info("MATRIX %d combos elapsed=%.1fs", len(rows), elapsed)
-        # also print compact table to log
         for ln in format_matrix_table(rows):
             logger.info("%s", ln)
         return
 
-    lines, cycles = run(cfg)
+    lines, cycles, _skips = run(cfg)
     elapsed = time.time() - t0
     lines.append(f"elapsed_sec={elapsed:.1f}")
     write_cycles_csv(cycles)
