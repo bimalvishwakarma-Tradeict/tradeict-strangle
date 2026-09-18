@@ -34,6 +34,7 @@ if str(_BACKTEST) not in sys.path:
     sys.path.insert(0, str(_BACKTEST))
 
 import s001_income_engine as eng  # noqa: E402
+from slippage_model import load_slip_table, slip_pct  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Spec constants (CAPS)
@@ -46,7 +47,9 @@ BTC_TARGET = 150.0
 BTC_STOP = 50.0
 BRACKET_SL = 100.0
 BRACKET_TP = 100.0
-SLIP = 0.0165
+SLIP = 0.0165  # flat165 baseline (fraction)
+SLIP_MODEL_FLAT = "flat165"
+SLIP_MODEL_BUCKETED = "bucketed"
 QTY_LOTS = 1
 CONTRACT_VALUE = eng.CONTRACT_VALUE
 SETTLE_HOUR_UTC = 12
@@ -189,6 +192,8 @@ class TradeResult:
     label: str  # RIGHT | WRONG | NEITHER
     exit_reason: str  # a|b|c|d|e
     pnl: float
+    entry_slip_pct: float = 0.0  # percent units (1.65 = 1.65%)
+    exit_slip_pct: float = 0.0
 
 
 @dataclass
@@ -518,6 +523,13 @@ def btc_label(
     return "NEITHER"
 
 
+def resolve_slip_pct(premium: float, dte: int, slip_model: str) -> float:
+    """Return slippage in percent units (1.65 = 1.65%)."""
+    if slip_model == SLIP_MODEL_FLAT:
+        return SLIP * 100.0
+    return float(slip_pct(premium, dte))
+
+
 def simulate_trade(
     bars: dict[int, SpotBar],
     marks: dict[int, MarkBar],
@@ -526,12 +538,17 @@ def simulate_trade(
     entry_btc: float,
     is_call: bool,
     cutoff_ts: int,
-) -> tuple[str, float] | None:
+    dte: int = 0,
+    slip_model: str = SLIP_MODEL_FLAT,
+) -> tuple[str, float, float, float] | None:
     """
-    Returns (exit_reason a-e, pnl_usd) or None if path incomplete.
+    Returns (exit_reason a-e, pnl_usd, entry_slip_pct, exit_slip_pct)
+    or None if path incomplete.
     Exit precedence per minute: a → b → c → d → e.
     """
-    entry_fill = entry_mark * (1.0 + SLIP)
+    entry_slip_pct = resolve_slip_pct(entry_mark, dte, slip_model)
+    entry_slip = entry_slip_pct / 100.0
+    entry_fill = entry_mark * (1.0 + entry_slip)
     fee_in = eng.option_fee(entry_fill, entry_btc, QTY_LOTS)
     qty_btc = QTY_LOTS * CONTRACT_VALUE
     sl_level = entry_mark - BRACKET_SL
@@ -547,49 +564,55 @@ def simulate_trade(
 
         # (a) max-loss bracket on option mark low
         if mbar.low <= sl_level:
-            exit_px = sl_level * (1.0 - SLIP)
+            exit_slip_pct = resolve_slip_pct(mbar.close, dte, slip_model)
+            exit_px = sl_level * (1.0 - exit_slip_pct / 100.0)
             fee_out = eng.option_fee(exit_px, entry_btc, QTY_LOTS)
             pnl = (exit_px - entry_fill) * qty_btc - fee_in - fee_out
-            return "a", pnl
+            return "a", pnl, entry_slip_pct, exit_slip_pct
 
         # (b) target bracket on option mark high (limit, no slip)
         if mbar.high >= tp_level:
             exit_px = tp_level
             fee_out = eng.option_fee(exit_px, entry_btc, QTY_LOTS)
             pnl = (exit_px - entry_fill) * qty_btc - fee_in - fee_out
-            return "b", pnl
+            return "b", pnl, entry_slip_pct, 0.0
 
         if sbar is not None:
             # (c) BTC target
             if is_call and sbar.high >= entry_btc + BTC_TARGET:
-                exit_px = mbar.close * (1.0 - SLIP)
+                exit_slip_pct = resolve_slip_pct(mbar.close, dte, slip_model)
+                exit_px = mbar.close * (1.0 - exit_slip_pct / 100.0)
                 fee_out = eng.option_fee(exit_px, sbar.close, QTY_LOTS)
                 pnl = (exit_px - entry_fill) * qty_btc - fee_in - fee_out
-                return "c", pnl
+                return "c", pnl, entry_slip_pct, exit_slip_pct
             if (not is_call) and sbar.low <= entry_btc - BTC_TARGET:
-                exit_px = mbar.close * (1.0 - SLIP)
+                exit_slip_pct = resolve_slip_pct(mbar.close, dte, slip_model)
+                exit_px = mbar.close * (1.0 - exit_slip_pct / 100.0)
                 fee_out = eng.option_fee(exit_px, sbar.close, QTY_LOTS)
                 pnl = (exit_px - entry_fill) * qty_btc - fee_in - fee_out
-                return "c", pnl
+                return "c", pnl, entry_slip_pct, exit_slip_pct
 
             # (d) BTC stop on close
             if is_call and sbar.close <= entry_btc - BTC_STOP:
-                exit_px = mbar.close * (1.0 - SLIP)
+                exit_slip_pct = resolve_slip_pct(mbar.close, dte, slip_model)
+                exit_px = mbar.close * (1.0 - exit_slip_pct / 100.0)
                 fee_out = eng.option_fee(exit_px, sbar.close, QTY_LOTS)
                 pnl = (exit_px - entry_fill) * qty_btc - fee_in - fee_out
-                return "d", pnl
+                return "d", pnl, entry_slip_pct, exit_slip_pct
             if (not is_call) and sbar.close >= entry_btc + BTC_STOP:
-                exit_px = mbar.close * (1.0 - SLIP)
+                exit_slip_pct = resolve_slip_pct(mbar.close, dte, slip_model)
+                exit_px = mbar.close * (1.0 - exit_slip_pct / 100.0)
                 fee_out = eng.option_fee(exit_px, sbar.close, QTY_LOTS)
                 pnl = (exit_px - entry_fill) * qty_btc - fee_in - fee_out
-                return "d", pnl
+                return "d", pnl, entry_slip_pct, exit_slip_pct
 
         # (e) cutoff at end of loop body when ts == cutoff
         if ts >= cutoff_ts:
-            exit_px = mbar.close * (1.0 - SLIP)
+            exit_slip_pct = resolve_slip_pct(mbar.close, dte, slip_model)
+            exit_px = mbar.close * (1.0 - exit_slip_pct / 100.0)
             fee_out = eng.option_fee(exit_px, entry_btc, QTY_LOTS)
             pnl = (exit_px - entry_fill) * qty_btc - fee_in - fee_out
-            return "e", pnl
+            return "e", pnl, entry_slip_pct, exit_slip_pct
 
         ts += 60
 
@@ -630,6 +653,11 @@ def label_stats(trades: list[TradeResult]) -> dict[str, Any]:
             "mean": mean_or_nan(pnls),
             "median": median_or_nan(pnls),
             "exit_mix_pct": mix,
+            "avg_entry_slip_pct": mean_or_nan([x.entry_slip_pct for x in rows]),
+            "avg_exit_slip_pct": mean_or_nan([x.exit_slip_pct for x in rows]),
+            "avg_applied_slip_pct": mean_or_nan(
+                [0.5 * (x.entry_slip_pct + x.exit_slip_pct) for x in rows]
+            ),
         }
     return out
 
@@ -681,6 +709,8 @@ def report_block(lines: list[str], title: str, trades: list[TradeResult]) -> Non
         emit(
             lines,
             f"  {lab}: n={b['n']} mean={b['mean']:.4f} median={b['median']:.4f} "
+            f"avg_slip%={b['avg_applied_slip_pct']:.4f} "
+            f"(entry={b['avg_entry_slip_pct']:.4f} exit={b['avg_exit_slip_pct']:.4f}) "
             f"exits[{fmt_mix(b['exit_mix_pct'])}]",
         )
     p, p_cond = breakeven_p(st)
@@ -726,12 +756,15 @@ def day_clustered_bootstrap_p(
     return float(statistics.fmean(ps)), float(lo), float(hi)
 
 
-def run(month: str | None, grid_min: int) -> list[str]:
+def run(month: str | None, grid_min: int, slip_model: str) -> list[str]:
     lines: list[str] = []
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    if slip_model == SLIP_MODEL_BUCKETED:
+        load_slip_table()
 
     emit(lines, "===== S004 SIGNAL-AGNOSTIC COST GATE =====")
     emit(lines, f"generated_utc={datetime.now(tz=UTC).isoformat()}")
@@ -740,7 +773,8 @@ def run(month: str | None, grid_min: int) -> list[str]:
         lines,
         f"PREMIUM=[{PREMIUM_MIN},{PREMIUM_MAX}] DELTA=[{DELTA_MIN},{DELTA_MAX}] "
         f"BTC_TARGET={BTC_TARGET} BTC_STOP={BTC_STOP} "
-        f"BRACKET_SL={BRACKET_SL} BRACKET_TP={BRACKET_TP} SLIP={SLIP}",
+        f"BRACKET_SL={BRACKET_SL} BRACKET_TP={BRACKET_TP} SLIP={SLIP} "
+        f"slip_model={slip_model}",
     )
     emit(lines, f"qty_lots={QTY_LOTS} contract_value={CONTRACT_VALUE} grid_min={grid_min}")
     emit(lines, f"month_filter={month or 'ALL_INTERSECTION'}")
@@ -839,11 +873,13 @@ def run(month: str | None, grid_min: int) -> list[str]:
                     entry_btc,
                     is_call,
                     cutoff_ts,
+                    dte=dte,
+                    slip_model=slip_model,
                 )
                 if sim is None:
                     skips.no_exit_path += 1
                     continue
-                reason, pnl = sim
+                reason, pnl, entry_slip_pct, exit_slip_pct = sim
                 trades.append(
                     TradeResult(
                         day=day,
@@ -854,6 +890,8 @@ def run(month: str | None, grid_min: int) -> list[str]:
                         label=label,
                         exit_reason=reason,
                         pnl=pnl,
+                        entry_slip_pct=entry_slip_pct,
+                        exit_slip_pct=exit_slip_pct,
                     )
                 )
 
@@ -907,11 +945,18 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="S004 signal-agnostic cost gate")
     ap.add_argument("--month", type=str, default=None, help="YYYY-MM optional")
     ap.add_argument("--grid-min", type=int, default=15)
+    ap.add_argument(
+        "--slip-model",
+        type=str,
+        default=SLIP_MODEL_BUCKETED,
+        choices=(SLIP_MODEL_BUCKETED, SLIP_MODEL_FLAT),
+        help="bucketed=calibrate_slippage.csv lookup; flat165=0.0165 baseline",
+    )
     args = ap.parse_args()
     if args.month is not None and len(args.month) != 7:
         raise SystemExit("--month must be YYYY-MM")
 
-    lines = run(args.month, args.grid_min)
+    lines = run(args.month, args.grid_min, args.slip_model)
     text = "\n".join(lines) + "\n"
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(text, encoding="utf-8")
