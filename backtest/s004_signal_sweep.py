@@ -68,9 +68,10 @@ CONTROL_REPEATS = 20
 CONTROL_SEED = 20260916
 MIN_TRAIN_TRADES = 100
 
-PARITY_POINTS: list[dict[str, Any]] = [
-    {
-        "ist": "2026-09-16 04:37",
+# Default parity anchors (IST candle OPEN). Chart values used when timestamp matches.
+DEFAULT_PARITY_TS: tuple[str, ...] = ("2026-09-16 04:37", "2026-09-16 01:42")
+CHART_ANCHORS: dict[str, dict[str, Any]] = {
+    "2026-09-16 04:37": {
         "o": 75757.5,
         "h": 75776.0,
         "l": 75748.0,
@@ -80,8 +81,7 @@ PARITY_POINTS: list[dict[str, Any]] = [
         "ma_slow": 75698.7,
         "rsi": 63.62,
     },
-    {
-        "ist": "2026-09-16 01:42",
+    "2026-09-16 01:42": {
         "o": None,
         "h": None,
         "l": None,
@@ -91,7 +91,7 @@ PARITY_POINTS: list[dict[str, Any]] = [
         "ma_slow": 76048.5,
         "rsi": 47.02,
     },
-]
+}
 PARITY_SIGNAL_START = "2026-09-15 18:00"
 PARITY_SIGNAL_END = "2026-09-16 06:00"
 
@@ -831,7 +831,51 @@ def filter_side(trades: list[Trade], side: str) -> list[Trade]:
 # ---------------------------------------------------------------------------
 # Parity
 # ---------------------------------------------------------------------------
-def run_parity(df: pd.DataFrame) -> list[str]:
+def _parse_parity_ts(raw: str) -> str:
+    """Normalize 'YYYY-MM-DD HH:MM' (optional seconds stripped)."""
+    s = raw.strip().replace("T", " ")
+    if s.endswith(" IST"):
+        s = s[: -len(" IST")].strip()
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%d %H:%M")
+    except ValueError as exc:
+        raise SystemExit(
+            f"--parity-ts must be 'YYYY-MM-DD HH:MM', got {raw!r}"
+        ) from exc
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def build_parity_points(timestamps: list[str]) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for ts in timestamps:
+        pt: dict[str, Any] = {
+            "ist": ts,
+            "o": None,
+            "h": None,
+            "l": None,
+            "c": None,
+            "vwap": None,
+            "ma_fast": None,
+            "ma_slow": None,
+            "rsi": None,
+        }
+        if ts in CHART_ANCHORS:
+            pt.update(CHART_ANCHORS[ts])
+        points.append(pt)
+    return points
+
+
+def run_parity(
+    df: pd.DataFrame,
+    parity_timestamps: list[str] | None = None,
+) -> tuple[list[str], int]:
+    """
+    Returns (report_lines, exit_code).
+    exit_code 2 when no requested timestamps exist in CSV for any config.
+    """
+    ts_list = list(parity_timestamps) if parity_timestamps else list(DEFAULT_PARITY_TS)
+    points = build_parity_points(ts_list)
+
     lines: list[str] = []
     lines.append("===== S004 PARITY MODE =====")
     lines.append(f"generated_utc={datetime.now(tz=UTC).isoformat()}")
@@ -840,10 +884,12 @@ def run_parity(df: pd.DataFrame) -> list[str]:
     lines.append(
         f"data_span_ist={df['dt_ist'].iloc[0]} .. {df['dt_ist'].iloc[-1]}"
     )
+    lines.append(f"parity_timestamps={ts_list}")
     lines.append("")
 
     key_to_i = {ist_key(df["dt_ist"].iloc[i]): i for i in range(len(df))}
-    scores: list[tuple[float, tuple[str, int, int, int, str]]] = []
+    # (score, n_points, cfg)
+    scored: list[tuple[float, int, tuple[str, int, int, int, str]]] = []
     cutoff_map = build_cutoff_map(df)
 
     for ma_type, fast_l, slow_l, rsi_l, anchor in PARITY_CONFIGS:
@@ -853,7 +899,7 @@ def run_parity(df: pd.DataFrame) -> list[str]:
         )
         total_abs = 0.0
         n_cmp = 0
-        for pt in PARITY_POINTS:
+        for pt in points:
             k = pt["ist"]
             i = key_to_i.get(k)
             lines.append(f"  timestamp IST (candle OPEN)={k}")
@@ -862,7 +908,6 @@ def run_parity(df: pd.DataFrame) -> list[str]:
                     "    ERROR: candle not in CSV "
                     "(current 1m file may end before this timestamp)"
                 )
-                total_abs += 1e9
                 continue
             assert cache.vwap is not None
             o_ = float(df["open"].iloc[i])
@@ -877,20 +922,24 @@ def run_parity(df: pd.DataFrame) -> list[str]:
                 f"    ours: O={o_:.1f} H={h_:.1f} L={l_:.1f} C={c_:.1f} "
                 f"VWAP={vwap:.1f} MA={mf:.1f}/{ms:.1f} RSI={rr:.2f}"
             )
-            if pt["o"] is not None:
+            n_cmp += 1
+            if pt.get("vwap") is None and pt.get("ma_fast") is None:
+                lines.append("    chart: (no chart anchor for this timestamp)")
+                continue
+            if pt.get("o") is not None:
                 lines.append(
                     f"    chart: O={pt['o']} H={pt['h']} L={pt['l']} C={pt['c']} "
                     f"VWAP={pt['vwap']} MA={pt['ma_fast']}/{pt['ma_slow']} RSI={pt['rsi']}"
                 )
                 diffs = [
-                    abs(o_ - pt["o"]),
-                    abs(h_ - pt["h"]),
-                    abs(l_ - pt["l"]),
-                    abs(c_ - pt["c"]),
-                    abs(vwap - pt["vwap"]),
-                    abs(mf - pt["ma_fast"]),
-                    abs(ms - pt["ma_slow"]),
-                    abs(rr - pt["rsi"]),
+                    abs(o_ - float(pt["o"])),
+                    abs(h_ - float(pt["h"])),
+                    abs(l_ - float(pt["l"])),
+                    abs(c_ - float(pt["c"])),
+                    abs(vwap - float(pt["vwap"])),
+                    abs(mf - float(pt["ma_fast"])),
+                    abs(ms - float(pt["ma_slow"])),
+                    abs(rr - float(pt["rsi"])),
                 ]
                 lines.append(
                     f"    diff: O={diffs[0]:.2f} H={diffs[1]:.2f} L={diffs[2]:.2f} "
@@ -904,26 +953,38 @@ def run_parity(df: pd.DataFrame) -> list[str]:
                     f"RSI={pt['rsi']}"
                 )
                 diffs = [
-                    abs(vwap - pt["vwap"]),
-                    abs(mf - pt["ma_fast"]),
-                    abs(ms - pt["ma_slow"]),
-                    abs(rr - pt["rsi"]),
+                    abs(vwap - float(pt["vwap"])),
+                    abs(mf - float(pt["ma_fast"])),
+                    abs(ms - float(pt["ma_slow"])),
+                    abs(rr - float(pt["rsi"])),
                 ]
                 lines.append(
                     f"    diff: VWAP={diffs[0]:.2f} MAf={diffs[1]:.2f} "
                     f"MAs={diffs[2]:.2f} RSI={diffs[3]:.2f}"
                 )
                 total_abs += float(sum(diffs))
-            n_cmp += 1
         lines.append(f"  score_abs_sum={total_abs:.4f} (n_points={n_cmp})")
         lines.append("")
-        scores.append((total_abs, (ma_type, fast_l, slow_l, rsi_l, anchor)))
+        if n_cmp > 0:
+            scored.append(
+                (total_abs, n_cmp, (ma_type, fast_l, slow_l, rsi_l, anchor))
+            )
 
-    scores.sort(key=lambda x: x[0])
-    best_score, best_cfg = scores[0]
+    if not scored:
+        lines.insert(
+            0,
+            "PARITY FAILED - NO DATA AT REQUESTED TIMESTAMPS",
+        )
+        lines.append("BEST_PARITY skipped (n_points=0 for all configs).")
+        lines.append("")
+        return lines, 2
+
+    scored.sort(key=lambda x: (x[0], -x[1]))
+    best_score, best_n, best_cfg = scored[0]
     bm, bf, bs, br, ba = best_cfg
     lines.append(
-        f"BEST_PARITY={bm} fast={bf} slow={bs} RSI={br} VWAP={ba} score={best_score:.4f}"
+        f"BEST_PARITY={bm} fast={bf} slow={bs} RSI={br} VWAP={ba} "
+        f"score={best_score:.4f} n_points={best_n}"
     )
     lines.append("")
 
@@ -958,7 +1019,7 @@ def run_parity(df: pd.DataFrame) -> list[str]:
         lines.append("  (no signals in window — check data coverage / warmup)")
     lines.append("")
     lines.append("BTC-only parity. Option marks not used.")
-    return lines
+    return lines, 0
 
 
 # ---------------------------------------------------------------------------
@@ -1186,11 +1247,29 @@ def main() -> None:
     ap.add_argument("--ma-type", choices=("EMA", "SMA"), default="EMA")
     ap.add_argument("--vwap-anchor", choices=("UTC00", "IST00"), default="UTC00")
     ap.add_argument("--side", choices=("both", "long", "short"), default="both")
+    ap.add_argument(
+        "--parity-ts",
+        action="append",
+        default=None,
+        metavar="YYYY-MM-DD HH:MM",
+        help=(
+            "IST candle OPEN timestamp for parity (repeatable). "
+            f"Default: {list(DEFAULT_PARITY_TS)}"
+        ),
+    )
     args = ap.parse_args()
 
     df = load_ohlcv()
     if args.parity:
-        emit_file(PARITY_OUT, run_parity(df))
+        ts_list = (
+            [_parse_parity_ts(t) for t in args.parity_ts]
+            if args.parity_ts
+            else list(DEFAULT_PARITY_TS)
+        )
+        lines, code = run_parity(df, ts_list)
+        emit_file(PARITY_OUT, lines)
+        if code != 0:
+            raise SystemExit(code)
         return
 
     lines, rdf = run_sweep(df, args.ma_type, args.vwap_anchor, args.side)

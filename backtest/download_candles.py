@@ -224,12 +224,171 @@ async def _fetch_page(
     return []
 
 
+def _finalize_write(
+    by_ts: dict[int, dict[str, Any]],
+    *,
+    symbol: str,
+    resolution: str,
+    res_sec: int,
+    floor_ts: int | None,
+) -> Path:
+    """Write final CSV + gap report; delete superseded shards. Preserves floor_ts."""
+    now = time.time()
+    filtered: dict[int, dict[str, Any]] = {}
+    for ts, row in by_ts.items():
+        if not _is_closed(ts, res_sec, now):
+            continue
+        if floor_ts is not None and ts < floor_ts:
+            continue
+        filtered[ts] = row
+    by_ts = filtered
+    if not by_ts:
+        raise RuntimeError("Download produced zero candles")
+
+    first_ts, last_ts = min(by_ts), max(by_ts)
+    final_path = DATA_DIR / f"{_output_stem(symbol, resolution, first_ts, last_ts)}.csv"
+    _write_csv(final_path, by_ts)
+
+    for p in DATA_DIR.glob(f"{symbol}_{resolution}_*.csv"):
+        if p.resolve() != final_path.resolve():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    partial = DATA_DIR / f"{symbol}_{resolution}_partial.csv"
+    if partial.exists() and partial.resolve() != final_path.resolve():
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+
+    report = _gap_report(by_ts, res_sec)
+    report_path = final_path.with_suffix(".txt")
+    report_path.write_text(report, encoding="utf-8")
+    print()
+    print(report)
+    print(f"CSV:    {final_path}")
+    print(f"Report: {report_path}")
+    return final_path
+
+
+async def extend_tail(
+    *,
+    symbol: str,
+    resolution: str,
+) -> Path:
+    """
+    Safe forward-only append: keep existing history intact, fetch only the
+    missing tail after max(existing). Never applies a --months start floor.
+    """
+    if resolution not in RESOLUTION_SECONDS:
+        raise ValueError(f"resolution must be one of {sorted(RESOLUTION_SECONDS)}")
+    res_sec = RESOLUTION_SECONDS[resolution]
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    existing = _find_existing_csv(symbol, resolution)
+    if existing is None:
+        raise FileNotFoundError(
+            f"No existing {symbol}_{resolution}_*.csv in {DATA_DIR} — "
+            "cannot --extend; use --months for a fresh download"
+        )
+
+    print(f"Extending existing file (forward tail only): {existing}")
+    by_ts = _load_csv(existing)
+    if not by_ts:
+        raise RuntimeError(f"Existing CSV empty: {existing}")
+    old_first, old_last = min(by_ts), max(by_ts)
+    print(
+        f"  loaded {len(by_ts)} candles; "
+        f"first={_fmt_ist(old_first)} last={_fmt_ist(old_last)}"
+    )
+
+    now = time.time()
+    page_start = old_last + res_sec
+    page_end_cap = int(now)
+
+    if page_start > page_end_cap:
+        print("Already up to date — no tail to fetch.")
+        return _finalize_write(
+            by_ts, symbol=symbol, resolution=resolution, res_sec=res_sec, floor_ts=None
+        )
+
+    transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+    async with httpx.AsyncClient(transport=transport, timeout=60.0) as client:
+        pages = 0
+        cursor = page_start
+        while cursor <= page_end_cap:
+            chunk_end = min(page_end_cap, cursor + MAX_PER_REQUEST * res_sec)
+            raw_rows = await _fetch_page(
+                client,
+                symbol=symbol,
+                resolution=resolution,
+                start=cursor,
+                end=chunk_end,
+            )
+            pages += 1
+            new_count = 0
+            newest_in_page: int | None = None
+            for raw in raw_rows:
+                row = _row_from_api(raw)
+                if row is None:
+                    continue
+                ts = int(row["open_time_unix"])
+                if ts < page_start:
+                    continue
+                if not _is_closed(ts, res_sec, now):
+                    continue
+                if ts not in by_ts:
+                    new_count += 1
+                by_ts[ts] = row
+                if newest_in_page is None or ts > newest_in_page:
+                    newest_in_page = ts
+
+            print(
+                f"tail page {pages}: start={cursor} end={chunk_end} "
+                f"api={len(raw_rows)} new={new_count} total={len(by_ts)}"
+            )
+
+            if newest_in_page is None:
+                # empty page — advance by request window to avoid stall
+                next_cursor = chunk_end + res_sec
+            else:
+                next_cursor = newest_in_page + res_sec
+
+            if next_cursor <= cursor:
+                print("Pagination did not move forwards — stopping.")
+                break
+            cursor = next_cursor
+
+            ck_path = DATA_DIR / f"{symbol}_{resolution}_partial.csv"
+            _write_csv(ck_path, by_ts)
+            await asyncio.sleep(SLEEP_BETWEEN_S)
+
+    # Preserve original start — never floor-cut
+    if min(by_ts) != old_first:
+        raise RuntimeError(
+            f"REFUSING TO WRITE: start date changed "
+            f"({_fmt_ist(old_first)} -> {_fmt_ist(min(by_ts))})"
+        )
+
+    return _finalize_write(
+        by_ts, symbol=symbol, resolution=resolution, res_sec=res_sec, floor_ts=None
+    )
+
+
 async def download(
     *,
     months: int,
     symbol: str,
     resolution: str,
 ) -> Path:
+    """
+    Backward-paging history download keyed by --months.
+
+    WARNING: final filter keeps only ts >= target_start, so a short --months
+    can truncate an older existing start. Prefer --extend to append a tail
+    without cutting history.
+    """
     if resolution not in RESOLUTION_SECONDS:
         raise ValueError(f"resolution must be one of {sorted(RESOLUTION_SECONDS)}")
     res_sec = RESOLUTION_SECONDS[resolution]
@@ -251,6 +410,13 @@ async def download(
         print(f"Resuming from existing file: {existing}")
         by_ts = _load_csv(existing)
         print(f"  loaded {len(by_ts)} candles; oldest={min(by_ts) if by_ts else 'n/a'}")
+        if by_ts and min(by_ts) < target_start:
+            print(
+                f"WARNING: --months target_start={_fmt_ist(target_start)} is NEWER "
+                f"than existing first candle {_fmt_ist(min(by_ts))}. "
+                f"Final write will CUT the old start. Use --extend to append "
+                f"forward without truncating."
+            )
 
     # Page end: if resuming, continue from oldest already stored
     if by_ts:
@@ -297,9 +463,6 @@ async def download(
             if oldest_in_page is None:
                 print("No candles in page — stopping.")
                 break
-            if new_count == 0 and oldest_in_page >= page_start:
-                # Overlap-only page while still above target — still step back
-                pass
 
             next_end = oldest_in_page - res_sec
             if next_end >= page_end:
@@ -317,43 +480,13 @@ async def download(
 
             await asyncio.sleep(SLEEP_BETWEEN_S)
 
-    if not by_ts:
-        raise RuntimeError("Download produced zero candles")
-
-    # Drop any still-forming bar that slipped in
-    now = time.time()
-    by_ts = {
-        ts: row
-        for ts, row in by_ts.items()
-        if _is_closed(ts, res_sec, now) and ts >= target_start
-    }
-
-    first_ts, last_ts = min(by_ts), max(by_ts)
-    final_path = DATA_DIR / f"{_output_stem(symbol, resolution, first_ts, last_ts)}.csv"
-    _write_csv(final_path, by_ts)
-
-    # Clean partial / superseded dated files for this symbol+resolution
-    for p in DATA_DIR.glob(f"{symbol}_{resolution}_*.csv"):
-        if p.resolve() != final_path.resolve():
-            try:
-                p.unlink()
-            except OSError:
-                pass
-    partial = DATA_DIR / f"{symbol}_{resolution}_partial.csv"
-    if partial.exists() and partial.resolve() != final_path.resolve():
-        try:
-            partial.unlink()
-        except OSError:
-            pass
-
-    report = _gap_report(by_ts, res_sec)
-    report_path = final_path.with_suffix(".txt")
-    report_path.write_text(report, encoding="utf-8")
-    print()
-    print(report)
-    print(f"CSV:    {final_path}")
-    print(f"Report: {report_path}")
-    return final_path
+    return _finalize_write(
+        by_ts,
+        symbol=symbol,
+        resolution=resolution,
+        res_sec=res_sec,
+        floor_ts=target_start,
+    )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -361,6 +494,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Download Delta India historical candles for S003 backtest"
     )
     p.add_argument("--months", type=int, default=12, help="Months of history (default 12)")
+    p.add_argument(
+        "--extend",
+        action="store_true",
+        help=(
+            "Append missing FORWARD tail onto existing CSV only. "
+            "Preserves original start date. Prefer this over --months when "
+            "history already exists (e.g. from 2025-06)."
+        ),
+    )
     p.add_argument("--symbol", type=str, default="BTCUSD")
     p.add_argument(
         "--resolution",
@@ -373,10 +515,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    if args.months < 1:
-        print("--months must be >= 1", file=sys.stderr)
-        return 2
     try:
+        if args.extend:
+            asyncio.run(
+                extend_tail(
+                    symbol=str(args.symbol).upper(),
+                    resolution=str(args.resolution),
+                )
+            )
+            return 0
+        if args.months < 1:
+            print("--months must be >= 1", file=sys.stderr)
+            return 2
         asyncio.run(
             download(
                 months=int(args.months),
