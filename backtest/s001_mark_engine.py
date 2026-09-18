@@ -87,14 +87,10 @@ def parity_checklist_lines(*, wing_roll: bool) -> list[str]:
     lines = [
         "===== PARITY CHECKLIST G1..G10 =====",
         (
-            "G1 entry 11:00 IST / 2DTE / B25: "
-            "backtest/s001_final_validation.py:48-52; "
-            "pick_strangle_by_premium income_engine.py:322-356; "
-            "ATM target = 0.25*(ATM_C+ATM_P) synthetic (hedge off). "
-            "DIVERGENCE: live resolve_strangle_target_premium "
-            "(auto_trade_engine.py:279-356) falls back to fixed $150 when "
-            "hedge_enabled=False; this engine keeps synthetic ATM×25% to match "
-            "locked CFG B25 with hedge off."
+            "G1 premium selection: --premium-mode fixed|b25 (default fixed). "
+            "fixed = --target-premium-per-side (default 150) matching live "
+            "auto_trade_engine.py:279-356 _fallback('hedge_disabled') when hedge off. "
+            "b25 = ATM straddle mark × --premium-pct-of-hedge% (synthetic ATM×25%)."
         ),
         (
             "G2 Adj B trigger: logic.py:119-210 _try_adj_b_action — "
@@ -133,12 +129,11 @@ def parity_checklist_lines(*, wing_roll: bool) -> list[str]:
             "per task G8."
         ),
         (
-            "G9 profit target = entry_cost × k (default 1.0): "
-            "s001_final_validation.py:146-157,507-510 (fees+wing debit, not "
-            "short credit). Same-day re-entry only after profit_target "
-            "(final_validation.py:1101-1119). "
-            "DIVERGENCE: live uses THETA/PCT profit engine (hedge_theta.py), "
-            "not cost×k."
+            "G9 profit target: --profit-mode pct_of_credit|cost_k|none "
+            "(default pct_of_credit). pct_of_credit locks at entry: "
+            "NET=(short credit − wing debit − entry fees)×tp_pct/100 "
+            "(hedge_theta.py:449-505 PCT). cost_k = entry_cost×k (legacy). "
+            "none = no TP. Locked once at entry — not recomputed each tick."
         ),
         (
             "G10 pre-expiry 17:15 IST: time_utils is_pre_expiry_window; "
@@ -232,10 +227,17 @@ def to_unix(dt: datetime) -> int:
     return int(dt.astimezone(UTC).timestamp())
 
 
-def resolve_slip_frac(premium: float, dte: float, slip_model: str) -> float:
+def resolve_slip_frac(
+    premium: float,
+    dte: float,
+    slip_model: str,
+    slip_mult: float = 1.0,
+) -> float:
     if slip_model == SLIP_MODEL_FLAT:
-        return SLIP_FLAT
-    return float(slip_pct(premium, int(max(0, round(dte))))) / 100.0
+        base = SLIP_FLAT
+    else:
+        base = float(slip_pct(premium, int(max(0, round(dte))))) / 100.0
+    return max(0.0, float(base) * float(slip_mult))
 
 
 def sell_fill(mark: float, slip_frac: float) -> float:
@@ -254,6 +256,44 @@ def hours_to_expiry(now_ts: int, expiry: date) -> float:
 def is_pre_expiry(now_ts: int, expiry: date) -> bool:
     h = hours_to_expiry(now_ts, expiry)
     return 0.0 < h <= (PRE_EXPIRY_MINUTE_IST / 60.0) or h <= 0.0
+
+
+def lock_profit_target_usd(
+    *,
+    call_fill: float,
+    put_fill: float,
+    wing_c_fill: float,
+    wing_p_fill: float,
+    entry_fees: float,
+    qty: int,
+    cfg: dict[str, Any],
+) -> float | None:
+    """
+    Lock profit target at entry (not recomputed each tick).
+
+    pct_of_credit (live PCT):
+      net_credit = (short fills − wing fills) × qty × CV
+      NET = net_credit − entry_fees   # task: fees in NET
+      target = max(0, NET) × tp_pct / 100
+      Mirror hedge_theta.py:449-505 PCT multiply; fees included per task KAAM 2.
+
+    cost_k: entry_cost × k (legacy compare)
+    none: no TP
+    """
+    mode = str(cfg.get("profit_mode") or "pct_of_credit").lower()
+    if mode in ("none", "off", ""):
+        return None
+    if mode == "cost_k":
+        wing_debit = (wing_c_fill + wing_p_fill) * qty_btc(qty)
+        entry_cost = entry_fees + wing_debit
+        return max(0.0, entry_cost * float(cfg.get("profit_k") or 1.0))
+    # pct_of_credit
+    short_credit = (call_fill + put_fill) * qty_btc(qty)
+    wing_debit = (wing_c_fill + wing_p_fill) * qty_btc(qty)
+    net_credit = short_credit - wing_debit
+    net_after_fees = net_credit - float(entry_fees)
+    tp_pct = float(cfg.get("tp_pct") or 50.0)
+    return max(0.0, net_after_fees * tp_pct / 100.0)
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +598,11 @@ class CycleResult:
     applied_slip_entry: float
     applied_slip_exit: float
     spot_source: str
+    premium_mode: str = ""
+    target_premium: float = 0.0
+    profit_mode: str = ""
+    profit_target_usd: float = 0.0
+    avg_applied_slip_pct: float = 0.0
 
 
 def qty_btc(qty: int) -> float:
@@ -617,9 +662,21 @@ def simulate_cycle(
         return None
     _atm_k, atm_c, atm_p = atm
     atm_straddle = atm_c + atm_p
-    pct = float(cfg["premium_pct_of_hedge"])
-    target = (pct / 100.0) * atm_straddle
-    picked = pick_strangle_by_premium_marks(calls, puts, spot, target)
+    premium_mode = str(cfg.get("premium_mode") or "fixed").lower()
+    if premium_mode == "b25":
+        pct = float(cfg["premium_pct_of_hedge"])
+        target_prem = (pct / 100.0) * atm_straddle
+    else:
+        # fixed — live hedge_disabled fallback (auto_trade_engine.py:279-356)
+        premium_mode = "fixed"
+        target_prem = float(cfg.get("target_premium_per_side") or 150.0)
+    logger.info(
+        "premium_mode=%s target_premium_per_side=%.4f atm_straddle=%.4f",
+        premium_mode,
+        target_prem,
+        atm_straddle,
+    )
+    picked = pick_strangle_by_premium_marks(calls, puts, spot, target_prem)
     if picked is None:
         return None
     call_row, put_row = picked
@@ -643,10 +700,12 @@ def simulate_cycle(
 
     dte_entry = max(0.0, hours_to_expiry(entry_ts, expiry) / 24.0)
     qty0 = int(cfg["qty_lots"])
+    slip_model = str(cfg.get("slip_model") or slip_model)
+    slip_mult = float(cfg.get("slip_mult", 1.0))
 
     def _enter_short(row: dict[str, Any]) -> LegState:
         m = float(row["mark_price"])
-        sf = resolve_slip_frac(m, dte_entry, slip_model)
+        sf = resolve_slip_frac(m, dte_entry, slip_model, slip_mult)
         fill = sell_fill(m, sf)
         fee = eng.option_fee(fill, spot, qty0)
         return LegState(
@@ -665,7 +724,7 @@ def simulate_cycle(
 
     def _enter_long(row: dict[str, Any]) -> LegState:
         m = float(row["mark_price"])
-        sf = resolve_slip_frac(m, dte_entry, slip_model)
+        sf = resolve_slip_frac(m, dte_entry, slip_model, slip_mult)
         fill = buy_fill(m, sf)
         fee = eng.option_fee(fill, spot, qty0)
         return LegState(
@@ -685,14 +744,28 @@ def simulate_cycle(
     wing_c = _enter_long(wing_c_row)
     wing_p = _enter_long(wing_p_row)
 
-    entry_cost = (
+    entry_fees = (
         call_leg.entry_fee
         + put_leg.entry_fee
         + wing_c.entry_fee
         + wing_p.entry_fee
-        + (wing_c.entry_fill + wing_p.entry_fill) * qty_btc(qty0)
     )
-    profit_target = entry_cost * float(cfg["profit_k"])
+    profit_mode = str(cfg.get("profit_mode") or "pct_of_credit").lower()
+    profit_target = lock_profit_target_usd(
+        call_fill=call_leg.entry_fill,
+        put_fill=put_leg.entry_fill,
+        wing_c_fill=wing_c.entry_fill,
+        wing_p_fill=wing_p.entry_fill,
+        entry_fees=entry_fees,
+        qty=qty0,
+        cfg=cfg,
+    )
+    logger.info(
+        "profit_mode=%s locked_profit_target_usd=%s target_premium=%.4f",
+        profit_mode,
+        profit_target,
+        target_prem,
+    )
 
     # Preload marks through expiry
     exp_ts = to_unix(ist_dt(expiry, EXPIRY_HOUR_IST, EXPIRY_MINUTE_IST))
@@ -764,7 +837,7 @@ def simulate_cycle(
         worst_mtm = min(worst_mtm, net_mtm)
 
         # --- exits priority: TP → pre-expiry → max-adj gate on trigger → Adj B ---
-        if net_mtm >= profit_target:
+        if profit_target is not None and net_mtm >= profit_target:
             exit_reason = "PROFIT_TARGET"
             exit_ts = ts
             break
@@ -866,7 +939,7 @@ def simulate_cycle(
                 dte_now = max(0.0, hours_to_expiry(ts, expiry) / 24.0)
                 old_mark = mp if untested == "put" else mc
                 assert old_mark is not None
-                sf_ex = resolve_slip_frac(old_mark, dte_now, slip_model)
+                sf_ex = resolve_slip_frac(old_mark, dte_now, slip_model, slip_mult)
                 ex_fill = buy_fill(old_mark, sf_ex)
                 fee_ex = eng.option_fee(ex_fill, float(fwd), untested_leg.qty)
                 slip_exit_samples.append(sf_ex * 100.0)
@@ -889,7 +962,7 @@ def simulate_cycle(
                         wleg = wing_c if untested == "call" else wing_p
                         wm = mark_of(wleg, ts)
                         if wm is not None and wleg.status == "open":
-                            sf_w = resolve_slip_frac(wm, dte_now, slip_model)
+                            sf_w = resolve_slip_frac(wm, dte_now, slip_model, slip_mult)
                             w_ex = sell_fill(wm, sf_w)  # sell long wing
                             fee_w = eng.option_fee(w_ex, float(fwd), wleg.qty)
                             wleg.realized += signed_long_upnl(
@@ -912,7 +985,7 @@ def simulate_cycle(
                                 nrow = find_symbol(ch, nw)
                                 if nrow is not None:
                                     nm = float(nrow["mark_price"])
-                                    sf_n = resolve_slip_frac(nm, dte_now, slip_model)
+                                    sf_n = resolve_slip_frac(nm, dte_now, slip_model, slip_mult)
                                     nfill = buy_fill(nm, sf_n)
                                     nfee = eng.option_fee(nfill, float(fwd), int(new_qty))
                                     new_wing = LegState(
@@ -936,7 +1009,7 @@ def simulate_cycle(
 
                 # Enter new untested short
                 nm = float(new_row["mark_price"])
-                sf_in = resolve_slip_frac(nm, dte_now, slip_model)
+                sf_in = resolve_slip_frac(nm, dte_now, slip_model, slip_mult)
                 nfill = sell_fill(nm, sf_in)
                 nfee = eng.option_fee(nfill, float(fwd), int(new_qty))
                 new_leg = LegState(
@@ -1014,7 +1087,7 @@ def simulate_cycle(
                 # last known
                 s = series.get(leg.symbol) or {}
                 m = s[max(s)] if s else leg.entry_mark
-            sf = resolve_slip_frac(m, dte_now, slip_model)
+            sf = resolve_slip_frac(m, dte_now, slip_model, slip_mult)
             slip_exit_samples.append(sf * 100.0)
             if is_short:
                 fill = buy_fill(m, sf)
@@ -1071,6 +1144,11 @@ def simulate_cycle(
     avg_exit_slip = (
         float(statistics.fmean(slip_exit_samples)) if slip_exit_samples else 0.0
     )
+    avg_applied = (
+        float(statistics.fmean(entry_slips + slip_exit_samples))
+        if (entry_slips or slip_exit_samples)
+        else 0.0
+    )
 
     return CycleResult(
         entry_date=day,
@@ -1095,36 +1173,359 @@ def simulate_cycle(
         applied_slip_entry=avg_entry_slip,
         applied_slip_exit=avg_exit_slip,
         spot_source=spot_src,
+        premium_mode=premium_mode,
+        target_premium=target_prem,
+        profit_mode=profit_mode,
+        profit_target_usd=float(profit_target or 0.0),
+        avg_applied_slip_pct=avg_applied,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Synthetic cycle (unit tests / exit-path proofs)
+# ---------------------------------------------------------------------------
+def simulate_synthetic_cycle(
+    *,
+    entry_ts: int,
+    expiry: date,
+    spot: float,
+    call_leg: LegState,
+    put_leg: LegState,
+    wing_c: LegState,
+    wing_p: LegState,
+    series: dict[str, dict[int, float]],
+    chain_by_ts: dict[int, dict[str, list[dict[str, Any]]]],
+    all_strikes: list[float],
+    cfg: dict[str, Any],
+    profit_target: float | None,
+) -> CycleResult:
+    """
+    Monitor loop only — used by exit-path unit tests.
+    chain_by_ts[ts]['call'|'put'] = option chain rows for Adj B.
+    """
+    qty0 = int(call_leg.qty)
+    slip_model = str(cfg.get("slip_model") or SLIP_MODEL_FLAT)
+    slip_mult = float(cfg.get("slip_mult", 1.0))
+    exp_ts = to_unix(ist_dt(expiry, EXPIRY_HOUR_IST, EXPIRY_MINUTE_IST))
+    adj_count = 0
+    adj_events: list[AdjEvent] = []
+    worst_mtm = 0.0
+    exit_reason = ""
+    exit_ts = entry_ts
+    slip_exit_samples: list[float] = []
+
+    def mark_of(leg: LegState, ts: int) -> float | None:
+        s = series.get(leg.symbol) or {}
+        minute = (ts // 60) * 60
+        if minute in s:
+            return s[minute]
+        for d in range(-MARK_TOL_SEC, MARK_TOL_SEC + 1, 60):
+            if minute + d in s:
+                return s[minute + d]
+        return None
+
+    ts = entry_ts + MONITOR_STEP_SEC
+    while ts <= exp_ts:
+        fwd = spot
+        mc = mark_of(call_leg, ts) if call_leg.status == "open" else None
+        mp = mark_of(put_leg, ts) if put_leg.status == "open" else None
+        mwc = mark_of(wing_c, ts) if wing_c.status == "open" else None
+        mwp = mark_of(wing_p, ts) if wing_p.status == "open" else None
+        if call_leg.status == "open" and mc is None:
+            ts += MONITOR_STEP_SEC
+            continue
+        if put_leg.status == "open" and mp is None:
+            ts += MONITOR_STEP_SEC
+            continue
+
+        mtm = call_leg.realized + put_leg.realized + wing_c.realized + wing_p.realized
+        fees_so_far = (
+            call_leg.entry_fee
+            + put_leg.entry_fee
+            + wing_c.entry_fee
+            + wing_p.entry_fee
+            + call_leg.exit_fee
+            + put_leg.exit_fee
+            + wing_c.exit_fee
+            + wing_p.exit_fee
+        )
+        if call_leg.status == "open" and mc is not None:
+            mtm += signed_short_upnl(call_leg.entry_fill, mc, call_leg.qty)
+        if put_leg.status == "open" and mp is not None:
+            mtm += signed_short_upnl(put_leg.entry_fill, mp, put_leg.qty)
+        if wing_c.status == "open" and mwc is not None:
+            mtm += signed_long_upnl(wing_c.entry_fill, mwc, wing_c.qty)
+        if wing_p.status == "open" and mwp is not None:
+            mtm += signed_long_upnl(wing_p.entry_fill, mwp, wing_p.qty)
+        net_mtm = mtm - fees_so_far
+        worst_mtm = min(worst_mtm, net_mtm)
+
+        if profit_target is not None and net_mtm >= profit_target:
+            exit_reason = "PROFIT_TARGET"
+            exit_ts = ts
+            break
+        if is_pre_expiry(ts, expiry):
+            exit_reason = "PRE_EXPIRY"
+            exit_ts = ts
+            break
+
+        if (
+            str(cfg.get("adj_mode") or "B_only").upper() in ("B_ONLY", "BOTH", "B")
+            and call_leg.status == "open"
+            and put_leg.status == "open"
+            and mc is not None
+            and mp is not None
+        ):
+            trig = float(cfg["adj_b_trigger"]) / 100.0
+            call_pressured = call_leg.baseline > 0 and mc >= call_leg.baseline * 1.0
+            put_pressured = put_leg.baseline > 0 and mp >= put_leg.baseline * 1.0
+            call_decayed = call_leg.baseline > 0 and mc < call_leg.baseline * trig
+            put_decayed = put_leg.baseline > 0 and mp < put_leg.baseline * trig
+            tested = untested = None
+            if call_pressured and put_decayed:
+                tested, untested = "call", "put"
+            elif put_pressured and call_decayed:
+                tested, untested = "put", "call"
+            if tested is not None and untested is not None:
+                if adj_count >= int(cfg["max_adj"]):
+                    exit_reason = "MAX_ADJUSTMENTS_REACHED"
+                    exit_ts = ts
+                    break
+                adj_n = adj_count + 1
+                new_qty, close_basket = compute_decrease_step_qty(
+                    original_qty=qty0,
+                    adjustment_number=adj_n,
+                    decrease_pct=float(cfg["dec_pct"]),
+                )
+                if close_basket or new_qty is None:
+                    exit_reason = "QTY_DECREASE_EXHAUSTED"
+                    exit_ts = ts
+                    break
+                tested_prem = mc if tested == "call" else mp
+                untested_leg = put_leg if untested == "put" else call_leg
+                other_leg = call_leg if untested == "put" else put_leg
+                wing_leg_obj = wing_c if untested == "call" else wing_p
+
+                class _W:
+                    pass
+
+                wp = _W()
+                wp.status = wing_leg_obj.status
+                wp.quantity = wing_leg_obj.qty
+                wp.strike = wing_leg_obj.strike
+                wing_k = resolve_adj_b_wing_strike(wp)
+                chain = (chain_by_ts.get(ts) or {}).get(untested) or []
+                res = select_adj_b_strike(
+                    leg_type=untested,
+                    p_target=float(tested_prem),
+                    chain=chain,
+                    spot=float(fwd),
+                    other_short_strike=float(other_leg.strike),
+                    wing_strike=wing_k,
+                )
+                if is_adj_b_no_strike_inside_wing(res, wing_k):
+                    exit_reason = "ADJ_B_NO_STRIKE_INSIDE_WING"
+                    exit_ts = ts
+                    break
+                if not res.success or res.strike is None:
+                    ts += MONITOR_STEP_SEC
+                    continue
+                new_strike = float(res.strike)
+                new_row = find_symbol(chain, new_strike)
+                if new_row is None:
+                    ts += MONITOR_STEP_SEC
+                    continue
+                dte_now = max(0.0, hours_to_expiry(ts, expiry) / 24.0)
+                old_mark = mp if untested == "put" else mc
+                assert old_mark is not None
+                sf_ex = resolve_slip_frac(old_mark, dte_now, slip_model, slip_mult)
+                ex_fill = buy_fill(old_mark, sf_ex)
+                fee_ex = eng.option_fee(ex_fill, float(fwd), untested_leg.qty)
+                slip_exit_samples.append(sf_ex * 100.0)
+                untested_leg.realized += signed_short_upnl(
+                    untested_leg.entry_fill, ex_fill, untested_leg.qty
+                )
+                untested_leg.exit_fee += fee_ex
+                untested_leg.status = "closed"
+                old_strike = float(untested_leg.strike)
+                nm = float(new_row["mark_price"])
+                sf_in = resolve_slip_frac(nm, dte_now, slip_model, slip_mult)
+                nfill = sell_fill(nm, sf_in)
+                nfee = eng.option_fee(nfill, float(fwd), int(new_qty))
+                new_leg = LegState(
+                    symbol=str(new_row["symbol"]),
+                    strike=new_strike,
+                    opt_type=untested,
+                    qty=int(new_qty),
+                    entry_fill=nfill,
+                    entry_mark=nm,
+                    baseline=nm,
+                    entry_fee=nfee,
+                    entry_slip=sf_in * 100.0,
+                )
+                other_leg.baseline = float(nm)
+                other_leg.qty = int(new_qty)
+                if untested == "call":
+                    call_leg = new_leg
+                else:
+                    put_leg = new_leg
+                adj_count += 1
+                adj_events.append(
+                    AdjEvent(
+                        ts=ts,
+                        leg=untested,
+                        old_strike=old_strike,
+                        new_strike=new_strike,
+                        reason="ADJ_B",
+                        new_qty=int(new_qty),
+                    )
+                )
+        ts += MONITOR_STEP_SEC
+    else:
+        exit_reason = exit_reason or "EXPIRY"
+        exit_ts = min(ts, exp_ts)
+
+    # flatten open legs at exit
+    for leg, is_short in (
+        (call_leg, True),
+        (put_leg, True),
+        (wing_c, False),
+        (wing_p, False),
+    ):
+        if leg.status != "open":
+            continue
+        m = mark_of(leg, exit_ts) or leg.entry_mark
+        dte_now = max(0.0, hours_to_expiry(exit_ts, expiry) / 24.0)
+        sf = resolve_slip_frac(m, dte_now, slip_model, slip_mult)
+        if is_short:
+            fill = buy_fill(m, sf)
+            leg.realized += signed_short_upnl(leg.entry_fill, fill, leg.qty)
+        else:
+            fill = sell_fill(m, sf)
+            leg.realized += signed_long_upnl(leg.entry_fill, fill, leg.qty)
+        leg.exit_fee += eng.option_fee(fill, spot, leg.qty)
+        leg.status = "closed"
+
+    fees = (
+        call_leg.entry_fee
+        + put_leg.entry_fee
+        + wing_c.entry_fee
+        + wing_p.entry_fee
+        + call_leg.exit_fee
+        + put_leg.exit_fee
+        + wing_c.exit_fee
+        + wing_p.exit_fee
+    )
+    gross = (
+        call_leg.realized
+        + put_leg.realized
+        + wing_c.realized
+        + wing_p.realized
+    )
+    entry_day = datetime.fromtimestamp(entry_ts, tz=UTC).astimezone(IST).date()
+    return CycleResult(
+        entry_date=entry_day,
+        entry_ts=entry_ts,
+        call_strike=call_leg.strike,
+        put_strike=put_leg.strike,
+        entry_prem_c=call_leg.entry_mark,
+        entry_prem_p=put_leg.entry_mark,
+        qty=qty0,
+        wing_c=wing_c.strike,
+        wing_p=wing_p.strike,
+        n_adjustments=adj_count,
+        adj_events=adj_events,
+        exit_ts=exit_ts,
+        exit_reason=exit_reason,
+        hold_hours=max(0.0, (exit_ts - entry_ts) / 3600.0),
+        gross_pnl=gross,
+        fees=fees,
+        slippage_cost=0.0,
+        net_pnl=gross - fees,
+        worst_mtm=worst_mtm,
+        applied_slip_entry=0.0,
+        applied_slip_exit=0.0,
+        spot_source="synthetic",
+        profit_target_usd=float(profit_target or 0.0),
     )
 
 
 # ---------------------------------------------------------------------------
 # Runner / stats
 # ---------------------------------------------------------------------------
-def day_clustered_ci(
-    cycles: list[CycleResult], n: int, seed: int
-) -> tuple[float, float, float]:
-    by_day: dict[date, list[float]] = defaultdict(list)
+def summarize_cycles(
+    cycles: list[CycleResult], d0: date, d1: date
+) -> dict[str, Any]:
+    n = len(cycles)
+    day_span = max(1, (d1 - d0).days + 1)
+    by_day: dict[date, float] = defaultdict(float)
     for c in cycles:
-        by_day[c.entry_date].append(c.net_pnl)
-    days = sorted(by_day)
-    if not days:
+        by_day[c.entry_date] += c.net_pnl
+    daily = [by_day.get(d0 + timedelta(days=i), 0.0) for i in range(day_span)]
+    mean_day = float(statistics.fmean(daily)) if daily else float("nan")
+    reason_counts: dict[str, int] = defaultdict(int)
+    for c in cycles:
+        reason_counts[c.exit_reason] += 1
+    mix = {
+        k: (100.0 * v / n if n else float("nan"))
+        for k, v in sorted(reason_counts.items())
+    }
+    holds = [c.hold_hours for c in cycles]
+    mean_p, lo, hi = day_clustered_ci_daily(daily, BOOTSTRAP_N, BOOTSTRAP_SEED)
+    worst = min(cycles, key=lambda c: c.net_pnl) if cycles else None
+    return {
+        "n_cycles": n,
+        "mean_day": mean_day,
+        "ci_lo": lo,
+        "ci_hi": hi,
+        "bootstrap_mean": mean_p,
+        "worst_net": float(worst.net_pnl) if worst else float("nan"),
+        "worst_date": worst.entry_date.isoformat() if worst else "",
+        "max_dd": max_drawdown(daily) if daily else float("nan"),
+        "adj_per": float(statistics.fmean([c.n_adjustments for c in cycles]))
+        if cycles
+        else float("nan"),
+        "exit_mix": mix,
+        "hold_med": float(statistics.median(holds)) if holds else float("nan"),
+        "fees_day": sum(c.fees for c in cycles) / day_span,
+        "slip_day": sum(c.slippage_cost for c in cycles) / day_span,
+        "avg_slip_pct": float(
+            statistics.fmean([c.avg_applied_slip_pct for c in cycles])
+        )
+        if cycles
+        else float("nan"),
+    }
+
+
+def day_clustered_ci_daily(
+    daily: list[float], n: int, seed: int
+) -> tuple[float, float, float]:
+    """Bootstrap mean of the daily PnL series (includes zero days)."""
+    if not daily:
         return float("nan"), float("nan"), float("nan")
     rng = random.Random(seed)
     means: list[float] = []
+    m = len(daily)
     for _ in range(n):
-        sample: list[float] = []
-        for _d in days:
-            day = days[rng.randrange(len(days))]
-            sample.extend(by_day[day])
-        if sample:
-            means.append(float(statistics.fmean(sample)))
-    if not means:
-        return float("nan"), float("nan"), float("nan")
+        sample = [daily[rng.randrange(m)] for _ in range(m)]
+        means.append(float(statistics.fmean(sample)))
     means.sort()
     lo = means[int(0.025 * (len(means) - 1))]
     hi = means[int(0.975 * (len(means) - 1))]
     return float(statistics.fmean(means)), float(lo), float(hi)
+
+
+def day_clustered_ci(
+    cycles: list[CycleResult], n: int, seed: int
+) -> tuple[float, float, float]:
+    """Legacy: day-clustered bootstrap of mean daily PnL from cycle entry days."""
+    by_day: dict[date, float] = defaultdict(float)
+    for c in cycles:
+        by_day[c.entry_date] += c.net_pnl
+    days = sorted(by_day)
+    if not days:
+        return float("nan"), float("nan"), float("nan")
+    return day_clustered_ci_daily([by_day[d] for d in days], n, seed)
 
 
 def max_drawdown(daily: list[float]) -> float:
@@ -1149,6 +1550,25 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
     lines.append(f"generated_utc={datetime.now(tz=UTC).isoformat()}")
     lines.append(f"config={cfg}")
     lines.append(f"window={cfg['from_date']} .. {cfg['to_date']}")
+    pm = str(cfg.get("premium_mode") or "fixed")
+    if pm == "b25":
+        lines.append(
+            f"premium_mode=b25  "
+            f"target=ATM_straddle×{float(cfg.get('premium_pct_of_hedge') or 25.0):.1f}% "
+            f"(resolved per cycle at entry)"
+        )
+    else:
+        lines.append(
+            f"premium_mode=fixed  "
+            f"target_premium_per_side="
+            f"{float(cfg.get('target_premium_per_side') or 150.0):.2f} "
+            f"(live hedge_disabled fallback)"
+        )
+    lines.append(
+        f"profit_mode={cfg.get('profit_mode')}  "
+        f"tp_pct={cfg.get('tp_pct')}  profit_k={cfg.get('profit_k')}  "
+        f"slip_mult={cfg.get('slip_mult')}  slip_model={cfg.get('slip_model')}"
+    )
     lines.append("")
 
     spot_path = find_spot_csv()
@@ -1190,12 +1610,16 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
             cycles.append(cyc)
             entries_today += 1
             logger.info(
-                "day=%s cycle#%d exit=%s net=%.4f adj=%d",
+                "day=%s cycle#%d exit=%s net=%.4f adj=%d prem_mode=%s "
+                "target_prem=%.2f profit_tgt=%s",
                 day,
                 entries_today,
                 cyc.exit_reason,
                 cyc.net_pnl,
                 cyc.n_adjustments,
+                cyc.premium_mode,
+                cyc.target_premium,
+                cyc.profit_target_usd,
             )
             # same-day reentry only after profit target
             if cyc.exit_reason != "PROFIT_TARGET":
@@ -1217,51 +1641,69 @@ def run(cfg: dict[str, Any]) -> tuple[list[str], list[CycleResult]]:
         lines.append("No cycles completed.")
         return lines, cycles
 
+    stats = summarize_cycles(cycles, d0, d1)
     nets = [c.net_pnl for c in cycles]
-    by_day: dict[date, float] = defaultdict(float)
-    for c in cycles:
-        by_day[c.entry_date] += c.net_pnl
-    day_span = (d1 - d0).days + 1
-    daily = [by_day.get(d0 + timedelta(days=i), 0.0) for i in range(day_span)]
-    mean_day = float(statistics.fmean(daily)) if daily else float("nan")
     median_net = float(statistics.median(nets))
-    mean_p, lo, hi = day_clustered_ci(cycles, BOOTSTRAP_N, BOOTSTRAP_SEED)
-    worst = min(cycles, key=lambda c: c.net_pnl)
-    adj_per = float(statistics.fmean([c.n_adjustments for c in cycles]))
-    reason_counts: dict[str, int] = defaultdict(int)
-    for c in cycles:
-        reason_counts[c.exit_reason] += 1
     holds = [c.hold_hours for c in cycles]
-    fees_total = sum(c.fees for c in cycles)
-    slip_total = sum(c.slippage_cost for c in cycles)
-    fees_per_day = fees_total / day_span
-    slip_per_day = slip_total / day_span
 
-    lines.append(f"mean_net_per_day={mean_day:.6f}")
+    lines.append(f"mean_net_per_day={stats['mean_day']:.6f}")
     lines.append(f"median_cycle_net={median_net:.6f}")
     lines.append(
-        f"bootstrap_mean_cycle={mean_p:.6f} 95%CI=[{lo:.6f},{hi:.6f}] "
+        f"bootstrap_mean_day={stats['bootstrap_mean']:.6f} "
+        f"95%CI=[{stats['ci_lo']:.6f},{stats['ci_hi']:.6f}] "
         f"n={BOOTSTRAP_N} seed={BOOTSTRAP_SEED}"
     )
     lines.append(
-        f"worst_cycle date={worst.entry_date} net={worst.net_pnl:.6f} "
-        f"reason={worst.exit_reason}"
+        f"worst_cycle date={stats['worst_date']} net={stats['worst_net']:.6f}"
     )
-    lines.append(f"max_drawdown_daily_equity={max_drawdown(daily):.6f}")
-    lines.append(f"adj_per_cycle={adj_per:.4f}")
-    mix = ", ".join(
-        f"{k}={100.0 * v / n:.1f}%" for k, v in sorted(reason_counts.items())
-    )
+    lines.append(f"max_drawdown_daily_equity={stats['max_dd']:.6f}")
+    lines.append(f"adj_per_cycle={stats['adj_per']:.4f}")
+    mix = ", ".join(f"{k}={v:.1f}%" for k, v in stats["exit_mix"].items())
     lines.append(f"exit_reason_mix%={mix}")
     lines.append(
         f"hold_hours mean={statistics.fmean(holds):.2f} "
-        f"median={statistics.median(holds):.2f} "
+        f"median={stats['hold_med']:.2f} "
         f"min={min(holds):.2f} max={max(holds):.2f}"
     )
-    lines.append(f"fees_per_day={fees_per_day:.6f}")
-    lines.append(f"slippage_cost_per_day={slip_per_day:.6f}")
+    lines.append(f"fees_per_day={stats['fees_day']:.6f}")
+    lines.append(f"slippage_cost_per_day={stats['slip_day']:.6f}")
+    lines.append(f"avg_applied_slip_pct={stats['avg_slip_pct']:.4f}")
+    if cycles:
+        lines.append(
+            f"sample_cycle premium_mode={cycles[0].premium_mode} "
+            f"target_premium={cycles[0].target_premium:.4f} "
+            f"profit_mode={cycles[0].profit_mode} "
+            f"locked_tp_usd={cycles[0].profit_target_usd:.4f}"
+        )
     lines.append("")
     return lines, cycles
+
+
+def format_matrix_table(rows: list[dict[str, Any]]) -> list[str]:
+    rows_sorted = sorted(rows, key=lambda r: r["mean_day"], reverse=True)
+    hdr = (
+        f"{'prem':>5} {'tp%':>4} {'slip':>4} {'n':>3} "
+        f"{'mean/day':>10} {'ci_lo':>9} {'ci_hi':>9} "
+        f"{'worst':>9} {'maxDD':>9} {'adj/c':>5} "
+        f"{'hold_med':>8} {'fees/d':>8} {'slip/d':>8}  exit_mix"
+    )
+    out = ["===== MATRIX (sorted by mean/day desc) =====", hdr]
+    for r in rows_sorted:
+        mix = ",".join(f"{k[:8]}={v:.0f}%" for k, v in r["exit_mix"].items())
+        out.append(
+            f"{r['premium_mode']:>5} {r['tp_pct']:4.0f} {r['slip_mult']:4.1f} "
+            f"{r['n_cycles']:3d} "
+            f"{r['mean_day']:10.4f} {r['ci_lo']:9.4f} {r['ci_hi']:9.4f} "
+            f"{r['worst_net']:9.4f} {r['max_dd']:9.4f} {r['adj_per']:5.2f} "
+            f"{r['hold_med']:8.2f} {r['fees_day']:8.4f} {r['slip_day']:8.4f}  "
+            f"{mix}"
+        )
+    out.append("")
+    out.append(
+        "16 combos tested — best-of-16 bias; "
+        "final selection OOS window pe hi honi chahiye"
+    )
+    return out
 
 
 def write_cycles_csv(cycles: list[CycleResult]) -> None:
@@ -1288,6 +1730,11 @@ def write_cycles_csv(cycles: list[CycleResult]) -> None:
         "worst_intracycle_mtm",
         "applied_slip_pct_entry",
         "applied_slip_pct_exit",
+        "avg_applied_slip_pct",
+        "premium_mode",
+        "target_premium",
+        "profit_mode",
+        "profit_target_usd",
         "spot_source",
     ]
     with OUT_CSV.open("w", newline="", encoding="utf-8") as f:
@@ -1321,6 +1768,11 @@ def write_cycles_csv(cycles: list[CycleResult]) -> None:
                     "worst_intracycle_mtm": f"{c.worst_mtm:.6f}",
                     "applied_slip_pct_entry": f"{c.applied_slip_entry:.4f}",
                     "applied_slip_pct_exit": f"{c.applied_slip_exit:.4f}",
+                    "avg_applied_slip_pct": f"{c.avg_applied_slip_pct:.4f}",
+                    "premium_mode": c.premium_mode,
+                    "target_premium": f"{c.target_premium:.4f}",
+                    "profit_mode": c.profit_mode,
+                    "profit_target_usd": f"{c.profit_target_usd:.6f}",
                     "spot_source": c.spot_source,
                 }
             )
@@ -1330,6 +1782,82 @@ def write_cycles_csv(cycles: list[CycleResult]) -> None:
 def parse_hhmm(s: str) -> tuple[int, int]:
     parts = s.strip().replace("IST", "").strip().split(":")
     return int(parts[0]), int(parts[1])
+
+
+def build_cfg(args: argparse.Namespace) -> dict[str, Any]:
+    eh, em = parse_hhmm(args.entry_time)
+    return {
+        "dec_pct": float(args.dec_pct),
+        "adj_b_trigger": float(args.adj_b_trigger),
+        "adj_mode": str(args.adj_mode),
+        "hedge": str(args.hedge),
+        "profit_k": float(args.profit_k),
+        "profit_mode": str(args.profit_mode),
+        "tp_pct": float(args.tp_pct),
+        "wing_points": float(args.wing_points),
+        "wing_roll": args.wing_roll == "on",
+        "qty_lots": int(args.qty_lots),
+        "entry_hour": eh,
+        "entry_minute": em,
+        "dte": int(args.dte),
+        "premium_mode": str(args.premium_mode),
+        "target_premium_per_side": float(args.target_premium_per_side),
+        "premium_pct_of_hedge": float(args.premium_pct_of_hedge),
+        "max_adj": int(args.max_adj),
+        "from_date": date.fromisoformat(args.from_date),
+        "to_date": date.fromisoformat(args.to_date),
+        "slip_model": str(args.slip_model),
+        "slip_mult": float(args.slip_mult),
+    }
+
+
+def run_matrix(base_cfg: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    """16 combos: premium_mode × tp_pct × slip_mult; other knobs locked."""
+    combos = [
+        (pm, tp, sm)
+        for pm in ("fixed", "b25")
+        for tp in (25.0, 35.0, 50.0, 65.0)
+        for sm in (1.0, 1.5)
+    ]
+    rows: list[dict[str, Any]] = []
+    lines: list[str] = [
+        "===== S001 MARK ENGINE MATRIX =====",
+        f"generated_utc={datetime.now(tz=UTC).isoformat()}",
+        f"window={base_cfg['from_date']} .. {base_cfg['to_date']}",
+        "locked: dec=40 adj_b=70 B_only hedge=off wing=2000 wing_roll=on "
+        "qty=8 entry=11:00 IST dte=2 profit_mode=pct_of_credit",
+        f"n_combos={len(combos)}",
+        "",
+    ]
+    for pm, tp, sm in combos:
+        cfg = dict(base_cfg)
+        cfg["premium_mode"] = pm
+        cfg["tp_pct"] = tp
+        cfg["slip_mult"] = sm
+        cfg["profit_mode"] = "pct_of_credit"
+        t0 = time.time()
+        _combo_lines, cycles = run(cfg)
+        elapsed = time.time() - t0
+        st = summarize_cycles(cycles, cfg["from_date"], cfg["to_date"])
+        row = {
+            "premium_mode": pm,
+            "tp_pct": tp,
+            "slip_mult": sm,
+            **st,
+            "elapsed_sec": elapsed,
+        }
+        rows.append(row)
+        logger.info(
+            "matrix combo prem=%s tp=%.0f slip=%.1f n=%d mean/day=%.4f elapsed=%.1fs",
+            pm,
+            tp,
+            sm,
+            st["n_cycles"],
+            st["mean_day"],
+            elapsed,
+        )
+    lines.extend(format_matrix_table(rows))
+    return lines, rows
 
 
 def main() -> None:
@@ -1343,11 +1871,25 @@ def main() -> None:
     ap.add_argument("--adj-mode", type=str, default="B_only")
     ap.add_argument("--hedge", type=str, default="off", choices=("off", "on"))
     ap.add_argument("--profit-k", type=float, default=1.0)
+    ap.add_argument(
+        "--profit-mode",
+        type=str,
+        default="pct_of_credit",
+        choices=("pct_of_credit", "cost_k", "none"),
+    )
+    ap.add_argument("--tp-pct", type=float, default=50.0)
     ap.add_argument("--wing-points", type=float, default=2000.0)
     ap.add_argument("--wing-roll", type=str, default="on", choices=("on", "off"))
     ap.add_argument("--qty-lots", type=int, default=8)
     ap.add_argument("--entry-time", type=str, default="11:00")
     ap.add_argument("--dte", type=int, default=2)
+    ap.add_argument(
+        "--premium-mode",
+        type=str,
+        default="fixed",
+        choices=("fixed", "b25"),
+    )
+    ap.add_argument("--target-premium-per-side", type=float, default=150.0)
     ap.add_argument("--premium-pct-of-hedge", type=float, default=25.0)
     ap.add_argument("--max-adj", type=int, default=2)
     ap.add_argument("--from", dest="from_date", type=str, required=True)
@@ -1358,29 +1900,29 @@ def main() -> None:
         default=SLIP_MODEL_BUCKETED,
         choices=(SLIP_MODEL_BUCKETED, SLIP_MODEL_FLAT),
     )
+    ap.add_argument("--slip-mult", type=float, default=1.0)
+    ap.add_argument(
+        "--matrix",
+        action="store_true",
+        help="Run 16-combo matrix (premium×tp_pct×slip_mult)",
+    )
     args = ap.parse_args()
-
-    eh, em = parse_hhmm(args.entry_time)
-    cfg: dict[str, Any] = {
-        "dec_pct": float(args.dec_pct),
-        "adj_b_trigger": float(args.adj_b_trigger),
-        "adj_mode": str(args.adj_mode),
-        "hedge": str(args.hedge),
-        "profit_k": float(args.profit_k),
-        "wing_points": float(args.wing_points),
-        "wing_roll": args.wing_roll == "on",
-        "qty_lots": int(args.qty_lots),
-        "entry_hour": eh,
-        "entry_minute": em,
-        "dte": int(args.dte),
-        "premium_pct_of_hedge": float(args.premium_pct_of_hedge),
-        "max_adj": int(args.max_adj),
-        "from_date": date.fromisoformat(args.from_date),
-        "to_date": date.fromisoformat(args.to_date),
-        "slip_model": str(args.slip_model),
-    }
+    cfg = build_cfg(args)
 
     t0 = time.time()
+    if args.matrix:
+        lines, rows = run_matrix(cfg)
+        elapsed = time.time() - t0
+        lines.append(f"elapsed_sec={elapsed:.1f}")
+        OUT_TXT.parent.mkdir(parents=True, exist_ok=True)
+        OUT_TXT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("wrote %s", OUT_TXT)
+        logger.info("MATRIX %d combos elapsed=%.1fs", len(rows), elapsed)
+        # also print compact table to log
+        for ln in format_matrix_table(rows):
+            logger.info("%s", ln)
+        return
+
     lines, cycles = run(cfg)
     elapsed = time.time() - t0
     lines.append(f"elapsed_sec={elapsed:.1f}")
