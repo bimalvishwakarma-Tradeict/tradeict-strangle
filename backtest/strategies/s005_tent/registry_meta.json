@@ -2,11 +2,24 @@
   "id": "S005",
   "name": "S005 Tent Strategy",
   "status": "TESTING",
-  "one_line": "ATM short straddle + BE short strangle + earlier-DTE long protection; continuous entry; TP/SL/time cutoff.",
-  "rules_summary": "Short ATM straddle + BE strangle on SHORT_DTE; long matching strangle on LONG_DTE (qty=total short); TARGET=pct\u00d7net_credit; SL=sl_mult\u00d7target; TIME_CUTOFF long expiry 17:25 IST; 2h cooldown after SL; no adjustments; bucketed slip + fees.",
+  "one_line": "ATM straddle + BE strangle + long protection; credit_pct or Absorption Stop; entry-drag adjusted MTM.",
+  "rules_summary": "v2: entry_drag baseline; mae_usd true MAE; net_theta_entry Black-76; exit_mode credit_pct|absorption; HARD_FLOOR optional; TIME_CUTOFF; per-basket CSV; defaults preserve phase-1 72-combo credit_pct grid.",
   "tests_done": [
     {
       "stage": "KILL",
+      "tag": "exits",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260919",
+      "n": 100,
+      "mean_day": -1.5564369762753187,
+      "ci_lo": -1.7826403431556699,
+      "ci_hi": -1.3319533595075037,
+      "verdict": "GRID_18_COMBOS",
+      "top_arm": "s1l0_q10_20_tp5_sl2_cut1200_cd4"
+    },
+    {
+      "stage": "KILL",
+      "tag": null,
       "window": "2026-08-01..2026-08-07",
       "date": "20260919",
       "n": 7,
@@ -15,13 +28,52 @@
       "ci_hi": 2.610433736219367,
       "verdict": "GRID_72_COMBOS",
       "top_arm": "s2l1_q20_10_tp15_sl2"
+    },
+    {
+      "stage": "KILL",
+      "tag": null,
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260919",
+      "n": 124,
+      "mean_day": -2.218243663555052,
+      "ci_lo": -3.0841023583696843,
+      "ci_hi": -1.4697532396887598,
+      "verdict": "GRID_72_COMBOS",
+      "top_arm": "s1l0_q20_10_tp15_sl4"
+    },
+    {
+      "stage": "KILL",
+      "tag": "sl_tight",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260919",
+      "n": 129,
+      "mean_day": -2.635671190235958,
+      "ci_lo": -4.063896698925232,
+      "ci_hi": -1.2749409367873237,
+      "verdict": "GRID_54_COMBOS",
+      "top_arm": "s2l1_q20_10_tp15_sl1.5"
+    },
+    {
+      "stage": "KILL",
+      "tag": "structure",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260919",
+      "n": 201,
+      "mean_day": -2.949058030942349,
+      "ci_lo": -3.7925758659396807,
+      "ci_hi": -2.1897619559707078,
+      "verdict": "GRID_18_COMBOS",
+      "top_arm": "s1l0_q10_20_tp10_sl2_off1_be1.25"
     }
   ],
   "open_questions": [
-    "Which expiry_pair and qty_split survive KILL with CI not overlapping noise?"
+    "Does Absorption Stop beat credit_pct on MAE and net after fees?",
+    "Which trigger_pct / absorb_min / max_basket_loss survive with CI separation?"
   ],
   "next_steps": [
-    "Run full KILL 2026-06-01..2026-08-31 72-combo grid; promote survivors to DESIGN only if CI separates from noise."
+    "Smoke absorption grid with --exit-mode absorption --trigger-pcts --absorb-mins; compare MAE vs v1 credit_pct."
   ],
-  "learnings": []
+  "learnings": [
+    "Entry MTM was dragged negative by slip+fees while stops were set on net_credit \u2014 fixed via entry_drag baseline."
+  ]
 }

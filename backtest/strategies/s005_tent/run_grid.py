@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import math
@@ -25,16 +26,22 @@ from backtest.harness.registry import write_registry  # noqa: E402
 from backtest.strategies.s005_tent.strategy import (  # noqa: E402
     BOOTSTRAP_N,
     BOOTSTRAP_SEED,
+    DEFAULT_ABSORB_MIN,
     DEFAULT_BE_MULT,
     DEFAULT_COOLDOWN_HOURS,
     DEFAULT_CUTOFF_HOUR,
     DEFAULT_CUTOFF_MINUTE,
+    DEFAULT_EXIT_MODE,
+    DEFAULT_MAX_BASKET_LOSS,
+    DEFAULT_NO_TARGET,
     DEFAULT_PROTECTION_EXPIRY,
     DEFAULT_PROTECTION_OFFSET,
     DEFAULT_PROTECTION_RATIO,
+    DEFAULT_TRIGGER_PCT,
     S005TentStrategy,
     default_params,
     parse_cutoff_time,
+    parse_max_basket_loss,
 )
 
 logger = logging.getLogger("s005_grid")
@@ -54,6 +61,11 @@ DEFAULT_CUTOFF_TIMES = (
     f"{DEFAULT_CUTOFF_HOUR:02d}:{DEFAULT_CUTOFF_MINUTE:02d}",
 )
 DEFAULT_COOLDOWNS = (DEFAULT_COOLDOWN_HOURS,)
+DEFAULT_EXIT_MODES = (DEFAULT_EXIT_MODE,)
+DEFAULT_TRIGGER_PCTS = (DEFAULT_TRIGGER_PCT,)
+DEFAULT_ABSORB_MINS = (DEFAULT_ABSORB_MIN,)
+DEFAULT_MAX_BASKET_LOSSES: tuple[float | None, ...] = (DEFAULT_MAX_BASKET_LOSS,)
+DEFAULT_NO_TARGETS = (DEFAULT_NO_TARGET,)
 
 
 def _parse_floats(s: str) -> list[float]:
@@ -105,6 +117,11 @@ def make_arm(
     cut_h: int,
     cut_m: int,
     cd: float,
+    exit_mode: str,
+    trigger_pct: float,
+    absorb_min: float,
+    max_loss: float | None,
+    no_target: bool,
 ) -> str:
     """Classic phase-1 arm when new axes are defaults; else append tokens."""
     base = f"s{sd}l{ld}_q{qs}_{qg}_tp{tp:g}_sl{sl:g}"
@@ -121,6 +138,18 @@ def make_arm(
         extras.append(f"cut{cut_h:02d}{cut_m:02d}")
     if abs(cd - DEFAULT_COOLDOWN_HOURS) > 1e-9:
         extras.append(f"cd{cd:g}")
+    if exit_mode != DEFAULT_EXIT_MODE:
+        extras.append(f"xm{exit_mode}")
+    if exit_mode == "absorption" or abs(trigger_pct - DEFAULT_TRIGGER_PCT) > 1e-9:
+        if exit_mode == "absorption":
+            extras.append(f"tr{trigger_pct:g}")
+    if exit_mode == "absorption" or abs(absorb_min - DEFAULT_ABSORB_MIN) > 1e-9:
+        if exit_mode == "absorption":
+            extras.append(f"ab{absorb_min:g}")
+    if max_loss is not None:
+        extras.append(f"ml{max_loss:g}")
+    if no_target:
+        extras.append("notp")
     if not extras:
         return base
     return base + "_" + "_".join(extras)
@@ -138,6 +167,11 @@ def build_combos(
     be_mults: list[float],
     cutoff_times: list[str],
     cooldowns: list[float],
+    exit_modes: list[str],
+    trigger_pcts: list[float],
+    absorb_mins: list[float],
+    max_basket_losses: list[float | None],
+    no_targets: list[bool],
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for sd, ld in expiry_pairs:
@@ -151,39 +185,64 @@ def build_combos(
                                     for ct in cutoff_times:
                                         hh, mm = parse_cutoff_time(ct)
                                         for cd in cooldowns:
-                                            arm = make_arm(
-                                                sd=sd,
-                                                ld=ld,
-                                                qs=qs,
-                                                qg=qg,
-                                                tp=tp,
-                                                sl=sl,
-                                                pe=pe,
-                                                off=off,
-                                                pr=pr,
-                                                be=be,
-                                                cut_h=hh,
-                                                cut_m=mm,
-                                                cd=cd,
-                                            )
-                                            out.append(
-                                                {
-                                                    "short_dte": sd,
-                                                    "long_dte": ld,
-                                                    "qty_straddle": qs,
-                                                    "qty_strangle": qg,
-                                                    "target_pct": tp,
-                                                    "sl_mult": sl,
-                                                    "protection_expiry": pe,
-                                                    "protection_offset": off,
-                                                    "protection_ratio": pr,
-                                                    "be_mult": be,
-                                                    "cutoff_hour": hh,
-                                                    "cutoff_minute": mm,
-                                                    "cooldown_hours": cd,
-                                                    "arm": arm,
-                                                }
-                                            )
+                                            for xm in exit_modes:
+                                                tr_list = (
+                                                    trigger_pcts
+                                                    if xm == "absorption"
+                                                    else [DEFAULT_TRIGGER_PCT]
+                                                )
+                                                ab_list = (
+                                                    absorb_mins
+                                                    if xm == "absorption"
+                                                    else [DEFAULT_ABSORB_MIN]
+                                                )
+                                                for tr in tr_list:
+                                                    for ab in ab_list:
+                                                        for ml in max_basket_losses:
+                                                            for nt in no_targets:
+                                                                arm = make_arm(
+                                                                    sd=sd,
+                                                                    ld=ld,
+                                                                    qs=qs,
+                                                                    qg=qg,
+                                                                    tp=tp,
+                                                                    sl=sl,
+                                                                    pe=pe,
+                                                                    off=off,
+                                                                    pr=pr,
+                                                                    be=be,
+                                                                    cut_h=hh,
+                                                                    cut_m=mm,
+                                                                    cd=cd,
+                                                                    exit_mode=xm,
+                                                                    trigger_pct=tr,
+                                                                    absorb_min=ab,
+                                                                    max_loss=ml,
+                                                                    no_target=nt,
+                                                                )
+                                                                out.append(
+                                                                    {
+                                                                        "short_dte": sd,
+                                                                        "long_dte": ld,
+                                                                        "qty_straddle": qs,
+                                                                        "qty_strangle": qg,
+                                                                        "target_pct": tp,
+                                                                        "sl_mult": sl,
+                                                                        "protection_expiry": pe,
+                                                                        "protection_offset": off,
+                                                                        "protection_ratio": pr,
+                                                                        "be_mult": be,
+                                                                        "cutoff_hour": hh,
+                                                                        "cutoff_minute": mm,
+                                                                        "cooldown_hours": cd,
+                                                                        "exit_mode": xm,
+                                                                        "trigger_pct": tr,
+                                                                        "absorb_min": ab,
+                                                                        "max_basket_loss_usd": ml,
+                                                                        "no_target": nt,
+                                                                        "arm": arm,
+                                                                    }
+                                                                )
     return out
 
 
@@ -200,6 +259,11 @@ def all_combos() -> list[dict[str, Any]]:
         be_mults=list(DEFAULT_BE_MULTS),
         cutoff_times=list(DEFAULT_CUTOFF_TIMES),
         cooldowns=list(DEFAULT_COOLDOWNS),
+        exit_modes=list(DEFAULT_EXIT_MODES),
+        trigger_pcts=list(DEFAULT_TRIGGER_PCTS),
+        absorb_mins=list(DEFAULT_ABSORB_MINS),
+        max_basket_losses=list(DEFAULT_MAX_BASKET_LOSSES),
+        no_targets=list(DEFAULT_NO_TARGETS),
     )
 
 
@@ -258,7 +322,7 @@ def format_report(rows: list[dict[str, Any]], *, window: str, elapsed: float) ->
         (
             f"{'arm':<36} {'n':>4} {'b/d':>5} {'win%':>5} "
             f"{'mean/d':>8} {'ci_lo':>8} {'ci_hi':>8} "
-            f"{'worst':>8} {'maxDD':>8} {'hold':>5} "
+            f"{'worst':>8} {'mae':>8} {'maxDD':>8} {'hold':>5} "
             f"{'tc%':>5} {'tcNet':>7} {'shPnl':>7} {'prPnl':>7} "
             f"{'maxL':>7} {'units':>5} {'d%':>6} {'noise':>10}  exits"
         ),
@@ -276,6 +340,7 @@ def format_report(rows: list[dict[str, Any]], *, window: str, elapsed: float) ->
             f"{_fmt(r.get('ci_lo')):>8} "
             f"{_fmt(r.get('ci_hi')):>8} "
             f"{_fmt(r.get('worst_net')):>8} "
+            f"{_fmt(r.get('mae_usd')):>8} "
             f"{_fmt(r.get('max_dd')):>8} "
             f"{_fmt(r.get('hold_med'), 2):>5} "
             f"{_fmt(r.get('time_cutoff_pct'), 1):>5} "
@@ -339,6 +404,7 @@ def run_grid(
     logger.info("S005 grid n_combos=%d window=%s..%s", len(combos), d0, d1)
 
     rows: list[dict[str, Any]] = []
+    basket_csv_rows: list[dict[str, Any]] = []
     t0 = time.time()
 
     for i, combo in enumerate(combos, start=1):
@@ -349,6 +415,8 @@ def run_grid(
         _cycles, _skips, stats = strat.run_window(
             d0, d1, store=store, spot_map=spot_map
         )
+        csv_part = list(stats.pop("basket_csv_rows", []) or [])
+        basket_csv_rows.extend(csv_part)
         row = {
             "arm": combo["arm"],
             **combo,
@@ -357,12 +425,13 @@ def run_grid(
         }
         rows.append(row)
         logger.info(
-            "[%d/%d] %s n=%d mean/day=%s elapsed=%.1fs",
+            "[%d/%d] %s n=%d mean/day=%s mae=%s elapsed=%.1fs",
             i,
             len(combos),
             combo["arm"],
             stats.get("n_baskets"),
             _fmt(stats.get("mean_day")),
+            _fmt(stats.get("mae_usd")),
             row["elapsed_sec"],
         )
 
@@ -379,6 +448,7 @@ def run_grid(
         base = f"S005_{stage}_{stamp}"
     json_path = RUNS_DIR / f"{base}.json"
     md_path = RUNS_DIR / f"{base}.md"
+    csv_path = RUNS_DIR / f"{base}_baskets.csv"
     payload = {
         "strategy_id": "S005",
         "stage": stage,
@@ -389,11 +459,13 @@ def run_grid(
         "bootstrap": {"n": BOOTSTRAP_N, "seed": BOOTSTRAP_SEED},
         "n_combos": len(rows),
         "combos": rows,
+        "baskets_csv": str(csv_path.name),
         "note": "3-month exploration — CI overlap wale combos ko alag mat maano",
     }
     json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    logger.info("wrote %s and %s", json_path, md_path)
+    _write_baskets_csv(csv_path, basket_csv_rows)
+    logger.info("wrote %s, %s, %s", json_path, md_path, csv_path)
 
     meta_path = Path(__file__).resolve().parent / "registry_meta.json"
     try:
@@ -425,7 +497,25 @@ def run_grid(
         "elapsed_sec": elapsed,
         "json": str(json_path),
         "md": str(md_path),
+        "csv": str(csv_path),
     }
+
+
+def _write_baskets_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    # stable column order from first row, then any extras
+    fieldnames: list[str] = list(rows[0].keys())
+    for r in rows[1:]:
+        for k in r.keys():
+            if k not in fieldnames:
+                fieldnames.append(k)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
 
 
 def main() -> None:
@@ -505,6 +595,35 @@ def main() -> None:
         default=None,
         help="Comma list of hours after STOPLOSS (default 2)",
     )
+    ap.add_argument(
+        "--exit-mode",
+        type=str,
+        default=None,
+        help="Comma list: credit_pct|absorption (default credit_pct)",
+    )
+    ap.add_argument(
+        "--trigger-pcts",
+        type=str,
+        default=None,
+        help="Comma list stress%% for absorption (default 150)",
+    )
+    ap.add_argument(
+        "--absorb-mins",
+        type=str,
+        default=None,
+        help="Comma list A=prot/|shorts| min (default 0.6)",
+    )
+    ap.add_argument(
+        "--max-basket-loss",
+        type=str,
+        default=None,
+        help="Comma list USD hard floor or 'none' (default none)",
+    )
+    ap.add_argument(
+        "--no-target",
+        action="store_true",
+        help="Disable TARGET exit (stop/cutoff/absorption only)",
+    )
     args = ap.parse_args()
 
     expiry_pairs = (
@@ -552,12 +671,37 @@ def main() -> None:
         else list(DEFAULT_CUTOFF_TIMES)
     )
     for ct in cutoff_times:
-        parse_cutoff_time(ct)  # validate early
+        parse_cutoff_time(ct)
     cooldowns = (
         _parse_floats(args.cooldowns)
         if args.cooldowns
         else list(DEFAULT_COOLDOWNS)
     )
+    exit_modes = (
+        [x.lower() for x in _parse_str_list(args.exit_mode)]
+        if args.exit_mode
+        else list(DEFAULT_EXIT_MODES)
+    )
+    for xm in exit_modes:
+        if xm not in ("credit_pct", "absorption"):
+            raise SystemExit(f"invalid --exit-mode value: {xm!r}")
+    trigger_pcts = (
+        _parse_floats(args.trigger_pcts)
+        if args.trigger_pcts
+        else list(DEFAULT_TRIGGER_PCTS)
+    )
+    absorb_mins = (
+        _parse_floats(args.absorb_mins)
+        if args.absorb_mins
+        else list(DEFAULT_ABSORB_MINS)
+    )
+    if args.max_basket_loss:
+        max_basket_losses = [
+            parse_max_basket_loss(x) for x in _parse_str_list(args.max_basket_loss)
+        ]
+    else:
+        max_basket_losses = list(DEFAULT_MAX_BASKET_LOSSES)
+    no_targets = [True] if args.no_target else list(DEFAULT_NO_TARGETS)
 
     combos = build_combos(
         expiry_pairs=expiry_pairs,
@@ -570,6 +714,11 @@ def main() -> None:
         be_mults=be_mults,
         cutoff_times=cutoff_times,
         cooldowns=cooldowns,
+        exit_modes=exit_modes,
+        trigger_pcts=trigger_pcts,
+        absorb_mins=absorb_mins,
+        max_basket_losses=max_basket_losses,
+        no_targets=no_targets,
     )
 
     d0 = date.fromisoformat(args.from_date)

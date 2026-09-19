@@ -1,221 +1,234 @@
 OPTION MARK DOWNLOADER — DRY RUN
 ================================================================================
 --months=24  --dry-run (NO candle download)
-contract life assumption: 10d before 12:00 UTC settle
+--tail-days=5
+contract life assumption (short unk.): 10d before 12:00 UTC settle
+short-dated if life <= 14d → last 5d only
+longer life (monthlies) → full listing life
 strike band: entry_spot ± 6000
 
-lookback range UTC: 2024-09-14 08:41:18+00:00 -> 2026-09-14 20:41:18+00:00
+lookback range UTC: 2024-09-15 13:13:22+00:00 -> 2026-09-16 01:13:22+00:00
 
-products page=1 rows=500 new=500 unique_so_far=500 oldest=2026-09-08 newest=2026-10-02 total_count=10000
-products page=2 rows=500 new=500 unique_so_far=1000 oldest=2026-09-01 newest=2026-11-27 total_count=10000
-products page=3 rows=500 new=500 unique_so_far=1500 oldest=2026-08-25 newest=2026-11-27 total_count=10000
-products page=4 rows=500 new=500 unique_so_far=2000 oldest=2026-08-21 newest=2026-10-30 total_count=10000
-products page=5 rows=500 new=500 unique_so_far=2500 oldest=2026-08-20 newest=2026-10-30 total_count=10000
-products page=6 rows=500 new=500 unique_so_far=3000 oldest=2026-08-10 newest=2026-09-04 total_count=10000
-products page=7 rows=500 new=500 unique_so_far=3500 oldest=2026-08-01 newest=2026-10-30 total_count=10000
-products page=8 rows=500 new=500 unique_so_far=4000 oldest=2026-07-24 newest=2026-10-30 total_count=10000
-products page=9 rows=500 new=500 unique_so_far=4500 oldest=2026-07-15 newest=2026-09-25 total_count=10000
-products page=10 rows=500 new=500 unique_so_far=5000 oldest=2026-07-06 newest=2026-09-25 total_count=10000
-products page=11 rows=500 new=500 unique_so_far=5500 oldest=2026-06-29 newest=2026-09-25 total_count=10000
-products page=12 rows=500 new=500 unique_so_far=6000 oldest=2026-06-23 newest=2026-09-25 total_count=10000
-products page=13 rows=500 new=500 unique_so_far=6500 oldest=2026-06-15 newest=2026-07-10 total_count=10000
-products page=14 rows=500 new=500 unique_so_far=7000 oldest=2026-06-08 newest=2026-07-03 total_count=10000
-products page=15 rows=500 new=500 unique_so_far=7500 oldest=2026-06-04 newest=2026-08-28 total_count=10000
-products page=16 rows=500 new=500 unique_so_far=8000 oldest=2026-05-31 newest=2026-08-28 total_count=10000
-products page=17 rows=500 new=500 unique_so_far=8500 oldest=2026-05-24 newest=2026-08-28 total_count=10000
-products page=18 rows=500 new=500 unique_so_far=9000 oldest=2026-05-16 newest=2026-06-12 total_count=10000
-products page=19 rows=500 new=500 unique_so_far=9500 oldest=2026-05-10 newest=2026-06-05 total_count=10000
-products page=20 rows=500 new=500 unique_so_far=10000 oldest=2026-05-02 newest=2026-07-31 total_count=10000
-products page=21 rows=500 new=500 unique_so_far=10500 oldest=2026-04-25 newest=2026-07-31 total_count=10000
-products page=22 rows=500 new=500 unique_so_far=11000 oldest=2026-04-18 newest=2026-07-31 total_count=10000
-products page=23 rows=500 new=500 unique_so_far=11500 oldest=2026-04-13 newest=2026-06-26 total_count=10000
-products page=24 rows=500 new=500 unique_so_far=12000 oldest=2026-04-06 newest=2026-06-26 total_count=10000
-products page=25 rows=500 new=500 unique_so_far=12500 oldest=2026-03-30 newest=2026-06-26 total_count=10000
-products page=26 rows=500 new=500 unique_so_far=13000 oldest=2026-03-25 newest=2026-06-26 total_count=10000
-products page=27 rows=500 new=500 unique_so_far=13500 oldest=2026-03-19 newest=2026-04-10 total_count=10000
-products page=28 rows=500 new=500 unique_so_far=14000 oldest=2026-03-14 newest=2026-04-03 total_count=10000
-products page=29 rows=500 new=500 unique_so_far=14500 oldest=2026-03-07 newest=2026-04-03 total_count=10000
-products page=30 rows=500 new=500 unique_so_far=15000 oldest=2026-03-03 newest=2026-05-29 total_count=10000
-products page=31 rows=500 new=500 unique_so_far=15500 oldest=2026-02-28 newest=2026-05-29 total_count=10000
-products page=32 rows=500 new=500 unique_so_far=16000 oldest=2026-02-22 newest=2026-04-24 total_count=10000
-products page=33 rows=500 new=500 unique_so_far=16500 oldest=2026-02-15 newest=2026-03-13 total_count=10000
-products page=34 rows=500 new=500 unique_so_far=17000 oldest=2026-02-09 newest=2026-03-06 total_count=10000
-products page=35 rows=500 new=500 unique_so_far=17500 oldest=2026-02-06 newest=2026-04-24 total_count=10000
-products page=36 rows=500 new=500 unique_so_far=18000 oldest=2026-02-02 newest=2026-04-24 total_count=10000
-products page=37 rows=500 new=500 unique_so_far=18500 oldest=2026-02-01 newest=2026-04-24 total_count=10000
-products page=38 rows=500 new=500 unique_so_far=19000 oldest=2026-01-26 newest=2026-04-24 total_count=10000
-products page=39 rows=500 new=500 unique_so_far=19500 oldest=2026-01-21 newest=2026-02-13 total_count=10000
-products page=40 rows=500 new=500 unique_so_far=20000 oldest=2026-01-15 newest=2026-03-27 total_count=10000
-products page=41 rows=500 new=500 unique_so_far=20500 oldest=2026-01-08 newest=2026-01-30 total_count=10000
-products page=42 rows=500 new=500 unique_so_far=21000 oldest=2026-01-03 newest=2026-03-27 total_count=10000
-products page=43 rows=500 new=500 unique_so_far=21500 oldest=2025-12-27 newest=2026-03-27 total_count=10000
-products page=44 rows=500 new=500 unique_so_far=22000 oldest=2025-12-21 newest=2026-03-27 total_count=10000
-products page=45 rows=500 new=500 unique_so_far=22500 oldest=2025-12-15 newest=2026-01-09 total_count=10000
-products page=46 rows=500 new=500 unique_so_far=23000 oldest=2025-12-10 newest=2026-01-02 total_count=10000
-products page=47 rows=500 new=500 unique_so_far=23500 oldest=2025-12-04 newest=2025-12-26 total_count=10000
-products page=48 rows=500 new=500 unique_so_far=24000 oldest=2025-12-01 newest=2026-02-27 total_count=10000
-products page=49 rows=500 new=500 unique_so_far=24500 oldest=2025-11-27 newest=2026-02-27 total_count=10000
-products page=50 rows=500 new=500 unique_so_far=25000 oldest=2025-11-22 newest=2026-01-30 total_count=10000
-products page=51 rows=500 new=500 unique_so_far=25500 oldest=2025-11-20 newest=2026-01-30 total_count=10000
-products page=52 rows=500 new=500 unique_so_far=26000 oldest=2025-11-15 newest=2026-01-30 total_count=10000
-products page=53 rows=500 new=500 unique_so_far=26500 oldest=2025-11-13 newest=2026-01-30 total_count=10000
-products page=54 rows=500 new=500 unique_so_far=27000 oldest=2025-11-07 newest=2025-11-28 total_count=10000
-products page=55 rows=500 new=500 unique_so_far=27500 oldest=2025-11-04 newest=2025-12-26 total_count=10000
-products page=56 rows=500 new=500 unique_so_far=28000 oldest=2025-10-31 newest=2025-12-26 total_count=10000
-products page=57 rows=500 new=500 unique_so_far=28500 oldest=2025-10-26 newest=2025-11-14 total_count=10000
-products page=58 rows=500 new=500 unique_so_far=29000 oldest=2025-10-21 newest=2025-11-14 total_count=10000
-products page=59 rows=500 new=500 unique_so_far=29500 oldest=2025-10-17 newest=2025-11-28 total_count=10000
-products page=60 rows=500 new=500 unique_so_far=30000 oldest=2025-10-14 newest=2025-10-31 total_count=10000
-products page=61 rows=500 new=500 unique_so_far=30500 oldest=2025-10-11 newest=2025-11-28 total_count=10000
-products page=62 rows=500 new=500 unique_so_far=31000 oldest=2025-10-05 newest=2025-10-31 total_count=10000
-products page=63 rows=500 new=500 unique_so_far=31500 oldest=2025-10-02 newest=2025-11-28 total_count=10000
-products page=64 rows=500 new=500 unique_so_far=32000 oldest=2025-09-29 newest=2025-11-28 total_count=10000
-products page=65 rows=500 new=500 unique_so_far=32500 oldest=2025-09-22 newest=2025-11-28 total_count=10000
-products page=66 rows=500 new=500 unique_so_far=33000 oldest=2025-09-16 newest=2025-10-31 total_count=10000
-products page=67 rows=500 new=500 unique_so_far=33500 oldest=2025-09-09 newest=2025-10-31 total_count=10000
-products page=68 rows=500 new=500 unique_so_far=34000 oldest=2025-09-02 newest=2025-10-31 total_count=10000
-products page=69 rows=500 new=500 unique_so_far=34500 oldest=2025-08-29 newest=2025-10-31 total_count=10000
-products page=70 rows=500 new=500 unique_so_far=35000 oldest=2025-08-23 newest=2025-09-12 total_count=10000
-products page=71 rows=500 new=500 unique_so_far=35500 oldest=2025-08-18 newest=2025-09-12 total_count=10000
-products page=72 rows=500 new=500 unique_so_far=36000 oldest=2025-08-14 newest=2025-09-26 total_count=10000
-products page=73 rows=500 new=500 unique_so_far=36500 oldest=2025-08-08 newest=2025-08-29 total_count=10000
-products page=74 rows=500 new=500 unique_so_far=37000 oldest=2025-08-02 newest=2025-09-26 total_count=10000
-products page=75 rows=500 new=500 unique_so_far=37500 oldest=2025-07-26 newest=2025-09-26 total_count=10000
-products page=76 rows=500 new=500 unique_so_far=38000 oldest=2025-07-21 newest=2025-09-26 total_count=10000
-products page=77 rows=500 new=500 unique_so_far=38500 oldest=2025-07-15 newest=2025-08-08 total_count=10000
-products page=78 rows=500 new=500 unique_so_far=39000 oldest=2025-07-13 newest=2025-08-29 total_count=10000
-products page=79 rows=500 new=500 unique_so_far=39500 oldest=2025-07-08 newest=2025-08-29 total_count=10000
-products page=80 rows=500 new=500 unique_so_far=40000 oldest=2025-06-30 newest=2025-08-29 total_count=10000
-products page=81 rows=500 new=500 unique_so_far=40500 oldest=2025-06-24 newest=2025-08-29 total_count=10000
-products page=82 rows=500 new=500 unique_so_far=41000 oldest=2025-06-21 newest=2025-07-25 total_count=10000
-products page=83 rows=500 new=500 unique_so_far=41500 oldest=2025-06-14 newest=2025-07-11 total_count=10000
-products page=84 rows=500 new=500 unique_so_far=42000 oldest=2025-06-09 newest=2025-07-25 total_count=10000
-products page=85 rows=500 new=500 unique_so_far=42500 oldest=2025-06-03 newest=2025-07-25 total_count=10000
-products page=86 rows=500 new=500 unique_so_far=43000 oldest=2025-05-30 newest=2025-07-25 total_count=10000
-products page=87 rows=500 new=500 unique_so_far=43500 oldest=2025-05-25 newest=2025-06-13 total_count=10000
-products page=88 rows=500 new=500 unique_so_far=44000 oldest=2025-05-19 newest=2025-06-27 total_count=10000
-products page=89 rows=500 new=500 unique_so_far=44500 oldest=2025-05-13 newest=2025-06-06 total_count=10000
-products page=90 rows=500 new=500 unique_so_far=45000 oldest=2025-05-09 newest=2025-06-27 total_count=10000
-products page=91 rows=500 new=500 unique_so_far=45500 oldest=2025-05-03 newest=2025-06-27 total_count=10000
-products page=92 rows=500 new=500 unique_so_far=46000 oldest=2025-04-26 newest=2025-06-27 total_count=10000
-products page=93 rows=500 new=500 unique_so_far=46500 oldest=2025-04-22 newest=2025-06-27 total_count=10000
-products page=94 rows=500 new=500 unique_so_far=47000 oldest=2025-04-15 newest=2025-05-09 total_count=10000
-products page=95 rows=500 new=500 unique_so_far=47500 oldest=2025-04-10 newest=2025-05-02 total_count=10000
-products page=96 rows=500 new=500 unique_so_far=48000 oldest=2025-04-07 newest=2025-05-30 total_count=10000
-products page=97 rows=500 new=500 unique_so_far=48500 oldest=2025-04-01 newest=2025-05-30 total_count=10000
-products page=98 rows=500 new=500 unique_so_far=49000 oldest=2025-03-28 newest=2025-05-30 total_count=10000
-products page=99 rows=500 new=500 unique_so_far=49500 oldest=2025-03-21 newest=2025-04-11 total_count=10000
-products page=100 rows=500 new=500 unique_so_far=50000 oldest=2025-03-15 newest=2025-04-04 total_count=10000
-products page=101 rows=500 new=500 unique_so_far=50500 oldest=2025-03-11 newest=2025-04-25 total_count=10000
-products page=102 rows=500 new=500 unique_so_far=51000 oldest=2025-03-07 newest=2025-04-25 total_count=10000
-products page=103 rows=500 new=500 unique_so_far=51500 oldest=2025-03-04 newest=2025-04-25 total_count=10000
-products page=104 rows=500 new=500 unique_so_far=52000 oldest=2025-03-02 newest=2025-04-25 total_count=10000
-products page=105 rows=500 new=500 unique_so_far=52500 oldest=2025-02-27 newest=2025-04-25 total_count=10000
-products page=106 rows=500 new=500 unique_so_far=53000 oldest=2025-02-25 newest=2025-03-28 total_count=10000
-products page=107 rows=500 new=500 unique_so_far=53500 oldest=2025-02-17 newest=2025-03-14 total_count=10000
-products page=108 rows=500 new=500 unique_so_far=54000 oldest=2025-02-11 newest=2025-03-07 total_count=10000
-products page=109 rows=500 new=500 unique_so_far=54500 oldest=2025-02-04 newest=2025-02-12 total_count=10000
-products page=110 rows=500 new=500 unique_so_far=55000 oldest=2025-02-01 newest=2025-03-28 total_count=10000
-products page=111 rows=500 new=500 unique_so_far=55500 oldest=2025-01-29 newest=2025-03-28 total_count=10000
-products page=112 rows=500 new=500 unique_so_far=56000 oldest=2025-01-24 newest=2025-02-14 total_count=10000
-products page=113 rows=500 new=500 unique_so_far=56500 oldest=2025-01-20 newest=2025-02-28 total_count=10000
-products page=114 rows=500 new=500 unique_so_far=57000 oldest=2025-01-17 newest=2025-02-28 total_count=10000
-products page=115 rows=500 new=500 unique_so_far=57500 oldest=2025-01-13 newest=2025-01-31 total_count=10000
-products page=116 rows=500 new=500 unique_so_far=58000 oldest=2025-01-08 newest=2025-01-31 total_count=10000
-products page=117 rows=500 new=500 unique_so_far=58500 oldest=2025-01-03 newest=2025-02-28 total_count=10000
-products page=118 rows=500 new=500 unique_so_far=59000 oldest=2024-12-28 newest=2025-02-28 total_count=10000
-products page=119 rows=500 new=500 unique_so_far=59500 oldest=2024-12-24 newest=2025-02-28 total_count=10000
-products page=120 rows=500 new=500 unique_so_far=60000 oldest=2024-12-20 newest=2025-01-31 total_count=10000
-products page=121 rows=500 new=500 unique_so_far=60500 oldest=2024-12-17 newest=2025-01-31 total_count=10000
-products page=122 rows=500 new=500 unique_so_far=61000 oldest=2024-12-13 newest=2025-01-31 total_count=10000
-products page=123 rows=500 new=500 unique_so_far=61500 oldest=2024-12-08 newest=2024-12-15 total_count=10000
-products page=124 rows=500 new=500 unique_so_far=62000 oldest=2024-12-04 newest=2025-01-31 total_count=10000
-products page=125 rows=500 new=500 unique_so_far=62500 oldest=2024-11-29 newest=2025-01-31 total_count=10000
-products page=126 rows=500 new=500 unique_so_far=63000 oldest=2024-11-25 newest=2024-12-13 total_count=10000
-products page=127 rows=500 new=500 unique_so_far=63500 oldest=2024-11-21 newest=2024-12-13 total_count=10000
-products page=128 rows=500 new=500 unique_so_far=64000 oldest=2024-11-16 newest=2024-12-06 total_count=10000
-products page=129 rows=500 new=500 unique_so_far=64500 oldest=2024-11-13 newest=2024-12-27 total_count=10000
-products page=130 rows=500 new=500 unique_so_far=65000 oldest=2024-11-10 newest=2024-12-27 total_count=10000
-products page=131 rows=500 new=500 unique_so_far=65500 oldest=2024-11-05 newest=2024-12-27 total_count=10000
-products page=132 rows=500 new=500 unique_so_far=66000 oldest=2024-10-30 newest=2024-12-27 total_count=10000
-products page=133 rows=500 new=500 unique_so_far=66500 oldest=2024-10-26 newest=2024-12-27 total_count=10000
-products page=134 rows=500 new=500 unique_so_far=67000 oldest=2024-10-18 newest=2024-12-27 total_count=10000
-products page=135 rows=500 new=500 unique_so_far=67500 oldest=2024-10-12 newest=2024-11-29 total_count=10000
-products page=136 rows=500 new=500 unique_so_far=68000 oldest=2024-10-04 newest=2024-11-01 total_count=10000
-products page=137 rows=500 new=500 unique_so_far=68500 oldest=2024-09-28 newest=2024-11-29 total_count=10000
-products page=138 rows=500 new=500 unique_so_far=69000 oldest=2024-09-20 newest=2024-11-29 total_count=10000
-products page=139 rows=500 new=500 unique_so_far=69500 oldest=2024-09-14 newest=2024-10-25 total_count=10000
-products page=140 rows=500 new=500 unique_so_far=70000 oldest=2024-09-07 newest=2024-10-25 total_count=10000
-products page=141 rows=500 new=500 unique_so_far=70500 oldest=2024-08-31 newest=2024-10-25 total_count=10000
-products page=142 rows=500 new=500 unique_so_far=71000 oldest=2024-08-25 newest=2024-10-25 total_count=10000
-products page=143 rows=500 new=500 unique_so_far=71500 oldest=2024-08-20 newest=2024-09-13 total_count=10000
-products page=144 rows=500 new=500 unique_so_far=72000 oldest=2024-08-12 newest=2024-09-06 total_count=10000
-products page=145 rows=500 new=500 unique_so_far=72500 oldest=2024-08-06 newest=2024-08-30 total_count=10000
-products page=146 rows=500 new=500 unique_so_far=73000 oldest=2024-08-04 newest=2024-09-27 total_count=10000
-products page=147 rows=500 new=500 unique_so_far=73500 oldest=2024-07-30 newest=2024-09-27 total_count=10000
-products page=148 rows=500 new=500 unique_so_far=74000 oldest=2024-07-26 newest=2024-09-27 total_count=10000
-products page=149 rows=500 new=500 unique_so_far=74500 oldest=2024-07-20 newest=2024-08-30 total_count=10000
-products page=150 rows=500 new=500 unique_so_far=75000 oldest=2024-07-14 newest=2024-08-30 total_count=10000
-products page=151 rows=500 new=500 unique_so_far=75500 oldest=2024-07-07 newest=2024-08-02 total_count=10000
-products page=152 rows=500 new=500 unique_so_far=76000 oldest=2024-07-03 newest=2024-08-30 total_count=10000
-products page=153 rows=500 new=500 unique_so_far=76500 oldest=2024-06-25 newest=2024-08-30 total_count=10000
-products page=154 rows=500 new=500 unique_so_far=77000 oldest=2024-06-19 newest=2024-07-26 total_count=10000
-products page=155 rows=500 new=500 unique_so_far=77500 oldest=2024-06-12 newest=2024-07-05 total_count=10000
-products page=156 rows=500 new=500 unique_so_far=78000 oldest=2024-06-05 newest=2024-07-26 total_count=10000
-products page=157 rows=500 new=500 unique_so_far=78500 oldest=2024-05-30 newest=2024-07-26 total_count=10000
-products page=158 rows=500 new=500 unique_so_far=79000 oldest=2024-05-22 newest=2024-06-14 total_count=10000
-products page=159 rows=500 new=500 unique_so_far=79500 oldest=2024-05-17 newest=2024-06-07 total_count=10000
-products page=160 rows=500 new=500 unique_so_far=80000 oldest=2024-05-09 newest=2024-05-24 total_count=10000
-products page=161 rows=500 new=500 unique_so_far=80500 oldest=2024-05-04 newest=2024-05-24 total_count=10000
-products page=162 rows=500 new=500 unique_so_far=81000 oldest=2024-04-29 newest=2024-06-28 total_count=10000
-products page=163 rows=500 new=500 unique_so_far=81500 oldest=2024-04-22 newest=2024-06-28 total_count=10000
-products page=164 rows=500 new=500 unique_so_far=82000 oldest=2024-04-16 newest=2024-05-10 total_count=10000
-products page=165 rows=500 new=500 unique_so_far=82500 oldest=2024-04-13 newest=2024-05-03 total_count=10000
-products page=166 rows=500 new=500 unique_so_far=83000 oldest=2024-04-08 newest=2024-05-03 total_count=10000
-products page=167 rows=500 new=500 unique_so_far=83500 oldest=2024-04-02 newest=2024-05-31 total_count=10000
-products page=168 rows=500 new=500 unique_so_far=84000 oldest=2024-03-28 newest=2024-05-31 total_count=10000
-products page=169 rows=500 new=500 unique_so_far=84500 oldest=2024-03-23 newest=2024-04-12 total_count=10000
-products page=170 rows=500 new=500 unique_so_far=85000 oldest=2024-03-19 newest=2024-04-12 total_count=10000
-products page=171 rows=500 new=500 unique_so_far=85500 oldest=2024-03-15 newest=2024-04-05 total_count=10000
-products page=172 rows=500 new=500 unique_so_far=86000 oldest=2024-03-10 newest=2024-03-16 total_count=10000
-products page=173 rows=500 new=500 unique_so_far=86500 oldest=2024-03-04 newest=2024-03-29 total_count=10000
-products page=174 rows=500 new=500 unique_so_far=87000 oldest=2024-02-28 newest=2024-04-26 total_count=10000
-products page=175 rows=500 new=500 unique_so_far=87500 oldest=2024-02-24 newest=2024-04-26 total_count=10000
-products page=176 rows=500 new=500 unique_so_far=88000 oldest=2024-02-19 newest=2024-04-26 total_count=10000
-products page=177 rows=500 new=500 unique_so_far=88500 oldest=2024-02-14 newest=2024-03-29 total_count=10000
-products page=178 rows=500 new=500 unique_so_far=89000 oldest=2024-02-10 newest=2024-03-29 total_count=10000
-products page=179 rows=500 new=500 unique_so_far=89500 oldest=2024-02-05 newest=2024-03-29 total_count=10000
-products page=180 rows=500 new=500 unique_so_far=90000 oldest=2024-01-29 newest=2024-03-29 total_count=10000
-products page=181 rows=500 new=500 unique_so_far=90500 oldest=2024-01-24 newest=2024-03-29 total_count=10000
-products page=182 rows=500 new=500 unique_so_far=91000 oldest=2024-01-20 newest=2024-02-23 total_count=10000
-products page=183 rows=500 new=500 unique_so_far=91500 oldest=2024-01-15 newest=2024-02-23 total_count=10000
-products page=184 rows=500 new=500 unique_so_far=92000 oldest=2024-01-10 newest=2024-02-23 total_count=10000
-products page=185 rows=500 new=500 unique_so_far=92500 oldest=2023-12-29 newest=2024-02-23 total_count=10000
-products page=186 rows=15 new=15 unique_so_far=92515 oldest=2023-12-28 newest=2023-12-29 total_count=10000
+products page=1 rows=500 persisted=500 new=500 unique_so_far=500 oldest=2026-09-10 newest=2026-11-27 total_count=10000
+products page=2 rows=500 persisted=500 new=500 unique_so_far=1000 oldest=2026-09-02 newest=2026-11-27 total_count=10000
+products page=3 rows=500 persisted=500 new=500 unique_so_far=1500 oldest=2026-08-27 newest=2026-11-27 total_count=10000
+products page=4 rows=500 persisted=500 new=500 unique_so_far=2000 oldest=2026-08-21 newest=2026-10-30 total_count=10000
+products page=5 rows=500 persisted=500 new=500 unique_so_far=2500 oldest=2026-08-20 newest=2026-10-30 total_count=10000
+products page=6 rows=500 persisted=500 new=500 unique_so_far=3000 oldest=2026-08-11 newest=2026-09-04 total_count=10000
+products page=7 rows=500 persisted=500 new=500 unique_so_far=3500 oldest=2026-08-01 newest=2026-10-30 total_count=10000
+products page=8 rows=500 persisted=500 new=500 unique_so_far=4000 oldest=2026-07-25 newest=2026-10-30 total_count=10000
+products page=9 rows=500 persisted=500 new=500 unique_so_far=4500 oldest=2026-07-16 newest=2026-09-25 total_count=10000
+products page=10 rows=500 persisted=500 new=500 unique_so_far=5000 oldest=2026-07-07 newest=2026-09-25 total_count=10000
+products page=11 rows=500 persisted=500 new=500 unique_so_far=5500 oldest=2026-07-01 newest=2026-09-25 total_count=10000
+products page=12 rows=500 persisted=500 new=500 unique_so_far=6000 oldest=2026-06-24 newest=2026-09-25 total_count=10000
+products page=13 rows=500 persisted=500 new=500 unique_so_far=6500 oldest=2026-06-16 newest=2026-07-10 total_count=10000
+products page=14 rows=500 persisted=500 new=500 unique_so_far=7000 oldest=2026-06-09 newest=2026-07-03 total_count=10000
+products page=15 rows=500 persisted=500 new=500 unique_so_far=7500 oldest=2026-06-04 newest=2026-08-28 total_count=10000
+products page=16 rows=500 persisted=500 new=500 unique_so_far=8000 oldest=2026-06-01 newest=2026-08-28 total_count=10000
+products page=17 rows=500 persisted=500 new=500 unique_so_far=8500 oldest=2026-05-25 newest=2026-08-28 total_count=10000
+products page=18 rows=500 persisted=500 new=500 unique_so_far=9000 oldest=2026-05-18 newest=2026-06-12 total_count=10000
+products page=19 rows=500 persisted=500 new=500 unique_so_far=9500 oldest=2026-05-11 newest=2026-06-05 total_count=10000
+products page=20 rows=500 persisted=500 new=500 unique_so_far=10000 oldest=2026-05-03 newest=2026-07-31 total_count=10000
+products page=21 rows=500 persisted=500 new=500 unique_so_far=10500 oldest=2026-04-26 newest=2026-07-31 total_count=10000
+products page=22 rows=500 persisted=500 new=500 unique_so_far=11000 oldest=2026-04-20 newest=2026-07-31 total_count=10000
+products page=23 rows=500 persisted=500 new=500 unique_so_far=11500 oldest=2026-04-14 newest=2026-06-26 total_count=10000
+products page=24 rows=500 persisted=500 new=500 unique_so_far=12000 oldest=2026-04-08 newest=2026-06-26 total_count=10000
+products page=25 rows=500 persisted=500 new=500 unique_so_far=12500 oldest=2026-03-31 newest=2026-06-26 total_count=10000
+products page=26 rows=500 persisted=500 new=500 unique_so_far=13000 oldest=2026-03-27 newest=2026-06-26 total_count=10000
+products page=27 rows=500 persisted=500 new=500 unique_so_far=13500 oldest=2026-03-20 newest=2026-04-10 total_count=10000
+products page=28 rows=500 persisted=500 new=500 unique_so_far=14000 oldest=2026-03-14 newest=2026-04-03 total_count=10000
+products page=29 rows=500 persisted=500 new=500 unique_so_far=14500 oldest=2026-03-09 newest=2026-04-03 total_count=10000
+products page=30 rows=500 persisted=500 new=500 unique_so_far=15000 oldest=2026-03-04 newest=2026-05-29 total_count=10000
+products page=31 rows=500 persisted=500 new=500 unique_so_far=15500 oldest=2026-02-28 newest=2026-05-29 total_count=10000
+products page=32 rows=500 persisted=500 new=500 unique_so_far=16000 oldest=2026-02-23 newest=2026-05-29 total_count=10000
+products page=33 rows=500 persisted=500 new=500 unique_so_far=16500 oldest=2026-02-17 newest=2026-03-13 total_count=10000
+products page=34 rows=500 persisted=500 new=500 unique_so_far=17000 oldest=2026-02-11 newest=2026-03-06 total_count=10000
+products page=35 rows=500 persisted=500 new=500 unique_so_far=17500 oldest=2026-02-06 newest=2026-04-24 total_count=10000
+products page=36 rows=500 persisted=500 new=500 unique_so_far=18000 oldest=2026-02-04 newest=2026-04-24 total_count=10000
+products page=37 rows=500 persisted=500 new=500 unique_so_far=18500 oldest=2026-02-01 newest=2026-04-24 total_count=10000
+products page=38 rows=500 persisted=500 new=500 unique_so_far=19000 oldest=2026-01-28 newest=2026-04-24 total_count=10000
+products page=39 rows=500 persisted=500 new=500 unique_so_far=19500 oldest=2026-01-21 newest=2026-02-13 total_count=10000
+products page=40 rows=500 persisted=500 new=500 unique_so_far=20000 oldest=2026-01-15 newest=2026-03-27 total_count=10000
+products page=41 rows=500 persisted=500 new=500 unique_so_far=20500 oldest=2026-01-09 newest=2026-03-27 total_count=10000
+products page=42 rows=500 persisted=500 new=500 unique_so_far=21000 oldest=2026-01-03 newest=2026-03-27 total_count=10000
+products page=43 rows=500 persisted=500 new=500 unique_so_far=21500 oldest=2025-12-27 newest=2026-03-27 total_count=10000
+products page=44 rows=500 persisted=500 new=500 unique_so_far=22000 oldest=2025-12-21 newest=2026-03-27 total_count=10000
+products page=45 rows=500 persisted=500 new=500 unique_so_far=22500 oldest=2025-12-16 newest=2026-01-09 total_count=10000
+products page=46 rows=500 persisted=500 new=500 unique_so_far=23000 oldest=2025-12-11 newest=2026-01-02 total_count=10000
+products page=47 rows=500 persisted=500 new=500 unique_so_far=23500 oldest=2025-12-06 newest=2025-12-26 total_count=10000
+products page=48 rows=500 persisted=500 new=500 unique_so_far=24000 oldest=2025-12-01 newest=2026-02-27 total_count=10000
+products page=49 rows=500 persisted=500 new=500 unique_so_far=24500 oldest=2025-11-27 newest=2026-02-27 total_count=10000
+products page=50 rows=500 persisted=500 new=500 unique_so_far=25000 oldest=2025-11-24 newest=2025-12-12 total_count=10000
+products page=51 rows=500 persisted=500 new=500 unique_so_far=25500 oldest=2025-11-20 newest=2026-01-30 total_count=10000
+products page=52 rows=500 persisted=500 new=500 unique_so_far=26000 oldest=2025-11-16 newest=2026-01-30 total_count=10000
+products page=53 rows=500 persisted=500 new=500 unique_so_far=26500 oldest=2025-11-13 newest=2026-01-30 total_count=10000
+products page=54 rows=500 persisted=500 new=500 unique_so_far=27000 oldest=2025-11-08 newest=2025-11-28 total_count=10000
+products page=55 rows=500 persisted=500 new=500 unique_so_far=27500 oldest=2025-11-04 newest=2025-12-26 total_count=10000
+products page=56 rows=500 persisted=500 new=500 unique_so_far=28000 oldest=2025-11-02 newest=2025-12-26 total_count=10000
+products page=57 rows=500 persisted=500 new=500 unique_so_far=28500 oldest=2025-10-27 newest=2025-12-26 total_count=10000
+products page=58 rows=500 persisted=500 new=500 unique_so_far=29000 oldest=2025-10-22 newest=2025-11-14 total_count=10000
+products page=59 rows=500 persisted=500 new=500 unique_so_far=29500 oldest=2025-10-17 newest=2025-11-07 total_count=10000
+products page=60 rows=500 persisted=500 new=500 unique_so_far=30000 oldest=2025-10-14 newest=2025-11-28 total_count=10000
+products page=61 rows=500 persisted=500 new=500 unique_so_far=30500 oldest=2025-10-11 newest=2025-11-28 total_count=10000
+products page=62 rows=500 persisted=500 new=500 unique_so_far=31000 oldest=2025-10-07 newest=2025-10-31 total_count=10000
+products page=63 rows=500 persisted=500 new=500 unique_so_far=31500 oldest=2025-10-03 newest=2025-11-28 total_count=10000
+products page=64 rows=500 persisted=500 new=500 unique_so_far=32000 oldest=2025-09-29 newest=2025-11-28 total_count=10000
+products page=65 rows=500 persisted=500 new=500 unique_so_far=32500 oldest=2025-09-23 newest=2025-11-28 total_count=10000
+products page=66 rows=500 persisted=500 new=500 unique_so_far=33000 oldest=2025-09-17 newest=2025-10-31 total_count=10000
+products page=67 rows=500 persisted=500 new=500 unique_so_far=33500 oldest=2025-09-11 newest=2025-10-31 total_count=10000
+products page=68 rows=500 persisted=500 new=500 unique_so_far=34000 oldest=2025-09-03 newest=2025-10-31 total_count=10000
+products page=69 rows=500 persisted=500 new=500 unique_so_far=34500 oldest=2025-08-30 newest=2025-10-31 total_count=10000
+products page=70 rows=500 persisted=500 new=500 unique_so_far=35000 oldest=2025-08-25 newest=2025-10-31 total_count=10000
+products page=71 rows=500 persisted=500 new=500 unique_so_far=35500 oldest=2025-08-19 newest=2025-09-12 total_count=10000
+products page=72 rows=500 persisted=500 new=500 unique_so_far=36000 oldest=2025-08-14 newest=2025-09-26 total_count=10000
+products page=73 rows=500 persisted=500 new=500 unique_so_far=36500 oldest=2025-08-09 newest=2025-08-29 total_count=10000
+products page=74 rows=500 persisted=500 new=500 unique_so_far=37000 oldest=2025-08-02 newest=2025-09-26 total_count=10000
+products page=75 rows=500 persisted=500 new=500 unique_so_far=37500 oldest=2025-07-28 newest=2025-09-26 total_count=10000
+products page=76 rows=500 persisted=500 new=500 unique_so_far=38000 oldest=2025-07-22 newest=2025-09-26 total_count=10000
+products page=77 rows=500 persisted=500 new=500 unique_so_far=38500 oldest=2025-07-18 newest=2025-08-08 total_count=10000
+products page=78 rows=500 persisted=500 new=500 unique_so_far=39000 oldest=2025-07-13 newest=2025-08-29 total_count=10000
+products page=79 rows=500 persisted=500 new=500 unique_so_far=39500 oldest=2025-07-10 newest=2025-08-29 total_count=10000
+products page=80 rows=500 persisted=500 new=500 unique_so_far=40000 oldest=2025-07-02 newest=2025-08-29 total_count=10000
+products page=81 rows=500 persisted=500 new=500 unique_so_far=40500 oldest=2025-06-26 newest=2025-08-29 total_count=10000
+products page=82 rows=500 persisted=500 new=500 unique_so_far=41000 oldest=2025-06-21 newest=2025-07-25 total_count=10000
+products page=83 rows=500 persisted=500 new=500 unique_so_far=41500 oldest=2025-06-16 newest=2025-07-11 total_count=10000
+products page=84 rows=500 persisted=500 new=500 unique_so_far=42000 oldest=2025-06-10 newest=2025-07-25 total_count=10000
+products page=85 rows=500 persisted=500 new=500 unique_so_far=42500 oldest=2025-06-06 newest=2025-07-25 total_count=10000
+products page=86 rows=500 persisted=500 new=500 unique_so_far=43000 oldest=2025-05-30 newest=2025-07-25 total_count=10000
+products page=87 rows=500 persisted=500 new=500 unique_so_far=43500 oldest=2025-05-25 newest=2025-06-13 total_count=10000
+products page=88 rows=500 persisted=500 new=500 unique_so_far=44000 oldest=2025-05-20 newest=2025-06-27 total_count=10000
+products page=89 rows=500 persisted=500 new=500 unique_so_far=44500 oldest=2025-05-16 newest=2025-06-06 total_count=10000
+products page=90 rows=500 persisted=500 new=500 unique_so_far=45000 oldest=2025-05-09 newest=2025-06-27 total_count=10000
+products page=91 rows=500 persisted=500 new=500 unique_so_far=45500 oldest=2025-05-03 newest=2025-06-27 total_count=10000
+products page=92 rows=500 persisted=500 new=500 unique_so_far=46000 oldest=2025-04-28 newest=2025-06-27 total_count=10000
+products page=93 rows=500 persisted=500 new=500 unique_so_far=46500 oldest=2025-04-23 newest=2025-06-27 total_count=10000
+products page=94 rows=500 persisted=500 new=500 unique_so_far=47000 oldest=2025-04-18 newest=2025-05-09 total_count=10000
+products page=95 rows=500 persisted=500 new=500 unique_so_far=47500 oldest=2025-04-11 newest=2025-05-02 total_count=10000
+products page=96 rows=500 persisted=500 new=500 unique_so_far=48000 oldest=2025-04-07 newest=2025-05-30 total_count=10000
+products page=97 rows=500 persisted=500 new=500 unique_so_far=48500 oldest=2025-04-02 newest=2025-05-30 total_count=10000
+products page=98 rows=500 persisted=500 new=500 unique_so_far=49000 oldest=2025-03-29 newest=2025-05-30 total_count=10000
+products page=99 rows=500 persisted=500 new=500 unique_so_far=49500 oldest=2025-03-22 newest=2025-05-30 total_count=10000
+products page=100 rows=500 persisted=500 new=500 unique_so_far=50000 oldest=2025-03-17 newest=2025-04-11 total_count=10000
+products page=101 rows=500 persisted=500 new=500 unique_so_far=50500 oldest=2025-03-11 newest=2025-04-25 total_count=10000
+products page=102 rows=500 persisted=500 new=500 unique_so_far=51000 oldest=2025-03-08 newest=2025-04-25 total_count=10000
+products page=103 rows=500 persisted=500 new=500 unique_so_far=51500 oldest=2025-03-04 newest=2025-04-25 total_count=10000
+products page=104 rows=500 persisted=500 new=500 unique_so_far=52000 oldest=2025-03-02 newest=2025-04-25 total_count=10000
+products page=105 rows=500 persisted=500 new=500 unique_so_far=52500 oldest=2025-02-27 newest=2025-04-25 total_count=10000
+products page=106 rows=500 persisted=500 new=500 unique_so_far=53000 oldest=2025-02-25 newest=2025-03-28 total_count=10000
+products page=107 rows=500 persisted=500 new=500 unique_so_far=53500 oldest=2025-02-18 newest=2025-03-14 total_count=10000
+products page=108 rows=500 persisted=500 new=500 unique_so_far=54000 oldest=2025-02-12 newest=2025-03-07 total_count=10000
+products page=109 rows=500 persisted=500 new=500 unique_so_far=54500 oldest=2025-02-06 newest=2025-02-13 total_count=10000
+products page=110 rows=500 persisted=500 new=500 unique_so_far=55000 oldest=2025-02-02 newest=2025-03-28 total_count=10000
+products page=111 rows=500 persisted=500 new=500 unique_so_far=55500 oldest=2025-01-30 newest=2025-03-28 total_count=10000
+products page=112 rows=500 persisted=500 new=500 unique_so_far=56000 oldest=2025-01-25 newest=2025-02-14 total_count=10000
+products page=113 rows=500 persisted=500 new=500 unique_so_far=56500 oldest=2025-01-21 newest=2025-02-14 total_count=10000
+products page=114 rows=500 persisted=500 new=500 unique_so_far=57000 oldest=2025-01-18 newest=2025-02-28 total_count=10000
+products page=115 rows=500 persisted=500 new=500 unique_so_far=57500 oldest=2025-01-13 newest=2025-02-07 total_count=10000
+products page=116 rows=500 persisted=500 new=500 unique_so_far=58000 oldest=2025-01-09 newest=2025-01-31 total_count=10000
+products page=117 rows=500 persisted=500 new=500 unique_so_far=58500 oldest=2025-01-04 newest=2025-02-28 total_count=10000
+products page=118 rows=500 persisted=500 new=500 unique_so_far=59000 oldest=2024-12-30 newest=2025-02-28 total_count=10000
+products page=119 rows=500 persisted=500 new=500 unique_so_far=59500 oldest=2024-12-25 newest=2025-02-28 total_count=10000
+products page=120 rows=500 persisted=500 new=500 unique_so_far=60000 oldest=2024-12-21 newest=2025-01-10 total_count=10000
+products page=121 rows=500 persisted=500 new=500 unique_so_far=60500 oldest=2024-12-17 newest=2025-01-31 total_count=10000
+products page=122 rows=500 persisted=500 new=500 unique_so_far=61000 oldest=2024-12-14 newest=2025-01-31 total_count=10000
+products page=123 rows=500 persisted=500 new=500 unique_so_far=61500 oldest=2024-12-10 newest=2025-01-03 total_count=10000
+products page=124 rows=500 persisted=500 new=500 unique_so_far=62000 oldest=2024-12-05 newest=2025-01-31 total_count=10000
+products page=125 rows=500 persisted=500 new=500 unique_so_far=62500 oldest=2024-11-30 newest=2025-01-31 total_count=10000
+products page=126 rows=500 persisted=500 new=500 unique_so_far=63000 oldest=2024-11-26 newest=2025-01-31 total_count=10000
+products page=127 rows=500 persisted=500 new=500 unique_so_far=63500 oldest=2024-11-21 newest=2024-12-13 total_count=10000
+products page=128 rows=500 persisted=500 new=500 unique_so_far=64000 oldest=2024-11-18 newest=2024-12-06 total_count=10000
+products page=129 rows=500 persisted=500 new=500 unique_so_far=64500 oldest=2024-11-14 newest=2024-12-27 total_count=10000
+products page=130 rows=500 persisted=500 new=500 unique_so_far=65000 oldest=2024-11-10 newest=2024-12-27 total_count=10000
+products page=131 rows=500 persisted=500 new=500 unique_so_far=65500 oldest=2024-11-06 newest=2024-12-27 total_count=10000
+products page=132 rows=500 persisted=500 new=500 unique_so_far=66000 oldest=2024-11-01 newest=2024-11-22 total_count=10000
+products page=133 rows=500 persisted=500 new=500 unique_so_far=66500 oldest=2024-10-26 newest=2024-12-27 total_count=10000
+products page=134 rows=500 persisted=500 new=500 unique_so_far=67000 oldest=2024-10-19 newest=2024-12-27 total_count=10000
+products page=135 rows=500 persisted=500 new=500 unique_so_far=67500 oldest=2024-10-12 newest=2024-11-29 total_count=10000
+products page=136 rows=500 persisted=500 new=500 unique_so_far=68000 oldest=2024-10-05 newest=2024-11-01 total_count=10000
+products page=137 rows=500 persisted=500 new=500 unique_so_far=68500 oldest=2024-09-28 newest=2024-11-29 total_count=10000
+products page=138 rows=500 persisted=500 new=500 unique_so_far=69000 oldest=2024-09-22 newest=2024-11-29 total_count=10000
+products page=139 rows=500 persisted=500 new=500 unique_so_far=69500 oldest=2024-09-14 newest=2024-10-25 total_count=10000
+products page=140 rows=500 persisted=500 new=500 unique_so_far=70000 oldest=2024-09-07 newest=2024-10-04 total_count=10000
+products page=141 rows=500 persisted=500 new=500 unique_so_far=70500 oldest=2024-09-02 newest=2024-10-25 total_count=10000
+products page=142 rows=500 persisted=500 new=500 unique_so_far=71000 oldest=2024-08-27 newest=2024-10-25 total_count=10000
+products page=143 rows=500 persisted=500 new=500 unique_so_far=71500 oldest=2024-08-20 newest=2024-09-13 total_count=10000
+products page=144 rows=500 persisted=500 new=500 unique_so_far=72000 oldest=2024-08-14 newest=2024-09-06 total_count=10000
+products page=145 rows=500 persisted=500 new=500 unique_so_far=72500 oldest=2024-08-08 newest=2024-08-30 total_count=10000
+products page=146 rows=500 persisted=500 new=500 unique_so_far=73000 oldest=2024-08-05 newest=2024-09-27 total_count=10000
+products page=147 rows=500 persisted=500 new=500 unique_so_far=73500 oldest=2024-08-01 newest=2024-09-27 total_count=10000
+products page=148 rows=500 persisted=500 new=500 unique_so_far=74000 oldest=2024-07-27 newest=2024-09-27 total_count=10000
+products page=149 rows=500 persisted=500 new=500 unique_so_far=74500 oldest=2024-07-20 newest=2024-08-30 total_count=10000
+products page=150 rows=500 persisted=500 new=500 unique_so_far=75000 oldest=2024-07-15 newest=2024-08-30 total_count=10000
+products page=151 rows=500 persisted=500 new=500 unique_so_far=75500 oldest=2024-07-08 newest=2024-08-02 total_count=10000
+products page=152 rows=500 persisted=500 new=500 unique_so_far=76000 oldest=2024-07-04 newest=2024-08-30 total_count=10000
+products page=153 rows=500 persisted=500 new=500 unique_so_far=76500 oldest=2024-06-28 newest=2024-08-30 total_count=10000
+products page=154 rows=500 persisted=500 new=500 unique_so_far=77000 oldest=2024-06-21 newest=2024-07-26 total_count=10000
+products page=155 rows=500 persisted=500 new=500 unique_so_far=77500 oldest=2024-06-13 newest=2024-07-05 total_count=10000
+products page=156 rows=500 persisted=500 new=500 unique_so_far=78000 oldest=2024-06-06 newest=2024-07-26 total_count=10000
+products page=157 rows=500 persisted=500 new=500 unique_so_far=78500 oldest=2024-05-31 newest=2024-07-26 total_count=10000
+products page=158 rows=500 persisted=500 new=500 unique_so_far=79000 oldest=2024-05-24 newest=2024-06-14 total_count=10000
+products page=159 rows=500 persisted=500 new=500 unique_so_far=79500 oldest=2024-05-18 newest=2024-06-07 total_count=10000
+products page=160 rows=500 persisted=500 new=500 unique_so_far=80000 oldest=2024-05-10 newest=2024-05-24 total_count=10000
+products page=161 rows=500 persisted=500 new=500 unique_so_far=80500 oldest=2024-05-04 newest=2024-05-24 total_count=10000
+products page=162 rows=500 persisted=500 new=500 unique_so_far=81000 oldest=2024-04-29 newest=2024-06-28 total_count=10000
+products page=163 rows=500 persisted=500 new=500 unique_so_far=81500 oldest=2024-04-23 newest=2024-06-28 total_count=10000
+products page=164 rows=500 persisted=500 new=500 unique_so_far=82000 oldest=2024-04-18 newest=2024-05-10 total_count=10000
+products page=165 rows=500 persisted=500 new=500 unique_so_far=82500 oldest=2024-04-13 newest=2024-05-03 total_count=10000
+products page=166 rows=500 persisted=500 new=500 unique_so_far=83000 oldest=2024-04-08 newest=2024-05-03 total_count=10000
+products page=167 rows=500 persisted=500 new=500 unique_so_far=83500 oldest=2024-04-02 newest=2024-05-31 total_count=10000
+products page=168 rows=500 persisted=500 new=500 unique_so_far=84000 oldest=2024-03-29 newest=2024-05-31 total_count=10000
+products page=169 rows=500 persisted=500 new=500 unique_so_far=84500 oldest=2024-03-23 newest=2024-04-12 total_count=10000
+products page=170 rows=500 persisted=500 new=500 unique_so_far=85000 oldest=2024-03-19 newest=2024-04-12 total_count=10000
+products page=171 rows=500 persisted=500 new=500 unique_so_far=85500 oldest=2024-03-15 newest=2024-04-05 total_count=10000
+products page=172 rows=500 persisted=500 new=500 unique_so_far=86000 oldest=2024-03-11 newest=2024-03-17 total_count=10000
+products page=173 rows=500 persisted=500 new=500 unique_so_far=86500 oldest=2024-03-04 newest=2024-03-29 total_count=10000
+products page=174 rows=500 persisted=500 new=500 unique_so_far=87000 oldest=2024-03-02 newest=2024-04-26 total_count=10000
+products page=175 rows=500 persisted=500 new=500 unique_so_far=87500 oldest=2024-02-24 newest=2024-04-26 total_count=10000
+products page=176 rows=500 persisted=500 new=500 unique_so_far=88000 oldest=2024-02-19 newest=2024-04-26 total_count=10000
+products page=177 rows=500 persisted=500 new=500 unique_so_far=88500 oldest=2024-02-17 newest=2024-03-29 total_count=10000
+products page=178 rows=500 persisted=500 new=500 unique_so_far=89000 oldest=2024-02-11 newest=2024-03-29 total_count=10000
+products page=179 rows=500 persisted=500 new=500 unique_so_far=89500 oldest=2024-02-06 newest=2024-03-29 total_count=10000
+products page=180 rows=500 persisted=500 new=500 unique_so_far=90000 oldest=2024-01-30 newest=2024-03-29 total_count=10000
+products page=181 rows=500 persisted=500 new=500 unique_so_far=90500 oldest=2024-01-25 newest=2024-03-29 total_count=10000
+products page=182 rows=500 persisted=500 new=500 unique_so_far=91000 oldest=2024-01-20 newest=2024-02-23 total_count=10000
+products page=183 rows=500 persisted=500 new=500 unique_so_far=91500 oldest=2024-01-16 newest=2024-02-23 total_count=10000
+products page=184 rows=500 persisted=500 new=500 unique_so_far=92000 oldest=2024-01-11 newest=2024-02-23 total_count=10000
+products page=185 rows=500 persisted=500 new=500 unique_so_far=92500 oldest=2024-01-04 newest=2024-02-23 total_count=10000
+products page=186 rows=96 persisted=96 new=96 unique_so_far=92596 oldest=2023-12-28 newest=2024-01-04 total_count=10000
 products pagination complete at page=186 (no after)
+products persisted_upserts=92596 db=D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\cache\products_btc_options.sqlite
 
 ===== PAGINATION VERIFY (FIX 1) =====
 meta.total_count (API): 10000
-unique symbols fetched: 92515
-pages: 186  raw_rows_seen: 92515
+unique symbols fetched: 92596
+pages: 186  raw_rows_seen: 92596
 pagination_complete (no after left): True
-MATCH / MISMATCH: MATCH (unique=92515 > total_count=10000; API total_count appears CAPPED at 10000; after-cursor exhausted)
+MATCH / MISMATCH: MATCH (unique=92596 > total_count=10000; API total_count appears CAPPED at 10000; after-cursor exhausted)
 
 ===== LIVE-WINDOW SCOPE (FIX 2) =====
-symbols after live-window overlap filter: 69563
-after strike band ±6000: 36278
-expiries with no spot (skipped): 273 e.g. ['2024-09-14', '2024-09-15', '2024-09-16', '2024-09-17', '2024-09-18']
-date range (expiries in live-window list): oldest=2024-09-14  newest=2026-09-18
+symbols after live-window overlap filter: 69598
+after strike band ±6000: 36391
+expiries with no spot (skipped): 271 e.g. ['2024-09-16', '2024-09-17', '2024-09-18', '2024-09-19', '2024-09-20']
+date range (expiries in live-window list): 2024-09-16 -> 2026-09-25
 
-===== ESTIMATES (band-filtered, no download) =====
-estimated requests: 145015
-estimated hours (@ 0.75s sleep): 30.21
-estimated GB: 84.07
-estimated 1m rows: 521779440
+===== DOWNLOAD SCOPE ESTIMATE (tail-days) =====
+symbols after band: 36391
+short-dated (life<=14d): 34206  monthlies/long (full life): 2185
+OLD scope (full 10d life each):
+  requests≈145366  hours≈30.3  rows≈522990222  GB≈84.26
+NEW scope (tail_days=5, monthlies full):
+  requests≈91420  hours≈19.0  rows≈333884919  GB≈53.80
+ESTIMATED SAVINGS: requests≈53946 (37.1%)  hours≈11.2
+(sleep=0.75s between candle requests)
+estimated requests (new): 91420
+estimated hours (new): 19.05
+estimated GB (new): 53.795
+
+===== SPOT / CHECKS =====
 
 ===== SPECIFIC CHECKS =====
 CHECK 1: P-BTC-78000-150526 in live-window list? PASS
 CHECK 2: any expiry=2026-06-01 live in 2026-05 in list? PASS  (n=50; e.g. ['C-BTC-71400-010626', 'P-BTC-71400-010626', 'C-BTC-75400-010626', 'P-BTC-75400-010626', 'P-BTC-76000-010626'])
-CHECK 3: oldest expiry=2024-09-14 (target≈2024-09-14, |Δ|=0d) PASS
+CHECK 3: oldest expiry=2024-09-16 (target≈2024-09-15, |Δ|=1d) PASS
 
 DONE (dry-run).
