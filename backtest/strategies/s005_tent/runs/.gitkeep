@@ -1,0 +1,4 @@
+# Keep strategy run artifacts (json/md) in git for Strategies page history.
+# backtest/results/ stays ignored.
+!backtest/strategies/**/runs/
+!backtest/strategies/**/runs/**

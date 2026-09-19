@@ -1,0 +1,27 @@
+{
+  "id": "S005",
+  "name": "S005 Tent Strategy",
+  "status": "TESTING",
+  "one_line": "ATM short straddle + BE short strangle + earlier-DTE long protection; continuous entry; TP/SL/time cutoff.",
+  "rules_summary": "Short ATM straddle + BE strangle on SHORT_DTE; long matching strangle on LONG_DTE (qty=total short); TARGET=pct\u00d7net_credit; SL=sl_mult\u00d7target; TIME_CUTOFF long expiry 17:25 IST; 2h cooldown after SL; no adjustments; bucketed slip + fees.",
+  "tests_done": [
+    {
+      "stage": "KILL",
+      "window": "2026-08-01..2026-08-07",
+      "date": "20260919",
+      "n": 7,
+      "mean_day": 1.5019032348443102,
+      "ci_lo": 0.04801627315562345,
+      "ci_hi": 2.610433736219367,
+      "verdict": "GRID_72_COMBOS",
+      "top_arm": "s2l1_q20_10_tp15_sl2"
+    }
+  ],
+  "open_questions": [
+    "Which expiry_pair and qty_split survive KILL with CI not overlapping noise?"
+  ],
+  "next_steps": [
+    "Run full KILL 2026-06-01..2026-08-31 72-combo grid; promote survivors to DESIGN only if CI separates from noise."
+  ],
+  "learnings": []
+}
