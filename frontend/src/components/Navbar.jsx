@@ -169,6 +169,13 @@ export default function Navbar({ wsUrl = '' }) {
         Backtest
       </NavLink>
       <NavLink
+        to="/strategies"
+        className={linkClass}
+        onClick={() => setMenuOpen(false)}
+      >
+        Strategies
+      </NavLink>
+      <NavLink
         to="/strategy3"
         className={linkClass}
         onClick={() => setMenuOpen(false)}

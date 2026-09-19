@@ -730,3 +730,12 @@ export const getStrategy3Chart = async ({
     throw new Error(extractError(err, 'Failed to fetch S003 chart data'))
   }
 }
+
+export const getStrategiesRegistry = async () => {
+  try {
+    const res = await api.get('/api/strategies/registry')
+    return res.data
+  } catch (err) {
+    throw new Error(extractError(err, 'Failed to fetch strategies registry'))
+  }
+}

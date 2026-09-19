@@ -1,0 +1,43 @@
+{
+  "id": "S001",
+  "name": "S001 Wing-Capped Strangle",
+  "status": "CLOSED",
+  "one_line": "Short strangle + 2000pt wings + Adj B; CLOSED — negative mean/day on IS.",
+  "rules_summary": "Entry 11:00 IST 2DTE qty8; fixed $150 or B25; wings 2000; Adj B trigger 70; max 2 adj; pct_of_credit TP; bucketed slip + fees.",
+  "tests_done": [
+    {
+      "stage": "DESIGN",
+      "window": "2025-07-01..2026-09-13",
+      "date": "2026-09-18",
+      "n": 144,
+      "win_pct": null,
+      "mean_day": -0.0718,
+      "ci_lo": null,
+      "ci_hi": null,
+      "worst_net": null,
+      "max_dd": null,
+      "verdict": "CLOSED_NEGATIVE"
+    },
+    {
+      "stage": "KILL",
+      "window": "2026-05-01..2026-05-31",
+      "date": "2026-09-18",
+      "n": 14,
+      "mean_day": -0.0927,
+      "verdict": "KILL_OBSERVED_MAX_ADJ_100PCT"
+    }
+  ],
+  "open_questions": [
+    "Is PCT profit target ever hit before max adjustments under bucketed slip?",
+    "How much of fixed vs b25 gap is skip asymmetry vs true edge?"
+  ],
+  "next_steps": [
+    "Keep as harness reference only — do not re-deploy without OOS + paired CI > 0 vs baseline."
+  ],
+  "learnings": [
+    "May 2026: 100% exits MAX_ADJUSTMENTS — TP/path tests must be unit-proven separately.",
+    "fixed $150 enters fewer days than b25; always report skip accounting with mean/day.",
+    "slip_mult 1.5 worsens mean/day ~5% — model understates live market-order cost.",
+    "Do not tune on best-of-16 matrix; final selection only on OOS."
+  ]
+}

@@ -18,6 +18,7 @@ from backend.api.routes_logs import router as logs_router
 from backend.api.routes_slave import router as slave_router
 from backend.api.routes_strategy import router as strategy_router
 from backend.api.routes_strategy3 import router as strategy3_router
+from backend.api.routes_strategies import router as strategies_registry_router
 from backend.api.routes_structures import router as structures_router
 from backend.api.routes_trade import router as trade_router
 from backend.api.routes_ws import router as ws_router
@@ -202,6 +203,7 @@ app.include_router(auth_router)
 app.include_router(account_router, dependencies=[Depends(require_user)])
 app.include_router(strategy_router, dependencies=[Depends(require_user)])
 app.include_router(strategy3_router, dependencies=[Depends(require_user)])
+app.include_router(strategies_registry_router, dependencies=[Depends(require_user)])
 app.include_router(trade_router, dependencies=[Depends(require_user)])
 app.include_router(auto_trade_router, dependencies=[Depends(require_user)])
 app.include_router(hedge_router, dependencies=[Depends(require_user)])

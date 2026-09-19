@@ -1,0 +1,23 @@
+{
+  "id": "S003",
+  "name": "S003 LSR Sweep",
+  "status": "CLOSED",
+  "one_line": "LSR signal sweep research — CLOSED; live UI remains separate.",
+  "rules_summary": "LSR4 signal research; perfect-signal bounds vs ~35% reference hit-rate; not an income condor.",
+  "tests_done": [
+    {
+      "stage": "DESIGN",
+      "window": "historical",
+      "date": "2026-09",
+      "verdict": "CLOSED_RESEARCH"
+    }
+  ],
+  "open_questions": [],
+  "next_steps": [
+    "Keep live S003 UI; no new income variant without harness."
+  ],
+  "learnings": [
+    "Perfect-signal upper bounds still fail cost gates often — signal quality ≠ tradable edge.",
+    "Always compare observed win rate to breakeven win rate from width/credit."
+  ]
+}

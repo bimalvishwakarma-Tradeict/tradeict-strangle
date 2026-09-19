@@ -1,0 +1,17 @@
+{
+  "id": "S002",
+  "name": "S002 Archive (LSR / scan)",
+  "status": "CLOSED",
+  "one_line": "Pre-harness LSR/scan sim from s002_sim — archived, not for redeploy.",
+  "rules_summary": "12:00–15:30 IST scan; strike offset 1; max prem $70; target 40% capital used; SL×0.5; max 3/day.",
+  "tests_done": [],
+  "open_questions": [
+    "Did print-data optimism inflate S002 results?"
+  ],
+  "next_steps": [
+    "Only revisit via harness with mark data + bucketed slip."
+  ],
+  "learnings": [
+    "Old CSV print backtests overstated fills — always calibrate mark-to-fill before claiming edge."
+  ]
+}

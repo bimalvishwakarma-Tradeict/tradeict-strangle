@@ -13,6 +13,7 @@ import Dashboard from './pages/Dashboard'
 import Login from './pages/Login'
 import Logs from './pages/Logs'
 import Strategy3 from './pages/Strategy3'
+import Strategies from './pages/Strategies'
 import TradeInitiator from './pages/TradeInitiator'
 import Settings from './pages/Settings'
 
@@ -88,6 +89,7 @@ function AuthenticatedShell() {
           <Route path="/auto-trade" element={<AutoTrade />} />
           <Route path="/logs" element={<Logs />} />
           <Route path="/backtest" element={<Backtest />} />
+          <Route path="/strategies" element={<Strategies />} />
           <Route path="/strategy3" element={<Strategy3 />} />
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/settings" element={<Settings />} />

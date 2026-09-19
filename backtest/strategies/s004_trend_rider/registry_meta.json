@@ -1,0 +1,25 @@
+{
+  "id": "S004",
+  "name": "S004 Trend Rider",
+  "status": "PARKED",
+  "one_line": "Trend/signal rider — PARKED because cost gate failed under realistic slippage.",
+  "rules_summary": "Directional options; bucketed slip cost gate; parity vs prints; parked on gate fail.",
+  "tests_done": [
+    {
+      "stage": "KILL",
+      "window": "gate/parity",
+      "date": "2026-09",
+      "verdict": "GATE_FAIL_PARKED"
+    }
+  ],
+  "open_questions": [
+    "Does any premium/DTE bucket survive slip_mult=1.5?"
+  ],
+  "next_steps": [
+    "Remain PARKED; re-test only with harness KILL + documented gate criteria."
+  ],
+  "learnings": [
+    "Live fills in 300–600 bucket ~1.70% vs model ~0.75% — always stress slip_mult.",
+    "Empty parity points must hard-fail, not silently score zero."
+  ]
+}
