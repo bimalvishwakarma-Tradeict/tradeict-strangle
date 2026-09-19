@@ -59,14 +59,24 @@ from backtest.harness.models import (  # noqa: E402
 
 logger = logging.getLogger("strategies.s005")
 
-COOLDOWN_SEC = 2 * 3600
-TIME_CUTOFF_HOUR = 17
-TIME_CUTOFF_MINUTE = 25
+# Defaults — keep identical to phase-1 grid so an in-flight run is unaffected.
+DEFAULT_COOLDOWN_HOURS = 2.0
+DEFAULT_CUTOFF_HOUR = 17
+DEFAULT_CUTOFF_MINUTE = 25
+DEFAULT_PROTECTION_EXPIRY = "calendar"  # calendar | same
+DEFAULT_PROTECTION_OFFSET = 0
+DEFAULT_PROTECTION_RATIO = 1.0
+DEFAULT_BE_MULT = 1.0
 ENTRY_START_HOUR = 9
 ENTRY_START_MINUTE = 0
 MONITOR_STEP = 60
 BOOTSTRAP_N = 1000
 BOOTSTRAP_SEED = 20260919
+
+# Back-compat aliases used by older callers / reports
+COOLDOWN_SEC = int(DEFAULT_COOLDOWN_HOURS * 3600)
+TIME_CUTOFF_HOUR = DEFAULT_CUTOFF_HOUR
+TIME_CUTOFF_MINUTE = DEFAULT_CUTOFF_MINUTE
 
 
 def default_params() -> dict[str, Any]:
@@ -80,7 +90,23 @@ def default_params() -> dict[str, Any]:
         "slip_model": "bucketed",
         "slip_mult": 1.0,
         "arm": "s1l0_q10_20_tp10_sl3",
+        # New axes (defaults = prior behaviour)
+        "protection_expiry": DEFAULT_PROTECTION_EXPIRY,
+        "protection_offset": DEFAULT_PROTECTION_OFFSET,
+        "protection_ratio": DEFAULT_PROTECTION_RATIO,
+        "be_mult": DEFAULT_BE_MULT,
+        "cutoff_hour": DEFAULT_CUTOFF_HOUR,
+        "cutoff_minute": DEFAULT_CUTOFF_MINUTE,
+        "cooldown_hours": DEFAULT_COOLDOWN_HOURS,
     }
+
+
+def parse_cutoff_time(s: str) -> tuple[int, int]:
+    """Parse 'HH:MM' → (hour, minute)."""
+    parts = str(s).strip().split(":")
+    if len(parts) != 2:
+        raise ValueError(f"bad cutoff time: {s!r}")
+    return int(parts[0]), int(parts[1])
 
 
 @dataclass
@@ -189,8 +215,16 @@ class S005TentStrategy:
                 return series[minute + d]
         return None
 
+    def _cutoff_hm(self) -> tuple[int, int]:
+        p = self.params
+        return (
+            int(p.get("cutoff_hour", DEFAULT_CUTOFF_HOUR)),
+            int(p.get("cutoff_minute", DEFAULT_CUTOFF_MINUTE)),
+        )
+
     def _can_enter(self, now_ts: int, long_expiry: date) -> bool:
-        cutoff = to_unix(ist_dt(long_expiry, TIME_CUTOFF_HOUR, TIME_CUTOFF_MINUTE))
+        hh, mm = self._cutoff_hm()
+        cutoff = to_unix(ist_dt(long_expiry, hh, mm))
         return now_ts < cutoff
 
     def _pick_atm_straddle(
@@ -226,12 +260,14 @@ class S005TentStrategy:
         call_k: float,
         put_k: float,
         step: float,
+        offset: int = 0,
     ) -> tuple[dict[str, Any], dict[str, Any]] | None:
         c_by = self._by_strike(calls)
         p_by = self._by_strike(puts)
-        # try exact, then one step OTM
-        call_cands = [call_k, call_k + step]
-        put_cands = [put_k, put_k - step]
+        off = max(0, int(offset))
+        # Primary: shorts ± offset steps OTM; fallback: one more step OTM
+        call_cands = [call_k + off * step, call_k + (off + 1) * step]
+        put_cands = [put_k - off * step, put_k - (off + 1) * step]
         best = None
         for ck in call_cands:
             for pk in put_cands:
@@ -266,8 +302,14 @@ class S005TentStrategy:
         p = self.params
         short_dte = int(p["short_dte"])
         long_dte = int(p["long_dte"])
+        pe = str(p.get("protection_expiry") or DEFAULT_PROTECTION_EXPIRY).lower()
         short_exp = day + timedelta(days=short_dte)
-        long_exp = day + timedelta(days=long_dte)
+        if pe == "same":
+            long_exp = short_exp
+            long_dte_eff = short_dte
+        else:
+            long_exp = day + timedelta(days=long_dte)
+            long_dte_eff = long_dte
         if short_exp in SKIP_EXPIRIES or long_exp in SKIP_EXPIRIES:
             return None, "skipped_expiry_blocklist"
         if not self._can_enter(entry_ts, long_exp):
@@ -302,8 +344,9 @@ class S005TentStrategy:
             return None, "skipped_no_strike"
         atm_k, atm_c, atm_p = atm_pick
         straddle_prem = float(atm_c["mark_price"]) + float(atm_p["mark_price"])
-        be_up = atm_k + straddle_prem
-        be_dn = atm_k - straddle_prem
+        be_mult = float(p.get("be_mult", DEFAULT_BE_MULT))
+        be_up = atm_k + be_mult * straddle_prem
+        be_dn = atm_k - be_mult * straddle_prem
 
         all_k = sorted(
             {float(r["strike"]) for r in calls_s}
@@ -328,19 +371,25 @@ class S005TentStrategy:
             return None, "skipped_no_strike"
         be_c_row, be_p_row = c_by[be_call_k], p_by[be_put_k]
 
-        # Long protection chain
-        conn_l = store.conn(long_exp) or store.conn(day)
-        if conn_l is None:
-            return None, "skipped_no_protection"
-        cts_l = resolve_mark_ts(conn_l, long_exp, entry_ts)
-        if cts_l is None:
-            return None, "skipped_no_protection"
-        calls_l = load_chain(conn_l, long_exp, cts_l, "call")
-        puts_l = load_chain(conn_l, long_exp, cts_l, "put")
+        # Long protection chain (calendar = earlier DTE; same = shorts' expiry)
+        if pe == "same":
+            conn_l = conn_use_s
+            cts_l = cts_s
+            calls_l, puts_l = calls_s, puts_s
+        else:
+            conn_l = store.conn(long_exp) or store.conn(day)
+            if conn_l is None:
+                return None, "skipped_no_protection"
+            cts_l = resolve_mark_ts(conn_l, long_exp, entry_ts)
+            if cts_l is None:
+                return None, "skipped_no_protection"
+            calls_l = load_chain(conn_l, long_exp, cts_l, "call")
+            puts_l = load_chain(conn_l, long_exp, cts_l, "put")
         if not calls_l or not puts_l:
             return None, "skipped_no_protection"
+        prot_off = int(p.get("protection_offset", DEFAULT_PROTECTION_OFFSET))
         long_pair = self._pick_long_pair(
-            calls_l, puts_l, be_call_k, be_put_k, step
+            calls_l, puts_l, be_call_k, be_put_k, step, offset=prot_off
         )
         if long_pair is None:
             return None, "skipped_no_protection"
@@ -348,9 +397,10 @@ class S005TentStrategy:
 
         q_sd = int(p["qty_straddle"])
         q_sg = int(p["qty_strangle"])
-        q_long = q_sd + q_sg
+        prot_ratio = float(p.get("protection_ratio", DEFAULT_PROTECTION_RATIO))
+        q_long = max(1, int(round(prot_ratio * (q_sd + q_sg))))
         dte_s = max(0, short_dte)
-        dte_l = max(0, long_dte)
+        dte_l = max(0, long_dte_eff)
         slip_model = str(p.get("slip_model") or "bucketed")
         slip_mult = float(p.get("slip_mult") or 1.0)
 
@@ -416,7 +466,8 @@ class S005TentStrategy:
         target_usd = max(0.0, net_credit * tp_pct)
         stop_usd = -(sl_mult * tp_pct * net_credit)
 
-        cutoff_ts = to_unix(ist_dt(long_exp, TIME_CUTOFF_HOUR, TIME_CUTOFF_MINUTE))
+        hh, mm = self._cutoff_hm()
+        cutoff_ts = to_unix(ist_dt(long_exp, hh, mm))
         for leg in legs:
             leg.series = self._preload(store, leg.symbol, entry_ts, cutoff_ts + 120)
 
@@ -463,6 +514,8 @@ class S005TentStrategy:
         slip_model = str(p.get("slip_model") or "bucketed")
         slip_mult = float(p.get("slip_mult") or 1.0)
         realized = 0.0
+        shorts_pnl = 0.0
+        protection_pnl = 0.0
         fees = basket.fees_entry
         slip_cost = basket.slip_cost_entry
         for leg in basket.legs:
@@ -490,12 +543,15 @@ class S005TentStrategy:
                 fill, sf = fill_price(
                     m, "buy", dte=dte, slip_model=slip_model, slip_mult=slip_mult
                 )
-                realized += (leg.entry_fill - fill) * qty_btc(leg.qty)
+                leg_pnl = (leg.entry_fill - fill) * qty_btc(leg.qty)
+                shorts_pnl += leg_pnl
             else:
                 fill, sf = fill_price(
                     m, "sell", dte=dte, slip_model=slip_model, slip_mult=slip_mult
                 )
-                realized += (fill - leg.entry_fill) * qty_btc(leg.qty)
+                leg_pnl = (fill - leg.entry_fill) * qty_btc(leg.qty)
+                protection_pnl += leg_pnl
+            realized += leg_pnl
             fee = option_fee(fill, spot, leg.qty)
             fees += fee
             slip_cost += abs(fill - m) * qty_btc(leg.qty)
@@ -521,6 +577,8 @@ class S005TentStrategy:
                 "atm": basket.atm,
                 "be_call": basket.be_call,
                 "be_put": basket.be_put,
+                "shorts_pnl": shorts_pnl,
+                "protection_pnl": protection_pnl,
             },
         )
 
@@ -532,9 +590,8 @@ class S005TentStrategy:
         entry_ts: int,
         entry_day: date,
     ) -> CycleResult:
-        cutoff = to_unix(
-            ist_dt(basket.long_expiry, TIME_CUTOFF_HOUR, TIME_CUTOFF_MINUTE)
-        )
+        hh, mm = self._cutoff_hm()
+        cutoff = to_unix(ist_dt(basket.long_expiry, hh, mm))
         worst = 0.0
         exit_reason = "TIME_CUTOFF"
         exit_ts = cutoff
@@ -597,6 +654,9 @@ class S005TentStrategy:
         now_ts = to_unix(ist_dt(d0, ENTRY_START_HOUR, ENTRY_START_MINUTE))
         end_ts = to_unix(ist_dt(d1, 23, 59))
         cooldown_until = 0
+        cooldown_sec = int(
+            float(self.params.get("cooldown_hours", DEFAULT_COOLDOWN_HOURS)) * 3600
+        )
 
         while now_ts <= end_ts:
             day = datetime.fromtimestamp(now_ts, tz=UTC).astimezone(IST).date()
@@ -609,8 +669,15 @@ class S005TentStrategy:
                 now_ts = min(cooldown_until, now_ts + 3600)
                 continue
 
+            pe = str(
+                self.params.get("protection_expiry") or DEFAULT_PROTECTION_EXPIRY
+            ).lower()
+            short_dte = int(self.params["short_dte"])
             long_dte = int(self.params["long_dte"])
-            long_exp = day + timedelta(days=long_dte)
+            if pe == "same":
+                long_exp = day + timedelta(days=short_dte)
+            else:
+                long_exp = day + timedelta(days=long_dte)
             if not self._can_enter(now_ts, long_exp):
                 # jump to next day start
                 nxt = day + timedelta(days=1)
@@ -639,7 +706,7 @@ class S005TentStrategy:
             )
 
             if cyc.exit_reason == "STOPLOSS":
-                cooldown_until = cyc.exit_ts + COOLDOWN_SEC
+                cooldown_until = cyc.exit_ts + cooldown_sec
                 now_ts = cyc.exit_ts + MONITOR_STEP
             elif cyc.exit_reason == "TARGET":
                 now_ts = cyc.exit_ts + MONITOR_STEP
@@ -682,6 +749,35 @@ def summarize_s005(
     holds = [c.hold_hours for c in cycles]
     worst = min(cycles, key=lambda c: c.net_pnl) if cycles else None
 
+    tc = [c for c in cycles if c.exit_reason == "TIME_CUTOFF"]
+    time_cutoff_pct = (100.0 * len(tc) / n) if n else float("nan")
+    time_cutoff_mean_net = (
+        float(statistics.fmean([c.net_pnl for c in tc])) if tc else float("nan")
+    )
+
+    worst5 = sorted(cycles, key=lambda c: c.net_pnl)[:5]
+    worst5_list = [
+        {
+            "date": c.entry_date.isoformat(),
+            "exit_reason": c.exit_reason,
+            "net": c.net_pnl,
+        }
+        for c in worst5
+    ]
+
+    shorts_vals = [
+        float((c.meta or {}).get("shorts_pnl") or 0.0) for c in cycles
+    ]
+    prot_vals = [
+        float((c.meta or {}).get("protection_pnl") or 0.0) for c in cycles
+    ]
+    mean_shorts_pnl = (
+        float(statistics.fmean(shorts_vals)) if shorts_vals else float("nan")
+    )
+    mean_protection_pnl = (
+        float(statistics.fmean(prot_vals)) if prot_vals else float("nan")
+    )
+
     # designed max loss from SL (median absolute stop)
     stops = [abs(float((c.meta or {}).get("stop_usd") or 0)) for c in cycles]
     max_loss = float(statistics.median(stops)) if stops else float("nan")
@@ -715,9 +811,14 @@ def summarize_s005(
         "bootstrap_mean": mean_p,
         "worst_net": float(worst.net_pnl) if worst else float("nan"),
         "worst_date": worst.entry_date.isoformat() if worst else "",
+        "worst5": worst5_list,
         "max_dd": max_drawdown(daily) if daily else float("nan"),
         "hold_med": float(statistics.median(holds)) if holds else float("nan"),
         "exit_mix": mix,
+        "time_cutoff_pct": time_cutoff_pct,
+        "time_cutoff_mean_net": time_cutoff_mean_net,
+        "mean_shorts_pnl": mean_shorts_pnl,
+        "mean_protection_pnl": mean_protection_pnl,
         "cooldown_entry_skips": cooldown_skips,
         "skips": {
             "days_in_window": skips.days_in_window,
