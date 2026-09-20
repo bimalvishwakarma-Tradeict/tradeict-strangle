@@ -251,6 +251,26 @@ def format_report(rows: list[dict[str, Any]], *, window: str, elapsed: float) ->
             f"{_fmt(r.get('median_mae_usd'))}/{_fmt(r.get('mae_usd'))}"
         )
     lines.append("")
+    lines.append("===== SKIP REASONS (per arm) =====")
+    for r in ranked:
+        skips = (r.get("skips") or {}).get("counts") or {}
+        if not skips:
+            lines.append(f"{r.get('arm')}: (none)")
+            continue
+        bits = [f"{k}={v}" for k, v in sorted(skips.items())]
+        lines.append(f"{r.get('arm')}: " + ", ".join(bits))
+    lines.append("")
+    lines.append("===== 0DTE EXACT SHORT-STRIKE AVAILABILITY =====")
+    for r in ranked:
+        sa = r.get("strike_availability") or {}
+        lines.append(
+            f"{r.get('arm')}: exact strike mila = {_fmt(sa.get('exact_hit_pct'), 1)}%, "
+            f"nahi mila = {_fmt(sa.get('exact_miss_pct'), 1)}%, "
+            f"jab nahi mila to median fasla = {_fmt(sa.get('median_miss_gap_pts'), 0)} pts "
+            f"(checks={sa.get('n_checks', 0)} hit={sa.get('exact_hit', 0)} "
+            f"miss={sa.get('exact_miss', 0)})"
+        )
+    lines.append("")
     return lines
 
 
@@ -315,6 +335,19 @@ def run_grid(
             _fmt(stats.get("mean_day")),
             _fmt(stats.get("mean_net")),
             row["elapsed_sec"],
+        )
+        sa = stats.get("strike_availability") or {}
+        hit_pct = sa.get("exact_hit_pct")
+        miss_pct = sa.get("exact_miss_pct")
+        med_gap = sa.get("median_miss_gap_pts")
+        logger.info(
+            "%s skips=%s | exact strike mila=%s%% nahi mila=%s%% "
+            "median_miss_gap=%s pts",
+            combo["arm"],
+            (stats.get("skips") or {}).get("counts") or {},
+            _fmt(hit_pct, 1),
+            _fmt(miss_pct, 1),
+            _fmt(med_gap, 0),
         )
 
     store.close()

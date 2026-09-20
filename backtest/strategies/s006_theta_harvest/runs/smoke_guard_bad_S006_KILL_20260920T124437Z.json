@@ -1,0 +1,102 @@
+{
+  "strategy_id": "S006",
+  "stage": "KILL",
+  "tag": "smoke_guard_bad",
+  "window": {
+    "from": "2026-08-21",
+    "to": "2026-08-21"
+  },
+  "generated_utc": "2026-09-20T12:44:37.660224+00:00",
+  "elapsed_sec": 0.41387176513671875,
+  "bootstrap": {
+    "n": 1000,
+    "seed": 20260919
+  },
+  "n_combos": 1,
+  "combos": [
+    {
+      "arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte1",
+      "qty_short": 100,
+      "protection_ratio": 3.0,
+      "target_pct": 30.0,
+      "max_dd_pct": 10.0,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "n_baskets": 0,
+      "baskets_per_day": 0.0,
+      "win_pct": NaN,
+      "mean_gross": NaN,
+      "mean_fees": NaN,
+      "mean_slippage": NaN,
+      "mean_net": NaN,
+      "mean_day": 0.0,
+      "ci_lo": 0.0,
+      "ci_hi": 0.0,
+      "bootstrap_mean": 0.0,
+      "worst_net": NaN,
+      "worst_date": "",
+      "worst5": [],
+      "max_dd": 0.0,
+      "hold_med": NaN,
+      "exit_mix": {},
+      "mean_net_by_exit_reason": {},
+      "mean_shorts_pnl": NaN,
+      "mean_protection_pnl": NaN,
+      "mae_usd": NaN,
+      "mean_mae_usd": NaN,
+      "median_mae_usd": NaN,
+      "mean_net_theta_entry": NaN,
+      "mean_entry_drag": NaN,
+      "mean_target_usd": NaN,
+      "mean_net_credit": NaN,
+      "max_loss_per_basket": NaN,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": 0.0,
+      "skips": {
+        "days_in_window": 1,
+        "cycles_entered": 0,
+        "counts": {
+          "protection_same_strike": 1
+        },
+        "examples": {
+          "protection_same_strike": [
+            "2026-08-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 3.0,
+        "target_pct": 30.0,
+        "max_dd_pct": 10.0,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte1"
+      },
+      "n_cycles": 0,
+      "strike_availability": {
+        "exact_hit": 0,
+        "exact_miss": 2,
+        "n_checks": 2,
+        "exact_hit_pct": 0.0,
+        "exact_miss_pct": 100.0,
+        "median_miss_gap_pts": 2800.0
+      },
+      "elapsed_sec": 0.41341567039489746,
+      "ci_overlap_top": false,
+      "noise_vs_top": "TOP"
+    }
+  ],
+  "baskets_csv": "smoke_guard_bad_S006_KILL_20260920T124437Z_baskets.csv",
+  "intraday_csv": "smoke_guard_bad_S006_KILL_20260920T124437Z_intraday.csv"
+}

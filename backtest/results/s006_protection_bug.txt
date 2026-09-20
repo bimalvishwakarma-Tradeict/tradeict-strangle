@@ -1,0 +1,67 @@
+S006 protection strike selection bug — DIAGNOSIS
+================================================
+Date: 2026-09-20
+File: backtest/strategies/s006_theta_harvest/strategy.py
+Function: S006ThetaHarvestStrategy.build_basket
+
+ROOT CAUSE
+----------
+0DTE protection strikes are chosen with absolute-distance nearest-neighbor
+fallback. There is NO requirement that the short strike exists exactly on the
+0DTE chain, and NO OTM / same-strike sanity check before entry.
+
+RELEVANT LINES (build_basket)
+-----------------------------
+427-451  Long 0DTE protection block
+439-444  Comment + target setup:
+         "# offset applied OTM-ward: call +po, put -po when po>0; if po==0 same strikes"
+         When protection_offset == 0 (default):
+             pc_target, pp_target = sc_k, sp_k   # copy short call/put strikes
+445-446  THE FALLBACK (bug path):
+             pc_k = self._nearest_strike(sorted(c_by_l), pc_target)
+             pp_k = self._nearest_strike(sorted(p_by_l), pp_target)
+264-267  _nearest_strike definition:
+             return min(strikes, key=lambda k: (abs(k - target), k))
+         -> always returns SOME strike if the chain is non-empty
+         -> never returns None for "missing exact strike"
+         -> ignores moneyness (ITM vs OTM)
+         -> call and put independently can snap to the SAME edge strike
+
+WHAT HAPPENS WHEN SHORT STRIKE IS ABSENT FROM 0DTE CHAIN
+--------------------------------------------------------
+1. Shorts are picked on the N-DTE chain (short_dte, default 1) via
+   _pick_premium_matched_strangle (lines 417-425). Those strikes are often
+   outside the 0DTE listed range for that morning.
+2. Protection targets = those short strikes (po=0).
+3. Exact membership is NEVER checked (no "if sc_k in c_by_l").
+4. _nearest_strike silently snaps each target to the closest listed 0DTE
+   strike of that option type — usually the chain EDGE when the short is
+   far OTM relative to what 0DTE lists.
+5. Basket is entered with whatever snapped strikes + marks; no skip.
+
+SYMPTOM MAPPING (from screen CSV)
+---------------------------------
+(a) Protection ITM:
+    Example 2026-06-03: spot=66182, short_put=64800, prot_put snapped to
+    67400 (ITM by 1218). Target 64800 not on 0DTE put chain -> nearest
+    listed put was ITM.
+    Example 2026-08-21: spot=74598.5, short_call=75400 -> prot_call snapped
+    to 70200 (ITM by ~4398); mark ~4425, huge long_debit.
+
+(b) prot_call_strike == prot_put_strike:
+    Example 2026-08-21/22: both protections = 70200 / 75400. Call and put
+    targets independently nearest-neighbor to the same edge strike on a
+    truncated 0DTE chain.
+
+WHAT IS NOT BROKEN
+------------------
+- Short-leg selection on N-DTE chain looks correct (OTM call/put).
+- Protection expiry / expire-at-cutoff path is unrelated.
+- No alternate fallback after _nearest_strike — that IS the only path.
+
+CONCLUSION
+----------
+Bug = silent nearest-strike fallback at strategy.py:445-446 with no
+exact-match or OTM guards. Fix path (next steps): measure exact-strike
+hit rate + OTM gaps; hard-skip ITM / same-strike / short-ITM baskets;
+do NOT invent a new strike fallback until hit-rate data is in.

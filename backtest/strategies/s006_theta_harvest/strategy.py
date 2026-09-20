@@ -230,7 +230,13 @@ class BasketBuild:
     protection_ratio: float
     short_dte: int = 1
     short_premium_entry_points: float = 0.0
+    prot_call_otm_pts: float = 0.0
+    prot_put_otm_pts: float = 0.0
+    exact_strike_available: int = 0
+    strike_gap_pts: float = 0.0
     basket_id: int = 0
+
+
 class S006ThetaHarvestStrategy:
     def __init__(self, params: dict[str, Any] | None = None) -> None:
         self.params = default_params()
@@ -238,6 +244,9 @@ class S006ThetaHarvestStrategy:
             self.params.update(params)
         self.skips = SkipAccount()
         self._basket_seq = 0
+        self._strike_exact_hit = 0
+        self._strike_exact_miss = 0
+        self._strike_miss_gaps: list[float] = []
 
     def meta(self) -> StrategyMeta:
         return StrategyMeta(
@@ -265,6 +274,86 @@ class S006ThetaHarvestStrategy:
         if not strikes:
             return None
         return min(strikes, key=lambda k: (abs(k - target), k))
+
+    def _nearest_otm_strike(
+        self,
+        strikes: list[float],
+        target: float,
+        spot: float,
+        *,
+        is_call: bool,
+    ) -> float | None:
+        if is_call:
+            cands = [k for k in strikes if k > spot]
+        else:
+            cands = [k for k in strikes if k < spot]
+        if not cands:
+            return None
+        return min(cands, key=lambda k: (abs(k - target), k))
+
+    def _record_short_strike_on_0dte(
+        self,
+        *,
+        day: date,
+        target: float,
+        chain_by: dict[float, dict[str, Any]],
+        spot: float,
+        is_call: bool,
+    ) -> tuple[bool, float]:
+        """Count exact short-strike presence on 0DTE; log gap when missing.
+
+        Returns (exact_available, gap_pts_to_nearest_otm).
+        """
+        exact = target in chain_by
+        nearest_otm = self._nearest_otm_strike(
+            sorted(chain_by.keys()), target, spot, is_call=is_call
+        )
+        side = "call" if is_call else "put"
+        if exact:
+            self._strike_exact_hit += 1
+            return True, 0.0
+        self._strike_exact_miss += 1
+        if nearest_otm is None:
+            logger.info(
+                "S006 exact strike miss day=%s side=%s target=%.0f "
+                "nearest_otm=None (no OTM on 0DTE chain) spot=%.2f",
+                day,
+                side,
+                target,
+                spot,
+            )
+            return False, float("nan")
+        gap = abs(nearest_otm - target)
+        self._strike_miss_gaps.append(gap)
+        pct = 100.0 * gap / spot if spot > 0 else float("nan")
+        logger.info(
+            "S006 exact strike miss day=%s side=%s target=%.0f "
+            "nearest_otm=%.0f gap=%.0f pts (%.3f%% of spot=%.2f)",
+            day,
+            side,
+            target,
+            nearest_otm,
+            gap,
+            pct,
+            spot,
+        )
+        return False, gap
+
+    def strike_availability_summary(self) -> dict[str, Any]:
+        hit = int(self._strike_exact_hit)
+        miss = int(self._strike_exact_miss)
+        total = hit + miss
+        gaps = list(self._strike_miss_gaps)
+        return {
+            "exact_hit": hit,
+            "exact_miss": miss,
+            "n_checks": total,
+            "exact_hit_pct": (100.0 * hit / total) if total else float("nan"),
+            "exact_miss_pct": (100.0 * miss / total) if total else float("nan"),
+            "median_miss_gap_pts": (
+                float(statistics.median(gaps)) if gaps else float("nan")
+            ),
+        }
 
     def _strike_step(self, strikes: list[float]) -> float:
         if len(strikes) < 2:
@@ -423,6 +512,7 @@ class S006ThetaHarvestStrategy:
         atm_k, sc_row, sp_row = pick
         sc_k = float(sc_row["strike"])
         sp_k = float(sp_row["strike"])
+        spot_f = float(spot)
 
         # Long 0DTE protection at short strikes +/- protection_offset
         conn_l = store.conn(long_exp) or conn
@@ -435,6 +525,30 @@ class S006ThetaHarvestStrategy:
             return None, "skipped_no_protection"
         c_by_l = self._by_strike(calls_l)
         p_by_l = self._by_strike(puts_l)
+
+        # STEP3 metrics: exact short-strike presence on 0DTE (no new fallback)
+        exact_c, gap_c = self._record_short_strike_on_0dte(
+            day=day,
+            target=sc_k,
+            chain_by=c_by_l,
+            spot=spot_f,
+            is_call=True,
+        )
+        exact_p, gap_p = self._record_short_strike_on_0dte(
+            day=day,
+            target=sp_k,
+            chain_by=p_by_l,
+            spot=spot_f,
+            is_call=False,
+        )
+        exact_strike_available = 1 if (exact_c and exact_p) else 0
+        gap_vals = [g for g in (gap_c, gap_p) if g == g]  # drop nan
+        strike_gap_pts = float(max(gap_vals)) if gap_vals else 0.0
+
+        # Short-leg OTM hard check (before protection snap)
+        if sc_k <= spot_f or sp_k >= spot_f:
+            return None, "short_itm"
+
         po = float(p.get("protection_offset", DEFAULT_PROTECTION_OFFSET))
         # offset applied OTM-ward: call +po, put -po when po>0; if po==0 same strikes
         if po == 0:
@@ -448,7 +562,16 @@ class S006ThetaHarvestStrategy:
             return None, "skipped_no_protection"
         if pc_k not in c_by_l or pp_k not in p_by_l:
             return None, "skipped_no_protection"
+
+        # STEP2 guardrails — skip bad protection / never enter silently
+        if pc_k == pp_k:
+            return None, "protection_same_strike"
+        if pc_k <= spot_f or pp_k >= spot_f:
+            return None, "protection_itm"
+
         lc_row, lp_row = c_by_l[pc_k], p_by_l[pp_k]
+        prot_call_otm_pts = pc_k - spot_f
+        prot_put_otm_pts = spot_f - pp_k
 
         q_short = int(p.get("qty_short", DEFAULT_QTY_SHORT))
         pr = float(p.get("protection_ratio", DEFAULT_PROTECTION_RATIO))
@@ -546,6 +669,10 @@ class S006ThetaHarvestStrategy:
                 protection_ratio=pr,
                 short_dte=short_dte,
                 short_premium_entry_points=short_premium_entry_points,
+                prot_call_otm_pts=prot_call_otm_pts,
+                prot_put_otm_pts=prot_put_otm_pts,
+                exact_strike_available=exact_strike_available,
+                strike_gap_pts=strike_gap_pts,
                 basket_id=self._basket_seq,
             ),
             None,
@@ -765,6 +892,10 @@ class S006ThetaHarvestStrategy:
             "short_put_strike": basket.short_put,
             "prot_call_strike": basket.prot_call,
             "prot_put_strike": basket.prot_put,
+            "prot_call_otm_pts": basket.prot_call_otm_pts,
+            "prot_put_otm_pts": basket.prot_put_otm_pts,
+            "exact_strike_available": basket.exact_strike_available,
+            "strike_gap_pts": basket.strike_gap_pts,
             "qty_short": basket.qty_short,
             "qty_protection": basket.qty_protection,
             "protection_ratio": basket.protection_ratio,
@@ -957,6 +1088,9 @@ class S006ThetaHarvestStrategy:
 
         self.skips = SkipAccount(days_in_window=max(0, (d1 - d0).days + 1))
         self._basket_seq = 0
+        self._strike_exact_hit = 0
+        self._strike_exact_miss = 0
+        self._strike_miss_gaps = []
         cycles: list[CycleResult] = []
 
         day = d0
@@ -988,6 +1122,7 @@ class S006ThetaHarvestStrategy:
             store.close()
 
         stats = summarize_s006(cycles, d0, d1, self.skips, self.params)
+        stats["strike_availability"] = self.strike_availability_summary()
         return cycles, self.skips, stats
 
 
