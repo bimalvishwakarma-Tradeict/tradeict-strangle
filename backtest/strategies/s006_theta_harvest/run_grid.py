@@ -34,6 +34,7 @@ from backtest.strategies.s006_theta_harvest.strategy import (  # noqa: E402
     DEFAULT_PROTECTION_OFFSET,
     DEFAULT_PROTECTION_RATIO,
     DEFAULT_QTY_SHORT,
+    DEFAULT_SHORT_DTE,
     DEFAULT_SHORT_OFFSET,
     DEFAULT_TARGET_PCT,
     S006ThetaHarvestStrategy,
@@ -53,6 +54,7 @@ DEFAULT_SHORT_OFFSETS = (DEFAULT_SHORT_OFFSET,)
 DEFAULT_PROTECTION_OFFSETS = (DEFAULT_PROTECTION_OFFSET,)
 DEFAULT_CUTOFF_TIMES = (f"{DEFAULT_CUTOFF_HOUR:02d}:{DEFAULT_CUTOFF_MINUTE:02d}",)
 DEFAULT_EXPIRE_FLAGS = (DEFAULT_EXPIRE_PROT_AT_CUTOFF,)
+DEFAULT_SHORT_DTES = (DEFAULT_SHORT_DTE,)
 
 
 def _parse_floats(s: str) -> list[float]:
@@ -74,11 +76,12 @@ def make_arm(
     cut_h: int,
     cut_m: int,
     expire: bool,
+    short_dte: int,
 ) -> str:
     dd_s = "none" if dd is None else f"{dd:g}"
     arm = (
         f"q{qty}_pr{pr:g}_tp{tp:g}_dd{dd_s}_off{off:g}_po{po:g}_"
-        f"cut{cut_h:02d}{cut_m:02d}"
+        f"cut{cut_h:02d}{cut_m:02d}_sdte{int(short_dte)}"
     )
     if not expire:
         arm += "_nox"
@@ -95,6 +98,7 @@ def build_combos(
     protection_offsets: list[float],
     cutoff_times: list[str],
     expire_flags: list[bool],
+    short_dtes: list[int],
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for qty in qty_shorts:
@@ -106,31 +110,34 @@ def build_combos(
                             for ct in cutoff_times:
                                 hh, mm = parse_cutoff_time(ct)
                                 for ex in expire_flags:
-                                    arm = make_arm(
-                                        qty=qty,
-                                        pr=pr,
-                                        tp=tp,
-                                        dd=dd,
-                                        off=off,
-                                        po=po,
-                                        cut_h=hh,
-                                        cut_m=mm,
-                                        expire=ex,
-                                    )
-                                    out.append(
-                                        {
-                                            "qty_short": qty,
-                                            "protection_ratio": pr,
-                                            "target_pct": tp,
-                                            "max_dd_pct": dd,
-                                            "short_offset": off,
-                                            "protection_offset": po,
-                                            "cutoff_hour": hh,
-                                            "cutoff_minute": mm,
-                                            "expire_protection_at_cutoff": ex,
-                                            "arm": arm,
-                                        }
-                                    )
+                                    for sdte in short_dtes:
+                                        arm = make_arm(
+                                            qty=qty,
+                                            pr=pr,
+                                            tp=tp,
+                                            dd=dd,
+                                            off=off,
+                                            po=po,
+                                            cut_h=hh,
+                                            cut_m=mm,
+                                            expire=ex,
+                                            short_dte=sdte,
+                                        )
+                                        out.append(
+                                            {
+                                                "qty_short": qty,
+                                                "protection_ratio": pr,
+                                                "target_pct": tp,
+                                                "max_dd_pct": dd,
+                                                "short_offset": off,
+                                                "protection_offset": po,
+                                                "cutoff_hour": hh,
+                                                "cutoff_minute": mm,
+                                                "expire_protection_at_cutoff": ex,
+                                                "short_dte": int(sdte),
+                                                "arm": arm,
+                                            }
+                                        )
     return out
 
 
@@ -144,6 +151,7 @@ def all_combos() -> list[dict[str, Any]]:
         protection_offsets=list(DEFAULT_PROTECTION_OFFSETS),
         cutoff_times=list(DEFAULT_CUTOFF_TIMES),
         expire_flags=list(DEFAULT_EXPIRE_FLAGS),
+        short_dtes=list(DEFAULT_SHORT_DTES),
     )
 
 
@@ -196,9 +204,9 @@ def format_report(rows: list[dict[str, Any]], *, window: str, elapsed: float) ->
         f"n_combos={len(rows)} elapsed_sec={elapsed:.1f}",
         "",
         (
-            f"{'arm':<48} {'n':>4} {'b/d':>5} {'win%':>5} "
+            f"{'arm':<52} {'n':>4} {'b/d':>5} {'win%':>5} "
             f"{'mean/b':>8} {'mean/d':>8} {'ci_lo':>8} {'ci_hi':>8} "
-            f"{'tgt$':>7} {'nc$':>7} {'mae':>8} {'shPnl':>7} {'prPnl':>7} "
+            f"{'mn_nc$':>7} {'mn_tgt$':>7} {'mae':>8} {'shPnl':>7} {'prPnl':>7} "
             f"{'noise':>10}  exits"
         ),
     ]
@@ -207,7 +215,7 @@ def format_report(rows: list[dict[str, Any]], *, window: str, elapsed: float) ->
             f"{k[:3]}={v:.0f}%" for k, v in (r.get("exit_mix") or {}).items()
         )
         lines.append(
-            f"{str(r.get('arm','')):<48} "
+            f"{str(r.get('arm','')):<52} "
             f"{int(r.get('n_baskets') or 0):4d} "
             f"{_fmt(r.get('baskets_per_day'), 2):>5} "
             f"{_fmt(r.get('win_pct'), 1):>5} "
@@ -215,8 +223,8 @@ def format_report(rows: list[dict[str, Any]], *, window: str, elapsed: float) ->
             f"{_fmt(r.get('mean_day')):>8} "
             f"{_fmt(r.get('ci_lo')):>8} "
             f"{_fmt(r.get('ci_hi')):>8} "
-            f"{_fmt(r.get('mean_target_usd'), 3):>7} "
             f"{_fmt(r.get('mean_net_credit'), 3):>7} "
+            f"{_fmt(r.get('mean_target_usd'), 3):>7} "
             f"{_fmt(r.get('mae_usd')):>8} "
             f"{_fmt(r.get('mean_shorts_pnl'), 3):>7} "
             f"{_fmt(r.get('mean_protection_pnl'), 3):>7} "
@@ -430,6 +438,12 @@ def main() -> None:
         default=None,
         help="Comma true/false (default true). false = close longs at cutoff too",
     )
+    ap.add_argument(
+        "--short-dtes",
+        type=str,
+        default=None,
+        help="Comma list short-leg DTE (default 1). Protection stays 0DTE.",
+    )
     args = ap.parse_args()
 
     qty_shorts = (
@@ -480,6 +494,11 @@ def main() -> None:
                 raise SystemExit(f"bad --expire-protection-at-cutoff: {x!r}")
     else:
         expire_flags = list(DEFAULT_EXPIRE_FLAGS)
+    short_dtes = (
+        [max(1, int(float(x))) for x in _parse_floats(args.short_dtes)]
+        if args.short_dtes
+        else list(DEFAULT_SHORT_DTES)
+    )
 
     combos = build_combos(
         qty_shorts=qty_shorts,
@@ -490,6 +509,7 @@ def main() -> None:
         protection_offsets=protection_offsets,
         cutoff_times=cutoff_times,
         expire_flags=expire_flags,
+        short_dtes=short_dtes,
     )
     d0 = date.fromisoformat(args.from_date)
     d1 = date.fromisoformat(args.to_date)

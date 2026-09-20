@@ -16,6 +16,42 @@
       "ci_hi": -5.424538326455702,
       "verdict": "GRID_1_COMBOS",
       "top_arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729"
+    },
+    {
+      "stage": "KILL",
+      "tag": "screen",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260920",
+      "n": 92,
+      "mean_day": -3.5639446295892587,
+      "ci_lo": -5.760208866128613,
+      "ci_hi": -2.071821654729871,
+      "verdict": "GRID_6_COMBOS",
+      "top_arm": "q100_pr3_tp20_dd10_off2000_po0_cut1729"
+    },
+    {
+      "stage": "KILL",
+      "tag": "smoke_sdte1",
+      "window": "2026-08-04..2026-08-04",
+      "date": "20260920",
+      "n": 1,
+      "mean_day": -5.424538326455702,
+      "ci_lo": -5.424538326455702,
+      "ci_hi": -5.424538326455702,
+      "verdict": "GRID_1_COMBOS",
+      "top_arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte1"
+    },
+    {
+      "stage": "KILL",
+      "tag": "smoke_sdte2",
+      "window": "2026-08-04..2026-08-04",
+      "date": "20260920",
+      "n": 1,
+      "mean_day": -1.5748372681688418,
+      "ci_lo": -1.5748372681688418,
+      "ci_hi": -1.5748372681688418,
+      "verdict": "GRID_1_COMBOS",
+      "top_arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte2"
     }
   ],
   "open_questions": [

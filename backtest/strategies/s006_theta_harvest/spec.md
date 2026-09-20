@@ -9,12 +9,13 @@ BTC options on Delta Exchange India. Harness-native (no live bot changes).
 
 Entry **09:00 IST** each day:
 
-1. **SHORT 1DTE strangle**  
+1. **SHORT `short_dte` strangle** (default 1; grid via `--short-dtes`)  
    Target strikes = ATM ± `short_offset` (default 2000).  
    Premium-match within ±2 listed strikes. qty = `qty_short` (default 100) per side.
 
 2. **LONG 0DTE protection** at short strikes ± `protection_offset` (default 0).  
    qty = `protection_ratio` × `qty_short` per side (grid 2/3/4/5).
+   Protection expiry is always 0DTE regardless of short DTE.
 
 ## Exit (whole basket; never leave a naked short)
 
@@ -43,6 +44,7 @@ Harness bucketed slippage + `option_fee`. No new cost model.
 
 | Axis | Values |
 |------|--------|
+| short_dte | 1 (default; CLI `--short-dtes 1,2`) |
 | protection_ratio | 2, 3, 4, 5 |
 | target_pct | 10..70 step 10 |
 | max_dd_pct | 10, 20, none |
@@ -51,6 +53,7 @@ Harness bucketed slippage + `option_fee`. No new cost model.
 | protection_offset | 0 |
 | cutoff | 17:29 |
 
-= 4 × 7 × 3 = **84** combos.
+Default (sdte=1 only) = 4 × 7 × 3 = **84** combos.  
+Report shows **mean_net_credit** and **mean_target_usd** (absolute $) so DTE arms are comparable.
 
 Bootstrap: n=1000, seed **20260919**

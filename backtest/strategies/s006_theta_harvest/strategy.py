@@ -70,6 +70,7 @@ DEFAULT_MAX_DD_PCT: float | None = 10.0
 DEFAULT_SHORT_OFFSET = 2000.0
 DEFAULT_PROTECTION_OFFSET = 0.0
 DEFAULT_EXPIRE_PROT_AT_CUTOFF = True
+DEFAULT_SHORT_DTE = 1
 MONITOR_STEP = 60
 INTRADAY_STEP = 3600
 BOOTSTRAP_N = 1000
@@ -88,12 +89,13 @@ def default_params() -> dict[str, Any]:
         "max_dd_pct": DEFAULT_MAX_DD_PCT,
         "short_offset": DEFAULT_SHORT_OFFSET,
         "protection_offset": DEFAULT_PROTECTION_OFFSET,
+        "short_dte": DEFAULT_SHORT_DTE,
         "cutoff_hour": DEFAULT_CUTOFF_HOUR,
         "cutoff_minute": DEFAULT_CUTOFF_MINUTE,
         "expire_protection_at_cutoff": DEFAULT_EXPIRE_PROT_AT_CUTOFF,
         "slip_model": "bucketed",
         "slip_mult": 1.0,
-        "arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729",
+        "arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte1",
     }
 
 
@@ -226,6 +228,8 @@ class BasketBuild:
     qty_short: int
     qty_protection: int
     protection_ratio: float
+    short_dte: int = 1
+    short_premium_entry_points: float = 0.0
     basket_id: int = 0
 class S006ThetaHarvestStrategy:
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -381,7 +385,8 @@ class S006ThetaHarvestStrategy:
         entry_ts: int,
     ) -> tuple[BasketBuild | None, str | None]:
         p = self.params
-        short_exp = day + timedelta(days=1)
+        short_dte = max(1, int(p.get("short_dte", DEFAULT_SHORT_DTE)))
+        short_exp = day + timedelta(days=short_dte)
         long_exp = day
         if short_exp in SKIP_EXPIRIES or long_exp in SKIP_EXPIRIES:
             return None, "skipped_expiry_blocklist"
@@ -395,7 +400,7 @@ class S006ThetaHarvestStrategy:
         if conn is None:
             return None, "skipped_no_mark"
 
-        # Short 1DTE chain
+        # Short N-DTE chain (protection always 0DTE)
         conn_s = store.conn(short_exp) or conn
         cts_s = resolve_mark_ts(conn_s, short_exp, entry_ts)
         if cts_s is None:
@@ -419,7 +424,7 @@ class S006ThetaHarvestStrategy:
         sc_k = float(sc_row["strike"])
         sp_k = float(sp_row["strike"])
 
-        # Long 0DTE protection at short strikes Â± protection_offset
+        # Long 0DTE protection at short strikes +/- protection_offset
         conn_l = store.conn(long_exp) or conn
         cts_l = resolve_mark_ts(conn_l, long_exp, entry_ts)
         if cts_l is None:
@@ -431,8 +436,6 @@ class S006ThetaHarvestStrategy:
         c_by_l = self._by_strike(calls_l)
         p_by_l = self._by_strike(puts_l)
         po = float(p.get("protection_offset", DEFAULT_PROTECTION_OFFSET))
-        pc_target = sc_k + po
-        pp_target = sp_k - po if po != 0 else sp_k + po
         # offset applied OTM-ward: call +po, put -po when po>0; if po==0 same strikes
         if po == 0:
             pc_target, pp_target = sc_k, sp_k
@@ -475,8 +478,8 @@ class S006ThetaHarvestStrategy:
             )
 
         legs = [
-            make_leg("short_call", sc_row, q_short, 1, "sell"),
-            make_leg("short_put", sp_row, q_short, 1, "sell"),
+            make_leg("short_call", sc_row, q_short, short_dte, "sell"),
+            make_leg("short_put", sp_row, q_short, short_dte, "sell"),
             make_leg("prot_call", lc_row, q_prot, 0, "buy"),
             make_leg("prot_put", lp_row, q_prot, 0, "buy"),
         ]
@@ -486,6 +489,9 @@ class S006ThetaHarvestStrategy:
         )
         long_debit = sum(
             leg.entry_fill * qty_btc(leg.qty) for leg in legs if leg.side == "buy"
+        )
+        short_premium_entry_points = sum(
+            leg.entry_mark for leg in legs if leg.side == "sell"
         )
         fees = sum(leg.entry_fee for leg in legs)
         slip_cost = sum(
@@ -538,6 +544,8 @@ class S006ThetaHarvestStrategy:
                 qty_short=q_short,
                 qty_protection=q_prot,
                 protection_ratio=pr,
+                short_dte=short_dte,
+                short_premium_entry_points=short_premium_entry_points,
                 basket_id=self._basket_seq,
             ),
             None,
@@ -707,8 +715,12 @@ class S006ThetaHarvestStrategy:
                 "short_credit": basket.short_credit,
                 "long_debit": basket.long_debit,
                 "target_usd": basket.target_usd,
+                "target_usd_absolute": basket.target_usd,
                 "target_pct": float(p.get("target_pct", DEFAULT_TARGET_PCT)),
                 "stop_usd": basket.stop_usd,
+                "stop_usd_absolute": basket.stop_usd,
+                "short_dte": basket.short_dte,
+                "short_premium_entry_points": basket.short_premium_entry_points,
                 "entry_drag": basket.entry_drag,
                 "net_theta_entry": basket.net_theta_entry,
                 "mae_usd": mae_usd,
@@ -756,6 +768,7 @@ class S006ThetaHarvestStrategy:
             "qty_short": basket.qty_short,
             "qty_protection": basket.qty_protection,
             "protection_ratio": basket.protection_ratio,
+            "short_dte": basket.short_dte,
         }
         by_role = {leg.role: leg for leg in basket.legs}
         for role in LEG_ROLES:
@@ -781,7 +794,12 @@ class S006ThetaHarvestStrategy:
                 "entry_drag": basket.entry_drag,
                 "target_pct": float(p.get("target_pct", DEFAULT_TARGET_PCT)),
                 "target_usd": basket.target_usd,
+                "target_usd_absolute": basket.target_usd,
                 "stop_usd": basket.stop_usd if basket.stop_usd is not None else "",
+                "stop_usd_absolute": (
+                    basket.stop_usd if basket.stop_usd is not None else ""
+                ),
+                "short_premium_entry_points": basket.short_premium_entry_points,
                 "mae_usd": mae_usd,
                 "net_theta_entry": basket.net_theta_entry,
                 "shorts_pnl": shorts_pnl,

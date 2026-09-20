@@ -1,0 +1,98 @@
+{
+  "strategy_id": "S006",
+  "stage": "KILL",
+  "tag": "smoke_sdte2",
+  "window": {
+    "from": "2026-08-04",
+    "to": "2026-08-04"
+  },
+  "generated_utc": "2026-09-20T12:09:41.282748+00:00",
+  "elapsed_sec": 0.10847306251525879,
+  "bootstrap": {
+    "n": 1000,
+    "seed": 20260919
+  },
+  "n_combos": 1,
+  "combos": [
+    {
+      "arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte2",
+      "qty_short": 100,
+      "protection_ratio": 3.0,
+      "target_pct": 30.0,
+      "max_dd_pct": 10.0,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 2,
+      "n_baskets": 1,
+      "baskets_per_day": 1.0,
+      "win_pct": 0.0,
+      "mean_gross": -0.5211510868141332,
+      "mean_fees": 1.0536861813547085,
+      "mean_slippage": 1.447934533814134,
+      "mean_net": -1.5748372681688418,
+      "mean_day": -1.5748372681688418,
+      "ci_lo": -1.5748372681688418,
+      "ci_hi": -1.5748372681688418,
+      "bootstrap_mean": -1.5748372681688418,
+      "worst_net": -1.5748372681688418,
+      "worst_date": "2026-08-04",
+      "worst5": [
+        {
+          "date": "2026-08-04",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -1.5748372681688418
+        }
+      ],
+      "max_dd": -1.5748372681688418,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TIME_CUTOFF": 100.0
+      },
+      "mean_net_by_exit_reason": {
+        "TIME_CUTOFF": -1.5748372681688418
+      },
+      "mean_shorts_pnl": 2.233202635169121,
+      "mean_protection_pnl": -2.7543537219832546,
+      "mae_usd": -2.415421634999999,
+      "mean_mae_usd": -2.415421634999999,
+      "median_mae_usd": -2.415421634999999,
+      "mean_net_theta_entry": -12.524946525837464,
+      "mean_entry_drag": -1.5276831871490661,
+      "mean_target_usd": 2.922468610291045,
+      "mean_net_credit": 9.741562034303485,
+      "max_loss_per_basket": 2.415421634999999,
+      "basket_units_at_3pct": 1,
+      "daily_net_pct_of_capital_at_size": -1.5748372681688416,
+      "skips": {
+        "days_in_window": 1,
+        "cycles_entered": 1,
+        "counts": {},
+        "examples": {}
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 3.0,
+        "target_pct": 30.0,
+        "max_dd_pct": 10.0,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 2,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte2"
+      },
+      "n_cycles": 1,
+      "elapsed_sec": 0.10810327529907227,
+      "ci_overlap_top": false,
+      "noise_vs_top": "TOP"
+    }
+  ],
+  "baskets_csv": "smoke_sdte2_S006_KILL_20260920T120941Z_baskets.csv",
+  "intraday_csv": "smoke_sdte2_S006_KILL_20260920T120941Z_intraday.csv"
+}
