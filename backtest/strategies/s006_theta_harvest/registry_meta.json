@@ -1,0 +1,29 @@
+{
+  "id": "S006",
+  "name": "S006 Daily Theta Harvesting",
+  "status": "TESTING",
+  "one_line": "1DTE short strangle (ATM+/-2000 premium-matched) + 0DTE ratio protection; daily 09:00; TP/SL/17:29; expire longs at cutoff.",
+  "rules_summary": "Entry 09:00 IST; short 1DTE ATM+/-offset with premium match; long 0DTE same strikes x protection_ratio; TARGET=pct*net_credit; SL=max_dd_pct of $100; TIME 17:29; at cutoff expire protection at intrinsic (no fee/slip) when flag on; entry_drag baseline; baskets + hourly intraday CSV.",
+  "tests_done": [
+    {
+      "stage": "KILL",
+      "tag": "smoke1d",
+      "window": "2026-08-04..2026-08-04",
+      "date": "20260920",
+      "n": 1,
+      "mean_day": -5.424538326455702,
+      "ci_lo": -5.424538326455702,
+      "ci_hi": -5.424538326455702,
+      "verdict": "GRID_1_COMBOS",
+      "top_arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729"
+    }
+  ],
+  "open_questions": [
+    "Does terminal 15:00-17:29 collapse show up in real intraday CSV?",
+    "Which protection_ratio / target_pct / max_dd_pct survives with positive mean/day?"
+  ],
+  "next_steps": [
+    "Smoke 1 day then KILL window grid on protection_ratios x target_pcts x max_dd_pcts."
+  ],
+  "learnings": []
+}
