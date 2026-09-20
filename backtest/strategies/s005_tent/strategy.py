@@ -37,6 +37,7 @@ from backtest.harness.data import (  # noqa: E402
     ist_dt,
     load_chain,
     load_spot_map,
+    load_symbol_series,
     resolve_forward,
     resolve_mark_ts,
     to_unix,
@@ -293,22 +294,7 @@ class S005TentStrategy:
     def _preload(
         self, store: MarksStore, symbol: str, t0: int, t1: int
     ) -> dict[int, float]:
-        out: dict[int, float] = {}
-        d0 = datetime.fromtimestamp(t0, tz=UTC).astimezone(IST).date()
-        d1 = datetime.fromtimestamp(t1, tz=UTC).astimezone(IST).date()
-        day = d0
-        while day <= d1:
-            conn = store.conn(day)
-            if conn is not None:
-                rows = conn.execute(
-                    "SELECT ts, close FROM marks WHERE symbol=? AND ts BETWEEN ? AND ?",
-                    (symbol, t0 - 120, t1 + 120),
-                ).fetchall()
-                for ts, c in rows:
-                    if c is not None and float(c) > 0:
-                        out[int(ts)] = float(c)
-            day += timedelta(days=1)
-        return out
+        return load_symbol_series(store, symbol, t0, t1)
 
     def _mark_at(self, series: dict[int, float], ts: int) -> float | None:
         minute = (ts // 60) * 60

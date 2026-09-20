@@ -6,7 +6,7 @@ import csv
 import logging
 import sqlite3
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -19,6 +19,7 @@ if str(_BACKTEST) not in sys.path:
     sys.path.insert(0, str(_BACKTEST))
 
 from backtest.harness.config import MARKS_DIR, DATA_1M_DIR, MARK_TOL_SEC, STALE_BAR_SEC
+from backtest.harness.mark_cache import get_mark_cache
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
@@ -103,6 +104,11 @@ def resolve_mark_ts(
 def load_chain(
     conn: sqlite3.Connection, expiry: date, chain_ts: int, opt_type: str
 ) -> list[dict[str, Any]]:
+    cache = get_mark_cache()
+    key = ("chain", expiry.isoformat(), int(chain_ts), str(opt_type))
+    hit = cache.get(key)
+    if hit is not None:
+        return hit  # type: ignore[return-value]
     rows = conn.execute(
         """
         SELECT symbol, strike, close FROM marks
@@ -111,7 +117,7 @@ def load_chain(
         """,
         (expiry.isoformat(), chain_ts, opt_type),
     ).fetchall()
-    return [
+    out = [
         {
             "symbol": str(s),
             "strike": float(k),
@@ -122,6 +128,51 @@ def load_chain(
         }
         for s, k, c in rows
     ]
+    cache.put(key, out)
+    return out
+
+
+def load_symbol_series(
+    store: MarksStore, symbol: str, t0: int, t1: int
+) -> dict[int, float]:
+    """
+    Load close marks for symbol over [t0, t1] (±120s pad), process-cached.
+    Queries each month sqlite at most once (unlike day-loop re-fetch).
+    """
+    cache = get_mark_cache()
+    t0i, t1i = int(t0), int(t1)
+    key = ("series", str(symbol), t0i, t1i)
+    hit = cache.get(key)
+    if hit is not None:
+        return hit  # type: ignore[return-value]
+
+    out: dict[int, float] = {}
+    d0 = datetime.fromtimestamp(t0i, tz=UTC).astimezone(IST).date()
+    d1 = datetime.fromtimestamp(t1i, tz=UTC).astimezone(IST).date()
+    # Unique month connections covering the range
+    seen_ym: set[str] = set()
+    day = d0
+    while day <= d1:
+        ym = f"{day.year:04d}-{day.month:02d}"
+        if ym not in seen_ym:
+            seen_ym.add(ym)
+            conn = store.conn(day)
+            if conn is not None:
+                rows = conn.execute(
+                    "SELECT ts, close FROM marks WHERE symbol=? AND ts BETWEEN ? AND ?",
+                    (symbol, t0i - 120, t1i + 120),
+                ).fetchall()
+                for ts, c in rows:
+                    if c is not None and float(c) > 0:
+                        out[int(ts)] = float(c)
+        # jump to next month start
+        if day.month == 12:
+            day = date(day.year + 1, 1, 1)
+        else:
+            day = date(day.year, day.month + 1, 1)
+
+    cache.put(key, out)
+    return out
 
 
 def mark_ohlc_at(

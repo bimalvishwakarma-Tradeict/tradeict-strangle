@@ -22,6 +22,7 @@ if str(_BACKTEST) not in sys.path:
     sys.path.insert(0, str(_BACKTEST))
 
 from backtest.harness.data import MarksStore, find_spot_csv, load_spot_map  # noqa: E402
+from backtest.harness.mark_cache import get_mark_cache  # noqa: E402
 from backtest.harness.registry import write_registry  # noqa: E402
 from backtest.strategies.s005_tent.strategy import (  # noqa: E402
     BOOTSTRAP_N,
@@ -466,6 +467,7 @@ def run_grid(
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _write_baskets_csv(csv_path, basket_csv_rows)
     logger.info("wrote %s, %s, %s", json_path, md_path, csv_path)
+    logger.info("mark_cache %s", get_mark_cache().stats())
 
     meta_path = Path(__file__).resolve().parent / "registry_meta.json"
     try:

@@ -1,0 +1,116 @@
+{
+  "strategy_id": "S005",
+  "stage": "KILL",
+  "tag": "v2check",
+  "window": {
+    "from": "2026-08-04",
+    "to": "2026-08-04"
+  },
+  "generated_utc": "2026-09-20T06:14:18.979881+00:00",
+  "elapsed_sec": 0.9118759632110596,
+  "bootstrap": {
+    "n": 1000,
+    "seed": 20260919
+  },
+  "n_combos": 1,
+  "combos": [
+    {
+      "arm": "s1l0_q10_20_tp25_sl99_cd4_xmabsorption_tr150_ab0.2_ml5",
+      "short_dte": 1,
+      "long_dte": 0,
+      "qty_straddle": 10,
+      "qty_strangle": 20,
+      "target_pct": 25.0,
+      "sl_mult": 99.0,
+      "protection_expiry": "calendar",
+      "protection_offset": 0,
+      "protection_ratio": 1.0,
+      "be_mult": 1.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 25,
+      "cooldown_hours": 4.0,
+      "exit_mode": "absorption",
+      "trigger_pct": 150.0,
+      "absorb_min": 0.2,
+      "max_basket_loss_usd": 5.0,
+      "no_target": false,
+      "n_baskets": 2,
+      "baskets_per_day": 2.0,
+      "win_pct": 0.0,
+      "mean_gross": -1.8301546563489657,
+      "mean_fees": 0.8044172485916403,
+      "mean_slippage": 0.43903349064896513,
+      "mean_net": -2.634571904940606,
+      "mean_day": -5.269143809881212,
+      "ci_lo": -5.269143809881212,
+      "ci_hi": -5.269143809881212,
+      "bootstrap_mean": -5.269143809881212,
+      "worst_net": -2.7229347082682844,
+      "worst_date": "2026-08-04",
+      "worst5": [
+        {
+          "date": "2026-08-04",
+          "exit_reason": "ABSORPTION_FAIL",
+          "net": -2.7229347082682844
+        },
+        {
+          "date": "2026-08-04",
+          "exit_reason": "ABSORPTION_FAIL",
+          "net": -2.546209101612927
+        }
+      ],
+      "max_dd": -5.269143809881212,
+      "hold_med": 2.158333333333333,
+      "exit_mix": {
+        "ABSORPTION_FAIL": 100.0
+      },
+      "time_cutoff_pct": 0.0,
+      "time_cutoff_mean_net": NaN,
+      "mean_shorts_pnl": -1.5669225919217447,
+      "mean_protection_pnl": -0.2632320644272208,
+      "mae_usd": -1.4805658403000002,
+      "mean_mae_usd": -1.3911211657000004,
+      "mean_net_theta_entry": -2.703325878798873,
+      "mean_entry_drag": -0.5828121123173369,
+      "max_loss_per_basket": 1.4805658403000002,
+      "basket_units_at_3pct": 2,
+      "daily_net_pct_of_capital_at_size": -10.538287619762423,
+      "cooldown_entry_skips": 8,
+      "skips": {
+        "days_in_window": 1,
+        "cycles_entered": 2,
+        "counts": {},
+        "examples": {}
+      },
+      "params": {
+        "short_dte": 1,
+        "long_dte": 0,
+        "qty_straddle": 10,
+        "qty_strangle": 20,
+        "target_pct": 25.0,
+        "sl_mult": 99.0,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "s1l0_q10_20_tp25_sl99_cd4_xmabsorption_tr150_ab0.2_ml5",
+        "protection_expiry": "calendar",
+        "protection_offset": 0,
+        "protection_ratio": 1.0,
+        "be_mult": 1.0,
+        "cutoff_hour": 17,
+        "cutoff_minute": 25,
+        "cooldown_hours": 4.0,
+        "exit_mode": "absorption",
+        "trigger_pct": 150.0,
+        "absorb_min": 0.2,
+        "max_basket_loss_usd": 5.0,
+        "no_target": false
+      },
+      "n_cycles": 2,
+      "elapsed_sec": 0.9114270210266113,
+      "ci_overlap_top": false,
+      "noise_vs_top": "TOP"
+    }
+  ],
+  "baskets_csv": "v2check_S005_KILL_20260920T061418Z_baskets.csv",
+  "note": "3-month exploration \u2014 CI overlap wale combos ko alag mat maano"
+}

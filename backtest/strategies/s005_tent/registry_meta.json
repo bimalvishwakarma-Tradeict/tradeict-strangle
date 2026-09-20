@@ -64,6 +64,78 @@
       "ci_hi": -2.1897619559707078,
       "verdict": "GRID_18_COMBOS",
       "top_arm": "s1l0_q10_20_tp10_sl2_off1_be1.25"
+    },
+    {
+      "stage": "KILL",
+      "tag": "v2check",
+      "window": "2026-08-04..2026-08-04",
+      "date": "20260920",
+      "n": 2,
+      "mean_day": -5.269143809881212,
+      "ci_lo": -5.269143809881212,
+      "ci_hi": -5.269143809881212,
+      "verdict": "GRID_1_COMBOS",
+      "top_arm": "s1l0_q10_20_tp25_sl99_cd4_xmabsorption_tr150_ab0.2_ml5"
+    },
+    {
+      "stage": "KILL",
+      "tag": "nostop",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260920",
+      "n": 92,
+      "mean_day": -0.949031681555681,
+      "ci_lo": -1.868850823826843,
+      "ci_hi": 0.14311762281970838,
+      "verdict": "GRID_6_COMBOS",
+      "top_arm": "s1l0_q10_20_tp10_sl99_cd4_notp"
+    },
+    {
+      "stage": "KILL",
+      "tag": "absorb",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260920",
+      "n": 102,
+      "mean_day": -2.0132727791064067,
+      "ci_lo": -2.469873419763794,
+      "ci_hi": -1.618039608081492,
+      "verdict": "GRID_16_COMBOS",
+      "top_arm": "s1l0_q10_20_tp25_sl99_pesame_cd4_xmabsorption_tr150_ab0.2_ml5"
+    },
+    {
+      "stage": "KILL",
+      "tag": "profile6",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260920",
+      "n": 189,
+      "mean_day": -3.2414464929843536,
+      "ci_lo": -4.282804252964126,
+      "ci_hi": -2.4520566097700174,
+      "verdict": "GRID_6_COMBOS",
+      "top_arm": "s1l0_q10_20_tp10_sl4"
+    },
+    {
+      "stage": "KILL",
+      "tag": "geom",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260920",
+      "n": 93,
+      "mean_day": -0.7942868954137813,
+      "ci_lo": -1.7315996967909608,
+      "ci_hi": 0.29734463248547666,
+      "verdict": "GRID_6_COMBOS",
+      "top_arm": "s1l0_q10_20_tp10_sl99_be1.25_cd4_notp"
+    },
+    {
+      "stage": "KILL",
+      "tag": "profile6_after",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260920",
+      "n": 189,
+      "mean_day": -3.2414464929843536,
+      "ci_lo": -4.282804252964126,
+      "ci_hi": -2.4520566097700174,
+      "verdict": "GRID_6_COMBOS",
+      "top_arm": "s1l0_q10_20_tp10_sl4"
     }
   ],
   "open_questions": [

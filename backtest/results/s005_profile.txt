@@ -1,0 +1,94 @@
+===== S005 PROFILE — BASELINE (before cache) =====
+window=2026-06-01..2026-08-31
+n_combos=6
+arms=['s1l0_q10_20_tp10_sl2', 's1l0_q10_20_tp10_sl3', 's1l0_q10_20_tp10_sl4', 's2l1_q10_20_tp10_sl2', 's2l1_q10_20_tp10_sl3', 's2l1_q10_20_tp10_sl4']
+wall_elapsed_sec=659.222
+run_grid_elapsed_sec=656.127
+total_baskets=1150
+mean_day_by_arm={'s1l0_q10_20_tp10_sl2': -3.5589231001687915, 's1l0_q10_20_tp10_sl3': -3.435162317910185, 's1l0_q10_20_tp10_sl4': -3.2414464929843536, 's2l1_q10_20_tp10_sl2': -5.085493696650135, 's2l1_q10_20_tp10_sl3': -3.37889842856693, 's2l1_q10_20_tp10_sl4': -3.863930724547288}
+
+===== top 20 by cumulative time =====
+         22456243 function calls (22456198 primitive calls) in 659.188 seconds
+
+   Ordered by: cumulative time
+   List reduced from 311 to 20 due to restriction <20>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.003    0.003  659.191  659.191 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\run_grid.py:387(run_grid)
+        6    0.327    0.055  656.120  109.353 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:1034(run_window)
+     1988    0.376    0.000  649.147    0.327 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:430(build_basket)
+    17462  625.927    0.036  625.927    0.036 {method 'fetchall' of 'sqlite3.Cursor' objects}
+     7256    0.418    0.000  617.546    0.085 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\data.py:103(load_chain)
+     6900    7.064    0.001   27.323    0.004 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:293(_preload)
+    21154   13.318    0.001   13.318    0.001 {method 'execute' of 'sqlite3.Connection' objects}
+     1150    0.589    0.001    5.629    0.005 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:927(monitor_basket)
+   522868    0.182    0.000    4.292    0.000 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:636(_adj_mtm)
+   522868    1.745    0.000    4.110    0.000 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:624(_raw_mtm)
+        1    0.669    0.669    2.752    2.752 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\data.py:70(load_spot_map)
+   664850    1.034    0.000    2.085    0.000 C:\Python314\Lib\csv.py:173(__next__)
+     3660    0.018    0.000    2.044    0.001 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\data.py:78(resolve_mark_ts)
+  3032413    1.033    0.000    1.353    0.000 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\costs.py:82(qty_btc)
+  3028038    1.034    0.000    1.034    0.000 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:313(_mark_at)
+        6    0.005    0.001    0.954    0.159 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:1127(summarize_s005)
+        6    0.148    0.025    0.944    0.157 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\metrics.py:27(day_clustered_ci_daily)
+     1150    0.030    0.000    0.811    0.001 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:401(_net_theta_usd)
+   552000    0.263    0.000    0.777    0.000 C:\Python314\Lib\random.py:294(randrange)
+   664857    0.764    0.000    0.773    0.000 {built-in method builtins.next}
+
+
+
+
+===== STEP2 — BOTTLENECK REPORT (from baseline profile) =====
+Dominant cost: sqlite3.Cursor.fetchall (~626s / 659s ≈ 95%).
+Called mainly via harness.data.load_chain (~617s cum) and strategy._preload (~27s).
+Black-76 / _net_theta_usd ≈ 0.8s; bootstrap day_clustered_ci_daily ≈ 0.9s;
+monitor/_adj_mtm ≈ 5.6s — not the bottleneck.
+
+===== S005 PROFILE — AFTER shared mark cache =====
+window=2026-06-01..2026-08-31
+n_combos=6
+wall_elapsed_sec=397.883
+run_grid_elapsed_sec=394.894
+total_baskets=1150
+mean_day_by_arm={'s1l0_q10_20_tp10_sl2': -3.5589231001687915, 's1l0_q10_20_tp10_sl3': -3.435162317910185, 's1l0_q10_20_tp10_sl4': -3.2414464929843536, 's2l1_q10_20_tp10_sl2': -5.085493696650135, 's2l1_q10_20_tp10_sl3': -3.37889842856693, 's2l1_q10_20_tp10_sl4': -3.863930724547288}
+cache_stats={'entries': 8106, 'nbytes': 383987648, 'max_bytes': 4294967296, 'hits': 6050, 'misses': 8106, 'evictions': 0, 'hit_rate': 0.4273806159932184}
+mean_day_identical_to_baseline=True
+mean_day_diffs=[]
+
+===== top 20 by cumulative time (after) =====
+         22541046 function calls (22541001 primitive calls) in 397.833 seconds
+
+   Ordered by: cumulative time
+   List reduced from 322 to 20 due to restriction <20>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.002    0.002  397.860  397.860 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\run_grid.py:388(run_grid)
+        6    0.048    0.008  394.891   65.815 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:1020(run_window)
+     1988    0.200    0.000  387.021    0.195 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:416(build_basket)
+     8142  371.536    0.046  371.536    0.046 {method 'fetchall' of 'sqlite3.Cursor' objects}
+     7256    0.424    0.000  371.462    0.051 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\data.py:104(load_chain)
+     6900    0.101    0.000   10.905    0.002 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:294(_preload)
+     6900    3.651    0.001   10.804    0.002 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\data.py:135(load_symbol_series)
+    11834    8.516    0.001    8.516    0.001 {method 'execute' of 'sqlite3.Connection' objects}
+     1150    0.716    0.001    6.711    0.006 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:913(monitor_basket)
+   522868    0.225    0.000    5.156    0.000 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:622(_adj_mtm)
+   522868    2.182    0.000    4.931    0.000 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:610(_raw_mtm)
+        1    0.664    0.664    2.699    2.699 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\data.py:71(load_spot_map)
+     3660    0.018    0.000    2.234    0.001 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\data.py:79(resolve_mark_ts)
+   664850    1.009    0.000    2.037    0.000 C:\Python314\Lib\csv.py:173(__next__)
+  3032413    1.285    0.000    1.687    0.000 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\costs.py:82(qty_btc)
+  3028038    1.091    0.000    1.091    0.000 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:299(_mark_at)
+        6    0.006    0.001    1.059    0.176 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:1113(summarize_s005)
+        6    0.165    0.027    1.048    0.175 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\harness\metrics.py:27(day_clustered_ci_daily)
+     1150    0.034    0.000    1.023    0.001 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:387(_net_theta_usd)
+     6900    0.157    0.000    0.898    0.000 D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\strategies\s005_tent\strategy.py:154(implied_vol_bisection)
+
+
+
+
+===== SPEEDUP SUMMARY =====
+before_wall_sec=659.222
+after_wall_sec=397.883
+speedup_x=1.656
+mean_day_identical_to_baseline=True
+fetchall_ncalls_before=17462 after=8142
