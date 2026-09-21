@@ -74,6 +74,11 @@ DEFAULT_SHORT_OFFSET = 2000.0
 DEFAULT_PROTECTION_OFFSET = 0.0
 DEFAULT_EXPIRE_PROT_AT_CUTOFF = True
 DEFAULT_SHORT_DTE = 1
+DEFAULT_PROTECTION_MODE = "same_strike"
+DEFAULT_PROTECTION_MULT = 1.0
+DEFAULT_ADJ_MODE = "none"
+DEFAULT_ADJ_TRIGGER = 200.0
+DEFAULT_MAX_ADJ = 1
 MONITOR_STEP = 60
 INTRADAY_STEP = 3600
 BOOTSTRAP_N = 1000
@@ -101,6 +106,11 @@ def default_params() -> dict[str, Any]:
         "entry_minute": ENTRY_MINUTE,
         "entry_window_start": DEFAULT_ENTRY_WINDOW_START,
         "entry_window_end": DEFAULT_ENTRY_WINDOW_END,
+        "protection_mode": DEFAULT_PROTECTION_MODE,
+        "protection_mult": DEFAULT_PROTECTION_MULT,
+        "adj_mode": DEFAULT_ADJ_MODE,
+        "adj_trigger": DEFAULT_ADJ_TRIGGER,
+        "max_adj": DEFAULT_MAX_ADJ,
         "slip_model": "bucketed",
         "slip_mult": 1.0,
         "arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte1_emfixed_e0900",
@@ -252,6 +262,12 @@ class BasketBuild:
     bars_since_day_reset: int = 0
     signals_found_today: int = 0
     signal_rank_used: int = 0
+    realized_adj_pnl: float = 0.0
+    adj_events: list[dict[str, Any]] = field(default_factory=list)
+    n_adjustments: int = 0
+    protection_mode: str = "same_strike"
+    protection_mult: float = 1.0
+    adj_mode: str = "none"
     basket_id: int = 0
 
 
@@ -297,6 +313,144 @@ class S006ThetaHarvestStrategy:
             return None
         return min(strikes, key=lambda k: (abs(k - target), k))
 
+    def _select_premium_multiple_protection(
+        self,
+        *,
+        chain_by: dict[float, dict[str, Any]],
+        short_strike: float,
+        spot: float,
+        mult: float,
+        is_call: bool,
+    ) -> tuple[float | None, str | None]:
+        """Walk 0DTE chain toward spot; first strike with premium >= mult * p_short.
+
+        Guard: strike must be strictly inside short (toward spot) and not past spot.
+        No silent nearest-snap. Returns (strike, None) or (None, reason).
+        """
+        if short_strike not in chain_by:
+            return None, "protection_strike_unavailable"
+        p_short = float(chain_by[short_strike]["mark_price"])
+        if p_short <= 0:
+            return None, "protection_strike_unavailable"
+        target = float(mult) * p_short
+        if is_call:
+            # Inside call short: spot < k < short_strike; walk down toward spot
+            cands = sorted(
+                (k for k in chain_by if spot < k < short_strike),
+                reverse=True,
+            )
+        else:
+            # Inside put short: short_strike < k < spot; walk up toward spot
+            cands = sorted(k for k in chain_by if short_strike < k < spot)
+        for k in cands:
+            prem = float(chain_by[k]["mark_price"])
+            if prem >= target:
+                return float(k), None
+        return None, "protection_strike_unavailable"
+
+    def select_adj_a_strike(
+        self,
+        *,
+        leg_type: str,
+        old_strike: float,
+        other_premium: float,
+        chain: list[dict[str, Any]],
+        spot: float,
+    ) -> tuple[float | None, float | None, str | None]:
+        """Further-OTM roll: premium <= other_premium; pick highest premium survivor.
+
+        Returns (new_strike, new_premium, skip_reason).
+        """
+        leg = leg_type.lower()
+        spot_f = float(spot)
+        other_p = float(other_premium)
+        if other_p <= 0 or spot_f <= 0:
+            return None, None, "adj_invalid_other_premium"
+        pool: list[tuple[float, float, dict[str, Any]]] = []
+        for row in chain:
+            k = float(row["strike"])
+            prem = float(row["mark_price"])
+            if prem <= 0:
+                continue
+            if leg == "call":
+                # Further OTM = higher strike; must stay OTM
+                if k <= old_strike or k <= spot_f:
+                    continue
+            else:
+                if k >= old_strike or k >= spot_f:
+                    continue
+            if prem > other_p + 1e-12:
+                continue
+            pool.append((prem, k, row))
+        if not pool:
+            return None, None, "adj_no_strike"
+        # Highest premium among further-OTM survivors
+        pool.sort(key=lambda t: (-t[0], t[1] if leg == "call" else -t[1]))
+        prem, k, _row = pool[0]
+        return float(k), float(prem), None
+
+    def _recompute_credits_and_targets(self, basket: BasketBuild) -> None:
+        """After Adj A: rebuild net_credit / target from current open legs."""
+        p = self.params
+        short_credit = sum(
+            leg.entry_fill * qty_btc(leg.qty) for leg in basket.legs if leg.side == "sell"
+        )
+        long_debit = sum(
+            leg.entry_fill * qty_btc(leg.qty) for leg in basket.legs if leg.side == "buy"
+        )
+        basket.short_credit = short_credit
+        basket.long_debit = long_debit
+        basket.net_credit = short_credit - long_debit
+        tp_pct = float(p.get("target_pct", DEFAULT_TARGET_PCT)) / 100.0
+        basket.target_usd = max(0.0, basket.net_credit * tp_pct)
+        max_dd = p.get("max_dd_pct", DEFAULT_MAX_DD_PCT)
+        if max_dd is None:
+            basket.stop_usd = None
+        else:
+            basket.stop_usd = -(float(max_dd) / 100.0) * CAPITAL_USD
+        basket.short_premium_entry_points = sum(
+            leg.entry_mark for leg in basket.legs if leg.side == "sell"
+        )
+
+    def assert_leg_invariant(self, basket: BasketBuild) -> None:
+        """STEP5b: 2 shorts + (0 or 2) protection; qty matches config."""
+        shorts = [l for l in basket.legs if l.side == "sell"]
+        longs = [l for l in basket.legs if l.side == "buy"]
+        if len(shorts) != 2:
+            raise AssertionError(f"leg invariant: expected 2 shorts, got {len(shorts)}")
+        q_short = int(self.params.get("qty_short", DEFAULT_QTY_SHORT))
+        for s in shorts:
+            if int(s.qty) != q_short:
+                raise AssertionError(
+                    f"leg invariant: short qty {s.qty} != config {q_short}"
+                )
+        pr = float(self.params.get("protection_ratio", DEFAULT_PROTECTION_RATIO))
+        mode = str(self.params.get("protection_mode", DEFAULT_PROTECTION_MODE)).lower()
+        expect_prot = pr > 0 and mode in ("same_strike", "premium_multiple")
+        # naked if pr<=0
+        if pr <= 0:
+            expect_prot = False
+        if expect_prot:
+            if len(longs) != 2:
+                raise AssertionError(
+                    f"leg invariant: expected 2 protection legs, got {len(longs)}"
+                )
+            q_prot = (
+                q_short
+                if mode == "premium_multiple"
+                else max(1, int(round(pr * q_short)))
+            )
+            for lg in longs:
+                if int(lg.qty) != q_prot:
+                    raise AssertionError(
+                        f"leg invariant: prot qty {lg.qty} != {q_prot}"
+                    )
+        else:
+            if len(longs) != 0:
+                raise AssertionError(
+                    f"leg invariant: expected 0 protection, got {len(longs)}"
+                )
+
     def _nearest_otm_strike(
         self,
         strikes: list[float],
@@ -312,6 +466,13 @@ class S006ThetaHarvestStrategy:
         if not cands:
             return None
         return min(cands, key=lambda k: (abs(k - target), k))
+
+    def _strike_step(self, strikes: list[float]) -> float:
+        if len(strikes) < 2:
+            return 500.0
+        diffs = [strikes[i + 1] - strikes[i] for i in range(len(strikes) - 1)]
+        diffs = [d for d in diffs if d > 0]
+        return float(statistics.median(diffs)) if diffs else 500.0
 
     def _record_short_strike_on_0dte(
         self,
@@ -376,13 +537,6 @@ class S006ThetaHarvestStrategy:
                 float(statistics.median(gaps)) if gaps else float("nan")
             ),
         }
-
-    def _strike_step(self, strikes: list[float]) -> float:
-        if len(strikes) < 2:
-            return 500.0
-        diffs = [strikes[i + 1] - strikes[i] for i in range(len(strikes) - 1)]
-        diffs = [d for d in diffs if d > 0]
-        return float(statistics.median(diffs)) if diffs else 500.0
 
     def _by_strike(self, chain: list[dict[str, Any]]) -> dict[float, dict[str, Any]]:
         return {float(r["strike"]): r for r in chain}
@@ -557,7 +711,7 @@ class S006ThetaHarvestStrategy:
         q_prot = 0
 
         if not naked:
-            # Long 0DTE protection at short strikes +/- protection_offset
+            # Long 0DTE protection
             conn_l = store.conn(long_exp) or conn
             cts_l = resolve_mark_ts(conn_l, long_exp, entry_ts)
             if cts_l is None:
@@ -587,28 +741,63 @@ class S006ThetaHarvestStrategy:
             gap_vals = [g for g in (gap_c, gap_p) if g == g]
             strike_gap_pts = float(max(gap_vals)) if gap_vals else 0.0
 
-            po = float(p.get("protection_offset", DEFAULT_PROTECTION_OFFSET))
-            if po == 0:
-                pc_target, pp_target = sc_k, sp_k
+            prot_mode = str(
+                p.get("protection_mode", DEFAULT_PROTECTION_MODE)
+            ).lower()
+            if prot_mode == "premium_multiple":
+                mult = float(p.get("protection_mult", DEFAULT_PROTECTION_MULT))
+                pc_k_opt, pc_reason = self._select_premium_multiple_protection(
+                    chain_by=c_by_l,
+                    short_strike=sc_k,
+                    spot=spot_f,
+                    mult=mult,
+                    is_call=True,
+                )
+                if pc_k_opt is None:
+                    return None, pc_reason or "protection_strike_unavailable"
+                pp_k_opt, pp_reason = self._select_premium_multiple_protection(
+                    chain_by=p_by_l,
+                    short_strike=sp_k,
+                    spot=spot_f,
+                    mult=mult,
+                    is_call=False,
+                )
+                if pp_k_opt is None:
+                    return None, pp_reason or "protection_strike_unavailable"
+                if pc_k_opt == pp_k_opt:
+                    return None, "protection_same_strike"
+                if pc_k_opt <= spot_f or pp_k_opt >= spot_f:
+                    return None, "protection_itm"
+                pc_k = float(pc_k_opt)
+                pp_k = float(pp_k_opt)
+                lc_row, lp_row = c_by_l[pc_k], p_by_l[pp_k]
+                prot_call_otm_pts = pc_k - spot_f
+                prot_put_otm_pts = spot_f - pp_k
+                q_prot = q_short  # 1x shorts, ignore protection_ratio
             else:
-                pc_target = sc_k + po
-                pp_target = sp_k - po
-            pc_k_opt = self._nearest_strike(sorted(c_by_l), pc_target)
-            pp_k_opt = self._nearest_strike(sorted(p_by_l), pp_target)
-            if pc_k_opt is None or pp_k_opt is None:
-                return None, "skipped_no_protection"
-            if pc_k_opt not in c_by_l or pp_k_opt not in p_by_l:
-                return None, "skipped_no_protection"
-            if pc_k_opt == pp_k_opt:
-                return None, "protection_same_strike"
-            if pc_k_opt <= spot_f or pp_k_opt >= spot_f:
-                return None, "protection_itm"
-            pc_k = float(pc_k_opt)
-            pp_k = float(pp_k_opt)
-            lc_row, lp_row = c_by_l[pc_k], p_by_l[pp_k]
-            prot_call_otm_pts = pc_k - spot_f
-            prot_put_otm_pts = spot_f - pp_k
-            q_prot = max(1, int(round(pr * q_short)))
+                # same_strike (default)
+                po = float(p.get("protection_offset", DEFAULT_PROTECTION_OFFSET))
+                if po == 0:
+                    pc_target, pp_target = sc_k, sp_k
+                else:
+                    pc_target = sc_k + po
+                    pp_target = sp_k - po
+                pc_k_opt = self._nearest_strike(sorted(c_by_l), pc_target)
+                pp_k_opt = self._nearest_strike(sorted(p_by_l), pp_target)
+                if pc_k_opt is None or pp_k_opt is None:
+                    return None, "skipped_no_protection"
+                if pc_k_opt not in c_by_l or pp_k_opt not in p_by_l:
+                    return None, "skipped_no_protection"
+                if pc_k_opt == pp_k_opt:
+                    return None, "protection_same_strike"
+                if pc_k_opt <= spot_f or pp_k_opt >= spot_f:
+                    return None, "protection_itm"
+                pc_k = float(pc_k_opt)
+                pp_k = float(pp_k_opt)
+                lc_row, lp_row = c_by_l[pc_k], p_by_l[pp_k]
+                prot_call_otm_pts = pc_k - spot_f
+                prot_put_otm_pts = spot_f - pp_k
+                q_prot = max(1, int(round(pr * q_short)))
 
         def make_leg(
             role: str, row: dict[str, Any], qty: int, dte: int, side: str
@@ -677,8 +866,7 @@ class S006ThetaHarvestStrategy:
 
         emeta = dict(self._pending_entry_meta or {})
         self._basket_seq += 1
-        return (
-            BasketBuild(
+        basket = BasketBuild(
                 legs=legs,
                 net_credit=net_credit,
                 short_credit=short_credit,
@@ -716,10 +904,20 @@ class S006ThetaHarvestStrategy:
                 bars_since_day_reset=int(emeta.get("bars_since_day_reset") or 0),
                 signals_found_today=int(emeta.get("signals_found_today") or 0),
                 signal_rank_used=int(emeta.get("signal_rank_used") or 0),
+                realized_adj_pnl=0.0,
+                adj_events=[],
+                n_adjustments=0,
+                protection_mode=str(
+                    p.get("protection_mode", DEFAULT_PROTECTION_MODE)
+                ).lower(),
+                protection_mult=float(
+                    p.get("protection_mult", DEFAULT_PROTECTION_MULT)
+                ),
+                adj_mode=str(p.get("adj_mode", DEFAULT_ADJ_MODE)).lower(),
                 basket_id=self._basket_seq,
-            ),
-            None,
-        )
+            )
+        self.assert_leg_invariant(basket)
+        return basket, None
 
     def _raw_mtm(self, basket: BasketBuild, ts: int) -> float | None:
         mtm = 0.0
@@ -731,7 +929,7 @@ class S006ThetaHarvestStrategy:
                 mtm += (leg.entry_fill - m) * qty_btc(leg.qty)
             else:
                 mtm += (m - leg.entry_fill) * qty_btc(leg.qty)
-        return mtm - basket.fees_entry
+        return mtm - basket.fees_entry + float(basket.realized_adj_pnl)
 
     def _adj_mtm(self, basket: BasketBuild, ts: int) -> float | None:
         raw = self._raw_mtm(basket, ts)
@@ -792,8 +990,8 @@ class S006ThetaHarvestStrategy:
             if fwd is not None and fwd > 0:
                 settle_spot = float(fwd)
 
-        realized = 0.0
-        shorts_pnl = 0.0
+        realized = float(basket.realized_adj_pnl)
+        shorts_pnl = float(basket.realized_adj_pnl)
         protection_pnl = 0.0
         fees = basket.fees_entry
         slip_cost = basket.slip_cost_entry
@@ -878,7 +1076,7 @@ class S006ThetaHarvestStrategy:
             slippage_cost=slip_cost,
             net_pnl=net,
             worst_mtm=mae_usd,
-            n_adjustments=0,
+            n_adjustments=int(basket.n_adjustments),
             arm=str(p.get("arm") or ""),
             meta={
                 "net_credit": basket.net_credit,
@@ -902,6 +1100,11 @@ class S006ThetaHarvestStrategy:
                 "csv_row": csv_row,
                 "intraday_rows": intraday_rows,
                 "expire_protection": expire_longs,
+                "adj_events": list(basket.adj_events),
+                "n_adjustments": int(basket.n_adjustments),
+                "protection_mode": basket.protection_mode,
+                "protection_mult": basket.protection_mult,
+                "adj_mode": basket.adj_mode,
             },
         )
 
@@ -1014,6 +1217,10 @@ class S006ThetaHarvestStrategy:
                 "bars_since_day_reset": basket.bars_since_day_reset,
                 "signals_found_today": basket.signals_found_today,
                 "signal_rank_used": basket.signal_rank_used,
+                "protection_mode": basket.protection_mode,
+                "protection_mult": basket.protection_mult,
+                "adj_mode": basket.adj_mode,
+                "n_adjustments": basket.n_adjustments,
             }
         )
         return row
@@ -1069,6 +1276,175 @@ class S006ThetaHarvestStrategy:
             "pct_of_net_credit": pct_nc,
         }
 
+    def try_adj_a(
+        self,
+        store: MarksStore,
+        spot_map: dict[int, float],
+        basket: BasketBuild,
+        ts: int,
+        spot: float,
+        entry_day: date,
+    ) -> dict[str, Any] | None:
+        """If a short leg triggers, roll it further OTM. Protection untouched.
+
+        Returns adj event dict if executed, else None.
+        """
+        p = self.params
+        if str(p.get("adj_mode", DEFAULT_ADJ_MODE)).lower() != "a":
+            return None
+        max_adj = int(p.get("max_adj", DEFAULT_MAX_ADJ))
+        if basket.n_adjustments >= max_adj:
+            return None
+        if getattr(basket, "_adj_a_blocked", False):
+            return None
+        trig_pct = float(p.get("adj_trigger", DEFAULT_ADJ_TRIGGER))
+        trig = trig_pct / 100.0
+
+        sc = self._leg_by_role(basket, "short_call")
+        sp = self._leg_by_role(basket, "short_put")
+        sc_m = self._mark_at(sc.series, ts)
+        sp_m = self._mark_at(sp.series, ts)
+        if sc_m is None or sp_m is None:
+            return None
+
+        triggered: str | None = None
+        if sc_m >= sc.entry_mark * trig:
+            triggered = "short_call"
+        elif sp_m >= sp.entry_mark * trig:
+            triggered = "short_put"
+        if triggered is None:
+            return None
+
+        old_leg = sc if triggered == "short_call" else sp
+        other_leg = sp if triggered == "short_call" else sc
+        other_m = sp_m if triggered == "short_call" else sc_m
+        old_mark = sc_m if triggered == "short_call" else sp_m
+        is_call = triggered == "short_call"
+        leg_type = "call" if is_call else "put"
+
+        conn = store.conn(basket.short_expiry) or store.conn(entry_day)
+        if conn is None:
+            return None
+        cts = resolve_mark_ts(conn, basket.short_expiry, ts)
+        if cts is None:
+            return None
+        chain = load_chain(conn, basket.short_expiry, cts, leg_type)
+        if not chain:
+            return None
+
+        new_k, new_prem, reason = self.select_adj_a_strike(
+            leg_type=leg_type,
+            old_strike=old_leg.strike,
+            other_premium=float(other_m),
+            chain=chain,
+            spot=spot,
+        )
+        if new_k is None:
+            basket._adj_a_blocked = True
+            logger.info(
+                "S006 Adj A skip day=%s leg=%s reason=%s (blocked further Adj A)",
+                entry_day,
+                triggered,
+                reason,
+            )
+            return None
+
+        # Close old short (buy to close)
+        slip_model = str(p.get("slip_model") or "bucketed")
+        slip_mult = float(p.get("slip_mult") or 1.0)
+        short_dte = int(basket.short_dte)
+        exit_fill, exit_sf = fill_price(
+            float(old_mark),
+            "buy",
+            dte=short_dte,
+            slip_model=slip_model,
+            slip_mult=slip_mult,
+        )
+        exit_fee = option_fee(exit_fill, float(spot), old_leg.qty)
+        closed_pnl = (old_leg.entry_fill - exit_fill) * qty_btc(old_leg.qty)
+
+        # Enter new short
+        row = next(r for r in chain if float(r["strike"]) == float(new_k))
+        entry_mark = float(row["mark_price"])
+        entry_fill, entry_sf = fill_price(
+            entry_mark,
+            "sell",
+            dte=short_dte,
+            slip_model=slip_model,
+            slip_mult=slip_mult,
+        )
+        entry_fee = option_fee(entry_fill, float(spot), old_leg.qty)
+        new_slip_cost = abs(entry_fill - entry_mark) * qty_btc(old_leg.qty)
+        old_slip_exit = abs(exit_fill - float(old_mark)) * qty_btc(old_leg.qty)
+
+        hh, mm = self._cutoff_hm()
+        cutoff_ts = to_unix(ist_dt(entry_day, hh, mm))
+        settle_ts = to_unix(
+            ist_dt(basket.long_expiry, EXPIRY_HOUR_IST, EXPIRY_MINUTE_IST)
+        )
+        preload_end = max(cutoff_ts, settle_ts) + 120
+        new_series = load_symbol_series(store, str(row["symbol"]), ts, preload_end)
+
+        new_leg = HarvestLeg(
+            role=triggered,
+            symbol=str(row["symbol"]),
+            strike=float(new_k),
+            opt_type=str(row["option_type"]),
+            side="sell",
+            qty=old_leg.qty,
+            entry_mark=entry_mark,
+            entry_fill=entry_fill,
+            entry_fee=entry_fee,
+            entry_slip=entry_sf * 100.0,
+            series=new_series,
+        )
+
+        # Replace leg; protection untouched
+        basket.legs = [new_leg if l.role == triggered else l for l in basket.legs]
+        if triggered == "short_call":
+            basket.short_call = float(new_k)
+        else:
+            basket.short_put = float(new_k)
+
+        basket.realized_adj_pnl += closed_pnl
+        basket.fees_entry += exit_fee + entry_fee
+        basket.slip_cost_entry += old_slip_exit + new_slip_cost
+        basket.entry_drag = -(basket.slip_cost_entry + basket.fees_entry)
+        basket.n_adjustments += 1
+        self._recompute_credits_and_targets(basket)
+        self.assert_leg_invariant(basket)
+
+        ev = {
+            "ts": ts,
+            "ts_ist": _ts_ist_str(ts),
+            "leg": triggered,
+            "old_strike": old_leg.strike,
+            "new_strike": float(new_k),
+            "old_exit_premium": float(old_mark),
+            "new_entry_premium": entry_mark,
+            "trigger_pct": trig_pct,
+            "fee": exit_fee + entry_fee,
+            "slippage": old_slip_exit + new_slip_cost,
+            "other_short_premium": float(other_m),
+            "new_net_credit": basket.net_credit,
+            "new_target_usd": basket.target_usd,
+            "basket_id": basket.basket_id,
+            "arm": str(p.get("arm") or ""),
+            "entry_date": entry_day.isoformat(),
+        }
+        basket.adj_events.append(ev)
+        logger.info(
+            "S006 Adj A %s %s %.0f->%.0f trig=%.0f%% nc=%.4f tgt=%.4f",
+            entry_day,
+            triggered,
+            old_leg.strike,
+            new_k,
+            trig_pct,
+            basket.net_credit,
+            basket.target_usd,
+        )
+        return ev
+
     def monitor_basket(
         self,
         store: MarksStore,
@@ -1084,8 +1460,8 @@ class S006ThetaHarvestStrategy:
         exit_ts = cutoff
         spot = float(basket.entry_spot)
         intraday: list[dict[str, Any]] = []
+        self.assert_leg_invariant(basket)
 
-        # entry snapshot
         snap0 = self._intraday_snapshot(basket, entry_ts, spot)
         if snap0 is not None:
             intraday.append(snap0)
@@ -1105,6 +1481,9 @@ class S006ThetaHarvestStrategy:
                 if snap is not None:
                     intraday.append(snap)
                 next_hour += INTRADAY_STEP
+
+            # Adj A before target/stop checks this tick
+            self.try_adj_a(store, spot_map, basket, ts, spot, entry_day)
 
             adj = self._adj_mtm(basket, ts)
             if adj is None:
@@ -1128,7 +1507,6 @@ class S006ThetaHarvestStrategy:
             if adj is not None:
                 mae = min(mae, adj)
 
-        # final snapshot at exit if not already
         snap_x = self._intraday_snapshot(basket, exit_ts, spot)
         if snap_x is not None:
             if not intraday or intraday[-1].get("ts_ist") != snap_x["ts_ist"]:

@@ -27,10 +27,15 @@ from backtest.harness.registry import write_registry  # noqa: E402
 from backtest.strategies.s006_theta_harvest.strategy import (  # noqa: E402
     BOOTSTRAP_N,
     BOOTSTRAP_SEED,
+    DEFAULT_ADJ_MODE,
+    DEFAULT_ADJ_TRIGGER,
     DEFAULT_CUTOFF_HOUR,
     DEFAULT_CUTOFF_MINUTE,
     DEFAULT_EXPIRE_PROT_AT_CUTOFF,
+    DEFAULT_MAX_ADJ,
     DEFAULT_MAX_DD_PCT,
+    DEFAULT_PROTECTION_MODE,
+    DEFAULT_PROTECTION_MULT,
     DEFAULT_PROTECTION_OFFSET,
     DEFAULT_PROTECTION_RATIO,
     DEFAULT_QTY_SHORT,
@@ -58,6 +63,10 @@ DEFAULT_SHORT_DTES = (DEFAULT_SHORT_DTE,)
 DEFAULT_ENTRY_MODE = "fixed"
 DEFAULT_ENTRY_TIMES = ("0900",)
 DEFAULT_ENTRY_WINDOW = "0900-1500"
+DEFAULT_PROTECTION_MODES = (DEFAULT_PROTECTION_MODE,)
+DEFAULT_PROTECTION_MULTS = (DEFAULT_PROTECTION_MULT,)
+DEFAULT_ADJ_MODES = (DEFAULT_ADJ_MODE,)
+DEFAULT_ADJ_TRIGGERS = (DEFAULT_ADJ_TRIGGER,)
 
 
 def _parse_floats(s: str) -> list[float]:
@@ -103,12 +112,23 @@ def make_arm(
     entry_hhmm: str | None = None,
     window_start: str | None = None,
     window_end: str | None = None,
+    protection_mode: str = "same_strike",
+    protection_mult: float = 1.0,
+    adj_mode: str = "none",
+    adj_trigger: float = 200.0,
 ) -> str:
     dd_s = "none" if dd is None else f"{dd:g}"
-    arm = (
-        f"q{qty}_pr{pr:g}_tp{tp:g}_dd{dd_s}_off{off:g}_po{po:g}_"
-        f"cut{cut_h:02d}{cut_m:02d}_sdte{int(short_dte)}"
-    )
+    pm = str(protection_mode).lower()
+    if pm == "premium_multiple":
+        arm = (
+            f"q{qty}_pm{protection_mult:g}_tp{tp:g}_dd{dd_s}_off{off:g}_po{po:g}_"
+            f"cut{cut_h:02d}{cut_m:02d}_sdte{int(short_dte)}"
+        )
+    else:
+        arm = (
+            f"q{qty}_pr{pr:g}_tp{tp:g}_dd{dd_s}_off{off:g}_po{po:g}_"
+            f"cut{cut_h:02d}{cut_m:02d}_sdte{int(short_dte)}"
+        )
     if not expire:
         arm += "_nox"
     em = entry_mode.lower()
@@ -120,6 +140,10 @@ def make_arm(
         ws = (window_start or "09:00").replace(":", "")
         we = (window_end or "15:00").replace(":", "")
         arm += f"_w{ws}-{we}"
+    am = str(adj_mode).lower()
+    arm += f"_adj{am}"
+    if am == "a":
+        arm += f"_tr{adj_trigger:g}"
     return arm
 
 
@@ -137,6 +161,11 @@ def build_combos(
     entry_mode: str = "fixed",
     entry_times: list[str] | None = None,
     entry_window: tuple[str, str] | None = None,
+    protection_mode: str = "same_strike",
+    protection_mults: list[float] | None = None,
+    adj_modes: list[str] | None = None,
+    adj_triggers: list[float] | None = None,
+    max_adj: int = 1,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     em = entry_mode.lower()
@@ -144,6 +173,10 @@ def build_combos(
     if entry_window is None:
         entry_window = _parse_entry_window(DEFAULT_ENTRY_WINDOW)
     ws, we = entry_window
+    pm = str(protection_mode).lower()
+    protection_mults = protection_mults or list(DEFAULT_PROTECTION_MULTS)
+    adj_modes = [str(x).lower() for x in (adj_modes or list(DEFAULT_ADJ_MODES))]
+    adj_triggers = adj_triggers or list(DEFAULT_ADJ_TRIGGERS)
 
     entry_axis: list[dict[str, Any]]
     if em == "fixed":
@@ -172,8 +205,28 @@ def build_combos(
             }
         ]
 
+    # Protection axis: premium_multiple uses mults; same_strike uses ratios
+    if pm == "premium_multiple":
+        prot_axis = [
+            {"protection_mode": "premium_multiple", "protection_ratio": 1.0, "protection_mult": m}
+            for m in protection_mults
+        ]
+    else:
+        prot_axis = [
+            {"protection_mode": "same_strike", "protection_ratio": pr, "protection_mult": 1.0}
+            for pr in protection_ratios
+        ]
+
+    adj_axis: list[dict[str, Any]] = []
+    for am in adj_modes:
+        if am == "a":
+            for tr in adj_triggers:
+                adj_axis.append({"adj_mode": "a", "adj_trigger": float(tr), "max_adj": int(max_adj)})
+        else:
+            adj_axis.append({"adj_mode": "none", "adj_trigger": float(adj_triggers[0]), "max_adj": int(max_adj)})
+
     for qty in qty_shorts:
-        for pr in protection_ratios:
+        for pa in prot_axis:
             for tp in target_pcts:
                 for dd in max_dd_pcts:
                     for off in short_offsets:
@@ -183,48 +236,52 @@ def build_combos(
                                 for ex in expire_flags:
                                     for sdte in short_dtes:
                                         for ea in entry_axis:
-                                            arm = make_arm(
-                                                qty=qty,
-                                                pr=pr,
-                                                tp=tp,
-                                                dd=dd,
-                                                off=off,
-                                                po=po,
-                                                cut_h=hh,
-                                                cut_m=mm,
-                                                expire=ex,
-                                                short_dte=sdte,
-                                                entry_mode=ea["entry_mode"],
-                                                entry_hhmm=ea.get("entry_hhmm"),
-                                                window_start=ea.get(
-                                                    "entry_window_start"
-                                                ),
-                                                window_end=ea.get("entry_window_end"),
-                                            )
-                                            out.append(
-                                                {
-                                                    "qty_short": qty,
-                                                    "protection_ratio": pr,
-                                                    "target_pct": tp,
-                                                    "max_dd_pct": dd,
-                                                    "short_offset": off,
-                                                    "protection_offset": po,
-                                                    "cutoff_hour": hh,
-                                                    "cutoff_minute": mm,
-                                                    "expire_protection_at_cutoff": ex,
-                                                    "short_dte": int(sdte),
-                                                    "entry_mode": ea["entry_mode"],
-                                                    "entry_hour": ea["entry_hour"],
-                                                    "entry_minute": ea["entry_minute"],
-                                                    "entry_window_start": ea[
-                                                        "entry_window_start"
-                                                    ],
-                                                    "entry_window_end": ea[
-                                                        "entry_window_end"
-                                                    ],
-                                                    "arm": arm,
-                                                }
-                                            )
+                                            for aa in adj_axis:
+                                                arm = make_arm(
+                                                    qty=qty,
+                                                    pr=float(pa["protection_ratio"]),
+                                                    tp=tp,
+                                                    dd=dd,
+                                                    off=off,
+                                                    po=po,
+                                                    cut_h=hh,
+                                                    cut_m=mm,
+                                                    expire=ex,
+                                                    short_dte=sdte,
+                                                    entry_mode=ea["entry_mode"],
+                                                    entry_hhmm=ea.get("entry_hhmm"),
+                                                    window_start=ea.get("entry_window_start"),
+                                                    window_end=ea.get("entry_window_end"),
+                                                    protection_mode=str(pa["protection_mode"]),
+                                                    protection_mult=float(pa["protection_mult"]),
+                                                    adj_mode=str(aa["adj_mode"]),
+                                                    adj_trigger=float(aa["adj_trigger"]),
+                                                )
+                                                out.append(
+                                                    {
+                                                        "qty_short": qty,
+                                                        "protection_ratio": float(pa["protection_ratio"]),
+                                                        "protection_mode": pa["protection_mode"],
+                                                        "protection_mult": float(pa["protection_mult"]),
+                                                        "target_pct": tp,
+                                                        "max_dd_pct": dd,
+                                                        "short_offset": off,
+                                                        "protection_offset": po,
+                                                        "cutoff_hour": hh,
+                                                        "cutoff_minute": mm,
+                                                        "expire_protection_at_cutoff": ex,
+                                                        "short_dte": int(sdte),
+                                                        "entry_mode": ea["entry_mode"],
+                                                        "entry_hour": ea["entry_hour"],
+                                                        "entry_minute": ea["entry_minute"],
+                                                        "entry_window_start": ea["entry_window_start"],
+                                                        "entry_window_end": ea["entry_window_end"],
+                                                        "adj_mode": aa["adj_mode"],
+                                                        "adj_trigger": float(aa["adj_trigger"]),
+                                                        "max_adj": int(aa["max_adj"]),
+                                                        "arm": arm,
+                                                    }
+                                                )
     return out
 
 
@@ -414,6 +471,7 @@ def run_grid(
     rows: list[dict[str, Any]] = []
     basket_csv_rows: list[dict[str, Any]] = []
     intraday_csv_rows: list[dict[str, Any]] = []
+    adj_csv_rows: list[dict[str, Any]] = []
     t0 = time.time()
 
     for i, combo in enumerate(combos, start=1):
@@ -426,7 +484,17 @@ def run_grid(
         )
         basket_csv_rows.extend(list(stats.pop("basket_csv_rows", []) or []))
         intraday_csv_rows.extend(list(stats.pop("intraday_csv_rows", []) or []))
-        row = {"arm": combo["arm"], **combo, **stats, "elapsed_sec": time.time() - ct0}
+        for c in _cycles:
+            for ev in ((c.meta or {}).get("adj_events") or []):
+                adj_csv_rows.append(dict(ev))
+        n_adj_total = sum(int(c.n_adjustments or 0) for c in _cycles)
+        row = {
+            "arm": combo["arm"],
+            **combo,
+            **stats,
+            "n_adjustments_total": n_adj_total,
+            "elapsed_sec": time.time() - ct0,
+        }
         rows.append(row)
         logger.info(
             "[%d/%d] %s n=%d mean/day=%s mean/b=%s elapsed=%.1fs",
@@ -464,6 +532,7 @@ def run_grid(
     md_path = RUNS_DIR / f"{base}.md"
     baskets_csv = RUNS_DIR / f"{base}_baskets.csv"
     intraday_csv = RUNS_DIR / f"{base}_intraday.csv"
+    adj_csv = RUNS_DIR / f"{base}_adjustments.csv"
 
     payload = {
         "strategy_id": "S006",
@@ -477,12 +546,16 @@ def run_grid(
         "combos": rows,
         "baskets_csv": baskets_csv.name,
         "intraday_csv": intraday_csv.name,
+        "adjustments_csv": adj_csv.name,
     }
     json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _write_csv(baskets_csv, basket_csv_rows)
     _write_csv(intraday_csv, intraday_csv_rows)
-    logger.info("wrote %s %s %s %s", json_path, md_path, baskets_csv, intraday_csv)
+    _write_csv(adj_csv, adj_csv_rows)
+    logger.info(
+        "wrote %s %s %s %s %s", json_path, md_path, baskets_csv, intraday_csv, adj_csv
+    )
     logger.info("mark_cache %s", get_mark_cache().stats())
 
     meta_path = Path(__file__).resolve().parent / "registry_meta.json"
@@ -517,6 +590,7 @@ def run_grid(
         "md": str(md_path),
         "baskets_csv": str(baskets_csv),
         "intraday_csv": str(intraday_csv),
+        "adjustments_csv": str(adj_csv),
     }
 
 
@@ -606,6 +680,37 @@ def main() -> None:
         default=None,
         help="HHMM-HHMM for vwap mode (default 0900-1500)",
     )
+    ap.add_argument(
+        "--protection-mode",
+        type=str,
+        default="same_strike",
+        choices=["same_strike", "premium_multiple"],
+        help="same_strike | premium_multiple (default same_strike)",
+    )
+    ap.add_argument(
+        "--protection-mult",
+        type=str,
+        default=None,
+        help="Comma list for premium_multiple mode (default 1.0)",
+    )
+    ap.add_argument(
+        "--adj-mode",
+        type=str,
+        default=None,
+        help="Comma list none|A (default none)",
+    )
+    ap.add_argument(
+        "--adj-trigger",
+        type=str,
+        default=None,
+        help="Comma list trigger %% for Adj A (default 200)",
+    )
+    ap.add_argument(
+        "--max-adj",
+        type=int,
+        default=1,
+        help="Max adjustments per basket (default 1)",
+    )
     args = ap.parse_args()
 
     from_s = args.from_date or args.start_date
@@ -618,9 +723,18 @@ def main() -> None:
         if args.qty_short
         else list(DEFAULT_QTY_SHORTS)
     )
+    protection_mode = str(args.protection_mode or "same_strike").lower()
     pr_raw = args.protection_ratio or args.protection_ratios
-    protection_ratios = (
-        _parse_floats(pr_raw) if pr_raw else list(DEFAULT_PROTECTION_RATIOS)
+    if protection_mode == "premium_multiple" and not pr_raw:
+        protection_ratios = [1.0]
+    else:
+        protection_ratios = (
+            _parse_floats(pr_raw) if pr_raw else list(DEFAULT_PROTECTION_RATIOS)
+        )
+    protection_mults = (
+        _parse_floats(args.protection_mult)
+        if args.protection_mult
+        else list(DEFAULT_PROTECTION_MULTS)
     )
     target_pcts = (
         _parse_floats(args.target_pcts)
@@ -676,6 +790,15 @@ def main() -> None:
         if args.entry_window
         else _parse_entry_window(DEFAULT_ENTRY_WINDOW)
     )
+    adj_modes = (
+        _parse_str_list(args.adj_mode) if args.adj_mode else list(DEFAULT_ADJ_MODES)
+    )
+    adj_triggers = (
+        _parse_floats(args.adj_trigger)
+        if args.adj_trigger
+        else list(DEFAULT_ADJ_TRIGGERS)
+    )
+    max_adj = int(args.max_adj)
 
     combos = build_combos(
         qty_shorts=qty_shorts,
@@ -690,6 +813,11 @@ def main() -> None:
         entry_mode=entry_mode,
         entry_times=entry_times,
         entry_window=entry_window,
+        protection_mode=protection_mode,
+        protection_mults=protection_mults,
+        adj_modes=adj_modes,
+        adj_triggers=adj_triggers,
+        max_adj=max_adj,
     )
     d0 = date.fromisoformat(from_s)
     d1 = date.fromisoformat(to_s)
