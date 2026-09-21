@@ -61,6 +61,15 @@ RESULTS_DIR = _BACKTEST / "results"
 OUT_CSV = RESULTS_DIR / "s001_mark_cycles.csv"
 OUT_TXT = RESULTS_DIR / "s001_mark_engine.txt"
 
+
+def tagged_paths(tag: str) -> tuple[Path, Path]:
+    """Return (cycles_csv, report_txt) for a run tag."""
+    t = (tag or "").strip() or "s001_mark"
+    return (
+        RESULTS_DIR / f"{t}_cycles.csv",
+        RESULTS_DIR / f"{t}.txt",
+    )
+
 SKIP_EXPIRY = date(2025, 4, 26)
 CONTRACT_VALUE = eng.CONTRACT_VALUE
 EXPIRY_HOUR_IST = 17
@@ -71,10 +80,32 @@ MONITOR_STEP_SEC = 60
 BOOTSTRAP_N = 1000
 BOOTSTRAP_SEED = 20260918
 MAX_ENTRIES_PER_DAY = 3
+WORST_CYCLE_CAP_USD = -22.0  # P3 historical (roll OFF); recomputed if fail under roll ON
 
 SLIP_FLAT = 0.0165
 SLIP_MODEL_FLAT = "flat165"
 SLIP_MODEL_BUCKETED = "bucketed"
+
+# Locked research knobs for --config locked (reverify OOS/IS)
+LOCKED_CFG_OVERLAY: dict[str, Any] = {
+    "dec_pct": 40.0,
+    "adj_b_trigger": 70.0,
+    "adj_mode": "B_only",
+    "hedge": "off",
+    "profit_k": 1.0,
+    "profit_mode": "cost_k",
+    "wing_points": 2000.0,
+    "wing_roll": True,
+    "qty_lots": 8,
+    "entry_hour": 11,
+    "entry_minute": 0,
+    "dte": 2,
+    "premium_mode": "b25",
+    "premium_pct_of_hedge": 25.0,
+    "max_adj": 2,
+    "slip_model": SLIP_MODEL_BUCKETED,
+    "slip_mult": 1.0,
+}
 
 logger = logging.getLogger("s001_mark_engine")
 
@@ -720,6 +751,10 @@ def simulate_cycle(
     """
     if expiry == SKIP_EXPIRY:
         logger.info("skip expiry %s", expiry)
+        return None, SKIP_OTHER
+    skip_dates = set(cfg.get("skip_dates") or [])
+    if day in skip_dates or expiry in skip_dates:
+        logger.info("skip_dates hit day=%s expiry=%s", day, expiry)
         return None, SKIP_OTHER
 
     conn = store.conn(day)
@@ -1827,6 +1862,12 @@ def run(
 
     day = d0
     while day <= d1:
+        if day in set(cfg.get("skip_dates") or []):
+            skips.record_skip(SKIP_OTHER, day)
+            if trace_only:
+                lines.append(f"SKIP day={day.isoformat()} reason=skip_dates")
+            day += timedelta(days=1)
+            continue
         entries_today = 0
         entry_hh = int(cfg["entry_hour"])
         entry_mm = int(cfg["entry_minute"])
@@ -2034,93 +2075,92 @@ def format_matrix_table(rows: list[dict[str, Any]]) -> list[str]:
     return out
 
 
-def write_cycles_csv(cycles: list[CycleResult]) -> None:
-    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+def write_cycles_csv(
+    cycles: list[CycleResult],
+    path: Path | None = None,
+    *,
+    tag: str = '',
+) -> Path:
+    out = path or OUT_CSV
+    out.parent.mkdir(parents=True, exist_ok=True)
     cols = [
-        "arm",
-        "window",
-        "date",
-        "entry_ts",
-        "call_strike",
-        "put_strike",
-        "entry_premium_c",
-        "entry_premium_p",
-        "qty",
-        "wing_c",
-        "wing_p",
-        "n_adjustments",
-        "adj_times_strikes_reasons",
-        "exit_ts",
-        "exit_reason",
-        "hold_hours",
-        "gross_pnl",
-        "fees",
-        "slippage_cost",
-        "net_pnl",
-        "worst_intracycle_mtm",
-        "applied_slip_pct_entry",
-        "applied_slip_pct_exit",
-        "avg_applied_slip_pct",
-        "premium_mode",
-        "target_premium",
-        "profit_mode",
-        "profit_target_usd",
-        "tp_touched",
-        "exit_mtm",
-        "hours_to_adj1",
-        "hours_to_adj2",
-        "spot_source",
+        'arm', 'window', 'tag', 'date', 'entry_ts',
+        'call_strike', 'put_strike', 'entry_premium_c', 'entry_premium_p',
+        'qty', 'wing_c', 'wing_p', 'n_adjustments',
+        'adj1_ts', 'adj1_leg', 'adj1_old_k', 'adj1_new_k', 'adj1_qty',
+        'adj2_ts', 'adj2_leg', 'adj2_old_k', 'adj2_new_k', 'adj2_qty',
+        'adj_times_strikes_reasons',
+        'exit_ts', 'exit_reason', 'hold_hours',
+        'gross_pnl', 'fees', 'slippage_cost', 'net_pnl',
+        'worst_intracycle_mtm',
+        'applied_slip_pct_entry', 'applied_slip_pct_exit', 'avg_applied_slip_pct',
+        'premium_mode', 'target_premium', 'profit_mode', 'profit_target_usd',
+        'tp_touched', 'exit_mtm', 'hours_to_adj1', 'hours_to_adj2', 'spot_source',
     ]
-    with OUT_CSV.open("w", newline="", encoding="utf-8") as f:
+    with out.open('w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         for c in cycles:
-            adj_s = ";".join(
-                f"{a.ts}:{a.leg}:{a.old_strike:.0f}->{a.new_strike:.0f}:{a.reason}:q{a.new_qty}"
+            adj_s = ';'.join(
+                f'{a.ts}:{a.leg}:{a.old_strike:.0f}->{a.new_strike:.0f}'
+                f':{a.reason}:q{a.new_qty}'
                 for a in c.adj_events
             )
-            w.writerow(
-                {
-                    "arm": c.arm,
-                    "window": c.window,
-                    "date": c.entry_date.isoformat(),
-                    "entry_ts": c.entry_ts,
-                    "call_strike": c.call_strike,
-                    "put_strike": c.put_strike,
-                    "entry_premium_c": c.entry_prem_c,
-                    "entry_premium_p": c.entry_prem_p,
-                    "qty": c.qty,
-                    "wing_c": c.wing_c,
-                    "wing_p": c.wing_p,
-                    "n_adjustments": c.n_adjustments,
-                    "adj_times_strikes_reasons": adj_s,
-                    "exit_ts": c.exit_ts,
-                    "exit_reason": c.exit_reason,
-                    "hold_hours": f"{c.hold_hours:.4f}",
-                    "gross_pnl": f"{c.gross_pnl:.6f}",
-                    "fees": f"{c.fees:.6f}",
-                    "slippage_cost": f"{c.slippage_cost:.6f}",
-                    "net_pnl": f"{c.net_pnl:.6f}",
-                    "worst_intracycle_mtm": f"{c.worst_mtm:.6f}",
-                    "applied_slip_pct_entry": f"{c.applied_slip_entry:.4f}",
-                    "applied_slip_pct_exit": f"{c.applied_slip_exit:.4f}",
-                    "avg_applied_slip_pct": f"{c.avg_applied_slip_pct:.4f}",
-                    "premium_mode": c.premium_mode,
-                    "target_premium": f"{c.target_premium:.4f}",
-                    "profit_mode": c.profit_mode,
-                    "profit_target_usd": f"{c.profit_target_usd:.6f}",
-                    "tp_touched": int(c.tp_touched),
-                    "exit_mtm": f"{c.exit_mtm:.6f}",
-                    "hours_to_adj1": (
-                        f"{c.hours_to_adj1:.4f}" if c.hours_to_adj1 is not None else ""
-                    ),
-                    "hours_to_adj2": (
-                        f"{c.hours_to_adj2:.4f}" if c.hours_to_adj2 is not None else ""
-                    ),
-                    "spot_source": c.spot_source,
-                }
-            )
-    logger.info("wrote %s (%d rows)", OUT_CSV, len(cycles))
+            a1 = c.adj_events[0] if len(c.adj_events) >= 1 else None
+            a2 = c.adj_events[1] if len(c.adj_events) >= 2 else None
+            row_tag = tag or c.arm or ''
+            w.writerow({
+                'arm': c.arm,
+                'window': c.window,
+                'tag': row_tag,
+                'date': c.entry_date.isoformat(),
+                'entry_ts': c.entry_ts,
+                'call_strike': c.call_strike,
+                'put_strike': c.put_strike,
+                'entry_premium_c': c.entry_prem_c,
+                'entry_premium_p': c.entry_prem_p,
+                'qty': c.qty,
+                'wing_c': c.wing_c,
+                'wing_p': c.wing_p,
+                'n_adjustments': c.n_adjustments,
+                'adj1_ts': a1.ts if a1 else '',
+                'adj1_leg': a1.leg if a1 else '',
+                'adj1_old_k': f'{a1.old_strike:.0f}' if a1 else '',
+                'adj1_new_k': f'{a1.new_strike:.0f}' if a1 else '',
+                'adj1_qty': a1.new_qty if a1 else '',
+                'adj2_ts': a2.ts if a2 else '',
+                'adj2_leg': a2.leg if a2 else '',
+                'adj2_old_k': f'{a2.old_strike:.0f}' if a2 else '',
+                'adj2_new_k': f'{a2.new_strike:.0f}' if a2 else '',
+                'adj2_qty': a2.new_qty if a2 else '',
+                'adj_times_strikes_reasons': adj_s,
+                'exit_ts': c.exit_ts,
+                'exit_reason': c.exit_reason,
+                'hold_hours': f'{c.hold_hours:.4f}',
+                'gross_pnl': f'{c.gross_pnl:.6f}',
+                'fees': f'{c.fees:.6f}',
+                'slippage_cost': f'{c.slippage_cost:.6f}',
+                'net_pnl': f'{c.net_pnl:.6f}',
+                'worst_intracycle_mtm': f'{c.worst_mtm:.6f}',
+                'applied_slip_pct_entry': f'{c.applied_slip_entry:.4f}',
+                'applied_slip_pct_exit': f'{c.applied_slip_exit:.4f}',
+                'avg_applied_slip_pct': f'{c.avg_applied_slip_pct:.4f}',
+                'premium_mode': c.premium_mode,
+                'target_premium': f'{c.target_premium:.4f}',
+                'profit_mode': c.profit_mode,
+                'profit_target_usd': f'{c.profit_target_usd:.6f}',
+                'tp_touched': int(c.tp_touched),
+                'exit_mtm': f'{c.exit_mtm:.6f}',
+                'hours_to_adj1': (
+                    f'{c.hours_to_adj1:.4f}' if c.hours_to_adj1 is not None else ''
+                ),
+                'hours_to_adj2': (
+                    f'{c.hours_to_adj2:.4f}' if c.hours_to_adj2 is not None else ''
+                ),
+                'spot_source': c.spot_source,
+            })
+    logger.info('wrote %s (%d rows)', out, len(cycles))
+    return out
 
 
 def parse_hhmm(s: str) -> tuple[int, int]:
@@ -2130,7 +2170,16 @@ def parse_hhmm(s: str) -> tuple[int, int]:
 
 def build_cfg(args: argparse.Namespace) -> dict[str, Any]:
     eh, em = parse_hhmm(args.entry_time)
-    return {
+    skip_raw = str(getattr(args, "skip_dates", "") or "")
+    skip_dates: list[date] = []
+    for part in skip_raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part:
+            skip_dates.append(date.fromisoformat(part))
+    if SKIP_EXPIRY not in skip_dates:
+        skip_dates.append(SKIP_EXPIRY)
+
+    cfg: dict[str, Any] = {
         "dec_pct": float(args.dec_pct),
         "adj_b_trigger": float(args.adj_b_trigger),
         "adj_mode": str(args.adj_mode),
@@ -2153,10 +2202,23 @@ def build_cfg(args: argparse.Namespace) -> dict[str, Any]:
         "slip_model": str(args.slip_model),
         "slip_mult": float(args.slip_mult),
         "window": str(args.window),
+        "tag": str(getattr(args, "tag", "") or ""),
+        "skip_dates": skip_dates,
         "matrix_include_baseline": bool(
             getattr(args, "matrix_include_baseline", True)
         ),
+        "with_baseline": bool(getattr(args, "with_baseline", False)),
     }
+    conf = str(getattr(args, "config", "") or "").lower().strip()
+    if conf in ("locked", "lock"):
+        # Overlay wins — locked means locked. Pass flags only for documentation /
+        # when not using --config locked.
+        for k, v in LOCKED_CFG_OVERLAY.items():
+            cfg[k] = v
+        cfg["config_name"] = "locked"
+    else:
+        cfg["config_name"] = conf or "custom"
+    return cfg
 
 
 def run_matrix(
@@ -2302,6 +2364,8 @@ def main() -> None:
     ap.add_argument("--max-adj", type=int, default=2)
     ap.add_argument("--from", dest="from_date", type=str, default="")
     ap.add_argument("--to", dest="to_date", type=str, default="")
+    ap.add_argument("--start", dest="start_date", type=str, default="")
+    ap.add_argument("--end", dest="end_date", type=str, default="")
     ap.add_argument(
         "--slip-model",
         type=str,
@@ -2314,32 +2378,34 @@ def main() -> None:
         type=str,
         default="IS",
         choices=("IS", "OOS"),
-        help="Tag written to CSV (IS/OOS)",
     )
-    ap.add_argument(
-        "--matrix",
-        action="store_true",
-        help="Run 16-combo matrix (premium×tp_pct×slip_mult)",
-    )
+    ap.add_argument("--config", type=str, default="")
+    ap.add_argument("--skip-dates", type=str, default="2025-04-26")
+    ap.add_argument("--tag", type=str, default="")
+    ap.add_argument("--with-baseline", action="store_true")
+    ap.add_argument("--matrix", action="store_true")
     ap.add_argument(
         "--matrix-include-baseline",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Include BASELINE_OLD_LIVE arm + paired CI (default: on)",
     )
-    ap.add_argument(
-        "--trace-day",
-        type=str,
-        default="",
-        help="YYYY-MM-DD: print leg-by-leg entry/adj/exit only (no aggregates)",
-    )
+    ap.add_argument("--trace-day", type=str, default="")
     args = ap.parse_args()
+    if args.start_date and not args.from_date:
+        args.from_date = args.start_date
+    if args.end_date and not args.to_date:
+        args.to_date = args.end_date
     if args.trace_day:
         d = date.fromisoformat(args.trace_day)
         args.from_date = d.isoformat()
         args.to_date = d.isoformat()
     if not args.from_date or not args.to_date:
-        ap.error("--from/--to required (or pass --trace-day YYYY-MM-DD)")
+        ap.error("--from/--to (or --start/--end) required, or --trace-day")
+    tag = str(args.tag or "").strip()
+    if "oos" in tag.lower():
+        args.window = "OOS"
+    elif tag.lower().startswith("s001_is") or "_is_" in tag.lower():
+        args.window = "IS"
     cfg = build_cfg(args)
 
     t0 = time.time()
@@ -2347,11 +2413,11 @@ def main() -> None:
         lines, rows, all_cycles = run_matrix(cfg)
         elapsed = time.time() - t0
         lines.append(f"elapsed_sec={elapsed:.1f}")
-        write_cycles_csv(all_cycles)
-        OUT_TXT.parent.mkdir(parents=True, exist_ok=True)
-        OUT_TXT.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        logger.info("wrote %s", OUT_TXT)
-        logger.info("MATRIX %d combos elapsed=%.1fs", len(rows), elapsed)
+        csv_path, txt_path = tagged_paths(tag or "s001_mark_matrix")
+        write_cycles_csv(all_cycles, csv_path, tag=tag or "matrix")
+        txt_path.parent.mkdir(parents=True, exist_ok=True)
+        txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("wrote %s", txt_path)
         for ln in format_matrix_table(rows):
             logger.info("%s", ln)
         return
@@ -2360,24 +2426,39 @@ def main() -> None:
     lines, cycles, _skips = run(cfg, trace_only=trace_only)
     elapsed = time.time() - t0
     lines.append(f"elapsed_sec={elapsed:.1f}")
-    if not trace_only:
-        write_cycles_csv(cycles)
-    out_path = (
-        RESULTS_DIR / f"s001_mark_trace_{args.trace_day}.txt"
-        if trace_only
-        else OUT_TXT
-    )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    logger.info("wrote %s", out_path)
+
+    if cfg.get("with_baseline") and not trace_only:
+        bcfg = baseline_old_live_cfg(cfg)
+        _bl, bl_cycles, _bl_skips = run(bcfg)
+        p_mean, p_lo, p_hi, p_n = paired_cycle_diff_ci(
+            cycles, bl_cycles, BOOTSTRAP_N, BOOTSTRAP_SEED
+        )
+        lines.append("")
+        lines.append("===== P4 PAIRED vs BASELINE_OLD_LIVE =====")
+        lines.append(f"paired_mean={p_mean:.6f} ci_lo={p_lo:.6f} ci_hi={p_hi:.6f} n={p_n}")
+        bl_tag = (tag + "_baseline") if tag else "s001_baseline"
+        bl_csv, _ = tagged_paths(bl_tag)
+        write_cycles_csv(bl_cycles, bl_csv, tag=bl_tag)
+        lines.append(f"baseline_csv={bl_csv}")
+
     if trace_only:
+        out_path = RESULTS_DIR / f"s001_mark_trace_{args.trace_day}.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("wrote %s", out_path)
         for ln in lines:
             logger.info("%s", ln)
     else:
+        csv_path, txt_path = tagged_paths(tag or "s001_mark")
+        write_cycles_csv(cycles, csv_path, tag=tag or "s001_mark")
+        txt_path.parent.mkdir(parents=True, exist_ok=True)
+        txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("wrote %s", txt_path)
         logger.info(
-            "SMOKE n_cycles=%d elapsed=%.1fs",
+            "SMOKE n_cycles=%d elapsed=%.1fs csv=%s",
             len(cycles),
             elapsed,
+            csv_path,
         )
 
 
