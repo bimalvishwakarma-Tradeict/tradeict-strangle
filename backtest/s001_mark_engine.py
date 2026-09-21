@@ -1729,16 +1729,62 @@ def max_drawdown(daily: list[float]) -> float:
     return float(dd)
 
 
+def format_cycle_leg_trace(cyc: CycleResult, cycle_idx: int) -> list[str]:
+    """Leg-by-leg one-day trace — no aggregate stats."""
+    ent = datetime.fromtimestamp(cyc.entry_ts, tz=UTC).astimezone(IST)
+    ex = datetime.fromtimestamp(cyc.exit_ts, tz=UTC).astimezone(IST)
+    lines = [
+        f"----- cycle#{cycle_idx} day={cyc.entry_date.isoformat()} -----",
+        (
+            f"ENTRY {ent.strftime('%Y-%m-%d %H:%M:%S %Z')}  "
+            f"expiry_dte_cfg  premiums_mode={cyc.premium_mode} "
+            f"target_prem={cyc.target_premium:.4f} "
+            f"profit_mode={cyc.profit_mode} "
+            f"locked_tp_usd={cyc.profit_target_usd:.4f} "
+            f"qty={cyc.qty} spot_src={cyc.spot_source}"
+        ),
+        (
+            f"  SHORT call K={cyc.call_strike:.0f} mark={cyc.entry_prem_c:.4f}  "
+            f"put K={cyc.put_strike:.0f} mark={cyc.entry_prem_p:.4f}"
+        ),
+        (
+            f"  WING  call K={cyc.wing_c:.0f}  put K={cyc.wing_p:.0f}"
+        ),
+    ]
+    if not cyc.adj_events:
+        lines.append("  ADJ: (none)")
+    for i, a in enumerate(cyc.adj_events, start=1):
+        ats = datetime.fromtimestamp(a.ts, tz=UTC).astimezone(IST)
+        lines.append(
+            f"  ADJ#{i} {ats.strftime('%Y-%m-%d %H:%M:%S %Z')}  "
+            f"leg={a.leg} {a.old_strike:.0f}->{a.new_strike:.0f} "
+            f"qty={a.new_qty} reason={a.reason}"
+        )
+    lines.append(
+        f"EXIT {ex.strftime('%Y-%m-%d %H:%M:%S %Z')}  "
+        f"reason={cyc.exit_reason}  n_adj={cyc.n_adjustments}  "
+        f"hold_h={cyc.hold_hours:.2f}"
+    )
+    return lines
+
+
 def run(
     cfg: dict[str, Any],
+    *,
+    trace_only: bool = False,
 ) -> tuple[list[str], list[CycleResult], SkipAccount]:
     lines: list[str] = []
-    lines.extend(parity_checklist_lines(wing_roll=bool(cfg["wing_roll"])))
+    if not trace_only:
+        lines.extend(parity_checklist_lines(wing_roll=bool(cfg["wing_roll"])))
 
     if cfg["slip_model"] == SLIP_MODEL_BUCKETED:
         load_slip_table()
 
-    lines.append("===== S001 MARK ENGINE =====")
+    if trace_only:
+        lines.append("===== S001 MARK ENGINE — ONE-DAY LEG TRACE =====")
+        lines.append("(no aggregate stats — entry / adj / exit only)")
+    else:
+        lines.append("===== S001 MARK ENGINE =====")
     lines.append(f"generated_utc={datetime.now(tz=UTC).isoformat()}")
     lines.append(f"arm={arm_label(cfg)} window={cfg.get('window')}")
     lines.append(f"config={cfg}")
@@ -1801,10 +1847,16 @@ def run(
             pending_ts = None
             if cyc is None:
                 skips.record_skip(skip_reason or SKIP_OTHER, day)
+                if trace_only:
+                    lines.append(
+                        f"SKIP day={day.isoformat()} reason={skip_reason}"
+                    )
                 break
             cycles.append(cyc)
             skips.cycles_entered += 1
             entries_today += 1
+            if trace_only:
+                lines.extend(format_cycle_leg_trace(cyc, entries_today))
             logger.info(
                 "day=%s cycle#%d exit=%s net=%.4f adj=%d prem_mode=%s "
                 "target_prem=%.2f profit_tgt=%s tp_touched=%s",
@@ -1830,6 +1882,20 @@ def run(
         day += timedelta(days=1)
 
     store.close()
+
+    if trace_only:
+        lines.append("")
+        lines.append(
+            f"trace_cycles={len(cycles)} "
+            f"skips_entered={skips.cycles_entered} "
+            f"no_chain={skips.skipped_no_chain} "
+            f"no_strike={skips.skipped_no_strike_at_target} "
+            f"no_wing={skips.skipped_no_wing} "
+            f"no_mark={skips.skipped_no_mark} "
+            f"other={skips.skipped_other}"
+        )
+        lines.append("(end trace — aggregates intentionally omitted)")
+        return lines, cycles, skips
 
     # --- summary ---
     n = len(cycles)
@@ -2234,8 +2300,8 @@ def main() -> None:
     ap.add_argument("--target-premium-per-side", type=float, default=150.0)
     ap.add_argument("--premium-pct-of-hedge", type=float, default=25.0)
     ap.add_argument("--max-adj", type=int, default=2)
-    ap.add_argument("--from", dest="from_date", type=str, required=True)
-    ap.add_argument("--to", dest="to_date", type=str, required=True)
+    ap.add_argument("--from", dest="from_date", type=str, default="")
+    ap.add_argument("--to", dest="to_date", type=str, default="")
     ap.add_argument(
         "--slip-model",
         type=str,
@@ -2261,7 +2327,19 @@ def main() -> None:
         default=True,
         help="Include BASELINE_OLD_LIVE arm + paired CI (default: on)",
     )
+    ap.add_argument(
+        "--trace-day",
+        type=str,
+        default="",
+        help="YYYY-MM-DD: print leg-by-leg entry/adj/exit only (no aggregates)",
+    )
     args = ap.parse_args()
+    if args.trace_day:
+        d = date.fromisoformat(args.trace_day)
+        args.from_date = d.isoformat()
+        args.to_date = d.isoformat()
+    if not args.from_date or not args.to_date:
+        ap.error("--from/--to required (or pass --trace-day YYYY-MM-DD)")
     cfg = build_cfg(args)
 
     t0 = time.time()
@@ -2278,18 +2356,29 @@ def main() -> None:
             logger.info("%s", ln)
         return
 
-    lines, cycles, _skips = run(cfg)
+    trace_only = bool(args.trace_day)
+    lines, cycles, _skips = run(cfg, trace_only=trace_only)
     elapsed = time.time() - t0
     lines.append(f"elapsed_sec={elapsed:.1f}")
-    write_cycles_csv(cycles)
-    OUT_TXT.parent.mkdir(parents=True, exist_ok=True)
-    OUT_TXT.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    logger.info("wrote %s", OUT_TXT)
-    logger.info(
-        "SMOKE n_cycles=%d elapsed=%.1fs",
-        len(cycles),
-        elapsed,
+    if not trace_only:
+        write_cycles_csv(cycles)
+    out_path = (
+        RESULTS_DIR / f"s001_mark_trace_{args.trace_day}.txt"
+        if trace_only
+        else OUT_TXT
     )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("wrote %s", out_path)
+    if trace_only:
+        for ln in lines:
+            logger.info("%s", ln)
+    else:
+        logger.info(
+            "SMOKE n_cycles=%d elapsed=%.1fs",
+            len(cycles),
+            elapsed,
+        )
 
 
 if __name__ == "__main__":
