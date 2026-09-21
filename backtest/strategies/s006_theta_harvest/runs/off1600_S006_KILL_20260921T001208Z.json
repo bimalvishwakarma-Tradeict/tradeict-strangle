@@ -1,0 +1,276 @@
+{
+  "strategy_id": "S006",
+  "stage": "KILL",
+  "tag": "off1600",
+  "window": {
+    "from": "2025-11-01",
+    "to": "2026-03-31"
+  },
+  "generated_utc": "2026-09-21T00:12:08.123135+00:00",
+  "elapsed_sec": 211.96443057060242,
+  "bootstrap": {
+    "n": 1000,
+    "seed": 20260919
+  },
+  "n_combos": 2,
+  "combos": [
+    {
+      "arm": "q100_pr1_tp20_ddnone_off1600_po0_cut1729_sdte1",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 1600.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "n_baskets": 142,
+      "baskets_per_day": 0.9403973509933775,
+      "win_pct": 40.84507042253521,
+      "mean_gross": -1.3639391532731637,
+      "mean_fees": 3.4264556337460834,
+      "mean_slippage": 1.514860103850628,
+      "mean_net": -4.790394787019247,
+      "mean_day": -4.504874567925385,
+      "ci_lo": -6.516514063289111,
+      "ci_hi": -2.6675268993335,
+      "bootstrap_mean": -4.508768532094501,
+      "worst_net": -55.81888748266424,
+      "worst_date": "2025-12-14",
+      "worst5": [
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -55.81888748266424
+        },
+        {
+          "date": "2025-12-01",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -50.51019983424856
+        },
+        {
+          "date": "2025-12-16",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -40.411502308720316
+        },
+        {
+          "date": "2025-11-02",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -40.18122906737714
+        },
+        {
+          "date": "2026-01-12",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -36.79517746473309
+        }
+      ],
+      "max_dd": -688.0061283912673,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 40.84507042253521,
+        "TIME_CUTOFF": 59.15492957746479
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 4.743756450194489,
+        "TIME_CUTOFF": -11.373499212714446
+      },
+      "mean_shorts_pnl": -0.3804584428074567,
+      "mean_protection_pnl": -0.9834807104657068,
+      "mae_usd": -57.320505785,
+      "mean_mae_usd": -9.397228528732395,
+      "median_mae_usd": -4.883761313500001,
+      "mean_net_theta_entry": 8.954923315201356,
+      "mean_entry_drag": -2.8191475665418313,
+      "mean_target_usd": 9.991504062019017,
+      "mean_net_credit": 49.957520310095084,
+      "max_loss_per_basket": 57.320505785,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 142,
+        "counts": {
+          "protection_itm": 4,
+          "short_itm": 1,
+          "protection_same_strike": 4
+        },
+        "examples": {
+          "protection_itm": [
+            "2025-11-18",
+            "2025-12-03",
+            "2025-12-04",
+            "2026-01-30"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ],
+          "protection_same_strike": [
+            "2025-11-22",
+            "2026-02-02",
+            "2026-02-05",
+            "2026-02-06"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 1600.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pr1_tp20_ddnone_off1600_po0_cut1729_sdte1"
+      },
+      "n_cycles": 142,
+      "strike_availability": {
+        "exact_hit": 268,
+        "exact_miss": 34,
+        "n_checks": 302,
+        "exact_hit_pct": 88.74172185430463,
+        "exact_miss_pct": 11.258278145695364,
+        "median_miss_gap_pts": 200.0
+      },
+      "elapsed_sec": 210.94226169586182,
+      "ci_overlap_top": false,
+      "noise_vs_top": "TOP"
+    },
+    {
+      "arm": "q100_pr3_tp20_ddnone_off1600_po0_cut1729_sdte1",
+      "qty_short": 100,
+      "protection_ratio": 3.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 1600.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "n_baskets": 142,
+      "baskets_per_day": 0.9403973509933775,
+      "win_pct": 33.80281690140845,
+      "mean_gross": -1.8332023640962407,
+      "mean_fees": 4.814532666189437,
+      "mean_slippage": 2.4535079592652544,
+      "mean_net": -6.647735030285678,
+      "mean_day": -6.251512412586531,
+      "ci_lo": -8.647135266675935,
+      "ci_hi": -3.8003210236468727,
+      "bootstrap_mean": -6.204581961757099,
+      "worst_net": -57.54303170920152,
+      "worst_date": "2025-12-14",
+      "worst5": [
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -57.54303170920152
+        },
+        {
+          "date": "2025-11-20",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -53.38532857942967
+        },
+        {
+          "date": "2026-03-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -48.919157343821134
+        },
+        {
+          "date": "2025-11-02",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -42.7746174490235
+        },
+        {
+          "date": "2026-03-12",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -40.89350532620381
+        }
+      ],
+      "max_dd": -984.2655551950306,
+      "hold_med": 7.625,
+      "exit_mix": {
+        "TARGET": 51.40845070422535,
+        "TIME_CUTOFF": 48.59154929577465
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 1.427157754004099,
+        "TIME_CUTOFF": -15.190737541200946
+      },
+      "mean_shorts_pnl": 1.0522651786972395,
+      "mean_protection_pnl": -2.88546754279348,
+      "mae_usd": -58.847517288999995,
+      "mean_mae_usd": -9.88531036543662,
+      "median_mae_usd": -4.204929313999998,
+      "mean_net_theta_entry": -66.55435868865479,
+      "mean_entry_drag": -4.076801766541187,
+      "mean_target_usd": 7.151405790524354,
+      "mean_net_credit": 33.33404142356955,
+      "max_loss_per_basket": 58.847517288999995,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 142,
+        "counts": {
+          "protection_itm": 4,
+          "short_itm": 1,
+          "protection_same_strike": 4
+        },
+        "examples": {
+          "protection_itm": [
+            "2025-11-18",
+            "2025-12-03",
+            "2025-12-04",
+            "2026-01-30"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ],
+          "protection_same_strike": [
+            "2025-11-22",
+            "2026-02-02",
+            "2026-02-05",
+            "2026-02-06"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 3.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 1600.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pr3_tp20_ddnone_off1600_po0_cut1729_sdte1"
+      },
+      "n_cycles": 142,
+      "strike_availability": {
+        "exact_hit": 268,
+        "exact_miss": 34,
+        "n_checks": 302,
+        "exact_hit_pct": 88.74172185430463,
+        "exact_miss_pct": 11.258278145695364,
+        "median_miss_gap_pts": 200.0
+      },
+      "elapsed_sec": 1.013702392578125,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    }
+  ],
+  "baskets_csv": "off1600_S006_KILL_20260921T001208Z_baskets.csv",
+  "intraday_csv": "off1600_S006_KILL_20260921T001208Z_intraday.csv"
+}

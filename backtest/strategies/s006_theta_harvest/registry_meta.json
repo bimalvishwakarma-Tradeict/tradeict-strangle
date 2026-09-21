@@ -88,6 +88,78 @@
       "ci_hi": -5.424538326455702,
       "verdict": "GRID_1_COMBOS",
       "top_arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte1"
+    },
+    {
+      "stage": "KILL",
+      "tag": "fixed",
+      "window": "2026-06-01..2026-08-31",
+      "date": "20260920",
+      "n": 88,
+      "mean_day": -1.9578393638182598,
+      "ci_lo": -2.9824437800517405,
+      "ci_hi": -1.055552801422337,
+      "verdict": "GRID_6_COMBOS",
+      "top_arm": "q100_pr3_tp20_ddnone_off2000_po0_cut1729_sdte1"
+    },
+    {
+      "stage": "KILL",
+      "tag": "tail",
+      "window": "2025-11-01..2026-03-31",
+      "date": "20260920",
+      "n": 142,
+      "mean_day": -5.388690730407102,
+      "ci_lo": -7.275097925385329,
+      "ci_hi": -3.1740771233333898,
+      "verdict": "GRID_6_COMBOS",
+      "top_arm": "q100_pr3_tp20_ddnone_off2000_po0_cut1729_sdte1"
+    },
+    {
+      "stage": "KILL",
+      "tag": "off1600",
+      "window": "2025-11-01..2026-03-31",
+      "date": "20260921",
+      "n": 142,
+      "mean_day": -4.504874567925385,
+      "ci_lo": -6.516514063289111,
+      "ci_hi": -2.6675268993335,
+      "verdict": "GRID_2_COMBOS",
+      "top_arm": "q100_pr1_tp20_ddnone_off1600_po0_cut1729_sdte1"
+    },
+    {
+      "stage": "KILL",
+      "tag": "off1200",
+      "window": "2025-11-01..2026-03-31",
+      "date": "20260921",
+      "n": 142,
+      "mean_day": -3.784868416571086,
+      "ci_lo": -6.167035271969534,
+      "ci_hi": -1.6584146401088757,
+      "verdict": "GRID_2_COMBOS",
+      "top_arm": "q100_pr1_tp20_ddnone_off1200_po0_cut1729_sdte1"
+    },
+    {
+      "stage": "KILL",
+      "tag": "smoke_c",
+      "window": "2025-11-01..2025-11-07",
+      "date": "20260921",
+      "n": 7,
+      "mean_day": 3.564637034234891,
+      "ci_lo": -5.776313997345993,
+      "ci_hi": 13.577511034890994,
+      "verdict": "GRID_2_COMBOS",
+      "top_arm": "q100_pr0_tp30_dd10_off2000_po0_cut1729_sdte1_emfixed_e1300"
+    },
+    {
+      "stage": "KILL",
+      "tag": "smoke_c_vwap",
+      "window": "2025-11-01..2025-11-07",
+      "date": "20260921",
+      "n": 7,
+      "mean_day": 1.8703739718532233,
+      "ci_lo": -9.004656195173732,
+      "ci_hi": 13.683879617426914,
+      "verdict": "GRID_1_COMBOS",
+      "top_arm": "q100_pr0_tp30_dd10_off2000_po0_cut1729_sdte1_emvwap_w0900-1500"
     }
   ],
   "open_questions": [

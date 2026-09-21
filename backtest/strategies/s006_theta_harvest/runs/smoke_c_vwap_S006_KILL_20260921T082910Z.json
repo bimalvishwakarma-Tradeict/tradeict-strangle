@@ -1,0 +1,147 @@
+{
+  "strategy_id": "S006",
+  "stage": "KILL",
+  "tag": "smoke_c_vwap",
+  "window": {
+    "from": "2025-11-01",
+    "to": "2025-11-07"
+  },
+  "generated_utc": "2026-09-21T08:29:10.589318+00:00",
+  "elapsed_sec": 6.205646991729736,
+  "bootstrap": {
+    "n": 1000,
+    "seed": 20260919
+  },
+  "n_combos": 1,
+  "combos": [
+    {
+      "arm": "q100_pr0_tp30_dd10_off2000_po0_cut1729_sdte1_emvwap_w0900-1500",
+      "qty_short": 100,
+      "protection_ratio": 0.0,
+      "target_pct": 30.0,
+      "max_dd_pct": 10.0,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "vwap",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "n_baskets": 7,
+      "baskets_per_day": 1.0,
+      "win_pct": 57.142857142857146,
+      "mean_gross": 5.949614341423632,
+      "mean_fees": 4.079240369570409,
+      "mean_slippage": 1.1809751595763678,
+      "mean_net": 1.8703739718532233,
+      "median_net": 1.3249564616190366,
+      "mean_day": 1.8703739718532233,
+      "ci_lo": -9.004656195173732,
+      "ci_hi": 13.683879617426914,
+      "bootstrap_mean": 1.8780300005230264,
+      "worst_net": -17.889495508712855,
+      "worst_date": "2025-11-04",
+      "worst5": [
+        {
+          "date": "2025-11-04",
+          "exit_reason": "STOPLOSS",
+          "net": -17.889495508712855
+        },
+        {
+          "date": "2025-11-02",
+          "exit_reason": "STOPLOSS",
+          "net": -15.614235866823762
+        },
+        {
+          "date": "2025-11-01",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -4.876825987097946
+        },
+        {
+          "date": "2025-11-06",
+          "exit_reason": "TIME_CUTOFF",
+          "net": 1.3249564616190366
+        },
+        {
+          "date": "2025-11-03",
+          "exit_reason": "TIME_CUTOFF",
+          "net": 6.078848413014701
+        }
+      ],
+      "max_dd": -32.301708949619865,
+      "hold_med": 4.433333333333334,
+      "exit_mix": {
+        "STOPLOSS": 28.571428571428573,
+        "TARGET": 14.285714285714286,
+        "TIME_CUTOFF": 57.142857142857146
+      },
+      "mean_net_by_exit_reason": {
+        "STOPLOSS": -16.75186568776831,
+        "TARGET": 21.85091219493161,
+        "TIME_CUTOFF": 6.186359245894392
+      },
+      "mean_shorts_pnl": 5.949614341423632,
+      "mean_protection_pnl": 0.0,
+      "mae_usd": -11.681688063999996,
+      "mean_mae_usd": -5.132282169285716,
+      "median_mae_usd": -3.8176294559999997,
+      "mean_net_theta_entry": 60.48339778604043,
+      "mean_entry_drag": -2.6425674099207583,
+      "mean_target_usd": 21.000600813902402,
+      "mean_net_credit": 70.00200271300801,
+      "max_loss_per_basket": 11.681688063999996,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": 0.0,
+      "skips": {
+        "days_in_window": 7,
+        "cycles_entered": 7,
+        "counts": {},
+        "examples": {}
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 0.0,
+        "target_pct": 30.0,
+        "max_dd_pct": 10.0,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "vwap",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pr0_tp30_dd10_off2000_po0_cut1729_sdte1_emvwap_w0900-1500"
+      },
+      "n_cycles": 7,
+      "strike_availability": {
+        "exact_hit": 0,
+        "exact_miss": 0,
+        "n_checks": 0,
+        "exact_hit_pct": NaN,
+        "exact_miss_pct": NaN,
+        "median_miss_gap_pts": NaN
+      },
+      "vwap_control": {
+        "n_signal_days": 7,
+        "n_reject_days_with_cf": 0,
+        "mean_net_signal_days": 1.8703739718532233,
+        "mean_net_reject_cf_days": NaN
+      },
+      "elapsed_sec": 6.204932689666748,
+      "ci_overlap_top": false,
+      "noise_vs_top": "TOP"
+    }
+  ],
+  "baskets_csv": "smoke_c_vwap_S006_KILL_20260921T082910Z_baskets.csv",
+  "intraday_csv": "smoke_c_vwap_S006_KILL_20260921T082910Z_intraday.csv"
+}

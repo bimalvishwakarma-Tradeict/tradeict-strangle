@@ -61,6 +61,9 @@ logger = logging.getLogger("strategies.s006")
 CAPITAL_USD = 100.0
 ENTRY_HOUR = 9
 ENTRY_MINUTE = 0
+DEFAULT_ENTRY_MODE = "fixed"
+DEFAULT_ENTRY_WINDOW_START = "09:00"
+DEFAULT_ENTRY_WINDOW_END = "15:00"
 DEFAULT_CUTOFF_HOUR = 17
 DEFAULT_CUTOFF_MINUTE = 29
 DEFAULT_QTY_SHORT = 100
@@ -93,9 +96,14 @@ def default_params() -> dict[str, Any]:
         "cutoff_hour": DEFAULT_CUTOFF_HOUR,
         "cutoff_minute": DEFAULT_CUTOFF_MINUTE,
         "expire_protection_at_cutoff": DEFAULT_EXPIRE_PROT_AT_CUTOFF,
+        "entry_mode": DEFAULT_ENTRY_MODE,
+        "entry_hour": ENTRY_HOUR,
+        "entry_minute": ENTRY_MINUTE,
+        "entry_window_start": DEFAULT_ENTRY_WINDOW_START,
+        "entry_window_end": DEFAULT_ENTRY_WINDOW_END,
         "slip_model": "bucketed",
         "slip_mult": 1.0,
-        "arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte1",
+        "arm": "q100_pr3_tp30_dd10_off2000_po0_cut1729_sdte1_emfixed_e0900",
     }
 
 
@@ -234,6 +242,16 @@ class BasketBuild:
     prot_put_otm_pts: float = 0.0
     exact_strike_available: int = 0
     strike_gap_pts: float = 0.0
+    entry_mode: str = "fixed"
+    entry_time_ist: str = ""
+    vwap_mid_at_entry: float | None = None
+    swing_high: float | None = None
+    swing_low: float | None = None
+    swing_high_vwap: float | None = None
+    swing_low_vwap: float | None = None
+    bars_since_day_reset: int = 0
+    signals_found_today: int = 0
+    signal_rank_used: int = 0
     basket_id: int = 0
 
 
@@ -247,6 +265,10 @@ class S006ThetaHarvestStrategy:
         self._strike_exact_hit = 0
         self._strike_exact_miss = 0
         self._strike_miss_gaps: list[float] = []
+        self._vwap_accept_nets: list[float] = []
+        self._vwap_reject_cf_nets: list[float] = []
+        self._df_1m: Any = None
+        self._pending_entry_meta: dict[str, Any] = {}
 
     def meta(self) -> StrategyMeta:
         return StrategyMeta(
@@ -514,70 +536,79 @@ class S006ThetaHarvestStrategy:
         sp_k = float(sp_row["strike"])
         spot_f = float(spot)
 
-        # Long 0DTE protection at short strikes +/- protection_offset
-        conn_l = store.conn(long_exp) or conn
-        cts_l = resolve_mark_ts(conn_l, long_exp, entry_ts)
-        if cts_l is None:
-            return None, "skipped_no_protection"
-        calls_l = load_chain(conn_l, long_exp, cts_l, "call")
-        puts_l = load_chain(conn_l, long_exp, cts_l, "put")
-        if not calls_l or not puts_l:
-            return None, "skipped_no_protection"
-        c_by_l = self._by_strike(calls_l)
-        p_by_l = self._by_strike(puts_l)
-
-        # STEP3 metrics: exact short-strike presence on 0DTE (no new fallback)
-        exact_c, gap_c = self._record_short_strike_on_0dte(
-            day=day,
-            target=sc_k,
-            chain_by=c_by_l,
-            spot=spot_f,
-            is_call=True,
-        )
-        exact_p, gap_p = self._record_short_strike_on_0dte(
-            day=day,
-            target=sp_k,
-            chain_by=p_by_l,
-            spot=spot_f,
-            is_call=False,
-        )
-        exact_strike_available = 1 if (exact_c and exact_p) else 0
-        gap_vals = [g for g in (gap_c, gap_p) if g == g]  # drop nan
-        strike_gap_pts = float(max(gap_vals)) if gap_vals else 0.0
-
-        # Short-leg OTM hard check (before protection snap)
+        # Short-leg OTM hard check
         if sc_k <= spot_f or sp_k >= spot_f:
             return None, "short_itm"
 
-        po = float(p.get("protection_offset", DEFAULT_PROTECTION_OFFSET))
-        # offset applied OTM-ward: call +po, put -po when po>0; if po==0 same strikes
-        if po == 0:
-            pc_target, pp_target = sc_k, sp_k
-        else:
-            pc_target = sc_k + po
-            pp_target = sp_k - po
-        pc_k = self._nearest_strike(sorted(c_by_l), pc_target)
-        pp_k = self._nearest_strike(sorted(p_by_l), pp_target)
-        if pc_k is None or pp_k is None:
-            return None, "skipped_no_protection"
-        if pc_k not in c_by_l or pp_k not in p_by_l:
-            return None, "skipped_no_protection"
-
-        # STEP2 guardrails — skip bad protection / never enter silently
-        if pc_k == pp_k:
-            return None, "protection_same_strike"
-        if pc_k <= spot_f or pp_k >= spot_f:
-            return None, "protection_itm"
-
-        lc_row, lp_row = c_by_l[pc_k], p_by_l[pp_k]
-        prot_call_otm_pts = pc_k - spot_f
-        prot_put_otm_pts = spot_f - pp_k
-
         q_short = int(p.get("qty_short", DEFAULT_QTY_SHORT))
         pr = float(p.get("protection_ratio", DEFAULT_PROTECTION_RATIO))
-        q_prot = max(1, int(round(pr * q_short)))
+        naked = pr <= 0
         slip_model = str(p.get("slip_model") or "bucketed")
         slip_mult = float(p.get("slip_mult") or 1.0)
+
+        pc_k = float("nan")
+        pp_k = float("nan")
+        prot_call_otm_pts = float("nan")
+        prot_put_otm_pts = float("nan")
+        exact_strike_available = 0
+        strike_gap_pts = 0.0
+        lc_row: dict[str, Any] | None = None
+        lp_row: dict[str, Any] | None = None
+        q_prot = 0
+
+        if not naked:
+            # Long 0DTE protection at short strikes +/- protection_offset
+            conn_l = store.conn(long_exp) or conn
+            cts_l = resolve_mark_ts(conn_l, long_exp, entry_ts)
+            if cts_l is None:
+                return None, "skipped_no_protection"
+            calls_l = load_chain(conn_l, long_exp, cts_l, "call")
+            puts_l = load_chain(conn_l, long_exp, cts_l, "put")
+            if not calls_l or not puts_l:
+                return None, "skipped_no_protection"
+            c_by_l = self._by_strike(calls_l)
+            p_by_l = self._by_strike(puts_l)
+
+            exact_c, gap_c = self._record_short_strike_on_0dte(
+                day=day,
+                target=sc_k,
+                chain_by=c_by_l,
+                spot=spot_f,
+                is_call=True,
+            )
+            exact_p, gap_p = self._record_short_strike_on_0dte(
+                day=day,
+                target=sp_k,
+                chain_by=p_by_l,
+                spot=spot_f,
+                is_call=False,
+            )
+            exact_strike_available = 1 if (exact_c and exact_p) else 0
+            gap_vals = [g for g in (gap_c, gap_p) if g == g]
+            strike_gap_pts = float(max(gap_vals)) if gap_vals else 0.0
+
+            po = float(p.get("protection_offset", DEFAULT_PROTECTION_OFFSET))
+            if po == 0:
+                pc_target, pp_target = sc_k, sp_k
+            else:
+                pc_target = sc_k + po
+                pp_target = sp_k - po
+            pc_k_opt = self._nearest_strike(sorted(c_by_l), pc_target)
+            pp_k_opt = self._nearest_strike(sorted(p_by_l), pp_target)
+            if pc_k_opt is None or pp_k_opt is None:
+                return None, "skipped_no_protection"
+            if pc_k_opt not in c_by_l or pp_k_opt not in p_by_l:
+                return None, "skipped_no_protection"
+            if pc_k_opt == pp_k_opt:
+                return None, "protection_same_strike"
+            if pc_k_opt <= spot_f or pp_k_opt >= spot_f:
+                return None, "protection_itm"
+            pc_k = float(pc_k_opt)
+            pp_k = float(pp_k_opt)
+            lc_row, lp_row = c_by_l[pc_k], p_by_l[pp_k]
+            prot_call_otm_pts = pc_k - spot_f
+            prot_put_otm_pts = spot_f - pp_k
+            q_prot = max(1, int(round(pr * q_short)))
 
         def make_leg(
             role: str, row: dict[str, Any], qty: int, dte: int, side: str
@@ -603,9 +634,10 @@ class S006ThetaHarvestStrategy:
         legs = [
             make_leg("short_call", sc_row, q_short, short_dte, "sell"),
             make_leg("short_put", sp_row, q_short, short_dte, "sell"),
-            make_leg("prot_call", lc_row, q_prot, 0, "buy"),
-            make_leg("prot_put", lp_row, q_prot, 0, "buy"),
         ]
+        if not naked and lc_row is not None and lp_row is not None:
+            legs.append(make_leg("prot_call", lc_row, q_prot, 0, "buy"))
+            legs.append(make_leg("prot_put", lp_row, q_prot, 0, "buy"))
 
         short_credit = sum(
             leg.entry_fill * qty_btc(leg.qty) for leg in legs if leg.side == "sell"
@@ -643,6 +675,7 @@ class S006ThetaHarvestStrategy:
         for leg in legs:
             leg.series = load_symbol_series(store, leg.symbol, entry_ts, preload_end)
 
+        emeta = dict(self._pending_entry_meta or {})
         self._basket_seq += 1
         return (
             BasketBuild(
@@ -673,6 +706,16 @@ class S006ThetaHarvestStrategy:
                 prot_put_otm_pts=prot_put_otm_pts,
                 exact_strike_available=exact_strike_available,
                 strike_gap_pts=strike_gap_pts,
+                entry_mode=str(emeta.get("entry_mode") or p.get("entry_mode") or "fixed"),
+                entry_time_ist=str(emeta.get("entry_time_ist") or _ts_ist_str(entry_ts)),
+                vwap_mid_at_entry=emeta.get("vwap_mid_at_entry"),
+                swing_high=emeta.get("swing_high"),
+                swing_low=emeta.get("swing_low"),
+                swing_high_vwap=emeta.get("swing_high_vwap"),
+                swing_low_vwap=emeta.get("swing_low_vwap"),
+                bars_since_day_reset=int(emeta.get("bars_since_day_reset") or 0),
+                signals_found_today=int(emeta.get("signals_found_today") or 0),
+                signal_rank_used=int(emeta.get("signal_rank_used") or 0),
                 basket_id=self._basket_seq,
             ),
             None,
@@ -903,7 +946,22 @@ class S006ThetaHarvestStrategy:
         }
         by_role = {leg.role: leg for leg in basket.legs}
         for role in LEG_ROLES:
-            leg = by_role[role]
+            leg = by_role.get(role)
+            if leg is None:
+                row[f"{role}_symbol"] = ""
+                row[f"{role}_side"] = ""
+                row[f"{role}_strike"] = ""
+                row[f"{role}_qty"] = 0
+                row[f"{role}_entry_mark"] = ""
+                row[f"{role}_entry_fill"] = ""
+                row[f"{role}_entry_slip_pct"] = ""
+                row[f"{role}_entry_fee"] = ""
+                row[f"{role}_exit_mark"] = ""
+                row[f"{role}_exit_fill"] = ""
+                row[f"{role}_exit_fee"] = ""
+                row[f"{role}_expired_flag"] = 0
+                row[f"{role}_leg_pnl_usd"] = ""
+                continue
             row[f"{role}_symbol"] = leg.symbol
             row[f"{role}_side"] = leg.side
             row[f"{role}_strike"] = leg.strike
@@ -940,6 +998,22 @@ class S006ThetaHarvestStrategy:
                 "slippage_usd": slippage,
                 "net_usd": net,
                 "exit_reason": exit_reason,
+                "entry_mode": basket.entry_mode,
+                "entry_time_ist": basket.entry_time_ist,
+                "vwap_mid_at_entry": (
+                    "" if basket.vwap_mid_at_entry is None else basket.vwap_mid_at_entry
+                ),
+                "swing_high": "" if basket.swing_high is None else basket.swing_high,
+                "swing_low": "" if basket.swing_low is None else basket.swing_low,
+                "swing_high_vwap": (
+                    "" if basket.swing_high_vwap is None else basket.swing_high_vwap
+                ),
+                "swing_low_vwap": (
+                    "" if basket.swing_low_vwap is None else basket.swing_low_vwap
+                ),
+                "bars_since_day_reset": basket.bars_since_day_reset,
+                "signals_found_today": basket.signals_found_today,
+                "signal_rank_used": basket.signal_rank_used,
             }
         )
         return row
@@ -947,17 +1021,21 @@ class S006ThetaHarvestStrategy:
     def _intraday_snapshot(
         self, basket: BasketBuild, ts: int, spot: float
     ) -> dict[str, Any] | None:
-        sc = self._leg_by_role(basket, "short_call")
-        sp = self._leg_by_role(basket, "short_put")
-        pc = self._leg_by_role(basket, "prot_call")
-        pp = self._leg_by_role(basket, "prot_put")
-        marks = {}
-        for role, leg in (
-            ("short_call", sc),
-            ("short_put", sp),
-            ("prot_call", pc),
-            ("prot_put", pp),
-        ):
+        by_role = {leg.role: leg for leg in basket.legs}
+        marks: dict[str, float] = {}
+        for role in ("short_call", "short_put"):
+            leg = by_role.get(role)
+            if leg is None:
+                return None
+            m = self._mark_at(leg.series, ts)
+            if m is None:
+                return None
+            marks[role] = m
+        for role in ("prot_call", "prot_put"):
+            leg = by_role.get(role)
+            if leg is None:
+                marks[role] = float("nan")
+                continue
             m = self._mark_at(leg.series, ts)
             if m is None:
                 return None
@@ -990,6 +1068,7 @@ class S006ThetaHarvestStrategy:
             "net_mtm_cost_adjusted": adj,
             "pct_of_net_credit": pct_nc,
         }
+
     def monitor_basket(
         self,
         store: MarksStore,
@@ -1091,31 +1170,153 @@ class S006ThetaHarvestStrategy:
         self._strike_exact_hit = 0
         self._strike_exact_miss = 0
         self._strike_miss_gaps = []
+        self._vwap_accept_nets = []
+        self._vwap_reject_cf_nets = []
         cycles: list[CycleResult] = []
+
+        p = self.params
+        entry_mode = str(p.get("entry_mode") or DEFAULT_ENTRY_MODE).lower()
+        if entry_mode not in ("fixed", "vwap"):
+            raise ValueError(f"bad entry_mode={entry_mode!r}")
+
+        df_1m = None
+        if entry_mode == "vwap":
+            from backtest.strategies.s006_theta_harvest.vwap_filter import (
+                diagnose_no_signal,
+                get_vwap_signals,
+                load_1m_csv,
+            )
+
+            if self._df_1m is None:
+                self._df_1m = load_1m_csv()
+            df_1m = self._df_1m
 
         day = d0
         while day <= d1:
-            entry_ts = to_unix(ist_dt(day, ENTRY_HOUR, ENTRY_MINUTE))
-            basket, skip = self.build_basket(
-                store, spot_map, day=day, entry_ts=entry_ts
-            )
-            if basket is None:
-                self.skips.record(skip or "skipped_other", day)
-                day += timedelta(days=1)
-                continue
+            entry_jobs: list[tuple[int, dict[str, Any]]] = []
+            if entry_mode == "fixed":
+                eh = int(p.get("entry_hour", ENTRY_HOUR))
+                em = int(p.get("entry_minute", ENTRY_MINUTE))
+                ets = to_unix(ist_dt(day, eh, em))
+                entry_jobs.append(
+                    (
+                        ets,
+                        {
+                            "entry_mode": "fixed",
+                            "entry_time_ist": _ts_ist_str(ets),
+                            "vwap_mid_at_entry": None,
+                            "swing_high": None,
+                            "swing_low": None,
+                            "swing_high_vwap": None,
+                            "swing_low_vwap": None,
+                            "bars_since_day_reset": 0,
+                            "signals_found_today": 0,
+                            "signal_rank_used": 0,
+                        },
+                    )
+                )
+            else:
+                from backtest.strategies.s006_theta_harvest.vwap_filter import (
+                    diagnose_no_signal,
+                    get_vwap_signals,
+                )
 
-            cyc = self.monitor_basket(store, spot_map, basket, entry_ts, day)
-            cyc.arm = str(self.params.get("arm") or "")
-            cycles.append(cyc)
-            self.skips.cycles_entered += 1
-            logger.info(
-                "S006 %s exit=%s net=%.4f mae=%.4f hold=%.2fh",
-                day,
-                cyc.exit_reason,
-                cyc.net_pnl,
-                float((cyc.meta or {}).get("mae_usd") or 0),
-                cyc.hold_hours,
-            )
+                ws = str(p.get("entry_window_start") or DEFAULT_ENTRY_WINDOW_START)
+                we = str(p.get("entry_window_end") or DEFAULT_ENTRY_WINDOW_END)
+                # normalize "0900" -> "09:00" for filter
+                def _norm_win(s: str) -> str:
+                    s = s.strip().replace(":", "")
+                    if len(s) == 3:
+                        s = "0" + s
+                    if len(s) == 4 and s.isdigit():
+                        return f"{s[:2]}:{s[2:]}"
+                    return s
+
+                ws_n, we_n = _norm_win(ws), _norm_win(we)
+                sigs = get_vwap_signals(df_1m, day, ws_n, we_n)
+                if not sigs:
+                    diag = diagnose_no_signal(df_1m, day, ws_n, we_n)
+                    reason = f"skipped_no_vwap_signal:{diag.get('reason')}"
+                    self.skips.record(reason, day)
+                    logger.info("S006 VWAP no signal %s reason=%s", day, diag)
+                    # Control: counterfactual entry at window start
+                    wh, wm = int(ws_n[:2]), int(ws_n[3:5])
+                    cf_ts = to_unix(ist_dt(day, wh, wm))
+                    self._pending_entry_meta = {
+                        "entry_mode": "vwap_reject_cf",
+                        "entry_time_ist": _ts_ist_str(cf_ts),
+                        "signals_found_today": 0,
+                        "signal_rank_used": 0,
+                    }
+                    cf_basket, cf_skip = self.build_basket(
+                        store, spot_map, day=day, entry_ts=cf_ts
+                    )
+                    if cf_basket is not None:
+                        cf_cyc = self.monitor_basket(
+                            store, spot_map, cf_basket, cf_ts, day
+                        )
+                        self._vwap_reject_cf_nets.append(cf_cyc.net_pnl)
+                    else:
+                        logger.info(
+                            "S006 VWAP reject CF skip %s: %s", day, cf_skip
+                        )
+                    day += timedelta(days=1)
+                    continue
+
+                for extra in sigs[1:]:
+                    logger.info(
+                        "S006 VWAP extra signal ignored day=%s ts=%s",
+                        day,
+                        extra["ts_ist"],
+                    )
+                sig = sigs[0]
+                ts_dt = sig["ts_ist"]
+                if hasattr(ts_dt, "to_pydatetime"):
+                    ts_dt = ts_dt.to_pydatetime()
+                ets = to_unix(ts_dt)
+                entry_jobs.append(
+                    (
+                        ets,
+                        {
+                            "entry_mode": "vwap",
+                            "entry_time_ist": _ts_ist_str(ets),
+                            "vwap_mid_at_entry": float(sig["mid"]),
+                            "swing_high": float(sig["swing_high"]),
+                            "swing_low": float(sig["swing_low"]),
+                            "swing_high_vwap": float(sig["swing_high_vwap"]),
+                            "swing_low_vwap": float(sig["swing_low_vwap"]),
+                            "bars_since_day_reset": int(sig["bars_since_reset"]),
+                            "signals_found_today": len(sigs),
+                            "signal_rank_used": 1,
+                        },
+                    )
+                )
+
+            for entry_ts, emeta in entry_jobs:
+                self._pending_entry_meta = emeta
+                basket, skip = self.build_basket(
+                    store, spot_map, day=day, entry_ts=entry_ts
+                )
+                if basket is None:
+                    self.skips.record(skip or "skipped_other", day)
+                    continue
+
+                cyc = self.monitor_basket(store, spot_map, basket, entry_ts, day)
+                cyc.arm = str(self.params.get("arm") or "")
+                cycles.append(cyc)
+                self.skips.cycles_entered += 1
+                if entry_mode == "vwap":
+                    self._vwap_accept_nets.append(cyc.net_pnl)
+                logger.info(
+                    "S006 %s exit=%s net=%.4f mae=%.4f hold=%.2fh mode=%s",
+                    day,
+                    cyc.exit_reason,
+                    cyc.net_pnl,
+                    float((cyc.meta or {}).get("mae_usd") or 0),
+                    cyc.hold_hours,
+                    entry_mode,
+                )
+
             day += timedelta(days=1)
 
         if own_store:
@@ -1123,6 +1324,19 @@ class S006ThetaHarvestStrategy:
 
         stats = summarize_s006(cycles, d0, d1, self.skips, self.params)
         stats["strike_availability"] = self.strike_availability_summary()
+        if entry_mode == "vwap":
+            acc = self._vwap_accept_nets
+            rej = self._vwap_reject_cf_nets
+            stats["vwap_control"] = {
+                "n_signal_days": len(acc),
+                "n_reject_days_with_cf": len(rej),
+                "mean_net_signal_days": (
+                    float(statistics.fmean(acc)) if acc else float("nan")
+                ),
+                "mean_net_reject_cf_days": (
+                    float(statistics.fmean(rej)) if rej else float("nan")
+                ),
+            }
         return cycles, self.skips, stats
 
 
@@ -1193,6 +1407,9 @@ def summarize_s006(
     mean_net = (
         float(statistics.fmean([c.net_pnl for c in cycles])) if cycles else float("nan")
     )
+    median_net = (
+        float(statistics.median([c.net_pnl for c in cycles])) if cycles else float("nan")
+    )
 
     max_loss = abs(mae_usd) if mae_usd == mae_usd else float("nan")
     units = lots_at_risk_cap(max_loss, CAPITAL_USD, 3.0) if max_loss == max_loss else 0
@@ -1217,6 +1434,7 @@ def summarize_s006(
         if cycles
         else float("nan"),
         "mean_net": mean_net,
+        "median_net": median_net,
         "mean_day": mean_day,
         "ci_lo": lo,
         "ci_hi": hi,

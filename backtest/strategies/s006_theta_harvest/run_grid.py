@@ -55,6 +55,9 @@ DEFAULT_PROTECTION_OFFSETS = (DEFAULT_PROTECTION_OFFSET,)
 DEFAULT_CUTOFF_TIMES = (f"{DEFAULT_CUTOFF_HOUR:02d}:{DEFAULT_CUTOFF_MINUTE:02d}",)
 DEFAULT_EXPIRE_FLAGS = (DEFAULT_EXPIRE_PROT_AT_CUTOFF,)
 DEFAULT_SHORT_DTES = (DEFAULT_SHORT_DTE,)
+DEFAULT_ENTRY_MODE = "fixed"
+DEFAULT_ENTRY_TIMES = ("0900",)
+DEFAULT_ENTRY_WINDOW = "0900-1500"
 
 
 def _parse_floats(s: str) -> list[float]:
@@ -63,6 +66,25 @@ def _parse_floats(s: str) -> list[float]:
 
 def _parse_str_list(s: str) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def _parse_hhmm(s: str) -> tuple[int, int]:
+    s = s.strip().replace(":", "")
+    if len(s) == 3:
+        s = "0" + s
+    if len(s) != 4 or not s.isdigit():
+        raise ValueError(f"bad HHMM: {s!r}")
+    return int(s[:2]), int(s[2:])
+
+
+def _parse_entry_window(s: str) -> tuple[str, str]:
+    s = s.strip().replace(" ", "")
+    if "-" not in s:
+        raise ValueError(f"bad --entry-window {s!r}, want HHMM-HHMM")
+    a, b = s.split("-", 1)
+    h0, m0 = _parse_hhmm(a)
+    h1, m1 = _parse_hhmm(b)
+    return f"{h0:02d}:{m0:02d}", f"{h1:02d}:{m1:02d}"
 
 
 def make_arm(
@@ -77,6 +99,10 @@ def make_arm(
     cut_m: int,
     expire: bool,
     short_dte: int,
+    entry_mode: str = "fixed",
+    entry_hhmm: str | None = None,
+    window_start: str | None = None,
+    window_end: str | None = None,
 ) -> str:
     dd_s = "none" if dd is None else f"{dd:g}"
     arm = (
@@ -85,6 +111,15 @@ def make_arm(
     )
     if not expire:
         arm += "_nox"
+    em = entry_mode.lower()
+    arm += f"_em{em}"
+    if em == "fixed":
+        hhmm = entry_hhmm or "0900"
+        arm += f"_e{hhmm}"
+    else:
+        ws = (window_start or "09:00").replace(":", "")
+        we = (window_end or "15:00").replace(":", "")
+        arm += f"_w{ws}-{we}"
     return arm
 
 
@@ -99,8 +134,44 @@ def build_combos(
     cutoff_times: list[str],
     expire_flags: list[bool],
     short_dtes: list[int],
+    entry_mode: str = "fixed",
+    entry_times: list[str] | None = None,
+    entry_window: tuple[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    em = entry_mode.lower()
+    entry_times = entry_times or list(DEFAULT_ENTRY_TIMES)
+    if entry_window is None:
+        entry_window = _parse_entry_window(DEFAULT_ENTRY_WINDOW)
+    ws, we = entry_window
+
+    entry_axis: list[dict[str, Any]]
+    if em == "fixed":
+        entry_axis = []
+        for et in entry_times:
+            hh, mm = _parse_hhmm(et)
+            entry_axis.append(
+                {
+                    "entry_mode": "fixed",
+                    "entry_hour": hh,
+                    "entry_minute": mm,
+                    "entry_hhmm": f"{hh:02d}{mm:02d}",
+                    "entry_window_start": ws,
+                    "entry_window_end": we,
+                }
+            )
+    else:
+        entry_axis = [
+            {
+                "entry_mode": "vwap",
+                "entry_hour": int(ws[:2]),
+                "entry_minute": int(ws[3:5]),
+                "entry_hhmm": None,
+                "entry_window_start": ws,
+                "entry_window_end": we,
+            }
+        ]
+
     for qty in qty_shorts:
         for pr in protection_ratios:
             for tp in target_pcts:
@@ -111,33 +182,49 @@ def build_combos(
                                 hh, mm = parse_cutoff_time(ct)
                                 for ex in expire_flags:
                                     for sdte in short_dtes:
-                                        arm = make_arm(
-                                            qty=qty,
-                                            pr=pr,
-                                            tp=tp,
-                                            dd=dd,
-                                            off=off,
-                                            po=po,
-                                            cut_h=hh,
-                                            cut_m=mm,
-                                            expire=ex,
-                                            short_dte=sdte,
-                                        )
-                                        out.append(
-                                            {
-                                                "qty_short": qty,
-                                                "protection_ratio": pr,
-                                                "target_pct": tp,
-                                                "max_dd_pct": dd,
-                                                "short_offset": off,
-                                                "protection_offset": po,
-                                                "cutoff_hour": hh,
-                                                "cutoff_minute": mm,
-                                                "expire_protection_at_cutoff": ex,
-                                                "short_dte": int(sdte),
-                                                "arm": arm,
-                                            }
-                                        )
+                                        for ea in entry_axis:
+                                            arm = make_arm(
+                                                qty=qty,
+                                                pr=pr,
+                                                tp=tp,
+                                                dd=dd,
+                                                off=off,
+                                                po=po,
+                                                cut_h=hh,
+                                                cut_m=mm,
+                                                expire=ex,
+                                                short_dte=sdte,
+                                                entry_mode=ea["entry_mode"],
+                                                entry_hhmm=ea.get("entry_hhmm"),
+                                                window_start=ea.get(
+                                                    "entry_window_start"
+                                                ),
+                                                window_end=ea.get("entry_window_end"),
+                                            )
+                                            out.append(
+                                                {
+                                                    "qty_short": qty,
+                                                    "protection_ratio": pr,
+                                                    "target_pct": tp,
+                                                    "max_dd_pct": dd,
+                                                    "short_offset": off,
+                                                    "protection_offset": po,
+                                                    "cutoff_hour": hh,
+                                                    "cutoff_minute": mm,
+                                                    "expire_protection_at_cutoff": ex,
+                                                    "short_dte": int(sdte),
+                                                    "entry_mode": ea["entry_mode"],
+                                                    "entry_hour": ea["entry_hour"],
+                                                    "entry_minute": ea["entry_minute"],
+                                                    "entry_window_start": ea[
+                                                        "entry_window_start"
+                                                    ],
+                                                    "entry_window_end": ea[
+                                                        "entry_window_end"
+                                                    ],
+                                                    "arm": arm,
+                                                }
+                                            )
     return out
 
 
@@ -152,6 +239,8 @@ def all_combos() -> list[dict[str, Any]]:
         cutoff_times=list(DEFAULT_CUTOFF_TIMES),
         expire_flags=list(DEFAULT_EXPIRE_FLAGS),
         short_dtes=list(DEFAULT_SHORT_DTES),
+        entry_mode=DEFAULT_ENTRY_MODE,
+        entry_times=list(DEFAULT_ENTRY_TIMES),
     )
 
 
@@ -204,8 +293,8 @@ def format_report(rows: list[dict[str, Any]], *, window: str, elapsed: float) ->
         f"n_combos={len(rows)} elapsed_sec={elapsed:.1f}",
         "",
         (
-            f"{'arm':<52} {'n':>4} {'b/d':>5} {'win%':>5} "
-            f"{'mean/b':>8} {'mean/d':>8} {'ci_lo':>8} {'ci_hi':>8} "
+            f"{'arm':<64} {'n':>4} {'b/d':>5} {'win%':>5} "
+            f"{'mean/b':>8} {'med/b':>8} {'mean/d':>8} {'ci_lo':>8} {'ci_hi':>8} "
             f"{'mn_nc$':>7} {'mn_tgt$':>7} {'mae':>8} {'shPnl':>7} {'prPnl':>7} "
             f"{'noise':>10}  exits"
         ),
@@ -215,11 +304,12 @@ def format_report(rows: list[dict[str, Any]], *, window: str, elapsed: float) ->
             f"{k[:3]}={v:.0f}%" for k, v in (r.get("exit_mix") or {}).items()
         )
         lines.append(
-            f"{str(r.get('arm','')):<52} "
+            f"{str(r.get('arm','')):<64} "
             f"{int(r.get('n_baskets') or 0):4d} "
             f"{_fmt(r.get('baskets_per_day'), 2):>5} "
             f"{_fmt(r.get('win_pct'), 1):>5} "
             f"{_fmt(r.get('mean_net')):>8} "
+            f"{_fmt(r.get('median_net')):>8} "
             f"{_fmt(r.get('mean_day')):>8} "
             f"{_fmt(r.get('ci_lo')):>8} "
             f"{_fmt(r.get('ci_hi')):>8} "
@@ -269,6 +359,18 @@ def format_report(rows: list[dict[str, Any]], *, window: str, elapsed: float) ->
             f"jab nahi mila to median fasla = {_fmt(sa.get('median_miss_gap_pts'), 0)} pts "
             f"(checks={sa.get('n_checks', 0)} hit={sa.get('exact_hit', 0)} "
             f"miss={sa.get('exact_miss', 0)})"
+        )
+    lines.append("")
+    lines.append("===== VWAP FILTER CONTROL (signal days vs reject counterfactual) =====")
+    for r in ranked:
+        vc = r.get("vwap_control")
+        if not vc:
+            continue
+        lines.append(
+            f"{r.get('arm')}: signal_days n={vc.get('n_signal_days')} "
+            f"mean={_fmt(vc.get('mean_net_signal_days'))} | "
+            f"reject_cf n={vc.get('n_reject_days_with_cf')} "
+            f"mean={_fmt(vc.get('mean_net_reject_cf_days'))}"
         )
     lines.append("")
     return lines
@@ -425,8 +527,10 @@ def main() -> None:
     )
     ap = argparse.ArgumentParser(description="S006 Daily Theta Harvest grid")
     ap.add_argument("--stage", type=str, default="KILL")
-    ap.add_argument("--from", dest="from_date", type=str, required=True)
-    ap.add_argument("--to", dest="to_date", type=str, required=True)
+    ap.add_argument("--from", dest="from_date", type=str, default=None)
+    ap.add_argument("--to", dest="to_date", type=str, default=None)
+    ap.add_argument("--start", dest="start_date", type=str, default=None, help="Alias for --from")
+    ap.add_argument("--end", dest="end_date", type=str, default=None, help="Alias for --to")
     ap.add_argument("--tag", type=str, default=None)
     ap.add_argument("--qty-short", type=str, default=None, help="Comma list, default 100")
     ap.add_argument(
@@ -434,6 +538,12 @@ def main() -> None:
         type=str,
         default=None,
         help="Comma list, default 2,3,4,5",
+    )
+    ap.add_argument(
+        "--protection-ratio",
+        type=str,
+        default=None,
+        help="Alias for --protection-ratios (supports 0=naked)",
     )
     ap.add_argument(
         "--target-pcts",
@@ -477,17 +587,40 @@ def main() -> None:
         default=None,
         help="Comma list short-leg DTE (default 1). Protection stays 0DTE.",
     )
+    ap.add_argument(
+        "--entry-mode",
+        type=str,
+        default="fixed",
+        choices=["fixed", "vwap"],
+        help="fixed | vwap (default fixed)",
+    )
+    ap.add_argument(
+        "--entry-times",
+        type=str,
+        default=None,
+        help="Comma HHMM list for fixed mode (default 0900)",
+    )
+    ap.add_argument(
+        "--entry-window",
+        type=str,
+        default=None,
+        help="HHMM-HHMM for vwap mode (default 0900-1500)",
+    )
     args = ap.parse_args()
+
+    from_s = args.from_date or args.start_date
+    to_s = args.to_date or args.end_date
+    if not from_s or not to_s:
+        raise SystemExit("require --from/--to or --start/--end")
 
     qty_shorts = (
         [int(float(x)) for x in _parse_floats(args.qty_short)]
         if args.qty_short
         else list(DEFAULT_QTY_SHORTS)
     )
+    pr_raw = args.protection_ratio or args.protection_ratios
     protection_ratios = (
-        _parse_floats(args.protection_ratios)
-        if args.protection_ratios
-        else list(DEFAULT_PROTECTION_RATIOS)
+        _parse_floats(pr_raw) if pr_raw else list(DEFAULT_PROTECTION_RATIOS)
     )
     target_pcts = (
         _parse_floats(args.target_pcts)
@@ -532,6 +665,17 @@ def main() -> None:
         if args.short_dtes
         else list(DEFAULT_SHORT_DTES)
     )
+    entry_mode = str(args.entry_mode or "fixed").lower()
+    entry_times = (
+        _parse_str_list(args.entry_times)
+        if args.entry_times
+        else list(DEFAULT_ENTRY_TIMES)
+    )
+    entry_window = (
+        _parse_entry_window(args.entry_window)
+        if args.entry_window
+        else _parse_entry_window(DEFAULT_ENTRY_WINDOW)
+    )
 
     combos = build_combos(
         qty_shorts=qty_shorts,
@@ -543,9 +687,12 @@ def main() -> None:
         cutoff_times=cutoff_times,
         expire_flags=expire_flags,
         short_dtes=short_dtes,
+        entry_mode=entry_mode,
+        entry_times=entry_times,
+        entry_window=entry_window,
     )
-    d0 = date.fromisoformat(args.from_date)
-    d1 = date.fromisoformat(args.to_date)
+    d0 = date.fromisoformat(from_s)
+    d1 = date.fromisoformat(to_s)
     out = run_grid(d0, d1, stage=args.stage.upper(), tag=args.tag, combos=combos)
     logger.info(
         "DONE combos=%d elapsed=%.1fs total_baskets=%d",
