@@ -7,16 +7,13 @@ import math
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from backtest.harness.config import CONTRACT_VALUE
 from backtest.harness.costs import fill_price, option_fee
 from backtest.harness.data import MarksStore, ist_dt, to_unix
-from backtest.strategies.s008_regime_gate.signal import (
-    DaySignal,
-    ExpandingSignalComputer,
-)
+from backtest.strategies.s008_regime_gate.signal import DaySignal
 
 IST = ZoneInfo("Asia/Kolkata")
 UTC = timezone.utc
@@ -28,11 +25,16 @@ OOS_FROM = date(2026, 4, 1)
 OOS_TO = date(2026, 9, 20)
 
 WING_PTS = 2000.0
+STRIKE_GRID = 200.0
 DEFAULT_QTY = 100
 MARK_TOL_SEC = 60
+DEFAULT_MAX_STRIKE_GAP = 400.0
+# S006 cap threshold: 0.28571% of spot as target premium per leg
+PREMIUM_TARGET_PCT = 0.0028571
 
 GateMode = Literal["none", "switch", "flat"]
 Side = Literal["sell", "buy", "flat"]
+StrikeMode = Literal["points", "premium"]
 
 
 def format_symbol(opt: str, strike: float, exp: date) -> str:
@@ -43,6 +45,27 @@ def format_symbol(opt: str, strike: float, exp: date) -> str:
 def zero_dte_expiry(d: date) -> date:
     """0DTE expiry = calendar trading day (ISO date in marks)."""
     return d
+
+
+def round_strike_grid(x: float, grid: float = STRIKE_GRID) -> float:
+    return round(x / grid) * grid
+
+
+def spot_based_targets(
+    spot: float, wing_pts: float = WING_PTS, grid: float = STRIKE_GRID
+) -> tuple[float, float]:
+    """
+    target_call_K = round((spot + wing)/grid)*grid
+    target_put_K  = round((spot - wing)/grid)*grid
+    Hard assert: call target > spot and put target < spot.
+    """
+    tc = round_strike_grid(spot + wing_pts, grid)
+    tp = round_strike_grid(spot - wing_pts, grid)
+    if not (tc > spot and tp < spot):
+        raise AssertionError(
+            f"target OTM assert fail: spot={spot} call_K={tc} put_K={tp}"
+        )
+    return tc, tp
 
 
 def mark_at(
@@ -79,9 +102,10 @@ def load_chain_pk(
     ts: int,
     spot: float,
     *,
-    half_width: float = 6000.0,
+    half_width: float = 15000.0,
     step: float = 100.0,
 ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Load marks near spot via PK symbol lookups (wide window for premium mode)."""
     atm0 = round(spot / step) * step
     calls: list[tuple[float, float]] = []
     puts: list[tuple[float, float]] = []
@@ -97,17 +121,45 @@ def load_chain_pk(
     return calls, puts
 
 
+def load_chain_sql(
+    conn: sqlite3.Connection, expiry: date, ts: int
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """All strikes at exact minute for expiry (fallback / full chain)."""
+    minute = (ts // 60) * 60
+    calls: list[tuple[float, float]] = []
+    puts: list[tuple[float, float]] = []
+    for opt, bucket in (("call", calls), ("put", puts)):
+        rows = conn.execute(
+            """
+            SELECT strike, close FROM marks
+            WHERE expiry=? AND ts=? AND opt_type=? AND close IS NOT NULL AND close > 0
+            ORDER BY strike
+            """,
+            (expiry.isoformat(), minute, opt),
+        ).fetchall()
+        for strike, close in rows:
+            bucket.append((float(strike), float(close)))
+    return calls, puts
+
+
 def nearest_strike(strikes: list[float], target: float) -> float | None:
-    """Nearest available strike to target. Caller must enforce gap guard —
-    silent wide snaps are forbidden (S006 lesson)."""
+    """Nearest available strike to target. Caller enforces gap / OTM guards."""
     if not strikes:
         return None
     return min(strikes, key=lambda k: (abs(k - target), k))
 
 
+def nearest_premium(
+    legs: list[tuple[float, float]], target_prem: float
+) -> tuple[float, float] | None:
+    """Strike whose mark is closest to target premium. Tie → nearer ATM later."""
+    if not legs:
+        return None
+    return min(legs, key=lambda kp: (abs(kp[1] - target_prem), kp[0]))
+
+
 @dataclass(frozen=True)
 class WingPick:
-    atm: float
     target_call_k: float
     target_put_k: float
     chosen_call_k: float
@@ -116,45 +168,157 @@ class WingPick:
     put_gap: float
     call_mark: float
     put_mark: float
+    strikes_available: bool
+    skip_reason: str  # "" if ok to trade after guards; else reason code
 
     @property
     def max_gap(self) -> float:
         return max(self.call_gap, self.put_gap)
 
 
+def _otm_calls(
+    calls: list[tuple[float, float]], spot: float
+) -> list[tuple[float, float]]:
+    return [(k, px) for k, px in calls if k > spot]
+
+
+def _otm_puts(
+    puts: list[tuple[float, float]], spot: float
+) -> list[tuple[float, float]]:
+    return [(k, px) for k, px in puts if k < spot]
+
+
+def pick_wings(
+    calls: list[tuple[float, float]],
+    puts: list[tuple[float, float]],
+    spot: float,
+    *,
+    strike_mode: StrikeMode = "points",
+    wing_pts: float = WING_PTS,
+    max_strike_gap: float = DEFAULT_MAX_STRIKE_GAP,
+    premium_pct: float = PREMIUM_TARGET_PCT,
+) -> WingPick:
+    """
+    Spot-based targets + OTM-only + (points: gap guard | premium: prem match).
+
+    Order: OTM filter → select → OTM assert on chosen → gap (points only).
+    Never silently snaps past max_strike_gap in points mode.
+    """
+    target_c, target_p = spot_based_targets(spot, wing_pts)
+    otm_c = _otm_calls(calls, spot)
+    otm_p = _otm_puts(puts, spot)
+
+    if not otm_c or not otm_p:
+        return WingPick(
+            target_call_k=target_c,
+            target_put_k=target_p,
+            chosen_call_k=0.0,
+            chosen_put_k=0.0,
+            call_gap=0.0,
+            put_gap=0.0,
+            call_mark=0.0,
+            put_mark=0.0,
+            strikes_available=False,
+            skip_reason="CHAIN_ONE_SIDED",
+        )
+
+    c_by = {k: px for k, px in otm_c}
+    p_by = {k: px for k, px in otm_p}
+
+    if strike_mode == "premium":
+        tgt_prem = premium_pct * spot
+        c_pick = nearest_premium(otm_c, tgt_prem)
+        p_pick = nearest_premium(otm_p, tgt_prem)
+        if c_pick is None or p_pick is None:
+            return WingPick(
+                target_call_k=target_c,
+                target_put_k=target_p,
+                chosen_call_k=0.0,
+                chosen_put_k=0.0,
+                call_gap=0.0,
+                put_gap=0.0,
+                call_mark=0.0,
+                put_mark=0.0,
+                strikes_available=False,
+                skip_reason="CHAIN_ONE_SIDED",
+            )
+        ck, c_mark = c_pick
+        pk, p_mark = p_pick
+    else:
+        ck = nearest_strike(list(c_by.keys()), target_c)
+        pk = nearest_strike(list(p_by.keys()), target_p)
+        if ck is None or pk is None:
+            return WingPick(
+                target_call_k=target_c,
+                target_put_k=target_p,
+                chosen_call_k=0.0,
+                chosen_put_k=0.0,
+                call_gap=0.0,
+                put_gap=0.0,
+                call_mark=0.0,
+                put_mark=0.0,
+                strikes_available=False,
+                skip_reason="CHAIN_ONE_SIDED",
+            )
+        c_mark = c_by[ck]
+        p_mark = p_by[pk]
+
+    # Hard OTM guard (before gap) — should already hold via filter
+    if not (ck > spot and pk < spot):
+        return WingPick(
+            target_call_k=target_c,
+            target_put_k=target_p,
+            chosen_call_k=ck,
+            chosen_put_k=pk,
+            call_gap=abs(ck - target_c),
+            put_gap=abs(pk - target_p),
+            call_mark=c_mark,
+            put_mark=p_mark,
+            strikes_available=False,
+            skip_reason="ITM_STRIKE",
+        )
+
+    call_gap = abs(ck - target_c)
+    put_gap = abs(pk - target_p)
+
+    if strike_mode == "points":
+        if call_gap > max_strike_gap or put_gap > max_strike_gap:
+            return WingPick(
+                target_call_k=target_c,
+                target_put_k=target_p,
+                chosen_call_k=ck,
+                chosen_put_k=pk,
+                call_gap=call_gap,
+                put_gap=put_gap,
+                call_mark=c_mark,
+                put_mark=p_mark,
+                strikes_available=False,
+                skip_reason="STRIKE_UNAVAILABLE",
+            )
+
+    return WingPick(
+        target_call_k=target_c,
+        target_put_k=target_p,
+        chosen_call_k=ck,
+        chosen_put_k=pk,
+        call_gap=call_gap,
+        put_gap=put_gap,
+        call_mark=c_mark,
+        put_mark=p_mark,
+        strikes_available=True,
+        skip_reason="",
+    )
+
+
+# Back-compat alias used by older probes
 def pick_atm_wings(
     calls: list[tuple[float, float]],
     puts: list[tuple[float, float]],
     spot: float,
     wing_pts: float = WING_PTS,
 ) -> WingPick | None:
-    """ATM±wing selection. Returns targets + chosen + gaps; does NOT skip.
-    Gap enforcement lives in simulate_day via max_strike_gap."""
-    c_strikes = [k for k, _ in calls]
-    p_strikes = [k for k, _ in puts]
-    common = sorted(set(c_strikes) & set(p_strikes))
-    atm = nearest_strike(common if common else c_strikes, spot)
-    if atm is None:
-        return None
-    target_c = atm + wing_pts
-    target_p = atm - wing_pts
-    ck = nearest_strike(c_strikes, target_c)
-    pk = nearest_strike(p_strikes, target_p)
-    if ck is None or pk is None:
-        return None
-    c_by = {k: px for k, px in calls}
-    p_by = {k: px for k, px in puts}
-    return WingPick(
-        atm=atm,
-        target_call_k=target_c,
-        target_put_k=target_p,
-        chosen_call_k=ck,
-        chosen_put_k=pk,
-        call_gap=abs(ck - target_c),
-        put_gap=abs(pk - target_p),
-        call_mark=c_by[ck],
-        put_mark=p_by[pk],
-    )
+    pick = pick_wings(calls, puts, spot, strike_mode="points", wing_pts=wing_pts)
+    return pick
 
 
 def settlement_spot(
@@ -182,13 +346,18 @@ def decide_side(gate: GateMode, sig: float, threshold: float) -> Side:
         return "sell"
     if gate == "switch":
         return "buy" if sig >= threshold else "sell"
-    # flat
     if sig >= threshold:
         return "flat"
     return "sell"
 
 
-DEFAULT_MAX_STRIKE_GAP = 400.0
+def sig_decile(sig: float) -> int:
+    """1..10 from expanding-rank sig in [0,1]."""
+    if sig < 0:
+        return 1
+    if sig >= 1.0:
+        return 10
+    return int(sig * 10) + 1
 
 
 @dataclass
@@ -211,6 +380,8 @@ class BasketResult:
     call_gap: float
     put_gap: float
     strike_ok: bool
+    strikes_available: bool
+    strike_mode: str
     call_mark: float
     put_mark: float
     call_fill: float
@@ -231,9 +402,12 @@ class BasketResult:
     gross_pnl: float
     net_pnl: float
     sig: float
+    sig_decile: int
     threshold: float
     prev_rvol: float
     overnight: float
+    overnight_move_pct: float
+    gate_decision: str
 
 
 @dataclass
@@ -243,6 +417,7 @@ class RunStats:
     n_flat_gate: int = 0
     n_skip_data: int = 0
     n_strike_unavailable: int = 0
+    n_chain_one_sided: int = 0
     baskets: list[BasketResult] = field(default_factory=list)
 
 
@@ -257,6 +432,7 @@ class S008RegimeGateStrategy:
         qty: int = DEFAULT_QTY,
         wing_pts: float = WING_PTS,
         max_strike_gap: float = DEFAULT_MAX_STRIKE_GAP,
+        strike_mode: StrikeMode = "points",
         slip_model: str = "bucketed",
         slip_mult: float = 1.0,
         window: str = "is",
@@ -268,6 +444,7 @@ class S008RegimeGateStrategy:
         self.qty = int(qty)
         self.wing_pts = float(wing_pts)
         self.max_strike_gap = float(max_strike_gap)
+        self.strike_mode: StrikeMode = strike_mode
         self.slip_model = slip_model
         self.slip_mult = float(slip_mult)
         self.window = str(window).lower().strip()
@@ -292,6 +469,7 @@ class S008RegimeGateStrategy:
         call_gap: float = 0.0,
         put_gap: float = 0.0,
         strike_ok: bool = False,
+        strikes_available: bool = False,
     ) -> BasketResult:
         return BasketResult(
             d=d,
@@ -312,6 +490,8 @@ class S008RegimeGateStrategy:
             call_gap=call_gap,
             put_gap=put_gap,
             strike_ok=strike_ok,
+            strikes_available=strikes_available,
+            strike_mode=self.strike_mode,
             call_mark=0.0,
             put_mark=0.0,
             call_fill=0.0,
@@ -332,9 +512,12 @@ class S008RegimeGateStrategy:
             gross_pnl=0.0,
             net_pnl=0.0,
             sig=sig.sig,
+            sig_decile=sig_decile(sig.sig),
             threshold=self.threshold,
             prev_rvol=sig.prev_rvol,
             overnight=sig.overnight,
+            overnight_move_pct=sig.overnight * 100.0,
+            gate_decision=side,
         )
 
     def simulate_day(
@@ -380,29 +563,29 @@ class S008RegimeGateStrategy:
                 spot_entry=float(spot_entry),
             )
         expiry = zero_dte_expiry(d)
-        calls, puts = load_chain_pk(conn, expiry, entry_ts, float(spot_entry))
-        picked = pick_atm_wings(calls, puts, float(spot_entry), self.wing_pts)
-        if picked is None:
-            return self._empty_basket(
-                d=d,
-                side=side,
-                sig=sig,
-                skip_reason="no_strikes",
-                entry_ts=entry_ts,
-                spot_entry=float(spot_entry),
-            )
+        if self.strike_mode == "premium":
+            calls, puts = load_chain_sql(conn, expiry, entry_ts)
+            if not calls and not puts:
+                calls, puts = load_chain_pk(
+                    conn, expiry, entry_ts, float(spot_entry)
+                )
+        else:
+            calls, puts = load_chain_pk(conn, expiry, entry_ts, float(spot_entry))
 
-        # Strike gap guard — never silently snap beyond max_strike_gap
-        strike_ok = (
-            picked.call_gap <= self.max_strike_gap
-            and picked.put_gap <= self.max_strike_gap
+        picked = pick_wings(
+            calls,
+            puts,
+            float(spot_entry),
+            strike_mode=self.strike_mode,
+            wing_pts=self.wing_pts,
+            max_strike_gap=self.max_strike_gap,
         )
-        if not strike_ok:
+        if picked.skip_reason:
             return self._empty_basket(
                 d=d,
                 side=side,
                 sig=sig,
-                skip_reason="STRIKE_UNAVAILABLE",
+                skip_reason=picked.skip_reason,
                 entry_ts=entry_ts,
                 spot_entry=float(spot_entry),
                 target_call_k=picked.target_call_k,
@@ -412,6 +595,7 @@ class S008RegimeGateStrategy:
                 call_gap=picked.call_gap,
                 put_gap=picked.put_gap,
                 strike_ok=False,
+                strikes_available=picked.strikes_available,
             )
 
         ck = picked.chosen_call_k
@@ -419,7 +603,6 @@ class S008RegimeGateStrategy:
         c_mark = picked.call_mark
         p_mark = picked.put_mark
 
-        # dte=0 for slip buckets
         c_fill, _c_sf = fill_price(
             c_mark,
             "sell" if side == "sell" else "buy",
@@ -437,27 +620,22 @@ class S008RegimeGateStrategy:
         fee = option_fee(c_fill, float(spot_entry), self.qty) + option_fee(
             p_fill, float(spot_entry), self.qty
         )
-        # slip cost ≈ |fill-mark| * qty * CV
         slip_cost = (
             abs(c_fill - c_mark) + abs(p_fill - p_mark)
         ) * self.qty * CONTRACT_VALUE
 
-        # Settlement intrinsic (USD)
         c_intr = call_intrinsic(settle_px, ck) * self.qty * CONTRACT_VALUE
         p_intr = put_intrinsic(settle_px, pk) * self.qty * CONTRACT_VALUE
         settlement_pay = c_intr + p_intr
 
         prem_notional = (c_fill + p_fill) * self.qty * CONTRACT_VALUE
         if side == "sell":
-            # credit received, pay settlement
             premium_pnl = prem_notional
             gross = premium_pnl - settlement_pay
         else:
-            # debit paid, receive settlement
             premium_pnl = -prem_notional
             gross = settlement_pay + premium_pnl
 
-        # EXIT COST ZERO by design
         exit_fee = 0.0
         exit_slip = 0.0
         net = gross - fee - exit_fee
@@ -481,6 +659,8 @@ class S008RegimeGateStrategy:
             call_gap=picked.call_gap,
             put_gap=picked.put_gap,
             strike_ok=True,
+            strikes_available=True,
+            strike_mode=self.strike_mode,
             call_mark=c_mark,
             put_mark=p_mark,
             call_fill=c_fill,
@@ -501,9 +681,12 @@ class S008RegimeGateStrategy:
             gross_pnl=gross,
             net_pnl=net,
             sig=sig.sig,
+            sig_decile=sig_decile(sig.sig),
             threshold=self.threshold,
             prev_rvol=sig.prev_rvol,
             overnight=sig.overnight,
+            overnight_move_pct=sig.overnight * 100.0,
+            gate_decision=side,
         )
 
 

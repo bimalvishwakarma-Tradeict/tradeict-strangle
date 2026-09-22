@@ -32,6 +32,7 @@ from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
     BasketResult,
     GateMode,
     S008RegimeGateStrategy,
+    StrikeMode,
     enforce_oos_threshold,
     iter_weekdays,
 )
@@ -59,11 +60,22 @@ def _parse_gates(s: str) -> list[GateMode]:
     return out
 
 
+def _parse_strike_modes(s: str) -> list[StrikeMode]:
+    out: list[StrikeMode] = []
+    for part in s.split(","):
+        m = part.strip().lower()
+        if m not in ("points", "premium"):
+            raise ValueError(f"bad strike-mode {m!r}")
+        out.append(m)  # type: ignore[arg-type]
+    return out
+
+
 def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     cols = [
         "date",
         "gate",
+        "strike_mode",
         "side",
         "skipped",
         "skip_reason",
@@ -78,6 +90,7 @@ def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
         "chosen_put_K",
         "put_gap",
         "strike_ok",
+        "strikes_available",
         "call_mark",
         "put_mark",
         "call_fill",
@@ -97,9 +110,12 @@ def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
         "gross_pnl",
         "net_pnl",
         "sig",
+        "sig_decile",
         "threshold",
         "prev_rvol",
         "overnight",
+        "overnight_move_pct",
+        "gate_decision",
     ]
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -109,6 +125,7 @@ def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
                 {
                     "date": b.d.isoformat(),
                     "gate": b.gate,
+                    "strike_mode": b.strike_mode,
                     "side": b.side,
                     "skipped": int(b.skipped),
                     "skip_reason": b.skip_reason,
@@ -123,6 +140,7 @@ def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
                     "chosen_put_K": f"{b.chosen_put_k:.0f}",
                     "put_gap": f"{b.put_gap:.0f}",
                     "strike_ok": int(b.strike_ok),
+                    "strikes_available": int(b.strikes_available),
                     "call_mark": f"{b.call_mark:.6f}",
                     "put_mark": f"{b.put_mark:.6f}",
                     "call_fill": f"{b.call_fill:.6f}",
@@ -142,24 +160,27 @@ def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
                     "gross_pnl": f"{b.gross_pnl:.6f}",
                     "net_pnl": f"{b.net_pnl:.6f}",
                     "sig": f"{b.sig:.6f}",
+                    "sig_decile": b.sig_decile,
                     "threshold": f"{b.threshold:.4f}",
                     "prev_rvol": f"{b.prev_rvol:.8f}",
                     "overnight": f"{b.overnight:.8f}",
+                    "overnight_move_pct": f"{b.overnight_move_pct:.6f}",
+                    "gate_decision": b.gate_decision,
                 }
             )
 
 
 def format_trace(b: BasketResult) -> list[str]:
     return [
-        f"--- {b.d.isoformat()} gate={b.gate} side={b.side} "
-        f"skip={b.skipped}/{b.skip_reason} ---",
+        f"--- {b.d.isoformat()} gate={b.gate} mode={b.strike_mode} "
+        f"side={b.side} skip={b.skipped}/{b.skip_reason} ---",
         f"  entry {b.entry_hour:02d}:{b.entry_minute:02d} spot={b.spot_entry:.2f} "
-        f"sig={b.sig:.4f} thr={b.threshold:.2f}",
+        f"sig={b.sig:.4f} decile={b.sig_decile} thr={b.threshold:.2f}",
         f"  C target={b.target_call_k:.0f} chosen={b.chosen_call_k:.0f} "
         f"gap={b.call_gap:.0f} mark={b.call_mark:.4f} fill={b.call_fill:.4f}",
         f"  P target={b.target_put_k:.0f} chosen={b.chosen_put_k:.0f} "
         f"gap={b.put_gap:.0f} mark={b.put_mark:.4f} fill={b.put_fill:.4f}",
-        f"  strike_ok={b.strike_ok}",
+        f"  strike_ok={b.strike_ok} strikes_available={b.strikes_available}",
         f"  settle {b.settle_hour:02d}:{b.settle_minute:02d} "
         f"S={b.settle_spot:.2f} ts={b.settle_ts}",
         f"  payoff C={b.call_payoff:.4f} P={b.put_payoff:.4f} "
@@ -173,6 +194,7 @@ def format_trace(b: BasketResult) -> list[str]:
 def run_arm(
     *,
     gate: GateMode,
+    strike_mode: StrikeMode,
     threshold: float,
     d0: date,
     d1: date,
@@ -191,6 +213,7 @@ def run_arm(
         entry_minute=entry_m,
         window=window,
         max_strike_gap=max_strike_gap,
+        strike_mode=strike_mode,
     )
     rows: list[BasketResult] = []
     counts = {
@@ -198,6 +221,7 @@ def run_arm(
         "flat_gate": 0,
         "skip_data": 0,
         "strike_unavailable": 0,
+        "chain_one_sided": 0,
         "days": 0,
     }
     for d in iter_weekdays(d0, d1):
@@ -213,6 +237,8 @@ def run_arm(
                 counts["flat_gate"] += 1
             elif b.skip_reason == "STRIKE_UNAVAILABLE":
                 counts["strike_unavailable"] += 1
+            elif b.skip_reason == "CHAIN_ONE_SIDED":
+                counts["chain_one_sided"] += 1
             else:
                 counts["skip_data"] += 1
         else:
@@ -230,6 +256,12 @@ def main() -> None:
     ap.add_argument("--end", type=str, required=True)
     ap.add_argument("--entry-time", type=str, default="0900")
     ap.add_argument("--gate", type=str, default="none,flat,switch")
+    ap.add_argument(
+        "--strike-mode",
+        type=str,
+        default="points",
+        help="points | premium (comma list ok)",
+    )
     ap.add_argument("--threshold", type=float, default=None)
     ap.add_argument(
         "--window",
@@ -245,10 +277,16 @@ def main() -> None:
         "--max-strike-gap",
         type=float,
         default=DEFAULT_MAX_STRIKE_GAP,
-        help="Skip basket if |chosen-target| > this (default 400). Never silent snap.",
+        help="points mode: skip if |chosen-target| > this (default 400)",
     )
     ap.add_argument("--run-tests", action="store_true", default=True)
     ap.add_argument("--no-run-tests", action="store_false", dest="run_tests")
+    ap.add_argument(
+        "--run-control",
+        action="store_true",
+        default=False,
+        help="Also emit T1/T2/T3 control analysis for full IS..OOS window",
+    )
     args = ap.parse_args()
 
     d0 = date.fromisoformat(args.start)
@@ -256,9 +294,9 @@ def main() -> None:
     thr = enforce_oos_threshold(args.window, args.threshold)
     eh, em = _parse_hhmm(args.entry_time)
     gates = _parse_gates(args.gate)
+    modes = _parse_strike_modes(args.strike_mode)
     max_gap = float(args.max_strike_gap)
 
-    # Window sanity (warn only for custom)
     if args.window == "is" and (d0 < IS_FROM or d1 > IS_TO):
         logger.warning(
             "start/end outside locked IS %s..%s (ok for smoke)",
@@ -285,6 +323,8 @@ def main() -> None:
             test_lines.append("SETTLEMENT_SPOT PASS")
             tmod.test_strike_gap_guard()
             test_lines.append("STRIKE_GAP PASS")
+            tmod.test_otm_only()
+            test_lines.append("OTM_ONLY PASS")
             test_lines.append("ALL S008 TESTS PASS")
         except AssertionError as exc:
             test_lines.append(f"TEST FAIL: {exc}")
@@ -297,7 +337,6 @@ def main() -> None:
     spot = load_spot_map(spot_path)
     store = MarksStore()
 
-    # Warm signals from ~60 calendar days before start (expanding ranks)
     warm0 = date.fromordinal(max(d0.toordinal() - 60, date(2025, 7, 1).toordinal()))
     days = iter_weekdays(warm0, d1)
     sigs = build_signals_through(days, spot, through=d1)
@@ -308,7 +347,8 @@ def main() -> None:
         f"generated_utc={datetime.now(tz=timezone.utc).isoformat()}",
         f"tag={args.tag} window={args.window} threshold={thr} "
         f"max_strike_gap={max_gap:.0f}",
-        f"range={d0}..{d1} entry={eh:02d}:{em:02d} gates={gates}",
+        f"range={d0}..{d1} entry={eh:02d}:{em:02d} gates={gates} "
+        f"strike_modes={modes}",
         f"spot_csv={spot_path.name}",
         "",
     ]
@@ -316,50 +356,80 @@ def main() -> None:
     lines.append("")
 
     all_rows: list[BasketResult] = []
-    for g in gates:
-        rows, counts = run_arm(
-            gate=g,
-            threshold=thr,
-            d0=d0,
-            d1=d1,
-            entry_h=eh,
-            entry_m=em,
-            window=args.window,
-            max_strike_gap=max_gap,
-            spot=spot,
-            store=store,
-            sigs=sigs,
-        )
-        all_rows.extend(rows)
-        lines.append(
-            f"gate={g}: days={counts['days']} traded={counts['traded']} "
-            f"flat_gate={counts['flat_gate']} "
-            f"STRIKE_UNAVAILABLE={counts['strike_unavailable']} "
-            f"skip_data={counts['skip_data']}"
-        )
-        # Show STRIKE_UNAVAILABLE traces (important for smoke)
-        strike_skips = [b for b in rows if b.skip_reason == "STRIKE_UNAVAILABLE"]
-        if strike_skips:
-            lines.append(f"  --- STRIKE_UNAVAILABLE ({len(strike_skips)}) ---")
-            for b in strike_skips[:5]:
-                lines.append(
-                    f"  {b.d} spot={b.spot_entry:.0f} "
-                    f"C t={b.target_call_k:.0f} c={b.chosen_call_k:.0f} "
-                    f"g={b.call_gap:.0f} | "
-                    f"P t={b.target_put_k:.0f} c={b.chosen_put_k:.0f} "
-                    f"g={b.put_gap:.0f}"
-                )
-        # 3-day leg traces (first 3 traded)
-        traded = [b for b in rows if not b.skipped]
-        lines.append(f"  --- traces gate={g} (up to 3) ---")
-        for b in traded[:3]:
-            lines.extend(format_trace(b))
-        # Always show 2025-11-05 if in range (smoke regression day)
-        for b in rows:
-            if b.d == date(2025, 11, 5):
-                lines.append("  --- 2025-11-05 (regression) ---")
+    for mode in modes:
+        for g in gates:
+            rows, counts = run_arm(
+                gate=g,
+                strike_mode=mode,
+                threshold=thr,
+                d0=d0,
+                d1=d1,
+                entry_h=eh,
+                entry_m=em,
+                window=args.window,
+                max_strike_gap=max_gap,
+                spot=spot,
+                store=store,
+                sigs=sigs,
+            )
+            all_rows.extend(rows)
+            lines.append(
+                f"mode={mode} gate={g}: days={counts['days']} "
+                f"traded={counts['traded']} flat_gate={counts['flat_gate']} "
+                f"STRIKE_UNAVAILABLE={counts['strike_unavailable']} "
+                f"CHAIN_ONE_SIDED={counts['chain_one_sided']} "
+                f"skip_data={counts['skip_data']}"
+            )
+            strike_skips = [
+                b
+                for b in rows
+                if b.skip_reason in ("STRIKE_UNAVAILABLE", "CHAIN_ONE_SIDED", "ITM_STRIKE")
+            ]
+            if strike_skips:
+                lines.append(f"  --- strike skips ({len(strike_skips)}) ---")
+                for b in strike_skips[:5]:
+                    lines.append(
+                        f"  {b.d} {b.skip_reason} spot={b.spot_entry:.0f} "
+                        f"C t={b.target_call_k:.0f} c={b.chosen_call_k:.0f} "
+                        f"g={b.call_gap:.0f} | "
+                        f"P t={b.target_put_k:.0f} c={b.chosen_put_k:.0f} "
+                        f"g={b.put_gap:.0f}"
+                    )
+            traded = [b for b in rows if not b.skipped]
+            lines.append(f"  --- traces mode={mode} gate={g} (up to 3) ---")
+            for b in traded[:3]:
                 lines.extend(format_trace(b))
-        lines.append("")
+            for b in rows:
+                if b.d == date(2025, 11, 5):
+                    lines.append("  --- 2025-11-05 (regression) ---")
+                    lines.extend(format_trace(b))
+            lines.append("")
+
+    if args.run_control:
+        from backtest.strategies.s008_regime_gate import control_analysis as ca
+
+        warm_c = date(2025, 6, 1)
+        days_c = iter_weekdays(warm_c, OOS_TO)
+        sigs_c = build_signals_through(days_c, spot, through=OOS_TO)
+        lines.append("===== CONTROL T1/T2/T3 (IS..OOS) =====")
+        for mode in modes:
+            recs = ca.build_day_records(
+                d0=IS_FROM,
+                d1=OOS_TO,
+                threshold=thr,
+                max_strike_gap=max_gap,
+                strike_mode=mode,
+                spot=spot,
+                store=store,
+                sigs=sigs_c,
+            )
+            lines.append(f"########## strike_mode={mode} ##########")
+            lines.extend(ca.run_t1_t2_t3(recs, threshold=thr))
+            lines.append(
+                f"strikes_available ({mode}): "
+                f"{sum(1 for r in recs if r.strikes_available)} / {len(recs)}"
+            )
+            lines.append("")
 
     store.close()
 

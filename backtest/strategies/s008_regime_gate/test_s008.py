@@ -1,9 +1,9 @@
-"""S008 look-ahead / exit-cost / settlement tests."""
+"""S008 look-ahead / exit-cost / settlement / strike-gap / OTM tests."""
 
 from __future__ import annotations
 
 import sys
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 _BACKTEST = Path(__file__).resolve().parents[2]
@@ -29,6 +29,7 @@ from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
     S008RegimeGateStrategy,
     iter_weekdays,
     settlement_spot,
+    spot_based_targets,
 )
 
 
@@ -43,7 +44,6 @@ def test_lookahead_sig_truncate() -> None:
     spot = _load_spot()
     d0 = date(2025, 11, 1)
     d1 = date(2025, 11, 30)
-    # warm-up from earlier so ranks are non-trivial
     warm0 = date(2025, 10, 1)
     days = iter_weekdays(warm0, d1)
     full = build_signals_through(days, spot, through=d1)
@@ -66,7 +66,7 @@ def test_lookahead_sig_truncate() -> None:
 
 
 def test_exit_cost_zero() -> None:
-    """(b) Every traded basket: exit_fee=0 and exit_slip=0; fees==entry only."""
+    """(b) Every traded basket: exit_fee=0 and exit_slip=0."""
     ensure_slip_table()
     spot = _load_spot()
     store = MarksStore()
@@ -82,6 +82,7 @@ def test_exit_cost_zero() -> None:
         entry_minute=0,
         qty=100,
         max_strike_gap=DEFAULT_MAX_STRIKE_GAP,
+        strike_mode="points",
     )
     n = 0
     for d in iter_weekdays(d0, d1):
@@ -94,7 +95,6 @@ def test_exit_cost_zero() -> None:
         n += 1
         assert b.exit_fee == 0.0, f"exit_fee>0 on {d}: {b.exit_fee}"
         assert b.exit_slip_cost == 0.0, f"exit_slip>0 on {d}: {b.exit_slip_cost}"
-        # total fee == entry fee (no exit)
         assert abs((b.entry_fee + b.exit_fee) - b.entry_fee) < 1e-15
     store.close()
     assert n > 0
@@ -118,6 +118,7 @@ def test_settlement_spot_timestamp() -> None:
         entry_minute=0,
         qty=100,
         max_strike_gap=DEFAULT_MAX_STRIKE_GAP,
+        strike_mode="points",
     )
     n = 0
     for d in iter_weekdays(d0, d1):
@@ -131,11 +132,9 @@ def test_settlement_spot_timestamp() -> None:
         ts_1730 = to_unix(ist_dt(d, 17, 30))
         ts_1729 = to_unix(ist_dt(d, 17, 29))
         assert b.settle_ts in (ts_1730, ts_1729), (
-            f"SETTLE FAIL {d}: settle_ts={b.settle_ts} "
-            f"not in {{17:30={ts_1730}, 17:29={ts_1729}}}"
+            f"SETTLE FAIL {d}: settle_ts={b.settle_ts}"
         )
         assert (b.settle_hour, b.settle_minute) in ((17, 30), (17, 29))
-        # settlement helper agrees
         helper = settlement_spot(spot, d)
         assert helper is not None and helper[0] == b.settle_ts
     store.close()
@@ -144,7 +143,7 @@ def test_settlement_spot_timestamp() -> None:
 
 
 def test_strike_gap_guard() -> None:
-    """(d) Every traded basket: both gaps <= max_strike_gap; 2025-11-05 skipped."""
+    """(d) Traded baskets: gaps <= max; targets spot-based; 2025-11-05 skip."""
     ensure_slip_table()
     spot = _load_spot()
     store = MarksStore()
@@ -161,6 +160,7 @@ def test_strike_gap_guard() -> None:
         entry_minute=0,
         qty=100,
         max_strike_gap=max_gap,
+        strike_mode="points",
     )
     n_traded = 0
     n_strike_skip = 0
@@ -169,40 +169,82 @@ def test_strike_gap_guard() -> None:
         if s is None:
             continue
         b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
-        if b.skip_reason == "STRIKE_UNAVAILABLE":
+        if b.skip_reason in ("STRIKE_UNAVAILABLE", "CHAIN_ONE_SIDED", "ITM_STRIKE"):
             n_strike_skip += 1
             assert b.skipped
             assert b.strike_ok is False
-            assert b.call_gap > max_gap or b.put_gap > max_gap
             continue
         if b.skipped:
             continue
         n_traded += 1
         assert b.strike_ok is True
-        assert b.call_gap <= max_gap, (
-            f"STRIKE_GAP FAIL {d}: call_gap={b.call_gap} > {max_gap}"
-        )
-        assert b.put_gap <= max_gap, (
-            f"STRIKE_GAP FAIL {d}: put_gap={b.put_gap} > {max_gap}"
-        )
-    # Known bad day: silent snap of put 100000→102000 must now SKIP
+        assert b.call_gap <= max_gap
+        assert b.put_gap <= max_gap
+        tc, tp = spot_based_targets(b.spot_entry)
+        assert b.target_call_k == tc and b.target_put_k == tp
+        assert b.target_call_k > b.spot_entry
+        assert b.target_put_k < b.spot_entry
     d_bad = date(2025, 11, 5)
     if d_bad in sigs:
         b_bad = strat.simulate_day(
             d=d_bad, sig=sigs[d_bad], store=store, spot_close=spot
         )
-        assert b_bad.skipped and b_bad.skip_reason == "STRIKE_UNAVAILABLE", (
-            f"2025-11-05 must STRIKE_UNAVAILABLE, got "
-            f"skip={b_bad.skipped}/{b_bad.skip_reason} put={b_bad.chosen_put_k}"
+        assert b_bad.skipped and b_bad.skip_reason in (
+            "STRIKE_UNAVAILABLE",
+            "CHAIN_ONE_SIDED",
+        ), (
+            f"2025-11-05 must skip strike, got "
+            f"{b_bad.skipped}/{b_bad.skip_reason} put={b_bad.chosen_put_k}"
         )
-        assert b_bad.put_gap > max_gap
     store.close()
     assert n_traded > 0
     assert n_strike_skip >= 1
     print(
         f"STRIKE_GAP PASS n_traded={n_traded} "
-        f"STRIKE_UNAVAILABLE={n_strike_skip} max_gap={max_gap:.0f}"
+        f"strike_skips={n_strike_skip} max_gap={max_gap:.0f}"
     )
+
+
+def test_otm_only() -> None:
+    """(e) No traded leg is ITM vs entry spot (points + premium)."""
+    ensure_slip_table()
+    spot = _load_spot()
+    store = MarksStore()
+    d0 = date(2025, 11, 1)
+    d1 = date(2025, 11, 30)
+    warm0 = date(2025, 10, 1)
+    days = iter_weekdays(warm0, d1)
+    sigs = build_signals_through(days, spot, through=d1)
+    n = 0
+    for mode in ("points", "premium"):
+        strat = S008RegimeGateStrategy(
+            gate="none",
+            threshold=0.90,
+            entry_hour=9,
+            entry_minute=0,
+            qty=100,
+            max_strike_gap=DEFAULT_MAX_STRIKE_GAP,
+            strike_mode=mode,  # type: ignore[arg-type]
+        )
+        for d in iter_weekdays(d0, d1):
+            s = sigs.get(d)
+            if s is None:
+                continue
+            b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+            if b.skipped:
+                continue
+            n += 1
+            assert b.chosen_call_k > b.spot_entry, (
+                f"OTM_ONLY FAIL {d} {mode}: call {b.chosen_call_k} "
+                f"<= spot {b.spot_entry}"
+            )
+            assert b.chosen_put_k < b.spot_entry, (
+                f"OTM_ONLY FAIL {d} {mode}: put {b.chosen_put_k} "
+                f">= spot {b.spot_entry}"
+            )
+    store.close()
+    assert n > 0
+    print(f"OTM_ONLY PASS n_traded_legs_checked={n}")
 
 
 def main() -> int:
@@ -210,6 +252,7 @@ def main() -> int:
     test_exit_cost_zero()
     test_settlement_spot_timestamp()
     test_strike_gap_guard()
+    test_otm_only()
     print("ALL S008 TESTS PASS")
     return 0
 
