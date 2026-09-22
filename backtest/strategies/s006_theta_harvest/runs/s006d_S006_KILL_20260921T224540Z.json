@@ -1,0 +1,1749 @@
+{
+  "strategy_id": "S006",
+  "stage": "KILL",
+  "tag": "s006d",
+  "window": {
+    "from": "2025-11-01",
+    "to": "2026-03-31"
+  },
+  "generated_utc": "2026-09-21T22:45:40.295830+00:00",
+  "elapsed_sec": 194.15785479545593,
+  "bootstrap": {
+    "n": 1000,
+    "seed": 20260919
+  },
+  "n_combos": 12,
+  "combos": [
+    {
+      "arm": "q100_pm1_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adjnone",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 1.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "none",
+      "adj_trigger": 200.0,
+      "max_adj": 1,
+      "n_baskets": 110,
+      "baskets_per_day": 0.7284768211920529,
+      "win_pct": 43.63636363636363,
+      "mean_gross": -0.8569238833996523,
+      "mean_fees": 3.060208005249954,
+      "mean_slippage": 1.3407319914632891,
+      "mean_net": -3.9171318886496063,
+      "median_net": -0.47481216981714774,
+      "mean_day": -2.853539786433488,
+      "ci_lo": -4.3341638403635665,
+      "ci_hi": -1.358985416866638,
+      "bootstrap_mean": -2.816899380287932,
+      "worst_net": -41.10684889141844,
+      "worst_date": "2025-12-14",
+      "worst5": [
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.10684889141844
+        },
+        {
+          "date": "2025-11-02",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -40.93938658708768
+        },
+        {
+          "date": "2026-02-23",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -32.22911349301207
+        },
+        {
+          "date": "2026-02-08",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -30.24733418023455
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -30.16095930015798
+        }
+      ],
+      "max_dd": -430.88450775145674,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 44.54545454545455,
+        "TIME_CUTOFF": 55.45454545454545
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 3.962506453761319,
+        "TIME_CUTOFF": -10.24667744238953
+      },
+      "mean_shorts_pnl": 1.2907289507735158,
+      "mean_protection_pnl": -2.1476528341731678,
+      "mae_usd": -42.79208967,
+      "mean_mae_usd": -8.421023718609092,
+      "median_mae_usd": -3.974555800000001,
+      "mean_net_theta_entry": 9.671518564557237,
+      "mean_entry_drag": -2.502624673675588,
+      "mean_target_usd": 8.106589244260517,
+      "mean_net_credit": 40.53294622130259,
+      "max_loss_per_basket": 42.79208967,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 110,
+        "counts": {
+          "protection_strike_unavailable": 40,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 1.0,
+        "adj_mode": "none",
+        "adj_trigger": 200.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm1_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adjnone"
+      },
+      "n_cycles": 110,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 0,
+      "elapsed_sec": 174.68927001953125,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm1_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr200",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 1.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "a",
+      "adj_trigger": 200.0,
+      "max_adj": 1,
+      "n_baskets": 110,
+      "baskets_per_day": 0.7284768211920529,
+      "win_pct": 43.63636363636363,
+      "mean_gross": -1.4084317014384087,
+      "mean_fees": 3.2440225034911268,
+      "mean_slippage": 1.4219690108202268,
+      "mean_net": -4.652454204929535,
+      "median_net": -0.47481216981714774,
+      "mean_day": -3.3892050499486683,
+      "ci_lo": -5.038083730978112,
+      "ci_hi": -1.775651048987864,
+      "bootstrap_mean": -3.3611137010250958,
+      "worst_net": -50.228842528200644,
+      "worst_date": "2026-02-23",
+      "worst5": [
+        {
+          "date": "2026-02-23",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -50.228842528200644
+        },
+        {
+          "date": "2025-11-24",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -49.27712467019244
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -39.241505773653834
+        },
+        {
+          "date": "2026-02-27",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -34.7943722987824
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -30.16095930015798
+        }
+      ],
+      "max_dd": -511.76996254224895,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 45.45454545454545,
+        "TIME_CUTOFF": 54.54545454545455
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 3.9232704084293215,
+        "TIME_CUTOFF": -11.798891382728582
+      },
+      "mean_shorts_pnl": 0.8896288646437746,
+      "mean_protection_pnl": -2.2980605660821833,
+      "mae_usd": -43.52573588100001,
+      "mean_mae_usd": -8.643700396963638,
+      "median_mae_usd": -3.7291223320000015,
+      "mean_net_theta_entry": 9.671518564557237,
+      "mean_entry_drag": -2.846693480339296,
+      "mean_target_usd": 7.688350626771593,
+      "mean_net_credit": 38.441753133857965,
+      "max_loss_per_basket": 43.52573588100001,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 110,
+        "counts": {
+          "protection_strike_unavailable": 40,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 1.0,
+        "adj_mode": "a",
+        "adj_trigger": 200.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm1_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr200"
+      },
+      "n_cycles": 110,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 19,
+      "elapsed_sec": 13.616221904754639,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm1_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr250",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 1.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "a",
+      "adj_trigger": 250.0,
+      "max_adj": 1,
+      "n_baskets": 110,
+      "baskets_per_day": 0.7284768211920529,
+      "win_pct": 41.81818181818182,
+      "mean_gross": -1.4036783177868741,
+      "mean_fees": 3.0872349798162517,
+      "mean_slippage": 1.352805776586874,
+      "mean_net": -4.490913297603126,
+      "median_net": -0.715181519823406,
+      "mean_day": -3.2715262432870453,
+      "ci_lo": -4.856510325311093,
+      "ci_hi": -1.663141363340019,
+      "bootstrap_mean": -3.235636298745849,
+      "worst_net": -42.67804103253237,
+      "worst_date": "2026-02-27",
+      "worst5": [
+        {
+          "date": "2026-02-27",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -42.67804103253237
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.10684889141844
+        },
+        {
+          "date": "2025-11-02",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -40.93938658708768
+        },
+        {
+          "date": "2026-02-08",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -38.25986458594164
+        },
+        {
+          "date": "2025-11-12",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -34.60644830876845
+        }
+      ],
+      "max_dd": -494.0004627363439,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 43.63636363636363,
+        "TIME_CUTOFF": 56.36363636363637
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 3.8934326548631137,
+        "TIME_CUTOFF": -10.982019841447956
+      },
+      "mean_shorts_pnl": 1.4739108004812196,
+      "mean_protection_pnl": -2.8775891182680935,
+      "mae_usd": -42.79208967,
+      "mean_mae_usd": -8.807784586509092,
+      "median_mae_usd": -3.974555800000001,
+      "mean_net_theta_entry": 9.671518564557237,
+      "mean_entry_drag": -2.5747210331349377,
+      "mean_target_usd": 7.964558822601283,
+      "mean_net_credit": 39.82279411300641,
+      "max_loss_per_basket": 42.79208967,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 110,
+        "counts": {
+          "protection_strike_unavailable": 40,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 1.0,
+        "adj_mode": "a",
+        "adj_trigger": 250.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm1_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr250"
+      },
+      "n_cycles": 110,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 5,
+      "elapsed_sec": 1.3537020683288574,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm1.5_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adjnone",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 1.5,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "none",
+      "adj_trigger": 200.0,
+      "max_adj": 1,
+      "n_baskets": 110,
+      "baskets_per_day": 0.7284768211920529,
+      "win_pct": 39.09090909090909,
+      "mean_gross": -1.5836020556044699,
+      "mean_fees": 3.1515209506928867,
+      "mean_slippage": 1.399868222649925,
+      "mean_net": -4.735123006297356,
+      "median_net": -1.2318641669577548,
+      "mean_day": -3.449427355580856,
+      "ci_lo": -5.053697986680715,
+      "ci_hi": -1.8205059335590394,
+      "bootstrap_mean": -3.4122739350857634,
+      "worst_net": -41.10684889141844,
+      "worst_date": "2025-12-14",
+      "worst5": [
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.10684889141844
+        },
+        {
+          "date": "2025-11-02",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -40.80515643751635
+        },
+        {
+          "date": "2026-02-23",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -38.52593280665321
+        },
+        {
+          "date": "2025-11-24",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -34.204350367452214
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -31.53512227076314
+        }
+      ],
+      "max_dd": -539.3402799329523,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 40.90909090909091,
+        "TIME_CUTOFF": 59.09090909090909
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 3.5868300023512676,
+        "TIME_CUTOFF": -10.496475089207943
+      },
+      "mean_shorts_pnl": 0.1669094481898035,
+      "mean_protection_pnl": -1.7505115037942736,
+      "mae_usd": -42.79208967,
+      "mean_mae_usd": -8.730755155754546,
+      "median_mae_usd": -4.523100077,
+      "mean_net_theta_entry": 4.754325080845328,
+      "mean_entry_drag": -2.611508214909053,
+      "mean_target_usd": 7.735607079707298,
+      "mean_net_credit": 38.67803539853649,
+      "max_loss_per_basket": 42.79208967,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 110,
+        "counts": {
+          "protection_strike_unavailable": 40,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 1.5,
+        "adj_mode": "none",
+        "adj_trigger": 200.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm1.5_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adjnone"
+      },
+      "n_cycles": 110,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 0,
+      "elapsed_sec": 0.5253894329071045,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm1.5_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr200",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 1.5,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "a",
+      "adj_trigger": 200.0,
+      "max_adj": 1,
+      "n_baskets": 110,
+      "baskets_per_day": 0.7284768211920529,
+      "win_pct": 37.27272727272727,
+      "mean_gross": -2.143108823316733,
+      "mean_fees": 3.340868425069003,
+      "mean_slippage": 1.4914490311803694,
+      "mean_net": -5.483977248385736,
+      "median_net": -1.280577933148916,
+      "mean_day": -3.9949503133935824,
+      "ci_lo": -5.812771748628156,
+      "ci_hi": -2.303040176353323,
+      "bootstrap_mean": -3.9539533763195864,
+      "worst_net": -56.52566184184179,
+      "worst_date": "2026-02-23",
+      "worst5": [
+        {
+          "date": "2026-02-23",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -56.52566184184179
+        },
+        {
+          "date": "2025-11-24",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -54.30809932491361
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -39.241505773653834
+        },
+        {
+          "date": "2026-02-27",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -35.072980513062404
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -31.53512227076314
+        }
+      ],
+      "max_dd": -617.9506614212206,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 41.81818181818182,
+        "TIME_CUTOFF": 58.18181818181818
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 3.410771659535885,
+        "TIME_CUTOFF": -11.8770780259544
+      },
+      "mean_shorts_pnl": -0.12268911147682222,
+      "mean_protection_pnl": -2.0204197118399105,
+      "mae_usd": -49.328954681000006,
+      "mean_mae_usd": -9.083966374636365,
+      "median_mae_usd": -4.523100077,
+      "mean_net_theta_entry": 4.754325080845328,
+      "mean_entry_drag": -2.9555770215727613,
+      "mean_target_usd": 7.317368462218375,
+      "mean_net_credit": 36.58684231109187,
+      "max_loss_per_basket": 49.328954681000006,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 110,
+        "counts": {
+          "protection_strike_unavailable": 40,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 1.5,
+        "adj_mode": "a",
+        "adj_trigger": 200.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm1.5_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr200"
+      },
+      "n_cycles": 110,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 19,
+      "elapsed_sec": 1.0813634395599365,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm1.5_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr250",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 1.5,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "a",
+      "adj_trigger": 250.0,
+      "max_adj": 1,
+      "n_baskets": 110,
+      "baskets_per_day": 0.7284768211920529,
+      "win_pct": 39.09090909090909,
+      "mean_gross": -1.896279004869652,
+      "mean_fees": 3.190226562577939,
+      "mean_slippage": 1.414868449787834,
+      "mean_net": -5.086505567447591,
+      "median_net": -1.2318641669577548,
+      "mean_day": -3.705401406749901,
+      "ci_lo": -5.417430868468844,
+      "ci_hi": -2.019986596433086,
+      "bootstrap_mean": -3.659950807333151,
+      "worst_net": -42.95664924681238,
+      "worst_date": "2026-02-27",
+      "worst5": [
+        {
+          "date": "2026-02-27",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -42.95664924681238
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.10684889141844
+        },
+        {
+          "date": "2025-11-02",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -40.80515643751635
+        },
+        {
+          "date": "2026-02-23",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -38.52593280665321
+        },
+        {
+          "date": "2025-11-24",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -34.204350367452214
+        }
+      ],
+      "max_dd": -571.206996325719,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 40.90909090909091,
+        "TIME_CUTOFF": 59.09090909090909
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 3.5006348988051528,
+        "TIME_CUTOFF": -11.031448967161028
+      },
+      "mean_shorts_pnl": 0.3403234359583858,
+      "mean_protection_pnl": -2.236602440828038,
+      "mae_usd": -42.79208967,
+      "mean_mae_usd": -9.196086888881819,
+      "median_mae_usd": -4.523100077,
+      "mean_net_theta_entry": 4.754325080845328,
+      "mean_entry_drag": -2.683604574368403,
+      "mean_target_usd": 7.593576658048064,
+      "mean_net_credit": 37.96788329024032,
+      "max_loss_per_basket": 42.79208967,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 110,
+        "counts": {
+          "protection_strike_unavailable": 40,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 1.5,
+        "adj_mode": "a",
+        "adj_trigger": 250.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm1.5_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr250"
+      },
+      "n_cycles": 110,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 5,
+      "elapsed_sec": 0.4268670082092285,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm2_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adjnone",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 2.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "none",
+      "adj_trigger": 200.0,
+      "max_adj": 1,
+      "n_baskets": 109,
+      "baskets_per_day": 0.7218543046357616,
+      "win_pct": 43.11926605504587,
+      "mean_gross": -0.20986074278879355,
+      "mean_fees": 3.337215289527998,
+      "mean_slippage": 1.470807492559436,
+      "mean_net": -3.5470760323167916,
+      "median_net": -0.9224210304218811,
+      "mean_day": -2.560472102798214,
+      "ci_lo": -4.102333366086354,
+      "ci_hi": -1.0698073298999113,
+      "bootstrap_mean": -2.527832457275888,
+      "worst_net": -41.316877579209006,
+      "worst_date": "2025-11-02",
+      "worst5": [
+        {
+          "date": "2025-11-02",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.316877579209006
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.25797109635744
+        },
+        {
+          "date": "2026-02-23",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -35.84776620195666
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -32.92104499706363
+        },
+        {
+          "date": "2025-11-09",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -25.78347318217315
+        }
+      ],
+      "max_dd": -416.83864934523217,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 45.87155963302752,
+        "TIME_CUTOFF": 54.12844036697248
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 3.333618044207375,
+        "TIME_CUTOFF": -9.37817270733727
+      },
+      "mean_shorts_pnl": 0.9187392200843245,
+      "mean_protection_pnl": -1.1285999628731183,
+      "mae_usd": -42.929439104,
+      "mean_mae_usd": -7.336491245715598,
+      "median_mae_usd": -3.998090623999997,
+      "mean_net_theta_entry": -1.4684716129209823,
+      "mean_entry_drag": -2.7429899836275213,
+      "mean_target_usd": 7.124785668002263,
+      "mean_net_credit": 35.62392834001131,
+      "max_loss_per_basket": 42.929439104,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 109,
+        "counts": {
+          "protection_strike_unavailable": 41,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 2.0,
+        "adj_mode": "none",
+        "adj_trigger": 200.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm2_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adjnone"
+      },
+      "n_cycles": 109,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 0,
+      "elapsed_sec": 0.6102700233459473,
+      "ci_overlap_top": false,
+      "noise_vs_top": "TOP"
+    },
+    {
+      "arm": "q100_pm2_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr200",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 2.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "a",
+      "adj_trigger": 200.0,
+      "max_adj": 1,
+      "n_baskets": 109,
+      "baskets_per_day": 0.7218543046357616,
+      "win_pct": 41.28440366972477,
+      "mean_gross": -0.903943563458768,
+      "mean_fees": 3.4883489851513545,
+      "mean_slippage": 1.539915063311979,
+      "mean_net": -4.392292548610122,
+      "median_net": -1.3142253732946045,
+      "mean_day": -3.170595283433797,
+      "ci_lo": -4.857786677851979,
+      "ci_hi": -1.5796429035100097,
+      "bootstrap_mean": -3.1415243784217535,
+      "worst_net": -53.84749523714523,
+      "worst_date": "2026-02-23",
+      "worst5": [
+        {
+          "date": "2026-02-23",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -53.84749523714523
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -39.39262797859284
+        },
+        {
+          "date": "2026-02-27",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -35.777072892177564
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -32.92104499706363
+        },
+        {
+          "date": "2025-11-02",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -30.12762828758119
+        }
+      ],
+      "max_dd": -496.4839684884927,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 46.788990825688074,
+        "TIME_CUTOFF": 53.211009174311926
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 3.1753512897065943,
+        "TIME_CUTOFF": -11.046600061612752
+      },
+      "mean_shorts_pnl": 0.8950652353078963,
+      "mean_protection_pnl": -1.7990087987666643,
+      "mae_usd": -44.463465311,
+      "mean_mae_usd": -7.977679385596331,
+      "median_mae_usd": -3.998090623999997,
+      "mean_net_theta_entry": -1.4684716129209823,
+      "mean_entry_drag": -3.0092248033957802,
+      "mean_target_usd": 6.907895027670412,
+      "mean_net_credit": 34.45926189999745,
+      "max_loss_per_basket": 44.463465311,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 109,
+        "counts": {
+          "protection_strike_unavailable": 41,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 2.0,
+        "adj_mode": "a",
+        "adj_trigger": 200.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm2_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr200"
+      },
+      "n_cycles": 109,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 15,
+      "elapsed_sec": 0.30906176567077637,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm2_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr250",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 2.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "a",
+      "adj_trigger": 250.0,
+      "max_adj": 1,
+      "n_baskets": 109,
+      "baskets_per_day": 0.7218543046357616,
+      "win_pct": 41.28440366972477,
+      "mean_gross": -0.7465755221084309,
+      "mean_fees": 3.361030073909435,
+      "mean_slippage": 1.476182437392835,
+      "mean_net": -4.107605596017866,
+      "median_net": -1.3527056476263832,
+      "mean_day": -2.96509278123144,
+      "ci_lo": -4.547060284749002,
+      "ci_hi": -1.3978952477273487,
+      "bootstrap_mean": -2.9316876981161437,
+      "worst_net": -43.66074162592753,
+      "worst_date": "2026-02-27",
+      "worst5": [
+        {
+          "date": "2026-02-27",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -43.66074162592753
+        },
+        {
+          "date": "2025-11-02",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.316877579209006
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.25797109635744
+        },
+        {
+          "date": "2026-02-23",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -35.84776620195666
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -32.92104499706363
+        }
+      ],
+      "max_dd": -467.73011354498766,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 44.95412844036697,
+        "TIME_CUTOFF": 55.04587155963303
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 3.213620598806243,
+        "TIME_CUTOFF": -10.086606988457556
+      },
+      "mean_shorts_pnl": 0.8053502686664833,
+      "mean_protection_pnl": -1.5519257907749144,
+      "mae_usd": -42.929439104,
+      "mean_mae_usd": -7.648474144779818,
+      "median_mae_usd": -3.998090623999997,
+      "mean_net_theta_entry": -1.4684716129209823,
+      "mean_entry_drag": -2.794586947652958,
+      "mean_target_usd": 7.025022038477753,
+      "mean_net_credit": 35.12511019238877,
+      "max_loss_per_basket": 42.929439104,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 109,
+        "counts": {
+          "protection_strike_unavailable": 41,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 2.0,
+        "adj_mode": "a",
+        "adj_trigger": 250.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm2_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr250"
+      },
+      "n_cycles": 109,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 4,
+      "elapsed_sec": 0.31108593940734863,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm3_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adjnone",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 3.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "none",
+      "adj_trigger": 200.0,
+      "max_adj": 1,
+      "n_baskets": 108,
+      "baskets_per_day": 0.7152317880794702,
+      "win_pct": 34.25925925925926,
+      "mean_gross": -1.7339946396650125,
+      "mean_fees": 3.6080891852532337,
+      "mean_slippage": 1.5245992532761237,
+      "mean_net": -5.342083824918246,
+      "median_net": -1.8218384141512636,
+      "mean_day": -3.820828166166693,
+      "ci_lo": -5.55067907255791,
+      "ci_hi": -2.1901514792826164,
+      "bootstrap_mean": -3.8014067227496198,
+      "worst_net": -46.5555090606013,
+      "worst_date": "2025-11-17",
+      "worst5": [
+        {
+          "date": "2025-11-17",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -46.5555090606013
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.560493833003676
+        },
+        {
+          "date": "2025-11-27",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -39.3577374222372
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -35.75324505388145
+        },
+        {
+          "date": "2026-03-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -31.730782012861606
+        }
+      ],
+      "max_dd": -576.9450530911707,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 46.2962962962963,
+        "TIME_CUTOFF": 53.7037037037037
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 2.0627351870671844,
+        "TIME_CUTOFF": -11.725548490422927
+      },
+      "mean_shorts_pnl": 2.44894314055265,
+      "mean_protection_pnl": -4.182937780217663,
+      "mae_usd": -43.204390933000006,
+      "mean_mae_usd": -8.016408153703704,
+      "median_mae_usd": -4.312777668499999,
+      "mean_net_theta_entry": -10.108831569134914,
+      "mean_entry_drag": -2.9176482390845115,
+      "mean_target_usd": 6.214126176529181,
+      "mean_net_credit": 30.973984559419176,
+      "max_loss_per_basket": 43.204390933000006,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 108,
+        "counts": {
+          "protection_strike_unavailable": 42,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 3.0,
+        "adj_mode": "none",
+        "adj_trigger": 200.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm3_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adjnone"
+      },
+      "n_cycles": 108,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 0,
+      "elapsed_sec": 0.6391491889953613,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm3_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr200",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 3.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "a",
+      "adj_trigger": 200.0,
+      "max_adj": 1,
+      "n_baskets": 108,
+      "baskets_per_day": 0.7152317880794702,
+      "win_pct": 33.333333333333336,
+      "mean_gross": -1.9335986911977043,
+      "mean_fees": 3.726044249998376,
+      "mean_slippage": 1.59240613612363,
+      "mean_net": -5.65964294119608,
+      "median_net": -1.971028579125292,
+      "mean_day": -4.047956540723024,
+      "ci_lo": -5.818364241168962,
+      "ci_hi": -2.390826605572233,
+      "bootstrap_mean": -4.027409994749725,
+      "worst_net": -46.5555090606013,
+      "worst_date": "2025-11-17",
+      "worst5": [
+        {
+          "date": "2025-11-17",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -46.5555090606013
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -39.69515071523907
+        },
+        {
+          "date": "2025-11-27",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -39.3577374222372
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -35.75324505388145
+        },
+        {
+          "date": "2025-11-09",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -32.5043747947104
+        }
+      ],
+      "max_dd": -611.2414376491769,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 47.22222222222222,
+        "TIME_CUTOFF": 52.77777777777778
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 1.8269707321478508,
+        "TIME_CUTOFF": -12.358192017345914
+      },
+      "mean_shorts_pnl": 2.0808273077123776,
+      "mean_protection_pnl": -4.014425998910082,
+      "mae_usd": -38.330621230999995,
+      "mean_mae_usd": -7.997979459657409,
+      "median_mae_usd": -4.312777668499999,
+      "mean_net_theta_entry": -10.108831569134914,
+      "mean_entry_drag": -3.143375470922975,
+      "mean_target_usd": 6.060858668721139,
+      "mean_net_credit": 30.207647020378968,
+      "max_loss_per_basket": 38.330621230999995,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 108,
+        "counts": {
+          "protection_strike_unavailable": 42,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 3.0,
+        "adj_mode": "a",
+        "adj_trigger": 200.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm3_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr200"
+      },
+      "n_cycles": 108,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 12,
+      "elapsed_sec": 0.29457974433898926,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    },
+    {
+      "arm": "q100_pm3_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr250",
+      "qty_short": 100,
+      "protection_ratio": 1.0,
+      "protection_mode": "premium_multiple",
+      "protection_mult": 3.0,
+      "target_pct": 20.0,
+      "max_dd_pct": null,
+      "short_offset": 2000.0,
+      "protection_offset": 0.0,
+      "cutoff_hour": 17,
+      "cutoff_minute": 29,
+      "expire_protection_at_cutoff": true,
+      "short_dte": 1,
+      "entry_mode": "fixed",
+      "entry_hour": 9,
+      "entry_minute": 0,
+      "entry_window_start": "09:00",
+      "entry_window_end": "15:00",
+      "adj_mode": "a",
+      "adj_trigger": 250.0,
+      "max_adj": 1,
+      "n_baskets": 108,
+      "baskets_per_day": 0.7152317880794702,
+      "win_pct": 34.25925925925926,
+      "mean_gross": -1.7400047500016054,
+      "mean_fees": 3.612471841309528,
+      "mean_slippage": 1.5306093636127163,
+      "mean_net": -5.352476591311133,
+      "median_net": -1.8218384141512636,
+      "mean_day": -3.8282614030569695,
+      "ci_lo": -5.551538609227043,
+      "ci_hi": -2.1975847161728934,
+      "bootstrap_mean": -3.8088176599292254,
+      "worst_net": -46.5555090606013,
+      "worst_date": "2025-11-17",
+      "worst5": [
+        {
+          "date": "2025-11-17",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -46.5555090606013
+        },
+        {
+          "date": "2025-12-14",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -41.560493833003676
+        },
+        {
+          "date": "2025-11-27",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -39.3577374222372
+        },
+        {
+          "date": "2025-12-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -35.75324505388145
+        },
+        {
+          "date": "2026-03-05",
+          "exit_reason": "TIME_CUTOFF",
+          "net": -31.730782012861606
+        }
+      ],
+      "max_dd": -578.0674718616025,
+      "hold_med": 8.483333333333333,
+      "exit_mix": {
+        "TARGET": 46.2962962962963,
+        "TIME_CUTOFF": 53.7037037037037
+      },
+      "mean_net_by_exit_reason": {
+        "TARGET": 2.0402868116585484,
+        "TIME_CUTOFF": -11.725548490422927
+      },
+      "mean_shorts_pnl": 2.4429330302160572,
+      "mean_protection_pnl": -4.182937780217663,
+      "mae_usd": -43.204390933000006,
+      "mean_mae_usd": -8.016408153703704,
+      "median_mae_usd": -4.312777668499999,
+      "mean_net_theta_entry": -10.108831569134914,
+      "mean_entry_drag": -2.932773471267679,
+      "mean_target_usd": 6.196789809442045,
+      "mean_net_credit": 30.887302723983495,
+      "max_loss_per_basket": 43.204390933000006,
+      "basket_units_at_3pct": 0,
+      "daily_net_pct_of_capital_at_size": -0.0,
+      "skips": {
+        "days_in_window": 151,
+        "cycles_entered": 108,
+        "counts": {
+          "protection_strike_unavailable": 42,
+          "short_itm": 1
+        },
+        "examples": {
+          "protection_strike_unavailable": [
+            "2025-11-05",
+            "2025-11-11",
+            "2025-11-13",
+            "2025-11-15",
+            "2025-11-18"
+          ],
+          "short_itm": [
+            "2025-11-21"
+          ]
+        }
+      },
+      "params": {
+        "qty_short": 100,
+        "protection_ratio": 1.0,
+        "target_pct": 20.0,
+        "max_dd_pct": null,
+        "short_offset": 2000.0,
+        "protection_offset": 0.0,
+        "short_dte": 1,
+        "cutoff_hour": 17,
+        "cutoff_minute": 29,
+        "expire_protection_at_cutoff": true,
+        "entry_mode": "fixed",
+        "entry_hour": 9,
+        "entry_minute": 0,
+        "entry_window_start": "09:00",
+        "entry_window_end": "15:00",
+        "protection_mode": "premium_multiple",
+        "protection_mult": 3.0,
+        "adj_mode": "a",
+        "adj_trigger": 250.0,
+        "max_adj": 1,
+        "slip_model": "bucketed",
+        "slip_mult": 1.0,
+        "arm": "q100_pm3_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr250"
+      },
+      "n_cycles": 108,
+      "strike_availability": {
+        "exact_hit": 255,
+        "exact_miss": 45,
+        "n_checks": 300,
+        "exact_hit_pct": 85.0,
+        "exact_miss_pct": 15.0,
+        "median_miss_gap_pts": 400.0
+      },
+      "n_adjustments_total": 1,
+      "elapsed_sec": 0.2943112850189209,
+      "ci_overlap_top": true,
+      "noise_vs_top": "YES_NOISE"
+    }
+  ],
+  "baskets_csv": "s006d_S006_KILL_20260921T224540Z_baskets.csv",
+  "intraday_csv": "s006d_S006_KILL_20260921T224540Z_intraday.csv",
+  "adjustments_csv": "s006d_S006_KILL_20260921T224540Z_adjustments.csv"
+}

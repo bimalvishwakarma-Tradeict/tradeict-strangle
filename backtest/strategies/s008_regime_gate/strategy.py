@@ -34,6 +34,8 @@ DEFAULT_MAX_STRIKE_GAP = 400.0
 # 0.034% of spot ≈ ATM±2000 premium level.
 DEFAULT_PREMIUM_TARGET_PCT = 0.034
 DEFAULT_TARGET_DELTA = 0.12
+# Reject any leg richer than this percent of spot (~3x a normal ATM±2000 leg).
+DEFAULT_MAX_LEG_PREMIUM_PCT = 0.10
 # 09:00 → 17:30 IST remaining fraction of year for Black-76
 T_YEARS_0DTE_0900 = 8.5 / 24.0 / 365.0
 
@@ -239,13 +241,16 @@ def pick_wings(
     max_strike_gap: float = DEFAULT_MAX_STRIKE_GAP,
     premium_target_pct: float = DEFAULT_PREMIUM_TARGET_PCT,
     target_delta: float = DEFAULT_TARGET_DELTA,
+    max_leg_premium_pct: float = DEFAULT_MAX_LEG_PREMIUM_PCT,
     t_years: float = T_YEARS_0DTE_0900,
 ) -> WingPick:
     """
     Spot-based targets + OTM-only + (points: gap guard | premium: prem match).
 
-    Order: OTM filter → select → OTM assert on chosen → gap (points only).
-    Never silently snaps past max_strike_gap in points mode.
+    Order: OTM filter → select → OTM assert on chosen → gap (points only)
+    → leg premium band (all modes).
+    Never silently snaps past max_strike_gap or trades a leg richer than
+    max_leg_premium_pct of spot.
     """
     target_c, target_p = spot_based_targets(spot, wing_pts)
     otm_c = _otm_calls(calls, spot)
@@ -360,6 +365,23 @@ def pick_wings(
                 strikes_available=False,
                 skip_reason="STRIKE_UNAVAILABLE",
             )
+
+    # Leg premium band — all modes. A thin one-sided chain can leave only
+    # near-ATM strikes, which are far richer than the intended wing.
+    band_usd = premium_target_usd(spot, max_leg_premium_pct)
+    if c_mark > band_usd or p_mark > band_usd:
+        return WingPick(
+            target_call_k=target_c,
+            target_put_k=target_p,
+            chosen_call_k=ck,
+            chosen_put_k=pk,
+            call_gap=call_gap,
+            put_gap=put_gap,
+            call_mark=c_mark,
+            put_mark=p_mark,
+            strikes_available=False,
+            skip_reason="LEG_PREMIUM_OUT_OF_BAND",
+        )
 
     return WingPick(
         target_call_k=target_c,
@@ -502,6 +524,7 @@ class S008RegimeGateStrategy:
         strike_mode: StrikeMode = "points",
         premium_target_pct: float = DEFAULT_PREMIUM_TARGET_PCT,
         target_delta: float = DEFAULT_TARGET_DELTA,
+        max_leg_premium_pct: float = DEFAULT_MAX_LEG_PREMIUM_PCT,
         slip_model: str = "bucketed",
         slip_mult: float = 1.0,
         window: str = "is",
@@ -516,6 +539,7 @@ class S008RegimeGateStrategy:
         self.strike_mode: StrikeMode = strike_mode
         self.premium_target_pct = float(premium_target_pct)
         self.target_delta = float(target_delta)
+        self.max_leg_premium_pct = float(max_leg_premium_pct)
         self.slip_model = slip_model
         self.slip_mult = float(slip_mult)
         self.window = str(window).lower().strip()
@@ -654,6 +678,7 @@ class S008RegimeGateStrategy:
             max_strike_gap=self.max_strike_gap,
             premium_target_pct=self.premium_target_pct,
             target_delta=self.target_delta,
+            max_leg_premium_pct=self.max_leg_premium_pct,
         )
         if picked.skip_reason:
             return self._empty_basket(

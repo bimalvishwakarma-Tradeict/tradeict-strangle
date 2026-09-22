@@ -29,6 +29,7 @@ from backtest.strategies.s008_regime_gate.stats import (  # noqa: E402
     gate_paired_report,
 )
 from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
+    DEFAULT_MAX_LEG_PREMIUM_PCT,
     DEFAULT_MAX_STRIKE_GAP,
     DEFAULT_PREMIUM_TARGET_PCT,
     DEFAULT_TARGET_DELTA,
@@ -221,6 +222,7 @@ def run_arm(
     entry_m: int,
     window: str,
     max_strike_gap: float,
+    max_leg_premium_pct: float,
     spot: dict[int, float],
     store: MarksStore,
     sigs: dict[date, Any],
@@ -235,6 +237,7 @@ def run_arm(
         strike_mode=strike_mode,
         premium_target_pct=premium_target_pct,
         target_delta=target_delta,
+        max_leg_premium_pct=max_leg_premium_pct,
     )
     rows: list[BasketResult] = []
     counts = {
@@ -243,6 +246,7 @@ def run_arm(
         "skip_data": 0,
         "strike_unavailable": 0,
         "chain_one_sided": 0,
+        "leg_premium_out_of_band": 0,
         "days": 0,
     }
     for d in iter_weekdays(d0, d1):
@@ -260,6 +264,8 @@ def run_arm(
                 counts["strike_unavailable"] += 1
             elif b.skip_reason == "CHAIN_ONE_SIDED":
                 counts["chain_one_sided"] += 1
+            elif b.skip_reason == "LEG_PREMIUM_OUT_OF_BAND":
+                counts["leg_premium_out_of_band"] += 1
             else:
                 counts["skip_data"] += 1
         else:
@@ -317,6 +323,15 @@ def main() -> None:
         default=DEFAULT_MAX_STRIKE_GAP,
         help="points mode: skip if |chosen-target| > this (default 400)",
     )
+    ap.add_argument(
+        "--max-leg-premium-pct",
+        type=float,
+        default=DEFAULT_MAX_LEG_PREMIUM_PCT,
+        help=(
+            "all modes: skip basket if any leg premium > this %% of spot "
+            "(default 0.10; normal ATM±2000 leg is ~0.034%%)"
+        ),
+    )
     ap.add_argument("--run-tests", action="store_true", default=True)
     ap.add_argument("--no-run-tests", action="store_false", dest="run_tests")
     ap.add_argument(
@@ -345,6 +360,7 @@ def main() -> None:
     gates = _parse_gates(args.gate)
     modes = _parse_strike_modes(args.strike_mode)
     max_gap = float(args.max_strike_gap)
+    max_leg_prem = float(args.max_leg_premium_pct)
     summary_only = (d1 - d0).days > 35
 
     if args.window == "is" and (d0 < IS_FROM or d1 > IS_TO):
@@ -398,7 +414,7 @@ def main() -> None:
         "===== S008 REGIME GATE =====",
         f"generated_utc={datetime.now(tz=timezone.utc).isoformat()}",
         f"tag={args.tag} window={args.window} thresholds={thresholds} "
-        f"max_strike_gap={max_gap:.0f}",
+        f"max_strike_gap={max_gap:.0f} max_leg_premium_pct={max_leg_prem:.3f}",
         f"range={d0}..{d1} entry={eh:02d}:{em:02d} gates={gates} "
         f"strike_modes={modes}",
         f"premium_target_pct={prem_pcts} target_delta={target_deltas}",
@@ -430,6 +446,7 @@ def main() -> None:
                             entry_m=em,
                             window=args.window,
                             max_strike_gap=max_gap,
+                            max_leg_premium_pct=max_leg_prem,
                             spot=spot,
                             store=store,
                             sigs=sigs,
@@ -446,7 +463,9 @@ def main() -> None:
                             f"  counts: traded={counts['traded']} "
                             f"flat_gate={counts['flat_gate']} "
                             f"STRIKE_UNAVAILABLE={counts['strike_unavailable']} "
-                            f"CHAIN_ONE_SIDED={counts['chain_one_sided']}"
+                            f"CHAIN_ONE_SIDED={counts['chain_one_sided']} "
+                            f"LEG_PREMIUM_OUT_OF_BAND="
+                            f"{counts['leg_premium_out_of_band']}"
                         )
                         lines.extend(format_arm_stats(label, st))
                         if not summary_only:

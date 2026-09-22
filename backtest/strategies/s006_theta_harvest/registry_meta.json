@@ -196,6 +196,30 @@
       "ci_hi": -0.07734927716033489,
       "verdict": "GRID_2_COMBOS",
       "top_arm": "q100_pm2_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr200"
+    },
+    {
+      "stage": "KILL",
+      "tag": "s006d",
+      "window": "2025-11-01..2026-03-31",
+      "date": "20260921",
+      "n": 109,
+      "mean_day": -2.560472102798214,
+      "ci_lo": -4.102333366086354,
+      "ci_hi": -1.0698073298999113,
+      "verdict": "GRID_12_COMBOS",
+      "top_arm": "q100_pm2_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adjnone"
+    },
+    {
+      "stage": "KILL",
+      "tag": "s006d_naked",
+      "window": "2025-11-01..2026-03-31",
+      "date": "20260921",
+      "n": 150,
+      "mean_day": -0.7512477104132247,
+      "ci_lo": -3.6052635227775722,
+      "ci_hi": 1.653850347657523,
+      "verdict": "GRID_3_COMBOS",
+      "top_arm": "q100_pr0_tp20_ddnone_off2000_po0_cut1729_sdte1_emfixed_e0900_adja_tr250"
     }
   ],
   "open_questions": [

@@ -25,6 +25,7 @@ from backtest.strategies.s008_regime_gate.signal import (  # noqa: E402
     build_signals_through,
 )
 from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
+    DEFAULT_MAX_LEG_PREMIUM_PCT,
     DEFAULT_MAX_STRIKE_GAP,
     S008RegimeGateStrategy,
     enforce_oos_threshold,
@@ -249,6 +250,77 @@ def test_otm_only() -> None:
     print(f"OTM_ONLY PASS n_traded_legs_checked={n}")
 
 
+def test_premium_band() -> None:
+    """(g) No traded leg richer than max_leg_premium_pct of entry spot."""
+    ensure_slip_table()
+    spot = _load_spot()
+    store = MarksStore()
+    d0 = date(2025, 11, 1)
+    d1 = date(2025, 11, 30)
+    warm0 = date(2025, 10, 1)
+    days = iter_weekdays(warm0, d1)
+    sigs = build_signals_through(days, spot, through=d1)
+    band_pct = DEFAULT_MAX_LEG_PREMIUM_PCT
+    n_traded = 0
+    n_band_skip = 0
+    for mode in ("points", "premium", "delta"):
+        strat = S008RegimeGateStrategy(
+            gate="none",
+            threshold=0.90,
+            entry_hour=9,
+            entry_minute=0,
+            qty=100,
+            max_strike_gap=DEFAULT_MAX_STRIKE_GAP,
+            strike_mode=mode,  # type: ignore[arg-type]
+            max_leg_premium_pct=band_pct,
+        )
+        for d in iter_weekdays(d0, d1):
+            s = sigs.get(d)
+            if s is None:
+                continue
+            b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+            if b.skip_reason == "LEG_PREMIUM_OUT_OF_BAND":
+                n_band_skip += 1
+                assert b.skipped and b.strike_ok is False
+                continue
+            if b.skipped:
+                continue
+            n_traded += 1
+            band = premium_target_usd(b.spot_entry, band_pct)
+            assert b.call_mark <= band, (
+                f"PREMIUM_BAND FAIL {d} {mode}: call {b.call_mark} > {band}"
+            )
+            assert b.put_mark <= band, (
+                f"PREMIUM_BAND FAIL {d} {mode}: put {b.put_mark} > {band}"
+            )
+    # 2025-11-05 premium mode leg was 0.6636% of spot — must be caught.
+    d_bad = date(2025, 11, 5)
+    if d_bad in sigs:
+        strat_bad = S008RegimeGateStrategy(
+            gate="none",
+            threshold=0.90,
+            entry_hour=9,
+            entry_minute=0,
+            qty=100,
+            max_strike_gap=DEFAULT_MAX_STRIKE_GAP,
+            strike_mode="premium",
+            max_leg_premium_pct=band_pct,
+        )
+        b_bad = strat_bad.simulate_day(
+            d=d_bad, sig=sigs[d_bad], store=store, spot_close=spot
+        )
+        assert b_bad.skipped, (
+            f"2025-11-05 premium mode must skip, got "
+            f"call={b_bad.call_mark} put={b_bad.put_mark}"
+        )
+    store.close()
+    assert n_traded > 0
+    print(
+        f"PREMIUM_BAND PASS n_traded={n_traded} "
+        f"band_skips={n_band_skip} band_pct={band_pct:.2f}"
+    )
+
+
 def test_oos_lock_and_premium_target() -> None:
     """(f) OOS needs an argument threshold; premium target is % of spot."""
     try:
@@ -269,6 +341,7 @@ def main() -> int:
     test_settlement_spot_timestamp()
     test_strike_gap_guard()
     test_otm_only()
+    test_premium_band()
     test_oos_lock_and_premium_target()
     print("ALL S008 TESTS PASS")
     return 0

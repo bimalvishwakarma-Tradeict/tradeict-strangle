@@ -41,6 +41,12 @@ Call must be `> spot`, put `< spot` — the OTM guard runs before the gap guard.
 `--premium-target-pct` is **percent of spot**. The old 0.28571% value was the 1DTE
 fee cap, roughly 8x too rich for 0DTE, and is not used.
 
+All three modes then pass a leg premium band: if either chosen leg's mark exceeds
+`--max-leg-premium-pct` % of spot (default 0.10, about 3x a normal ATM±2000 leg at
+~0.034%), the basket is skipped with `LEG_PREMIUM_OUT_OF_BAND`. This catches thin
+chains where the only OTM strike left sits far too close to the money — e.g.
+2025-11-05, whose put mark was 0.6636% of spot.
+
 ## Stats reported per arm
 `n`, mean, median, win%, worst, p5, maxDD, capital at the 3% worst-basket rule,
 return%/day on that capital, and a day-clustered bootstrap 95% CI.
@@ -54,4 +60,5 @@ CIs from fewer than 10 acted days are labelled untrustworthy.
 3. Settlement timestamp is 17:29/17:30 that day
 4. Strike gap guard: traded baskets within `--max-strike-gap`, targets spot-based
 5. OTM only: no traded leg is ITM in any strike mode
-6. OOS lock: `--window oos` rejects a missing or swept threshold
+6. Premium band: no traded leg exceeds `--max-leg-premium-pct` in any strike mode
+7. OOS lock: `--window oos` rejects a missing or swept threshold

@@ -26,6 +26,7 @@ from backtest.strategies.s008_regime_gate.signal import (  # noqa: E402
     build_signals_through,
 )
 from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
+    DEFAULT_MAX_LEG_PREMIUM_PCT,
     DEFAULT_MAX_STRIKE_GAP,
     DEFAULT_PREMIUM_TARGET_PCT,
     DEFAULT_TARGET_DELTA,
@@ -98,6 +99,7 @@ def build_day_records(
     sigs: dict[date, DaySignal],
     premium_target_pct: float = DEFAULT_PREMIUM_TARGET_PCT,
     target_delta: float = DEFAULT_TARGET_DELTA,
+    max_leg_premium_pct: float = DEFAULT_MAX_LEG_PREMIUM_PCT,
 ) -> list[DayRecord]:
     """Per-day availability + gate decisions + PnL under each gate (if tradable)."""
     strats = {
@@ -108,6 +110,7 @@ def build_day_records(
             strike_mode=strike_mode,  # type: ignore[arg-type]
             premium_target_pct=premium_target_pct,
             target_delta=target_delta,
+            max_leg_premium_pct=max_leg_premium_pct,
         )
         for g in ("none", "flat", "switch")
     }
@@ -145,6 +148,7 @@ def build_day_records(
                     max_strike_gap=max_strike_gap,
                     premium_target_pct=premium_target_pct,
                     target_delta=target_delta,
+                    max_leg_premium_pct=max_leg_premium_pct,
                 )
                 avail = picked.strikes_available
                 skip_reason = picked.skip_reason or ""
