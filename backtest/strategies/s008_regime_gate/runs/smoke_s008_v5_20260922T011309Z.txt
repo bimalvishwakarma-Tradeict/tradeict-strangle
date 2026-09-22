@@ -1,0 +1,222 @@
+===== S008 REGIME GATE =====
+generated_utc=2026-09-22T01:13:00.301638+00:00
+tag=smoke_s008_v5 window=custom thresholds=[0.9] max_strike_gap=400
+range=2025-11-01..2025-11-30 entry=09:00 gates=['none', 'flat', 'switch'] strike_modes=['points', 'delta']
+premium_target_pct=[0.034] target_delta=[0.12]
+spot_csv=BTCUSD_1m_20250613_20260921.csv
+
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.90 gate=none =====
+  counts: traded=16 flat_gate=0 STRIKE_UNAVAILABLE=3 CHAIN_ONE_SIDED=1
+--- mode=points prem=0.0340 delta=0.12 thr=0.90 gate=none ---
+  n=16 mean=-1.4405 median=8.7284 win%=87.5
+  worst=-125.5472 p5=-53.2659 maxDD=-125.5472
+  capital@3%worst=4184.91 return%/day=-0.0184
+  mean/day=-0.7683 bootstrap95%=[-12.7240, 5.6120] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0522 max=0.1757
+--- 2025-11-03 gate=none mode=points side=sell skip=False/ ---
+  entry 09:00 spot=108043.00 sig=0.6556 decile=7 thr=0.90
+  C target=110000 chosen=110000 gap=0 mark=84.6161 fill=79.8237
+  P target=106000 chosen=106000 gap=0 mark=189.8255 fill=187.5692
+  strike_ok=True strikes_available=True
+  settle 17:30 S=107759.50 ts=1762171200
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=26.7393 gross=26.7393 entry_fee=1.1043 exit_fee=0.0000 net=25.6350
+--- 2025-11-04 gate=none mode=points side=sell skip=False/ ---
+  entry 09:00 spot=106874.00 sig=0.6196 decile=7 thr=0.90
+  C target=108800 chosen=108800 gap=0 mark=32.7207 fill=30.8675
+  P target=104800 chosen=104800 gap=0 mark=36.6932 fill=34.6150
+  strike_ok=True strikes_available=True
+  settle 17:30 S=104445.50 ts=1762257600
+  payoff C=0.0000 P=35.4500 settlement_pay=35.4500
+  premium_pnl=6.5482 gross=-28.9018 entry_fee=0.2704 exit_fee=0.0000 net=-29.1722
+--- 2025-11-06 gate=none mode=points side=sell skip=False/ ---
+  entry 09:00 spot=103660.00 sig=0.8229 decile=9 thr=0.90
+  C target=105600 chosen=105600 gap=0 mark=23.6111 fill=22.2739
+  P target=101600 chosen=101600 gap=0 mark=51.8588 fill=48.9217
+  strike_ok=True strikes_available=True
+  settle 17:30 S=103153.50 ts=1762430400
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=7.1196 gross=7.1196 entry_fee=0.2940 exit_fee=0.0000 net=6.8255
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.90 gate=flat =====
+  counts: traded=15 flat_gate=2 STRIKE_UNAVAILABLE=2 CHAIN_ONE_SIDED=1
+--- mode=points prem=0.0340 delta=0.12 thr=0.90 gate=flat ---
+  n=15 mean=6.8333 median=8.8050 win%=93.3
+  worst=-29.1722 p5=-7.1686 maxDD=-29.1722
+  capital@3%worst=972.41 return%/day=0.3514
+  mean/day=3.4166 bootstrap95%=[0.1015, 6.1896] crosses_zero=NO
+  leg_premium%ofspot mean=0.0515 max=0.1757
+--- 2025-11-03 gate=flat mode=points side=sell skip=False/ ---
+  entry 09:00 spot=108043.00 sig=0.6556 decile=7 thr=0.90
+  C target=110000 chosen=110000 gap=0 mark=84.6161 fill=79.8237
+  P target=106000 chosen=106000 gap=0 mark=189.8255 fill=187.5692
+  strike_ok=True strikes_available=True
+  settle 17:30 S=107759.50 ts=1762171200
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=26.7393 gross=26.7393 entry_fee=1.1043 exit_fee=0.0000 net=25.6350
+--- 2025-11-04 gate=flat mode=points side=sell skip=False/ ---
+  entry 09:00 spot=106874.00 sig=0.6196 decile=7 thr=0.90
+  C target=108800 chosen=108800 gap=0 mark=32.7207 fill=30.8675
+  P target=104800 chosen=104800 gap=0 mark=36.6932 fill=34.6150
+  strike_ok=True strikes_available=True
+  settle 17:30 S=104445.50 ts=1762257600
+  payoff C=0.0000 P=35.4500 settlement_pay=35.4500
+  premium_pnl=6.5482 gross=-28.9018 entry_fee=0.2704 exit_fee=0.0000 net=-29.1722
+--- 2025-11-06 gate=flat mode=points side=sell skip=False/ ---
+  entry 09:00 spot=103660.00 sig=0.8229 decile=9 thr=0.90
+  C target=105600 chosen=105600 gap=0 mark=23.6111 fill=22.2739
+  P target=101600 chosen=101600 gap=0 mark=51.8588 fill=48.9217
+  strike_ok=True strikes_available=True
+  settle 17:30 S=103153.50 ts=1762430400
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=7.1196 gross=7.1196 entry_fee=0.2940 exit_fee=0.0000 net=6.8255
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.90 gate=switch =====
+  counts: traded=16 flat_gate=0 STRIKE_UNAVAILABLE=3 CHAIN_ONE_SIDED=1
+--- mode=points prem=0.0340 delta=0.12 thr=0.90 gate=switch ---
+  n=16 mean=14.1006 median=8.9817 win%=93.8
+  worst=-29.1722 p5=-5.5969 maxDD=-29.1722
+  capital@3%worst=972.41 return%/day=0.7734
+  mean/day=7.5203 bootstrap95%=[1.1093, 18.2633] crosses_zero=NO
+  leg_premium%ofspot mean=0.0522 max=0.1757
+--- 2025-11-03 gate=switch mode=points side=sell skip=False/ ---
+  entry 09:00 spot=108043.00 sig=0.6556 decile=7 thr=0.90
+  C target=110000 chosen=110000 gap=0 mark=84.6161 fill=79.8237
+  P target=106000 chosen=106000 gap=0 mark=189.8255 fill=187.5692
+  strike_ok=True strikes_available=True
+  settle 17:30 S=107759.50 ts=1762171200
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=26.7393 gross=26.7393 entry_fee=1.1043 exit_fee=0.0000 net=25.6350
+--- 2025-11-04 gate=switch mode=points side=sell skip=False/ ---
+  entry 09:00 spot=106874.00 sig=0.6196 decile=7 thr=0.90
+  C target=108800 chosen=108800 gap=0 mark=32.7207 fill=30.8675
+  P target=104800 chosen=104800 gap=0 mark=36.6932 fill=34.6150
+  strike_ok=True strikes_available=True
+  settle 17:30 S=104445.50 ts=1762257600
+  payoff C=0.0000 P=35.4500 settlement_pay=35.4500
+  premium_pnl=6.5482 gross=-28.9018 entry_fee=0.2704 exit_fee=0.0000 net=-29.1722
+--- 2025-11-06 gate=switch mode=points side=sell skip=False/ ---
+  entry 09:00 spot=103660.00 sig=0.8229 decile=9 thr=0.90
+  C target=105600 chosen=105600 gap=0 mark=23.6111 fill=22.2739
+  P target=101600 chosen=101600 gap=0 mark=51.8588 fill=48.9217
+  strike_ok=True strikes_available=True
+  settle 17:30 S=103153.50 ts=1762430400
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=7.1196 gross=7.1196 entry_fee=0.2940 exit_fee=0.0000 net=6.8255
+
+===== ARM mode=delta prem=0.0340 delta=0.12 thr=0.90 gate=none =====
+  counts: traded=19 flat_gate=0 STRIKE_UNAVAILABLE=0 CHAIN_ONE_SIDED=1
+--- mode=delta prem=0.0340 delta=0.12 thr=0.90 gate=none ---
+  n=19 mean=-10.6362 median=13.5906 win%=73.7
+  worst=-211.2397 p5=-147.8615 maxDD=-318.3395
+  capital@3%worst=7041.32 return%/day=-0.0957
+  mean/day=-6.7362 bootstrap95%=[-27.7430, 8.9677] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.1050 max=0.6636
+--- 2025-11-03 gate=none mode=delta side=sell skip=False/ ---
+  entry 09:00 spot=108043.00 sig=0.6556 decile=7 thr=0.90
+  C target=110000 chosen=110000 gap=0 mark=84.6161 fill=79.8237
+  P target=106000 chosen=105600 gap=400 mark=131.8198 fill=130.2530
+  strike_ok=True strikes_available=True
+  settle 17:30 S=107759.50 ts=1762171200
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=21.0077 gross=21.0077 entry_fee=0.8676 exit_fee=0.0000 net=20.1401
+--- 2025-11-04 gate=none mode=delta side=sell skip=False/ ---
+  entry 09:00 spot=106874.00 sig=0.6196 decile=7 thr=0.90
+  C target=108800 chosen=108200 gap=600 mark=78.7339 fill=74.2747
+  P target=104800 chosen=105400 gap=600 mark=77.1342 fill=72.7656
+  strike_ok=True strikes_available=True
+  settle 17:30 S=104445.50 ts=1762257600
+  payoff C=0.0000 P=95.4500 settlement_pay=95.4500
+  premium_pnl=14.7040 gross=-80.7460 entry_fee=0.6073 exit_fee=0.0000 net=-81.3532
+--- 2025-11-05 gate=none mode=delta side=sell skip=False/ ---
+  entry 09:00 spot=102043.00 sig=0.9681 decile=10 thr=0.90
+  C target=104000 chosen=104400 gap=400 mark=117.1270 fill=115.7349
+  P target=100000 chosen=102000 gap=2000 mark=677.1599 fill=672.9044
+  strike_ok=True strikes_available=True
+  settle 17:30 S=101976.50 ts=1762344000
+  payoff C=0.0000 P=2.3500 settlement_pay=2.3500
+  premium_pnl=78.8639 gross=76.5139 entry_fee=1.6821 exit_fee=0.0000 net=74.8318
+
+===== ARM mode=delta prem=0.0340 delta=0.12 thr=0.90 gate=flat =====
+  counts: traded=17 flat_gate=2 STRIKE_UNAVAILABLE=0 CHAIN_ONE_SIDED=1
+--- mode=delta prem=0.0340 delta=0.12 thr=0.90 gate=flat ---
+  n=17 mean=-8.0059 median=13.5906 win%=76.5
+  worst=-211.2397 p5=-107.3305 maxDD=-217.0814
+  capital@3%worst=7041.32 return%/day=-0.0644
+  mean/day=-4.5367 bootstrap95%=[-21.6424, 7.0471] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0893 max=0.3861
+--- 2025-11-03 gate=flat mode=delta side=sell skip=False/ ---
+  entry 09:00 spot=108043.00 sig=0.6556 decile=7 thr=0.90
+  C target=110000 chosen=110000 gap=0 mark=84.6161 fill=79.8237
+  P target=106000 chosen=105600 gap=400 mark=131.8198 fill=130.2530
+  strike_ok=True strikes_available=True
+  settle 17:30 S=107759.50 ts=1762171200
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=21.0077 gross=21.0077 entry_fee=0.8676 exit_fee=0.0000 net=20.1401
+--- 2025-11-04 gate=flat mode=delta side=sell skip=False/ ---
+  entry 09:00 spot=106874.00 sig=0.6196 decile=7 thr=0.90
+  C target=108800 chosen=108200 gap=600 mark=78.7339 fill=74.2747
+  P target=104800 chosen=105400 gap=600 mark=77.1342 fill=72.7656
+  strike_ok=True strikes_available=True
+  settle 17:30 S=104445.50 ts=1762257600
+  payoff C=0.0000 P=95.4500 settlement_pay=95.4500
+  premium_pnl=14.7040 gross=-80.7460 entry_fee=0.6073 exit_fee=0.0000 net=-81.3532
+--- 2025-11-06 gate=flat mode=delta side=sell skip=False/ ---
+  entry 09:00 spot=103660.00 sig=0.8229 decile=9 thr=0.90
+  C target=105600 chosen=105000 gap=600 mark=56.1384 fill=52.9589
+  P target=101600 chosen=102000 gap=400 mark=74.8993 fill=70.6572
+  strike_ok=True strikes_available=True
+  settle 17:30 S=103153.50 ts=1762430400
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=12.3616 gross=12.3616 entry_fee=0.5105 exit_fee=0.0000 net=11.8511
+
+===== ARM mode=delta prem=0.0340 delta=0.12 thr=0.90 gate=switch =====
+  counts: traded=19 flat_gate=0 STRIKE_UNAVAILABLE=0 CHAIN_ONE_SIDED=1
+--- mode=delta prem=0.0340 delta=0.12 thr=0.90 gate=switch ---
+  n=19 mean=-4.1094 median=13.5906 win%=73.7
+  worst=-211.2397 p5=-94.3419 maxDD=-211.2397
+  capital@3%worst=7041.32 return%/day=-0.0370
+  mean/day=-2.6026 bootstrap95%=[-21.5092, 14.5989] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.1050 max=0.6636
+--- 2025-11-03 gate=switch mode=delta side=sell skip=False/ ---
+  entry 09:00 spot=108043.00 sig=0.6556 decile=7 thr=0.90
+  C target=110000 chosen=110000 gap=0 mark=84.6161 fill=79.8237
+  P target=106000 chosen=105600 gap=400 mark=131.8198 fill=130.2530
+  strike_ok=True strikes_available=True
+  settle 17:30 S=107759.50 ts=1762171200
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=21.0077 gross=21.0077 entry_fee=0.8676 exit_fee=0.0000 net=20.1401
+--- 2025-11-04 gate=switch mode=delta side=sell skip=False/ ---
+  entry 09:00 spot=106874.00 sig=0.6196 decile=7 thr=0.90
+  C target=108800 chosen=108200 gap=600 mark=78.7339 fill=74.2747
+  P target=104800 chosen=105400 gap=600 mark=77.1342 fill=72.7656
+  strike_ok=True strikes_available=True
+  settle 17:30 S=104445.50 ts=1762257600
+  payoff C=0.0000 P=95.4500 settlement_pay=95.4500
+  premium_pnl=14.7040 gross=-80.7460 entry_fee=0.6073 exit_fee=0.0000 net=-81.3532
+--- 2025-11-05 gate=switch mode=delta side=buy skip=False/ ---
+  entry 09:00 spot=102043.00 sig=0.9681 decile=10 thr=0.90
+  C target=104000 chosen=104400 gap=400 mark=117.1270 fill=118.5192
+  P target=100000 chosen=102000 gap=2000 mark=677.1599 fill=681.4155
+  strike_ok=True strikes_available=True
+  settle 17:30 S=101976.50 ts=1762344000
+  payoff C=0.0000 P=2.3500 settlement_pay=2.3500
+  premium_pnl=-79.9935 gross=-77.6435 entry_fee=1.6936 exit_fee=0.0000 net=-79.3371
+
+===== GATE PAIRED (flat vs none, acted days only) =====
+  n_act=1 mean(gated-none)=125.5472 bootstrap95%=[125.5472, 125.5472] crosses_zero=NO
+  totals on acted days: none=-125.55 gated=0.00 edge=125.55
+
+===== GATE PAIRED (switch vs none, acted days only) =====
+  n_act=1 mean(gated-none)=248.6573 bootstrap95%=[248.6573, 248.6573] crosses_zero=NO
+  totals on acted days: none=-125.55 gated=123.11 edge=248.66
+
+===== GATE PAIRED (flat vs none, acted days only) =====
+  n_act=2 mean(gated-none)=32.9938 bootstrap95%=[-74.8318, 140.8195] crosses_zero=YES (CI includes 0)
+  totals on acted days: none=-65.99 gated=0.00 edge=65.99
+
+===== GATE PAIRED (switch vs none, acted days only) =====
+  n_act=2 mean(gated-none)=62.0046 bootstrap95%=[-154.1689, 278.1781] crosses_zero=YES (CI includes 0)
+  totals on acted days: none=-65.99 gated=58.02 edge=124.01
+

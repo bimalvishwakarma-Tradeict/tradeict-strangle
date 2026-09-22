@@ -23,8 +23,15 @@ from backtest.harness.data import MarksStore, find_spot_csv, load_spot_map  # no
 from backtest.strategies.s008_regime_gate.signal import (  # noqa: E402
     build_signals_through,
 )
+from backtest.strategies.s008_regime_gate.stats import (  # noqa: E402
+    arm_stats,
+    format_arm_stats,
+    gate_paired_report,
+)
 from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
     DEFAULT_MAX_STRIKE_GAP,
+    DEFAULT_PREMIUM_TARGET_PCT,
+    DEFAULT_TARGET_DELTA,
     IS_FROM,
     IS_TO,
     OOS_FROM,
@@ -64,10 +71,16 @@ def _parse_strike_modes(s: str) -> list[StrikeMode]:
     out: list[StrikeMode] = []
     for part in s.split(","):
         m = part.strip().lower()
-        if m not in ("points", "premium"):
+        if m not in ("points", "premium", "delta"):
             raise ValueError(f"bad strike-mode {m!r}")
         out.append(m)  # type: ignore[arg-type]
     return out
+
+
+def _parse_float_csv(s: str | None, default: list[float]) -> list[float]:
+    if s is None or not str(s).strip():
+        return list(default)
+    return [float(x.strip()) for x in str(s).split(",") if x.strip()]
 
 
 def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
@@ -112,6 +125,8 @@ def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
         "sig",
         "sig_decile",
         "threshold",
+        "premium_target_pct",
+        "target_delta",
         "prev_rvol",
         "overnight",
         "overnight_move_pct",
@@ -162,6 +177,8 @@ def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
                     "sig": f"{b.sig:.6f}",
                     "sig_decile": b.sig_decile,
                     "threshold": f"{b.threshold:.4f}",
+                    "premium_target_pct": f"{b.premium_target_pct:.6f}",
+                    "target_delta": f"{b.target_delta:.4f}",
                     "prev_rvol": f"{b.prev_rvol:.8f}",
                     "overnight": f"{b.overnight:.8f}",
                     "overnight_move_pct": f"{b.overnight_move_pct:.6f}",
@@ -196,6 +213,8 @@ def run_arm(
     gate: GateMode,
     strike_mode: StrikeMode,
     threshold: float,
+    premium_target_pct: float,
+    target_delta: float,
     d0: date,
     d1: date,
     entry_h: int,
@@ -214,6 +233,8 @@ def run_arm(
         window=window,
         max_strike_gap=max_strike_gap,
         strike_mode=strike_mode,
+        premium_target_pct=premium_target_pct,
+        target_delta=target_delta,
     )
     rows: list[BasketResult] = []
     counts = {
@@ -260,15 +281,32 @@ def main() -> None:
         "--strike-mode",
         type=str,
         default="points",
-        help="points | premium (comma list ok)",
+        help="points | premium | delta (comma list ok)",
     )
-    ap.add_argument("--threshold", type=float, default=None)
+    ap.add_argument(
+        "--threshold",
+        type=str,
+        default=None,
+        help="Comma list for IS sweep; OOS: exactly one value (hard lock)",
+    )
+    ap.add_argument(
+        "--premium-target-pct",
+        type=str,
+        default=None,
+        help="Percent of spot for premium mode (e.g. 0.034); comma sweep",
+    )
+    ap.add_argument(
+        "--target-delta",
+        type=str,
+        default=None,
+        help="Target |delta| for delta mode; comma sweep",
+    )
     ap.add_argument(
         "--window",
         type=str,
         default="is",
         choices=("is", "oos", "custom"),
-        help="oos HARD-LOCKS: threshold must be passed, never searched",
+        help="oos HARD-LOCKS: single --threshold only, no in-run search",
     )
     ap.add_argument("--tag", type=str, default="s008")
     ap.add_argument("--qty", type=int, default=100)
@@ -291,11 +329,23 @@ def main() -> None:
 
     d0 = date.fromisoformat(args.start)
     d1 = date.fromisoformat(args.end)
-    thr = enforce_oos_threshold(args.window, args.threshold)
+    thresholds = _parse_float_csv(args.threshold, [0.90])
+    prem_pcts = _parse_float_csv(
+        args.premium_target_pct, [DEFAULT_PREMIUM_TARGET_PCT]
+    )
+    target_deltas = _parse_float_csv(args.target_delta, [DEFAULT_TARGET_DELTA])
+    if args.window == "oos":
+        if len(thresholds) != 1:
+            raise SystemExit(
+                "HARD LOCK: --window oos requires exactly one --threshold "
+                "(no sweep / no in-run selection)"
+            )
+        enforce_oos_threshold("oos", thresholds[0])
     eh, em = _parse_hhmm(args.entry_time)
     gates = _parse_gates(args.gate)
     modes = _parse_strike_modes(args.strike_mode)
     max_gap = float(args.max_strike_gap)
+    summary_only = (d1 - d0).days > 35
 
     if args.window == "is" and (d0 < IS_FROM or d1 > IS_TO):
         logger.warning(
@@ -325,6 +375,8 @@ def main() -> None:
             test_lines.append("STRIKE_GAP PASS")
             tmod.test_otm_only()
             test_lines.append("OTM_ONLY PASS")
+            tmod.test_oos_lock_and_premium_target()
+            test_lines.append("OOS_LOCK PASS")
             test_lines.append("ALL S008 TESTS PASS")
         except AssertionError as exc:
             test_lines.append(f"TEST FAIL: {exc}")
@@ -345,10 +397,11 @@ def main() -> None:
     lines: list[str] = [
         "===== S008 REGIME GATE =====",
         f"generated_utc={datetime.now(tz=timezone.utc).isoformat()}",
-        f"tag={args.tag} window={args.window} threshold={thr} "
+        f"tag={args.tag} window={args.window} thresholds={thresholds} "
         f"max_strike_gap={max_gap:.0f}",
         f"range={d0}..{d1} entry={eh:02d}:{em:02d} gates={gates} "
         f"strike_modes={modes}",
+        f"premium_target_pct={prem_pcts} target_delta={target_deltas}",
         f"spot_csv={spot_path.name}",
         "",
     ]
@@ -356,54 +409,89 @@ def main() -> None:
     lines.append("")
 
     all_rows: list[BasketResult] = []
+    arms: dict[str, list[BasketResult]] = {}
+
     for mode in modes:
-        for g in gates:
-            rows, counts = run_arm(
-                gate=g,
-                strike_mode=mode,
-                threshold=thr,
-                d0=d0,
-                d1=d1,
-                entry_h=eh,
-                entry_m=em,
-                window=args.window,
-                max_strike_gap=max_gap,
-                spot=spot,
-                store=store,
-                sigs=sigs,
-            )
-            all_rows.extend(rows)
-            lines.append(
-                f"mode={mode} gate={g}: days={counts['days']} "
-                f"traded={counts['traded']} flat_gate={counts['flat_gate']} "
-                f"STRIKE_UNAVAILABLE={counts['strike_unavailable']} "
-                f"CHAIN_ONE_SIDED={counts['chain_one_sided']} "
-                f"skip_data={counts['skip_data']}"
-            )
-            strike_skips = [
-                b
-                for b in rows
-                if b.skip_reason in ("STRIKE_UNAVAILABLE", "CHAIN_ONE_SIDED", "ITM_STRIKE")
-            ]
-            if strike_skips:
-                lines.append(f"  --- strike skips ({len(strike_skips)}) ---")
-                for b in strike_skips[:5]:
-                    lines.append(
-                        f"  {b.d} {b.skip_reason} spot={b.spot_entry:.0f} "
-                        f"C t={b.target_call_k:.0f} c={b.chosen_call_k:.0f} "
-                        f"g={b.call_gap:.0f} | "
-                        f"P t={b.target_put_k:.0f} c={b.chosen_put_k:.0f} "
-                        f"g={b.put_gap:.0f}"
+        prem_iter = prem_pcts if mode == "premium" else [DEFAULT_PREMIUM_TARGET_PCT]
+        delta_iter = target_deltas if mode == "delta" else [DEFAULT_TARGET_DELTA]
+        for prem in prem_iter:
+            for tdelta in delta_iter:
+                for thr in thresholds:
+                    for g in gates:
+                        rows, counts = run_arm(
+                            gate=g,
+                            strike_mode=mode,
+                            threshold=thr,
+                            premium_target_pct=prem,
+                            target_delta=tdelta,
+                            d0=d0,
+                            d1=d1,
+                            entry_h=eh,
+                            entry_m=em,
+                            window=args.window,
+                            max_strike_gap=max_gap,
+                            spot=spot,
+                            store=store,
+                            sigs=sigs,
+                        )
+                        all_rows.extend(rows)
+                        label = (
+                            f"mode={mode} prem={prem:.4f} delta={tdelta:.2f} "
+                            f"thr={thr:.2f} gate={g}"
+                        )
+                        arms[label] = rows
+                        st = arm_stats(rows, d0, d1)
+                        lines.append(f"===== ARM {label} =====")
+                        lines.append(
+                            f"  counts: traded={counts['traded']} "
+                            f"flat_gate={counts['flat_gate']} "
+                            f"STRIKE_UNAVAILABLE={counts['strike_unavailable']} "
+                            f"CHAIN_ONE_SIDED={counts['chain_one_sided']}"
+                        )
+                        lines.extend(format_arm_stats(label, st))
+                        if not summary_only:
+                            traded = [b for b in rows if not b.skipped]
+                            for b in traded[:3]:
+                                lines.extend(format_trace(b))
+                        lines.append("")
+
+    # Gate paired reports (flat/switch vs none) per strike/threshold config
+    for mode in modes:
+        prem_iter = prem_pcts if mode == "premium" else [DEFAULT_PREMIUM_TARGET_PCT]
+        delta_iter = target_deltas if mode == "delta" else [DEFAULT_TARGET_DELTA]
+        for prem in prem_iter:
+            for tdelta in delta_iter:
+                for thr in thresholds:
+                    key_none = (
+                        f"mode={mode} prem={prem:.4f} delta={tdelta:.2f} "
+                        f"thr={thr:.2f} gate=none"
                     )
-            traded = [b for b in rows if not b.skipped]
-            lines.append(f"  --- traces mode={mode} gate={g} (up to 3) ---")
-            for b in traded[:3]:
-                lines.extend(format_trace(b))
-            for b in rows:
-                if b.d == date(2025, 11, 5):
-                    lines.append("  --- 2025-11-05 (regression) ---")
-                    lines.extend(format_trace(b))
-            lines.append("")
+                    rows_none = arms.get(key_none)
+                    if not rows_none:
+                        continue
+                    for g in ("flat", "switch"):
+                        key_g = (
+                            f"mode={mode} prem={prem:.4f} delta={tdelta:.2f} "
+                            f"thr={thr:.2f} gate={g}"
+                        )
+                        rows_g = arms.get(key_g)
+                        if not rows_g:
+                            continue
+                        lines.extend(
+                            gate_paired_report(
+                                rows_none=rows_none,
+                                rows_gated=rows_g,
+                                gate=g,
+                                threshold=thr,
+                                d0=d0,
+                                d1=d1,
+                                label=(
+                                    f"mode={mode} prem={prem:.4f} "
+                                    f"delta={tdelta:.2f} thr={thr:.2f}"
+                                ),
+                            )
+                        )
+                        lines.append("")
 
     if args.run_control:
         from backtest.strategies.s008_regime_gate import control_analysis as ca
@@ -416,15 +504,17 @@ def main() -> None:
             recs = ca.build_day_records(
                 d0=IS_FROM,
                 d1=OOS_TO,
-                threshold=thr,
+                threshold=thresholds[0],
                 max_strike_gap=max_gap,
                 strike_mode=mode,
                 spot=spot,
                 store=store,
                 sigs=sigs_c,
+                premium_target_pct=prem_pcts[0],
+                target_delta=target_deltas[0],
             )
             lines.append(f"########## strike_mode={mode} ##########")
-            lines.extend(ca.run_t1_t2_t3(recs, threshold=thr))
+            lines.extend(ca.run_t1_t2_t3(recs, threshold=thresholds[0]))
             lines.append(
                 f"strikes_available ({mode}): "
                 f"{sum(1 for r in recs if r.strikes_available)} / {len(recs)}"

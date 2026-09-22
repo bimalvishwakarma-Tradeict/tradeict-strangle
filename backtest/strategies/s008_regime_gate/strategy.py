@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from backtest.harness.config import CONTRACT_VALUE
 from backtest.harness.costs import fill_price, option_fee
 from backtest.harness.data import MarksStore, ist_dt, to_unix
+from backtest.s004_gate import black76_abs_delta, implied_vol_bisection
 from backtest.strategies.s008_regime_gate.signal import DaySignal
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -29,12 +30,21 @@ STRIKE_GRID = 200.0
 DEFAULT_QTY = 100
 MARK_TOL_SEC = 60
 DEFAULT_MAX_STRIKE_GAP = 400.0
-# S006 cap threshold: 0.28571% of spot as target premium per leg
-PREMIUM_TARGET_PCT = 0.0028571
+# Corrected 0DTE premium target: percent of spot (NOT the old 0.28571% 1DTE cap).
+# 0.034% of spot ≈ ATM±2000 premium level.
+DEFAULT_PREMIUM_TARGET_PCT = 0.034
+DEFAULT_TARGET_DELTA = 0.12
+# 09:00 → 17:30 IST remaining fraction of year for Black-76
+T_YEARS_0DTE_0900 = 8.5 / 24.0 / 365.0
 
 GateMode = Literal["none", "switch", "flat"]
 Side = Literal["sell", "buy", "flat"]
-StrikeMode = Literal["points", "premium"]
+StrikeMode = Literal["points", "premium", "delta"]
+
+
+def premium_target_usd(spot: float, premium_target_pct: float) -> float:
+    """premium_target_pct is percent-of-spot (e.g. 0.034 → 0.034% of spot)."""
+    return float(spot) * (float(premium_target_pct) / 100.0)
 
 
 def format_symbol(opt: str, strike: float, exp: date) -> str:
@@ -158,6 +168,37 @@ def nearest_premium(
     return min(legs, key=lambda kp: (abs(kp[1] - target_prem), kp[0]))
 
 
+def pick_delta_strike(
+    legs: list[tuple[float, float]],
+    spot: float,
+    *,
+    target_delta: float,
+    is_call: bool,
+    t_years: float = T_YEARS_0DTE_0900,
+) -> tuple[float, float] | None:
+    """OTM strike with |delta| closest to target (Black-76 IV from mark)."""
+    best: tuple[float, float, float] | None = None  # err, k, mark
+    for k, mark in legs:
+        if is_call and k <= spot:
+            continue
+        if not is_call and k >= spot:
+            continue
+        if mark <= 0:
+            continue
+        iv = implied_vol_bisection(mark, spot, k, t_years, is_call)
+        if iv is None or iv <= 0:
+            continue
+        dlt = black76_abs_delta(spot, k, t_years, iv, is_call)
+        err = abs(dlt - target_delta)
+        if best is None or err < best[0] or (
+            err == best[0] and abs(k - spot) < abs(best[1] - spot)
+        ):
+            best = (err, k, mark)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
 @dataclass(frozen=True)
 class WingPick:
     target_call_k: float
@@ -196,7 +237,9 @@ def pick_wings(
     strike_mode: StrikeMode = "points",
     wing_pts: float = WING_PTS,
     max_strike_gap: float = DEFAULT_MAX_STRIKE_GAP,
-    premium_pct: float = PREMIUM_TARGET_PCT,
+    premium_target_pct: float = DEFAULT_PREMIUM_TARGET_PCT,
+    target_delta: float = DEFAULT_TARGET_DELTA,
+    t_years: float = T_YEARS_0DTE_0900,
 ) -> WingPick:
     """
     Spot-based targets + OTM-only + (points: gap guard | premium: prem match).
@@ -226,9 +269,31 @@ def pick_wings(
     p_by = {k: px for k, px in otm_p}
 
     if strike_mode == "premium":
-        tgt_prem = premium_pct * spot
+        tgt_prem = premium_target_usd(spot, premium_target_pct)
         c_pick = nearest_premium(otm_c, tgt_prem)
         p_pick = nearest_premium(otm_p, tgt_prem)
+        if c_pick is None or p_pick is None:
+            return WingPick(
+                target_call_k=target_c,
+                target_put_k=target_p,
+                chosen_call_k=0.0,
+                chosen_put_k=0.0,
+                call_gap=0.0,
+                put_gap=0.0,
+                call_mark=0.0,
+                put_mark=0.0,
+                strikes_available=False,
+                skip_reason="CHAIN_ONE_SIDED",
+            )
+        ck, c_mark = c_pick
+        pk, p_mark = p_pick
+    elif strike_mode == "delta":
+        c_pick = pick_delta_strike(
+            otm_c, spot, target_delta=target_delta, is_call=True, t_years=t_years
+        )
+        p_pick = pick_delta_strike(
+            otm_p, spot, target_delta=target_delta, is_call=False, t_years=t_years
+        )
         if c_pick is None or p_pick is None:
             return WingPick(
                 target_call_k=target_c,
@@ -404,6 +469,8 @@ class BasketResult:
     sig: float
     sig_decile: int
     threshold: float
+    premium_target_pct: float
+    target_delta: float
     prev_rvol: float
     overnight: float
     overnight_move_pct: float
@@ -433,6 +500,8 @@ class S008RegimeGateStrategy:
         wing_pts: float = WING_PTS,
         max_strike_gap: float = DEFAULT_MAX_STRIKE_GAP,
         strike_mode: StrikeMode = "points",
+        premium_target_pct: float = DEFAULT_PREMIUM_TARGET_PCT,
+        target_delta: float = DEFAULT_TARGET_DELTA,
         slip_model: str = "bucketed",
         slip_mult: float = 1.0,
         window: str = "is",
@@ -445,6 +514,8 @@ class S008RegimeGateStrategy:
         self.wing_pts = float(wing_pts)
         self.max_strike_gap = float(max_strike_gap)
         self.strike_mode: StrikeMode = strike_mode
+        self.premium_target_pct = float(premium_target_pct)
+        self.target_delta = float(target_delta)
         self.slip_model = slip_model
         self.slip_mult = float(slip_mult)
         self.window = str(window).lower().strip()
@@ -514,6 +585,8 @@ class S008RegimeGateStrategy:
             sig=sig.sig,
             sig_decile=sig_decile(sig.sig),
             threshold=self.threshold,
+            premium_target_pct=self.premium_target_pct,
+            target_delta=self.target_delta,
             prev_rvol=sig.prev_rvol,
             overnight=sig.overnight,
             overnight_move_pct=sig.overnight * 100.0,
@@ -563,7 +636,7 @@ class S008RegimeGateStrategy:
                 spot_entry=float(spot_entry),
             )
         expiry = zero_dte_expiry(d)
-        if self.strike_mode == "premium":
+        if self.strike_mode in ("premium", "delta"):
             calls, puts = load_chain_sql(conn, expiry, entry_ts)
             if not calls and not puts:
                 calls, puts = load_chain_pk(
@@ -579,6 +652,8 @@ class S008RegimeGateStrategy:
             strike_mode=self.strike_mode,
             wing_pts=self.wing_pts,
             max_strike_gap=self.max_strike_gap,
+            premium_target_pct=self.premium_target_pct,
+            target_delta=self.target_delta,
         )
         if picked.skip_reason:
             return self._empty_basket(
@@ -683,6 +758,8 @@ class S008RegimeGateStrategy:
             sig=sig.sig,
             sig_decile=sig_decile(sig.sig),
             threshold=self.threshold,
+            premium_target_pct=self.premium_target_pct,
+            target_delta=self.target_delta,
             prev_rvol=sig.prev_rvol,
             overnight=sig.overnight,
             overnight_move_pct=sig.overnight * 100.0,

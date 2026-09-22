@@ -27,7 +27,9 @@ from backtest.strategies.s008_regime_gate.signal import (  # noqa: E402
 from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
     DEFAULT_MAX_STRIKE_GAP,
     S008RegimeGateStrategy,
+    enforce_oos_threshold,
     iter_weekdays,
+    premium_target_usd,
     settlement_spot,
     spot_based_targets,
 )
@@ -206,7 +208,7 @@ def test_strike_gap_guard() -> None:
 
 
 def test_otm_only() -> None:
-    """(e) No traded leg is ITM vs entry spot (points + premium)."""
+    """(e) No traded leg is ITM vs entry spot (points + premium + delta)."""
     ensure_slip_table()
     spot = _load_spot()
     store = MarksStore()
@@ -216,7 +218,7 @@ def test_otm_only() -> None:
     days = iter_weekdays(warm0, d1)
     sigs = build_signals_through(days, spot, through=d1)
     n = 0
-    for mode in ("points", "premium"):
+    for mode in ("points", "premium", "delta"):
         strat = S008RegimeGateStrategy(
             gate="none",
             threshold=0.90,
@@ -247,12 +249,27 @@ def test_otm_only() -> None:
     print(f"OTM_ONLY PASS n_traded_legs_checked={n}")
 
 
+def test_oos_lock_and_premium_target() -> None:
+    """(f) OOS needs an argument threshold; premium target is % of spot."""
+    try:
+        enforce_oos_threshold("oos", None)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("OOS_LOCK FAIL: missing threshold was accepted")
+    assert enforce_oos_threshold("oos", 0.90) == 0.90
+    # 0.034% of 100000 = 34.0 (old 0.28571% would have been 285.71)
+    assert abs(premium_target_usd(100_000.0, 0.034) - 34.0) < 1e-9
+    print("OOS_LOCK PASS + premium_target_pct is percent-of-spot")
+
+
 def main() -> int:
     test_lookahead_sig_truncate()
     test_exit_cost_zero()
     test_settlement_spot_timestamp()
     test_strike_gap_guard()
     test_otm_only()
+    test_oos_lock_and_premium_target()
     print("ALL S008 TESTS PASS")
     return 0
 

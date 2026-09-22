@@ -27,6 +27,8 @@ from backtest.strategies.s008_regime_gate.signal import (  # noqa: E402
 )
 from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
     DEFAULT_MAX_STRIKE_GAP,
+    DEFAULT_PREMIUM_TARGET_PCT,
+    DEFAULT_TARGET_DELTA,
     IS_FROM,
     OOS_TO,
     S008RegimeGateStrategy,
@@ -94,27 +96,20 @@ def build_day_records(
     spot: dict[int, float],
     store: MarksStore,
     sigs: dict[date, DaySignal],
+    premium_target_pct: float = DEFAULT_PREMIUM_TARGET_PCT,
+    target_delta: float = DEFAULT_TARGET_DELTA,
 ) -> list[DayRecord]:
     """Per-day availability + gate decisions + PnL under each gate (if tradable)."""
     strats = {
-        "none": S008RegimeGateStrategy(
-            gate="none",
+        g: S008RegimeGateStrategy(
+            gate=g,  # type: ignore[arg-type]
             threshold=threshold,
             max_strike_gap=max_strike_gap,
             strike_mode=strike_mode,  # type: ignore[arg-type]
-        ),
-        "flat": S008RegimeGateStrategy(
-            gate="flat",
-            threshold=threshold,
-            max_strike_gap=max_strike_gap,
-            strike_mode=strike_mode,  # type: ignore[arg-type]
-        ),
-        "switch": S008RegimeGateStrategy(
-            gate="switch",
-            threshold=threshold,
-            max_strike_gap=max_strike_gap,
-            strike_mode=strike_mode,  # type: ignore[arg-type]
-        ),
+            premium_target_pct=premium_target_pct,
+            target_delta=target_delta,
+        )
+        for g in ("none", "flat", "switch")
     }
     out: list[DayRecord] = []
     for d in iter_weekdays(d0, d1):
@@ -130,7 +125,7 @@ def build_day_records(
             if conn is None:
                 skip_reason = "no_marks"
             else:
-                if strike_mode == "premium":
+                if strike_mode in ("premium", "delta"):
                     calls, puts = load_chain_sql(
                         conn, zero_dte_expiry(d), entry_ts
                     )
@@ -148,6 +143,8 @@ def build_day_records(
                     float(sp),
                     strike_mode=strike_mode,  # type: ignore[arg-type]
                     max_strike_gap=max_strike_gap,
+                    premium_target_pct=premium_target_pct,
+                    target_delta=target_delta,
                 )
                 avail = picked.strikes_available
                 skip_reason = picked.skip_reason or ""
