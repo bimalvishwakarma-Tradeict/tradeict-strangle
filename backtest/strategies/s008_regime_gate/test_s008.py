@@ -25,6 +25,7 @@ from backtest.strategies.s008_regime_gate.signal import (  # noqa: E402
     build_signals_through,
 )
 from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
+    DEFAULT_MAX_STRIKE_GAP,
     S008RegimeGateStrategy,
     iter_weekdays,
     settlement_spot,
@@ -75,7 +76,12 @@ def test_exit_cost_zero() -> None:
     days = iter_weekdays(warm0, d1)
     sigs = build_signals_through(days, spot, through=d1)
     strat = S008RegimeGateStrategy(
-        gate="none", threshold=0.90, entry_hour=9, entry_minute=0, qty=100
+        gate="none",
+        threshold=0.90,
+        entry_hour=9,
+        entry_minute=0,
+        qty=100,
+        max_strike_gap=DEFAULT_MAX_STRIKE_GAP,
     )
     n = 0
     for d in iter_weekdays(d0, d1):
@@ -106,7 +112,12 @@ def test_settlement_spot_timestamp() -> None:
     days = iter_weekdays(warm0, d1)
     sigs = build_signals_through(days, spot, through=d1)
     strat = S008RegimeGateStrategy(
-        gate="none", threshold=0.90, entry_hour=9, entry_minute=0, qty=100
+        gate="none",
+        threshold=0.90,
+        entry_hour=9,
+        entry_minute=0,
+        qty=100,
+        max_strike_gap=DEFAULT_MAX_STRIKE_GAP,
     )
     n = 0
     for d in iter_weekdays(d0, d1):
@@ -132,10 +143,73 @@ def test_settlement_spot_timestamp() -> None:
     print(f"SETTLEMENT_SPOT PASS n_traded={n}")
 
 
+def test_strike_gap_guard() -> None:
+    """(d) Every traded basket: both gaps <= max_strike_gap; 2025-11-05 skipped."""
+    ensure_slip_table()
+    spot = _load_spot()
+    store = MarksStore()
+    d0 = date(2025, 11, 1)
+    d1 = date(2025, 11, 30)
+    warm0 = date(2025, 10, 1)
+    days = iter_weekdays(warm0, d1)
+    sigs = build_signals_through(days, spot, through=d1)
+    max_gap = DEFAULT_MAX_STRIKE_GAP
+    strat = S008RegimeGateStrategy(
+        gate="none",
+        threshold=0.90,
+        entry_hour=9,
+        entry_minute=0,
+        qty=100,
+        max_strike_gap=max_gap,
+    )
+    n_traded = 0
+    n_strike_skip = 0
+    for d in iter_weekdays(d0, d1):
+        s = sigs.get(d)
+        if s is None:
+            continue
+        b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+        if b.skip_reason == "STRIKE_UNAVAILABLE":
+            n_strike_skip += 1
+            assert b.skipped
+            assert b.strike_ok is False
+            assert b.call_gap > max_gap or b.put_gap > max_gap
+            continue
+        if b.skipped:
+            continue
+        n_traded += 1
+        assert b.strike_ok is True
+        assert b.call_gap <= max_gap, (
+            f"STRIKE_GAP FAIL {d}: call_gap={b.call_gap} > {max_gap}"
+        )
+        assert b.put_gap <= max_gap, (
+            f"STRIKE_GAP FAIL {d}: put_gap={b.put_gap} > {max_gap}"
+        )
+    # Known bad day: silent snap of put 100000→102000 must now SKIP
+    d_bad = date(2025, 11, 5)
+    if d_bad in sigs:
+        b_bad = strat.simulate_day(
+            d=d_bad, sig=sigs[d_bad], store=store, spot_close=spot
+        )
+        assert b_bad.skipped and b_bad.skip_reason == "STRIKE_UNAVAILABLE", (
+            f"2025-11-05 must STRIKE_UNAVAILABLE, got "
+            f"skip={b_bad.skipped}/{b_bad.skip_reason} put={b_bad.chosen_put_k}"
+        )
+        assert b_bad.put_gap > max_gap
+    store.close()
+    assert n_traded > 0
+    assert n_strike_skip >= 1
+    print(
+        f"STRIKE_GAP PASS n_traded={n_traded} "
+        f"STRIKE_UNAVAILABLE={n_strike_skip} max_gap={max_gap:.0f}"
+    )
+
+
 def main() -> int:
     test_lookahead_sig_truncate()
     test_exit_cost_zero()
     test_settlement_spot_timestamp()
+    test_strike_gap_guard()
     print("ALL S008 TESTS PASS")
     return 0
 

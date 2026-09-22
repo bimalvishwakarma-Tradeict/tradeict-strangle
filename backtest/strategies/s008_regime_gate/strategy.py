@@ -98,9 +98,28 @@ def load_chain_pk(
 
 
 def nearest_strike(strikes: list[float], target: float) -> float | None:
+    """Nearest available strike to target. Caller must enforce gap guard —
+    silent wide snaps are forbidden (S006 lesson)."""
     if not strikes:
         return None
     return min(strikes, key=lambda k: (abs(k - target), k))
+
+
+@dataclass(frozen=True)
+class WingPick:
+    atm: float
+    target_call_k: float
+    target_put_k: float
+    chosen_call_k: float
+    chosen_put_k: float
+    call_gap: float
+    put_gap: float
+    call_mark: float
+    put_mark: float
+
+    @property
+    def max_gap(self) -> float:
+        return max(self.call_gap, self.put_gap)
 
 
 def pick_atm_wings(
@@ -108,20 +127,34 @@ def pick_atm_wings(
     puts: list[tuple[float, float]],
     spot: float,
     wing_pts: float = WING_PTS,
-) -> tuple[float, float, float, float] | None:
+) -> WingPick | None:
+    """ATM±wing selection. Returns targets + chosen + gaps; does NOT skip.
+    Gap enforcement lives in simulate_day via max_strike_gap."""
     c_strikes = [k for k, _ in calls]
     p_strikes = [k for k, _ in puts]
     common = sorted(set(c_strikes) & set(p_strikes))
     atm = nearest_strike(common if common else c_strikes, spot)
     if atm is None:
         return None
-    ck = nearest_strike(c_strikes, atm + wing_pts)
-    pk = nearest_strike(p_strikes, atm - wing_pts)
+    target_c = atm + wing_pts
+    target_p = atm - wing_pts
+    ck = nearest_strike(c_strikes, target_c)
+    pk = nearest_strike(p_strikes, target_p)
     if ck is None or pk is None:
         return None
     c_by = {k: px for k, px in calls}
     p_by = {k: px for k, px in puts}
-    return ck, pk, c_by[ck], p_by[pk]
+    return WingPick(
+        atm=atm,
+        target_call_k=target_c,
+        target_put_k=target_p,
+        chosen_call_k=ck,
+        chosen_put_k=pk,
+        call_gap=abs(ck - target_c),
+        put_gap=abs(pk - target_p),
+        call_mark=c_by[ck],
+        put_mark=p_by[pk],
+    )
 
 
 def settlement_spot(
@@ -155,6 +188,9 @@ def decide_side(gate: GateMode, sig: float, threshold: float) -> Side:
     return "sell"
 
 
+DEFAULT_MAX_STRIKE_GAP = 400.0
+
+
 @dataclass
 class BasketResult:
     d: date
@@ -168,6 +204,13 @@ class BasketResult:
     spot_entry: float
     call_strike: float
     put_strike: float
+    target_call_k: float
+    target_put_k: float
+    chosen_call_k: float
+    chosen_put_k: float
+    call_gap: float
+    put_gap: float
+    strike_ok: bool
     call_mark: float
     put_mark: float
     call_fill: float
@@ -199,6 +242,7 @@ class RunStats:
     n_traded: int = 0
     n_flat_gate: int = 0
     n_skip_data: int = 0
+    n_strike_unavailable: int = 0
     baskets: list[BasketResult] = field(default_factory=list)
 
 
@@ -212,6 +256,7 @@ class S008RegimeGateStrategy:
         entry_minute: int = 0,
         qty: int = DEFAULT_QTY,
         wing_pts: float = WING_PTS,
+        max_strike_gap: float = DEFAULT_MAX_STRIKE_GAP,
         slip_model: str = "bucketed",
         slip_mult: float = 1.0,
         window: str = "is",
@@ -222,6 +267,7 @@ class S008RegimeGateStrategy:
         self.entry_minute = int(entry_minute)
         self.qty = int(qty)
         self.wing_pts = float(wing_pts)
+        self.max_strike_gap = float(max_strike_gap)
         self.slip_model = slip_model
         self.slip_mult = float(slip_mult)
         self.window = str(window).lower().strip()
@@ -230,27 +276,42 @@ class S008RegimeGateStrategy:
         ):
             raise ValueError("OOS window requires explicit --threshold (no search)")
 
-    def simulate_day(
+    def _empty_basket(
         self,
         *,
         d: date,
+        side: str,
         sig: DaySignal,
-        store: MarksStore,
-        spot_close: dict[int, float],
+        skip_reason: str,
+        spot_entry: float = 0.0,
+        entry_ts: int = 0,
+        target_call_k: float = 0.0,
+        target_put_k: float = 0.0,
+        chosen_call_k: float = 0.0,
+        chosen_put_k: float = 0.0,
+        call_gap: float = 0.0,
+        put_gap: float = 0.0,
+        strike_ok: bool = False,
     ) -> BasketResult:
-        side = decide_side(self.gate, sig.sig, self.threshold)
-        empty = BasketResult(
+        return BasketResult(
             d=d,
             gate=self.gate,
             side=side,
             skipped=True,
-            skip_reason="",
-            entry_ts=0,
+            skip_reason=skip_reason,
+            entry_ts=entry_ts,
             entry_hour=self.entry_hour,
             entry_minute=self.entry_minute,
-            spot_entry=0.0,
-            call_strike=0.0,
-            put_strike=0.0,
+            spot_entry=spot_entry,
+            call_strike=chosen_call_k,
+            put_strike=chosen_put_k,
+            target_call_k=target_call_k,
+            target_put_k=target_put_k,
+            chosen_call_k=chosen_call_k,
+            chosen_put_k=chosen_put_k,
+            call_gap=call_gap,
+            put_gap=put_gap,
+            strike_ok=strike_ok,
             call_mark=0.0,
             put_mark=0.0,
             call_fill=0.0,
@@ -275,44 +336,98 @@ class S008RegimeGateStrategy:
             prev_rvol=sig.prev_rvol,
             overnight=sig.overnight,
         )
+
+    def simulate_day(
+        self,
+        *,
+        d: date,
+        sig: DaySignal,
+        store: MarksStore,
+        spot_close: dict[int, float],
+    ) -> BasketResult:
+        side = decide_side(self.gate, sig.sig, self.threshold)
         if side == "flat":
-            empty.skip_reason = "gate_flat"
-            return empty
+            return self._empty_basket(d=d, side=side, sig=sig, skip_reason="gate_flat")
 
         entry_ts = to_unix(ist_dt(d, self.entry_hour, self.entry_minute))
         spot_entry = spot_close.get(entry_ts)
         if spot_entry is None or spot_entry <= 0:
-            empty.skip_reason = "no_spot_entry"
-            return empty
+            return self._empty_basket(
+                d=d, side=side, sig=sig, skip_reason="no_spot_entry", entry_ts=entry_ts
+            )
 
         settle = settlement_spot(spot_close, d)
         if settle is None:
-            empty.skip_reason = "no_settle_spot"
-            return empty
+            return self._empty_basket(
+                d=d,
+                side=side,
+                sig=sig,
+                skip_reason="no_settle_spot",
+                entry_ts=entry_ts,
+                spot_entry=float(spot_entry),
+            )
         settle_ts, settle_px = settle
         settle_dt = datetime.fromtimestamp(settle_ts, tz=UTC).astimezone(IST)
 
         conn = store.conn(d)
         if conn is None:
-            empty.skip_reason = "no_marks"
-            return empty
+            return self._empty_basket(
+                d=d,
+                side=side,
+                sig=sig,
+                skip_reason="no_marks",
+                entry_ts=entry_ts,
+                spot_entry=float(spot_entry),
+            )
         expiry = zero_dte_expiry(d)
         calls, puts = load_chain_pk(conn, expiry, entry_ts, float(spot_entry))
         picked = pick_atm_wings(calls, puts, float(spot_entry), self.wing_pts)
         if picked is None:
-            empty.skip_reason = "no_strikes"
-            return empty
-        ck, pk, c_mark, p_mark = picked
+            return self._empty_basket(
+                d=d,
+                side=side,
+                sig=sig,
+                skip_reason="no_strikes",
+                entry_ts=entry_ts,
+                spot_entry=float(spot_entry),
+            )
+
+        # Strike gap guard — never silently snap beyond max_strike_gap
+        strike_ok = (
+            picked.call_gap <= self.max_strike_gap
+            and picked.put_gap <= self.max_strike_gap
+        )
+        if not strike_ok:
+            return self._empty_basket(
+                d=d,
+                side=side,
+                sig=sig,
+                skip_reason="STRIKE_UNAVAILABLE",
+                entry_ts=entry_ts,
+                spot_entry=float(spot_entry),
+                target_call_k=picked.target_call_k,
+                target_put_k=picked.target_put_k,
+                chosen_call_k=picked.chosen_call_k,
+                chosen_put_k=picked.chosen_put_k,
+                call_gap=picked.call_gap,
+                put_gap=picked.put_gap,
+                strike_ok=False,
+            )
+
+        ck = picked.chosen_call_k
+        pk = picked.chosen_put_k
+        c_mark = picked.call_mark
+        p_mark = picked.put_mark
 
         # dte=0 for slip buckets
-        c_fill, c_sf = fill_price(
+        c_fill, _c_sf = fill_price(
             c_mark,
             "sell" if side == "sell" else "buy",
             dte=0,
             slip_model=self.slip_model,
             slip_mult=self.slip_mult,
         )
-        p_fill, p_sf = fill_price(
+        p_fill, _p_sf = fill_price(
             p_mark,
             "sell" if side == "sell" else "buy",
             dte=0,
@@ -359,6 +474,13 @@ class S008RegimeGateStrategy:
             spot_entry=float(spot_entry),
             call_strike=ck,
             put_strike=pk,
+            target_call_k=picked.target_call_k,
+            target_put_k=picked.target_put_k,
+            chosen_call_k=ck,
+            chosen_put_k=pk,
+            call_gap=picked.call_gap,
+            put_gap=picked.put_gap,
+            strike_ok=True,
             call_mark=c_mark,
             put_mark=p_mark,
             call_fill=c_fill,

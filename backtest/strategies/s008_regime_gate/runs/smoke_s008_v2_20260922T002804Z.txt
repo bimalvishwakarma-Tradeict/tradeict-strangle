@@ -1,0 +1,134 @@
+===== S008 REGIME GATE =====
+generated_utc=2026-09-22T00:28:03.529017+00:00
+tag=smoke_s008_v2 window=custom threshold=0.9 max_strike_gap=400
+range=2025-11-01..2025-11-30 entry=09:00 gates=['none', 'flat', 'switch']
+spot_csv=BTCUSD_1m_20250613_20260921.csv
+
+LOOKAHEAD PASS
+EXIT_COST_ZERO PASS
+SETTLEMENT_SPOT PASS
+STRIKE_GAP PASS
+ALL S008 TESTS PASS
+
+gate=none: days=20 traded=16 flat_gate=0 STRIKE_UNAVAILABLE=4 skip_data=0
+  --- STRIKE_UNAVAILABLE (4) ---
+  2025-11-05 spot=102043 C t=104000 c=104000 g=0 | P t=100000 c=102000 g=2000
+  2025-11-11 spot=106677 C t=108600 c=107800 g=800 | P t=104600 c=104600 g=0
+  2025-11-18 spot=89781 C t=92000 c=92000 g=0 | P t=88000 c=90000 g=2000
+  2025-11-21 spot=85784 C t=87800 c=87800 g=0 | P t=83800 c=84800 g=1000
+  --- traces gate=none (up to 3) ---
+--- 2025-11-03 gate=none side=sell skip=False/ ---
+  entry 09:00 spot=108043.00 sig=0.6556 thr=0.90
+  C target=110000 chosen=110000 gap=0 mark=84.6161 fill=79.8237
+  P target=106000 chosen=106000 gap=0 mark=189.8255 fill=187.5692
+  strike_ok=True
+  settle 17:30 S=107759.50 ts=1762171200
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=26.7393 gross=26.7393 entry_fee=1.1043 exit_fee=0.0000 net=25.6350
+--- 2025-11-04 gate=none side=sell skip=False/ ---
+  entry 09:00 spot=106874.00 sig=0.6196 thr=0.90
+  C target=108800 chosen=108800 gap=0 mark=32.7207 fill=30.8675
+  P target=104800 chosen=104800 gap=0 mark=36.6932 fill=34.6150
+  strike_ok=True
+  settle 17:30 S=104445.50 ts=1762257600
+  payoff C=0.0000 P=35.4500 settlement_pay=35.4500
+  premium_pnl=6.5482 gross=-28.9018 entry_fee=0.2704 exit_fee=0.0000 net=-29.1722
+--- 2025-11-06 gate=none side=sell skip=False/ ---
+  entry 09:00 spot=103660.00 sig=0.8229 thr=0.90
+  C target=105600 chosen=105600 gap=0 mark=23.6111 fill=22.2739
+  P target=101600 chosen=101600 gap=0 mark=51.8588 fill=48.9217
+  strike_ok=True
+  settle 17:30 S=103153.50 ts=1762430400
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=7.1196 gross=7.1196 entry_fee=0.2940 exit_fee=0.0000 net=6.8255
+  --- 2025-11-05 (regression) ---
+--- 2025-11-05 gate=none side=sell skip=True/STRIKE_UNAVAILABLE ---
+  entry 09:00 spot=102043.00 sig=0.9681 thr=0.90
+  C target=104000 chosen=104000 gap=0 mark=0.0000 fill=0.0000
+  P target=100000 chosen=102000 gap=2000 mark=0.0000 fill=0.0000
+  strike_ok=False
+  settle 00:00 S=0.00 ts=0
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=0.0000 gross=0.0000 entry_fee=0.0000 exit_fee=0.0000 net=0.0000
+
+gate=flat: days=20 traded=15 flat_gate=2 STRIKE_UNAVAILABLE=3 skip_data=0
+  --- STRIKE_UNAVAILABLE (3) ---
+  2025-11-11 spot=106677 C t=108600 c=107800 g=800 | P t=104600 c=104600 g=0
+  2025-11-18 spot=89781 C t=92000 c=92000 g=0 | P t=88000 c=90000 g=2000
+  2025-11-21 spot=85784 C t=87800 c=87800 g=0 | P t=83800 c=84800 g=1000
+  --- traces gate=flat (up to 3) ---
+--- 2025-11-03 gate=flat side=sell skip=False/ ---
+  entry 09:00 spot=108043.00 sig=0.6556 thr=0.90
+  C target=110000 chosen=110000 gap=0 mark=84.6161 fill=79.8237
+  P target=106000 chosen=106000 gap=0 mark=189.8255 fill=187.5692
+  strike_ok=True
+  settle 17:30 S=107759.50 ts=1762171200
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=26.7393 gross=26.7393 entry_fee=1.1043 exit_fee=0.0000 net=25.6350
+--- 2025-11-04 gate=flat side=sell skip=False/ ---
+  entry 09:00 spot=106874.00 sig=0.6196 thr=0.90
+  C target=108800 chosen=108800 gap=0 mark=32.7207 fill=30.8675
+  P target=104800 chosen=104800 gap=0 mark=36.6932 fill=34.6150
+  strike_ok=True
+  settle 17:30 S=104445.50 ts=1762257600
+  payoff C=0.0000 P=35.4500 settlement_pay=35.4500
+  premium_pnl=6.5482 gross=-28.9018 entry_fee=0.2704 exit_fee=0.0000 net=-29.1722
+--- 2025-11-06 gate=flat side=sell skip=False/ ---
+  entry 09:00 spot=103660.00 sig=0.8229 thr=0.90
+  C target=105600 chosen=105600 gap=0 mark=23.6111 fill=22.2739
+  P target=101600 chosen=101600 gap=0 mark=51.8588 fill=48.9217
+  strike_ok=True
+  settle 17:30 S=103153.50 ts=1762430400
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=7.1196 gross=7.1196 entry_fee=0.2940 exit_fee=0.0000 net=6.8255
+  --- 2025-11-05 (regression) ---
+--- 2025-11-05 gate=flat side=flat skip=True/gate_flat ---
+  entry 09:00 spot=0.00 sig=0.9681 thr=0.90
+  C target=0 chosen=0 gap=0 mark=0.0000 fill=0.0000
+  P target=0 chosen=0 gap=0 mark=0.0000 fill=0.0000
+  strike_ok=False
+  settle 00:00 S=0.00 ts=0
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=0.0000 gross=0.0000 entry_fee=0.0000 exit_fee=0.0000 net=0.0000
+
+gate=switch: days=20 traded=16 flat_gate=0 STRIKE_UNAVAILABLE=4 skip_data=0
+  --- STRIKE_UNAVAILABLE (4) ---
+  2025-11-05 spot=102043 C t=104000 c=104000 g=0 | P t=100000 c=102000 g=2000
+  2025-11-11 spot=106677 C t=108600 c=107800 g=800 | P t=104600 c=104600 g=0
+  2025-11-18 spot=89781 C t=92000 c=92000 g=0 | P t=88000 c=90000 g=2000
+  2025-11-21 spot=85784 C t=87800 c=87800 g=0 | P t=83800 c=84800 g=1000
+  --- traces gate=switch (up to 3) ---
+--- 2025-11-03 gate=switch side=sell skip=False/ ---
+  entry 09:00 spot=108043.00 sig=0.6556 thr=0.90
+  C target=110000 chosen=110000 gap=0 mark=84.6161 fill=79.8237
+  P target=106000 chosen=106000 gap=0 mark=189.8255 fill=187.5692
+  strike_ok=True
+  settle 17:30 S=107759.50 ts=1762171200
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=26.7393 gross=26.7393 entry_fee=1.1043 exit_fee=0.0000 net=25.6350
+--- 2025-11-04 gate=switch side=sell skip=False/ ---
+  entry 09:00 spot=106874.00 sig=0.6196 thr=0.90
+  C target=108800 chosen=108800 gap=0 mark=32.7207 fill=30.8675
+  P target=104800 chosen=104800 gap=0 mark=36.6932 fill=34.6150
+  strike_ok=True
+  settle 17:30 S=104445.50 ts=1762257600
+  payoff C=0.0000 P=35.4500 settlement_pay=35.4500
+  premium_pnl=6.5482 gross=-28.9018 entry_fee=0.2704 exit_fee=0.0000 net=-29.1722
+--- 2025-11-06 gate=switch side=sell skip=False/ ---
+  entry 09:00 spot=103660.00 sig=0.8229 thr=0.90
+  C target=105600 chosen=105600 gap=0 mark=23.6111 fill=22.2739
+  P target=101600 chosen=101600 gap=0 mark=51.8588 fill=48.9217
+  strike_ok=True
+  settle 17:30 S=103153.50 ts=1762430400
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=7.1196 gross=7.1196 entry_fee=0.2940 exit_fee=0.0000 net=6.8255
+  --- 2025-11-05 (regression) ---
+--- 2025-11-05 gate=switch side=buy skip=True/STRIKE_UNAVAILABLE ---
+  entry 09:00 spot=102043.00 sig=0.9681 thr=0.90
+  C target=104000 chosen=104000 gap=0 mark=0.0000 fill=0.0000
+  P target=100000 chosen=102000 gap=2000 mark=0.0000 fill=0.0000
+  strike_ok=False
+  settle 00:00 S=0.00 ts=0
+  payoff C=0.0000 P=0.0000 settlement_pay=0.0000
+  premium_pnl=0.0000 gross=0.0000 entry_fee=0.0000 exit_fee=0.0000 net=0.0000
+

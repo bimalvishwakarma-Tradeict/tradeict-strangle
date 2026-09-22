@@ -24,6 +24,7 @@ from backtest.strategies.s008_regime_gate.signal import (  # noqa: E402
     build_signals_through,
 )
 from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
+    DEFAULT_MAX_STRIKE_GAP,
     IS_FROM,
     IS_TO,
     OOS_FROM,
@@ -70,6 +71,13 @@ def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
         "spot_entry",
         "call_strike",
         "put_strike",
+        "target_call_K",
+        "chosen_call_K",
+        "call_gap",
+        "target_put_K",
+        "chosen_put_K",
+        "put_gap",
+        "strike_ok",
         "call_mark",
         "put_mark",
         "call_fill",
@@ -108,6 +116,13 @@ def write_baskets_csv(path: Path, rows: list[BasketResult]) -> None:
                     "spot_entry": f"{b.spot_entry:.4f}",
                     "call_strike": f"{b.call_strike:.0f}",
                     "put_strike": f"{b.put_strike:.0f}",
+                    "target_call_K": f"{b.target_call_k:.0f}",
+                    "chosen_call_K": f"{b.chosen_call_k:.0f}",
+                    "call_gap": f"{b.call_gap:.0f}",
+                    "target_put_K": f"{b.target_put_k:.0f}",
+                    "chosen_put_K": f"{b.chosen_put_k:.0f}",
+                    "put_gap": f"{b.put_gap:.0f}",
+                    "strike_ok": int(b.strike_ok),
                     "call_mark": f"{b.call_mark:.6f}",
                     "put_mark": f"{b.put_mark:.6f}",
                     "call_fill": f"{b.call_fill:.6f}",
@@ -140,8 +155,11 @@ def format_trace(b: BasketResult) -> list[str]:
         f"skip={b.skipped}/{b.skip_reason} ---",
         f"  entry {b.entry_hour:02d}:{b.entry_minute:02d} spot={b.spot_entry:.2f} "
         f"sig={b.sig:.4f} thr={b.threshold:.2f}",
-        f"  C K={b.call_strike:.0f} mark={b.call_mark:.4f} fill={b.call_fill:.4f}",
-        f"  P K={b.put_strike:.0f} mark={b.put_mark:.4f} fill={b.put_fill:.4f}",
+        f"  C target={b.target_call_k:.0f} chosen={b.chosen_call_k:.0f} "
+        f"gap={b.call_gap:.0f} mark={b.call_mark:.4f} fill={b.call_fill:.4f}",
+        f"  P target={b.target_put_k:.0f} chosen={b.chosen_put_k:.0f} "
+        f"gap={b.put_gap:.0f} mark={b.put_mark:.4f} fill={b.put_fill:.4f}",
+        f"  strike_ok={b.strike_ok}",
         f"  settle {b.settle_hour:02d}:{b.settle_minute:02d} "
         f"S={b.settle_spot:.2f} ts={b.settle_ts}",
         f"  payoff C={b.call_payoff:.4f} P={b.put_payoff:.4f} "
@@ -161,6 +179,7 @@ def run_arm(
     entry_h: int,
     entry_m: int,
     window: str,
+    max_strike_gap: float,
     spot: dict[int, float],
     store: MarksStore,
     sigs: dict[date, Any],
@@ -171,9 +190,16 @@ def run_arm(
         entry_hour=entry_h,
         entry_minute=entry_m,
         window=window,
+        max_strike_gap=max_strike_gap,
     )
     rows: list[BasketResult] = []
-    counts = {"traded": 0, "flat_gate": 0, "skip_data": 0, "days": 0}
+    counts = {
+        "traded": 0,
+        "flat_gate": 0,
+        "skip_data": 0,
+        "strike_unavailable": 0,
+        "days": 0,
+    }
     for d in iter_weekdays(d0, d1):
         counts["days"] += 1
         s = sigs.get(d)
@@ -185,6 +211,8 @@ def run_arm(
         if b.skipped:
             if b.skip_reason == "gate_flat":
                 counts["flat_gate"] += 1
+            elif b.skip_reason == "STRIKE_UNAVAILABLE":
+                counts["strike_unavailable"] += 1
             else:
                 counts["skip_data"] += 1
         else:
@@ -213,6 +241,12 @@ def main() -> None:
     ap.add_argument("--tag", type=str, default="s008")
     ap.add_argument("--qty", type=int, default=100)
     ap.add_argument("--slip-model", type=str, default="bucketed")
+    ap.add_argument(
+        "--max-strike-gap",
+        type=float,
+        default=DEFAULT_MAX_STRIKE_GAP,
+        help="Skip basket if |chosen-target| > this (default 400). Never silent snap.",
+    )
     ap.add_argument("--run-tests", action="store_true", default=True)
     ap.add_argument("--no-run-tests", action="store_false", dest="run_tests")
     args = ap.parse_args()
@@ -222,6 +256,7 @@ def main() -> None:
     thr = enforce_oos_threshold(args.window, args.threshold)
     eh, em = _parse_hhmm(args.entry_time)
     gates = _parse_gates(args.gate)
+    max_gap = float(args.max_strike_gap)
 
     # Window sanity (warn only for custom)
     if args.window == "is" and (d0 < IS_FROM or d1 > IS_TO):
@@ -248,6 +283,8 @@ def main() -> None:
             test_lines.append("EXIT_COST_ZERO PASS")
             tmod.test_settlement_spot_timestamp()
             test_lines.append("SETTLEMENT_SPOT PASS")
+            tmod.test_strike_gap_guard()
+            test_lines.append("STRIKE_GAP PASS")
             test_lines.append("ALL S008 TESTS PASS")
         except AssertionError as exc:
             test_lines.append(f"TEST FAIL: {exc}")
@@ -269,7 +306,8 @@ def main() -> None:
     lines: list[str] = [
         "===== S008 REGIME GATE =====",
         f"generated_utc={datetime.now(tz=timezone.utc).isoformat()}",
-        f"tag={args.tag} window={args.window} threshold={thr}",
+        f"tag={args.tag} window={args.window} threshold={thr} "
+        f"max_strike_gap={max_gap:.0f}",
         f"range={d0}..{d1} entry={eh:02d}:{em:02d} gates={gates}",
         f"spot_csv={spot_path.name}",
         "",
@@ -287,6 +325,7 @@ def main() -> None:
             entry_h=eh,
             entry_m=em,
             window=args.window,
+            max_strike_gap=max_gap,
             spot=spot,
             store=store,
             sigs=sigs,
@@ -294,13 +333,32 @@ def main() -> None:
         all_rows.extend(rows)
         lines.append(
             f"gate={g}: days={counts['days']} traded={counts['traded']} "
-            f"flat_gate={counts['flat_gate']} skip_data={counts['skip_data']}"
+            f"flat_gate={counts['flat_gate']} "
+            f"STRIKE_UNAVAILABLE={counts['strike_unavailable']} "
+            f"skip_data={counts['skip_data']}"
         )
+        # Show STRIKE_UNAVAILABLE traces (important for smoke)
+        strike_skips = [b for b in rows if b.skip_reason == "STRIKE_UNAVAILABLE"]
+        if strike_skips:
+            lines.append(f"  --- STRIKE_UNAVAILABLE ({len(strike_skips)}) ---")
+            for b in strike_skips[:5]:
+                lines.append(
+                    f"  {b.d} spot={b.spot_entry:.0f} "
+                    f"C t={b.target_call_k:.0f} c={b.chosen_call_k:.0f} "
+                    f"g={b.call_gap:.0f} | "
+                    f"P t={b.target_put_k:.0f} c={b.chosen_put_k:.0f} "
+                    f"g={b.put_gap:.0f}"
+                )
         # 3-day leg traces (first 3 traded)
         traded = [b for b in rows if not b.skipped]
         lines.append(f"  --- traces gate={g} (up to 3) ---")
         for b in traded[:3]:
             lines.extend(format_trace(b))
+        # Always show 2025-11-05 if in range (smoke regression day)
+        for b in rows:
+            if b.d == date(2025, 11, 5):
+                lines.append("  --- 2025-11-05 (regression) ---")
+                lines.extend(format_trace(b))
         lines.append("")
 
     store.close()
