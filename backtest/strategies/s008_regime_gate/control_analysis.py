@@ -32,11 +32,10 @@ from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
     DEFAULT_TARGET_DELTA,
     IS_FROM,
     OOS_TO,
+    ChainCache,
     S008RegimeGateStrategy,
     decide_side,
     iter_weekdays,
-    load_chain_pk,
-    load_chain_sql,
     pick_wings,
     sig_decile,
     zero_dte_expiry,
@@ -100,8 +99,10 @@ def build_day_records(
     premium_target_pct: float = DEFAULT_PREMIUM_TARGET_PCT,
     target_delta: float = DEFAULT_TARGET_DELTA,
     max_leg_premium_pct: float = DEFAULT_MAX_LEG_PREMIUM_PCT,
+    chain_cache: ChainCache | None = None,
 ) -> list[DayRecord]:
     """Per-day availability + gate decisions + PnL under each gate (if tradable)."""
+    cache = chain_cache if chain_cache is not None else ChainCache()
     strats = {
         g: S008RegimeGateStrategy(
             gate=g,  # type: ignore[arg-type]
@@ -128,18 +129,13 @@ def build_day_records(
             if conn is None:
                 skip_reason = "no_marks"
             else:
-                if strike_mode in ("premium", "delta"):
-                    calls, puts = load_chain_sql(
-                        conn, zero_dte_expiry(d), entry_ts
-                    )
-                    if not calls and not puts:
-                        calls, puts = load_chain_pk(
-                            conn, zero_dte_expiry(d), entry_ts, float(sp)
-                        )
-                else:
-                    calls, puts = load_chain_pk(
-                        conn, zero_dte_expiry(d), entry_ts, float(sp)
-                    )
+                calls, puts = cache.get(
+                    conn,
+                    zero_dte_expiry(d),
+                    entry_ts,
+                    float(sp),
+                    strike_mode=strike_mode,  # type: ignore[arg-type]
+                )
                 picked = pick_wings(
                     calls,
                     puts,
@@ -155,7 +151,9 @@ def build_day_records(
 
         nets: dict[str, float | None] = {"none": None, "flat": None, "switch": None}
         for g, strat in strats.items():
-            b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+            b = strat.simulate_day(
+                d=d, sig=s, store=store, spot_close=spot, chain_cache=cache
+            )
             if not b.skipped:
                 nets[g] = b.net_pnl
 

@@ -154,6 +154,59 @@ def load_chain_sql(
     return calls, puts
 
 
+Chain = tuple[list[tuple[float, float]], list[tuple[float, float]]]
+
+
+class ChainCache:
+    """(expiry, ts, loader) → chain, shared by every arm of a grid run.
+
+    Safe across arms because `spot_entry` for a given (date, ts) comes from the
+    same spot map, so the PK window is identical no matter which arm asks.
+    """
+
+    def __init__(self) -> None:
+        self._chains: dict[tuple[str, int, str], Chain] = {}
+        self.loads = 0
+        self.hits = 0
+
+    def get(
+        self,
+        conn: sqlite3.Connection,
+        expiry: date,
+        ts: int,
+        spot: float,
+        *,
+        strike_mode: StrikeMode,
+    ) -> Chain:
+        kind = "sql" if strike_mode in ("premium", "delta") else "pk"
+        key = (expiry.isoformat(), int(ts), kind)
+        hit = self._chains.get(key)
+        if hit is not None:
+            self.hits += 1
+            return hit
+        chain = load_chain_for_mode(conn, expiry, ts, spot, strike_mode=strike_mode)
+        self._chains[key] = chain
+        self.loads += 1
+        return chain
+
+
+def load_chain_for_mode(
+    conn: sqlite3.Connection,
+    expiry: date,
+    ts: int,
+    spot: float,
+    *,
+    strike_mode: StrikeMode,
+) -> Chain:
+    """Full chain for premium/delta, PK window for points (with SQL fallback)."""
+    if strike_mode in ("premium", "delta"):
+        calls, puts = load_chain_sql(conn, expiry, ts)
+        if not calls and not puts:
+            calls, puts = load_chain_pk(conn, expiry, ts, spot)
+        return calls, puts
+    return load_chain_pk(conn, expiry, ts, spot)
+
+
 def nearest_strike(strikes: list[float], target: float) -> float | None:
     """Nearest available strike to target. Caller enforces gap / OTM guards."""
     if not strikes:
@@ -624,6 +677,7 @@ class S008RegimeGateStrategy:
         sig: DaySignal,
         store: MarksStore,
         spot_close: dict[int, float],
+        chain_cache: ChainCache | None = None,
     ) -> BasketResult:
         side = decide_side(self.gate, sig.sig, self.threshold)
         if side == "flat":
@@ -660,14 +714,22 @@ class S008RegimeGateStrategy:
                 spot_entry=float(spot_entry),
             )
         expiry = zero_dte_expiry(d)
-        if self.strike_mode in ("premium", "delta"):
-            calls, puts = load_chain_sql(conn, expiry, entry_ts)
-            if not calls and not puts:
-                calls, puts = load_chain_pk(
-                    conn, expiry, entry_ts, float(spot_entry)
-                )
+        if chain_cache is not None:
+            calls, puts = chain_cache.get(
+                conn,
+                expiry,
+                entry_ts,
+                float(spot_entry),
+                strike_mode=self.strike_mode,
+            )
         else:
-            calls, puts = load_chain_pk(conn, expiry, entry_ts, float(spot_entry))
+            calls, puts = load_chain_for_mode(
+                conn,
+                expiry,
+                entry_ts,
+                float(spot_entry),
+                strike_mode=self.strike_mode,
+            )
 
         picked = pick_wings(
             calls,

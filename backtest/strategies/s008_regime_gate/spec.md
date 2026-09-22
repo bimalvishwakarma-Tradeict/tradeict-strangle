@@ -54,6 +54,19 @@ Gate arms additionally report a paired bootstrap on **only the days the gate
 actually acted** (available days where `flat` sat out or `switch` flipped to buy);
 CIs from fewer than 10 acted days are labelled untrustworthy.
 
+## Performance
+Chains are loaded once per `(expiry, entry_ts, loader)` by a `ChainCache` created
+outside the arm loops, so a 36-arm grid over 196 days does ~200 chain reads, not
+~7,000. Each arm prints elapsed seconds and traded count, and a `TIMING (per arm)`
+block lands in the run text file.
+
+Chain reads filter on `expiry` + `ts`. The marks files ship only
+`idx_marks_expiry ON marks(expiry)`, so each read seeks that index and then does a
+rowid lookup for every row of that expiry — 185k rows for 2026-05-12, 385k for
+2025-11-05 — to return ~50. `backtest/tools/build_marks_index.py` adds the
+composite `(expiry, ts)` index that turns this into a direct range seek; it is a
+one-time write-mode script and requires a backup plus `--yes`.
+
 ## Tests
 1. Look-ahead: truncate-at-T recomputes identical `sig`
 2. Exit cost zero

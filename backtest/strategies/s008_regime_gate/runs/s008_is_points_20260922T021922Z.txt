@@ -1,0 +1,159 @@
+===== S008 REGIME GATE =====
+generated_utc=2026-09-22T02:17:36.368420+00:00
+tag=s008_is_points window=is thresholds=[0.8, 0.85, 0.9, 0.95] max_strike_gap=400 max_leg_premium_pct=0.100
+range=2025-07-04..2026-03-31 entry=09:00 gates=['none', 'flat', 'switch'] strike_modes=['points']
+premium_target_pct=[0.034] target_delta=[0.12]
+spot_csv=BTCUSD_1m_20250613_20260921.csv
+
+LOOKAHEAD PASS
+EXIT_COST_ZERO PASS
+SETTLEMENT_SPOT PASS
+STRIKE_GAP PASS
+OTM_ONLY PASS
+OOS_LOCK PASS
+ALL S008 TESTS PASS
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.80 gate=none =====
+  counts: traded=160 flat_gate=0 STRIKE_UNAVAILABLE=14 CHAIN_ONE_SIDED=8 LEG_PREMIUM_OUT_OF_BAND=11
+--- mode=points prem=0.0340 delta=0.12 thr=0.80 gate=none ---
+  n=160 mean=0.4404 median=2.5864 win%=94.4
+  worst=-133.5013 p5=-4.9521 maxDD=-192.9624
+  capital@3%worst=4450.04 return%/day=0.0058
+  mean/day=0.2600 bootstrap95%=[-1.7037, 1.7145] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0224 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.80 gate=flat =====
+  counts: traded=136 flat_gate=38 STRIKE_UNAVAILABLE=8 CHAIN_ONE_SIDED=3 LEG_PREMIUM_OUT_OF_BAND=8
+--- mode=points prem=0.0340 delta=0.12 thr=0.80 gate=flat ---
+  n=136 mean=1.6097 median=2.3847 win%=94.9
+  worst=-122.5877 p5=-0.9559 maxDD=-122.5877
+  capital@3%worst=4086.26 return%/day=0.0198
+  mean/day=0.8078 bootstrap95%=[-0.3712, 1.6296] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0208 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.80 gate=switch =====
+  counts: traded=160 flat_gate=0 STRIKE_UNAVAILABLE=14 CHAIN_ONE_SIDED=8 LEG_PREMIUM_OUT_OF_BAND=11
+--- mode=points prem=0.0340 delta=0.12 thr=0.80 gate=switch ---
+  n=160 mean=2.1239 median=2.0679 win%=81.9
+  worst=-122.5877 p5=-11.8292 maxDD=-147.3078
+  capital@3%worst=4086.26 return%/day=0.0307
+  mean/day=1.2540 bootstrap95%=[-0.3224, 2.9902] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0224 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.85 gate=none =====
+  counts: traded=160 flat_gate=0 STRIKE_UNAVAILABLE=14 CHAIN_ONE_SIDED=8 LEG_PREMIUM_OUT_OF_BAND=11
+--- mode=points prem=0.0340 delta=0.12 thr=0.85 gate=none ---
+  n=160 mean=0.4404 median=2.5864 win%=94.4
+  worst=-133.5013 p5=-4.9521 maxDD=-192.9624
+  capital@3%worst=4450.04 return%/day=0.0058
+  mean/day=0.2600 bootstrap95%=[-1.7037, 1.7145] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0224 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.85 gate=flat =====
+  counts: traded=149 flat_gate=23 STRIKE_UNAVAILABLE=10 CHAIN_ONE_SIDED=3 LEG_PREMIUM_OUT_OF_BAND=8
+--- mode=points prem=0.0340 delta=0.12 thr=0.85 gate=flat ---
+  n=149 mean=1.9049 median=2.5437 win%=95.3
+  worst=-122.5877 p5=0.3628 maxDD=-122.5877
+  capital@3%worst=4086.26 return%/day=0.0256
+  mean/day=1.0474 bootstrap95%=[-0.1796, 1.8662] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0213 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.85 gate=switch =====
+  counts: traded=160 flat_gate=0 STRIKE_UNAVAILABLE=14 CHAIN_ONE_SIDED=8 LEG_PREMIUM_OUT_OF_BAND=11
+--- mode=points prem=0.0340 delta=0.12 thr=0.85 gate=switch ---
+  n=160 mean=3.0232 median=2.3847 win%=90.0
+  worst=-122.5877 p5=-6.2782 maxDD=-139.6887
+  capital@3%worst=4086.26 return%/day=0.0437
+  mean/day=1.7849 bootstrap95%=[0.1962, 3.5347] crosses_zero=NO
+  leg_premium%ofspot mean=0.0224 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.90 gate=none =====
+  counts: traded=160 flat_gate=0 STRIKE_UNAVAILABLE=14 CHAIN_ONE_SIDED=8 LEG_PREMIUM_OUT_OF_BAND=11
+--- mode=points prem=0.0340 delta=0.12 thr=0.90 gate=none ---
+  n=160 mean=0.4404 median=2.5864 win%=94.4
+  worst=-133.5013 p5=-4.9521 maxDD=-192.9624
+  capital@3%worst=4450.04 return%/day=0.0058
+  mean/day=0.2600 bootstrap95%=[-1.7037, 1.7145] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0224 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.90 gate=flat =====
+  counts: traded=154 flat_gate=13 STRIKE_UNAVAILABLE=12 CHAIN_ONE_SIDED=4 LEG_PREMIUM_OUT_OF_BAND=10
+--- mode=points prem=0.0340 delta=0.12 thr=0.90 gate=flat ---
+  n=154 mean=1.9662 median=2.5678 win%=95.5
+  worst=-122.5877 p5=0.3757 maxDD=-122.5877
+  capital@3%worst=4086.26 return%/day=0.0273
+  mean/day=1.1173 bootstrap95%=[-0.1138, 1.9216] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0215 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.90 gate=switch =====
+  counts: traded=160 flat_gate=0 STRIKE_UNAVAILABLE=14 CHAIN_ONE_SIDED=8 LEG_PREMIUM_OUT_OF_BAND=11
+--- mode=points prem=0.0340 delta=0.12 thr=0.90 gate=switch ---
+  n=160 mean=3.2859 median=2.5466 win%=93.1
+  worst=-122.5877 p5=-6.2782 maxDD=-130.4785
+  capital@3%worst=4086.26 return%/day=0.0475
+  mean/day=1.9400 bootstrap95%=[0.3276, 3.7712] crosses_zero=NO
+  leg_premium%ofspot mean=0.0224 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.95 gate=none =====
+  counts: traded=160 flat_gate=0 STRIKE_UNAVAILABLE=14 CHAIN_ONE_SIDED=8 LEG_PREMIUM_OUT_OF_BAND=11
+--- mode=points prem=0.0340 delta=0.12 thr=0.95 gate=none ---
+  n=160 mean=0.4404 median=2.5864 win%=94.4
+  worst=-133.5013 p5=-4.9521 maxDD=-192.9624
+  capital@3%worst=4450.04 return%/day=0.0058
+  mean/day=0.2600 bootstrap95%=[-1.7037, 1.7145] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0224 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.95 gate=flat =====
+  counts: traded=157 flat_gate=6 STRIKE_UNAVAILABLE=13 CHAIN_ONE_SIDED=7 LEG_PREMIUM_OUT_OF_BAND=10
+--- mode=points prem=0.0340 delta=0.12 thr=0.95 gate=flat ---
+  n=157 mean=1.1523 median=2.5861 win%=94.9
+  worst=-133.5013 p5=-0.6963 maxDD=-140.3919
+  capital@3%worst=4450.04 return%/day=0.0150
+  mean/day=0.6676 bootstrap95%=[-0.9388, 1.8785] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0219 max=0.0958
+
+===== ARM mode=points prem=0.0340 delta=0.12 thr=0.95 gate=switch =====
+  counts: traded=160 flat_gate=0 STRIKE_UNAVAILABLE=14 CHAIN_ONE_SIDED=8 LEG_PREMIUM_OUT_OF_BAND=11
+--- mode=points prem=0.0340 delta=0.12 thr=0.95 gate=switch ---
+  n=160 mean=1.7854 median=2.5678 win%=93.8
+  worst=-133.5013 p5=-5.5519 maxDD=-151.4134
+  capital@3%worst=4450.04 return%/day=0.0237
+  mean/day=1.0541 bootstrap95%=[-0.6944, 2.5934] crosses_zero=YES (CI includes 0)
+  leg_premium%ofspot mean=0.0224 max=0.0958
+
+===== GATE PAIRED (flat vs none, acted days only) [mode=points prem=0.0340 delta=0.12 thr=0.80] =====
+  n_act=24 mean(gated-none)=6.1859 bootstrap95%=[-5.4799, 22.8905] crosses_zero=YES (CI includes 0)
+  totals on acted days: none=-148.46 gated=0.00 edge=148.46
+
+===== GATE PAIRED (switch vs none, acted days only) [mode=points prem=0.0340 delta=0.12 thr=0.80] =====
+  n_act=24 mean(gated-none)=11.2235 bootstrap95%=[-12.1466, 44.4903] crosses_zero=YES (CI includes 0)
+  totals on acted days: none=-148.46 gated=120.90 edge=269.36
+
+===== GATE PAIRED (flat vs none, acted days only) [mode=points prem=0.0340 delta=0.12 thr=0.85] =====
+  n_act=11 mean(gated-none)=19.3980 bootstrap95%=[-5.6181, 55.7718] crosses_zero=YES (CI includes 0)
+  totals on acted days: none=-213.38 gated=0.00 edge=213.38
+
+===== GATE PAIRED (switch vs none, acted days only) [mode=points prem=0.0340 delta=0.12 thr=0.85] =====
+  n_act=11 mean(gated-none)=37.5689 bootstrap95%=[-12.4529, 110.0313] crosses_zero=YES (CI includes 0)
+  totals on acted days: none=-213.38 gated=199.88 edge=413.26
+
+===== GATE PAIRED (flat vs none, acted days only) [mode=points prem=0.0340 delta=0.12 thr=0.90] =====
+  n_act=6 mean(gated-none)=38.7232 bootstrap95%=[-7.0711, 86.0686] crosses_zero=YES (CI includes 0)
+  WARNING: n_act=6 < 10 — CI is not trustworthy at this sample size; treat as no evidence
+  totals on acted days: none=-232.34 gated=0.00 edge=232.34
+
+===== GATE PAIRED (switch vs none, acted days only) [mode=points prem=0.0340 delta=0.12 thr=0.90] =====
+  n_act=6 mean(gated-none)=75.8813 bootstrap95%=[-15.6736, 170.7984] crosses_zero=YES (CI includes 0)
+  WARNING: n_act=6 < 10 — CI is not trustworthy at this sample size; treat as no evidence
+  totals on acted days: none=-232.34 gated=222.95 edge=455.29
+
+===== GATE PAIRED (flat vs none, acted days only) [mode=points prem=0.0340 delta=0.12 thr=0.95] =====
+  n_act=3 mean(gated-none)=36.8194 bootstrap95%=[-10.5833, 125.5472] crosses_zero=YES (CI includes 0)
+  WARNING: n_act=3 < 10 — CI is not trustworthy at this sample size; treat as no evidence
+  totals on acted days: none=-110.46 gated=0.00 edge=110.46
+
+===== GATE PAIRED (switch vs none, acted days only) [mode=points prem=0.0340 delta=0.12 thr=0.95] =====
+  n_act=3 mean(gated-none)=71.7372 bootstrap95%=[-23.4587, 248.6573] crosses_zero=YES (CI includes 0)
+  WARNING: n_act=3 < 10 — CI is not trustworthy at this sample size; treat as no evidence
+  totals on acted days: none=-110.46 gated=104.75 edge=215.21
+

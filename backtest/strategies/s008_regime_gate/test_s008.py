@@ -27,6 +27,7 @@ from backtest.strategies.s008_regime_gate.signal import (  # noqa: E402
 from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
     DEFAULT_MAX_LEG_PREMIUM_PCT,
     DEFAULT_MAX_STRIKE_GAP,
+    ChainCache,
     S008RegimeGateStrategy,
     enforce_oos_threshold,
     iter_weekdays,
@@ -34,6 +35,10 @@ from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
     settlement_spot,
     spot_based_targets,
 )
+
+
+# Shared: every test re-reads the same (expiry, ts) chains.
+_CHAIN_CACHE = ChainCache()
 
 
 def _load_spot() -> dict[int, float]:
@@ -92,7 +97,9 @@ def test_exit_cost_zero() -> None:
         s = sigs.get(d)
         if s is None:
             continue
-        b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+        b = strat.simulate_day(
+            d=d, sig=s, store=store, spot_close=spot, chain_cache=_CHAIN_CACHE
+        )
         if b.skipped:
             continue
         n += 1
@@ -128,7 +135,9 @@ def test_settlement_spot_timestamp() -> None:
         s = sigs.get(d)
         if s is None:
             continue
-        b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+        b = strat.simulate_day(
+            d=d, sig=s, store=store, spot_close=spot, chain_cache=_CHAIN_CACHE
+        )
         if b.skipped:
             continue
         n += 1
@@ -171,7 +180,9 @@ def test_strike_gap_guard() -> None:
         s = sigs.get(d)
         if s is None:
             continue
-        b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+        b = strat.simulate_day(
+            d=d, sig=s, store=store, spot_close=spot, chain_cache=_CHAIN_CACHE
+        )
         if b.skip_reason in ("STRIKE_UNAVAILABLE", "CHAIN_ONE_SIDED", "ITM_STRIKE"):
             n_strike_skip += 1
             assert b.skipped
@@ -190,7 +201,11 @@ def test_strike_gap_guard() -> None:
     d_bad = date(2025, 11, 5)
     if d_bad in sigs:
         b_bad = strat.simulate_day(
-            d=d_bad, sig=sigs[d_bad], store=store, spot_close=spot
+            d=d_bad,
+            sig=sigs[d_bad],
+            store=store,
+            spot_close=spot,
+            chain_cache=_CHAIN_CACHE,
         )
         assert b_bad.skipped and b_bad.skip_reason in (
             "STRIKE_UNAVAILABLE",
@@ -233,7 +248,9 @@ def test_otm_only() -> None:
             s = sigs.get(d)
             if s is None:
                 continue
-            b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+            b = strat.simulate_day(
+            d=d, sig=s, store=store, spot_close=spot, chain_cache=_CHAIN_CACHE
+        )
             if b.skipped:
                 continue
             n += 1
@@ -278,7 +295,9 @@ def test_premium_band() -> None:
             s = sigs.get(d)
             if s is None:
                 continue
-            b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+            b = strat.simulate_day(
+            d=d, sig=s, store=store, spot_close=spot, chain_cache=_CHAIN_CACHE
+        )
             if b.skip_reason == "LEG_PREMIUM_OUT_OF_BAND":
                 n_band_skip += 1
                 assert b.skipped and b.strike_ok is False
@@ -307,7 +326,11 @@ def test_premium_band() -> None:
             max_leg_premium_pct=band_pct,
         )
         b_bad = strat_bad.simulate_day(
-            d=d_bad, sig=sigs[d_bad], store=store, spot_close=spot
+            d=d_bad,
+            sig=sigs[d_bad],
+            store=store,
+            spot_close=spot,
+            chain_cache=_CHAIN_CACHE,
         )
         assert b_bad.skipped, (
             f"2025-11-05 premium mode must skip, got "

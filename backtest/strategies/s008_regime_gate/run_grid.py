@@ -7,6 +7,7 @@ import argparse
 import csv
 import logging
 import sys
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
     OOS_FROM,
     OOS_TO,
     BasketResult,
+    ChainCache,
     GateMode,
     S008RegimeGateStrategy,
     StrikeMode,
@@ -47,6 +49,7 @@ from backtest.strategies.s008_regime_gate.strategy import (  # noqa: E402
 
 logger = logging.getLogger("s008_grid")
 RUNS_DIR = Path(__file__).resolve().parent / "runs"
+PROGRESS_EVERY_SEC = 15.0
 
 
 def _parse_hhmm(s: str) -> tuple[int, int]:
@@ -226,7 +229,9 @@ def run_arm(
     spot: dict[int, float],
     store: MarksStore,
     sigs: dict[date, Any],
-) -> tuple[list[BasketResult], dict[str, int]]:
+    chain_cache: ChainCache,
+    label: str = "",
+) -> tuple[list[BasketResult], dict[str, int], float]:
     strat = S008RegimeGateStrategy(
         gate=gate,
         threshold=threshold,
@@ -249,14 +254,27 @@ def run_arm(
         "leg_premium_out_of_band": 0,
         "days": 0,
     }
+    t0 = time.monotonic()
+    last_beat = t0
     for d in iter_weekdays(d0, d1):
         counts["days"] += 1
         s = sigs.get(d)
         if s is None:
             counts["skip_data"] += 1
             continue
-        b = strat.simulate_day(d=d, sig=s, store=store, spot_close=spot)
+        b = strat.simulate_day(
+            d=d, sig=s, store=store, spot_close=spot, chain_cache=chain_cache
+        )
         rows.append(b)
+        now = time.monotonic()
+        if now - last_beat >= PROGRESS_EVERY_SEC:
+            last_beat = now
+            print(
+                f"    .. {label} day={d} elapsed={now - t0:6.1f}s "
+                f"traded={counts['traded']} "
+                f"chain_loads={chain_cache.loads} hits={chain_cache.hits}",
+                flush=True,
+            )
         if b.skipped:
             if b.skip_reason == "gate_flat":
                 counts["flat_gate"] += 1
@@ -270,7 +288,7 @@ def run_arm(
                 counts["skip_data"] += 1
         else:
             counts["traded"] += 1
-    return rows, counts
+    return rows, counts, time.monotonic() - t0
 
 
 def main() -> None:
@@ -391,6 +409,8 @@ def main() -> None:
             test_lines.append("STRIKE_GAP PASS")
             tmod.test_otm_only()
             test_lines.append("OTM_ONLY PASS")
+            tmod.test_premium_band()
+            test_lines.append("PREMIUM_BAND PASS")
             tmod.test_oos_lock_and_premium_target()
             test_lines.append("OOS_LOCK PASS")
             test_lines.append("ALL S008 TESTS PASS")
@@ -426,6 +446,20 @@ def main() -> None:
 
     all_rows: list[BasketResult] = []
     arms: dict[str, list[BasketResult]] = {}
+    # One chain per (date, expiry, loader) for the WHOLE grid, not per arm.
+    chain_cache = ChainCache()
+    n_arms = (
+        len(gates)
+        * sum(
+            (len(prem_pcts) if m == "premium" else 1)
+            * (len(target_deltas) if m == "delta" else 1)
+            for m in modes
+        )
+        * len(thresholds)
+    )
+    arm_i = 0
+    timings: list[tuple[str, float, int]] = []
+    grid_t0 = time.monotonic()
 
     for mode in modes:
         prem_iter = prem_pcts if mode == "premium" else [DEFAULT_PREMIUM_TARGET_PCT]
@@ -434,7 +468,16 @@ def main() -> None:
             for tdelta in delta_iter:
                 for thr in thresholds:
                     for g in gates:
-                        rows, counts = run_arm(
+                        arm_i += 1
+                        label = (
+                            f"mode={mode} prem={prem:.4f} delta={tdelta:.2f} "
+                            f"thr={thr:.2f} gate={g}"
+                        )
+                        print(
+                            f"[arm {arm_i}/{n_arms}] start {label}",
+                            flush=True,
+                        )
+                        rows, counts, secs = run_arm(
                             gate=g,
                             strike_mode=mode,
                             threshold=thr,
@@ -450,15 +493,26 @@ def main() -> None:
                             spot=spot,
                             store=store,
                             sigs=sigs,
+                            chain_cache=chain_cache,
+                            label=f"arm {arm_i}/{n_arms}",
                         )
                         all_rows.extend(rows)
-                        label = (
-                            f"mode={mode} prem={prem:.4f} delta={tdelta:.2f} "
-                            f"thr={thr:.2f} gate={g}"
-                        )
                         arms[label] = rows
+                        timings.append((label, secs, counts["traded"]))
+                        print(
+                            f"[arm {arm_i}/{n_arms}] done  {label} "
+                            f"secs={secs:.2f} traded={counts['traded']} "
+                            f"chain_loads={chain_cache.loads} "
+                            f"cache_hits={chain_cache.hits}",
+                            flush=True,
+                        )
                         st = arm_stats(rows, d0, d1)
                         lines.append(f"===== ARM {label} =====")
+                        lines.append(
+                            f"  timing: secs={secs:.2f} "
+                            f"chain_loads_so_far={chain_cache.loads} "
+                            f"cache_hits_so_far={chain_cache.hits}"
+                        )
                         lines.append(
                             f"  counts: traded={counts['traded']} "
                             f"flat_gate={counts['flat_gate']} "
@@ -512,6 +566,15 @@ def main() -> None:
                         )
                         lines.append("")
 
+    lines.append("===== TIMING (per arm) =====")
+    for lbl, secs, ntr in timings:
+        lines.append(f"  {secs:8.2f}s  traded={ntr:<4d} {lbl}")
+    lines.append(
+        f"  grid_total={time.monotonic() - grid_t0:.2f}s "
+        f"chain_loads={chain_cache.loads} cache_hits={chain_cache.hits}"
+    )
+    lines.append("")
+
     if args.run_control:
         from backtest.strategies.s008_regime_gate import control_analysis as ca
 
@@ -531,6 +594,8 @@ def main() -> None:
                 sigs=sigs_c,
                 premium_target_pct=prem_pcts[0],
                 target_delta=target_deltas[0],
+                max_leg_premium_pct=max_leg_prem,
+                chain_cache=chain_cache,
             )
             lines.append(f"########## strike_mode={mode} ##########")
             lines.extend(ca.run_t1_t2_t3(recs, threshold=thresholds[0]))
