@@ -1,0 +1,130 @@
+===== STEP 1 — SHARED HARNESS CHECK =====
+_ffill_series is DEFINED LOCALLY in backtest/strategies/s010_weekend_theta/engine.py (not in backtest/harness/).
+Does this engine import S010 _ffill_series?
+  s001 mark engine : NO  (own fallback: mark_of() or last series key or entry_mark)
+  s006             : NO  (own _mark_at +/-60s, then `or leg.entry_mark` at exit)
+  s007b            : NO  (own local copy `_ffill_marks`, same seed-on-empty pattern)
+  s008             : NO  (entry mark_at PK lookup +/- MARK_TOL; expiry = settlement spot)
+NOTE: s001 and s006 do NOT share the function, but both have a similar 'if mark missing, use entry_mark / last known' fallback. That is a cousin of this bug, not this function. S001 4/5 FAIL cannot be blamed on S010 ffill, but S001's own last-known fallback can still stale-mark exits.
+
+===== STEP 2 — STALE SCOPE (tsOFF, DATA_START onward) =====
+near_window_min=1 (engine MARK_TOL_SEC=60)
+any_stale = koi bhi leg feed stale/none (D+2 17:30 print missing counts)
+pnl_stale = live-mark legs only (D+2 expire-to-intrinsic excluded)
+  arm A: n=612 any_stale=20 (3.3%) pnl_stale=20 (3.3%)
+    stale mean_net=-511.48 n=20
+    real  mean_net=-203.77 n=592
+    stale - real = -307.71  -> stale pulls result DOWN
+    Mon: 2.3% any_stale (2/88)
+    Tue: 2.2% any_stale (2/89)
+    Wed: 4.6% any_stale (4/87)
+    Thu: 3.5% any_stale (3/85)
+    Fri: 3.4% any_stale (3/88)
+    Sat: 3.4% any_stale (3/88)
+    Sun: 3.4% any_stale (3/87)
+    by month (stale/n):
+      2025-01: 1/31 (3.2%)
+      2025-02: 1/27 (3.7%)
+      2025-03: 1/29 (3.4%)
+      2025-04: 1/28 (3.6%)
+      2025-05: 1/31 (3.2%)
+      2025-06: 1/30 (3.3%)
+      2025-07: 1/30 (3.3%)
+      2025-08: 1/31 (3.2%)
+      2025-09: 1/30 (3.3%)
+      2025-10: 1/29 (3.4%)
+      2025-11: 1/29 (3.4%)
+      2025-12: 1/31 (3.2%)
+      2026-01: 1/31 (3.2%)
+      2026-02: 1/28 (3.6%)
+      2026-03: 1/31 (3.2%)
+      2026-04: 1/28 (3.6%)
+      2026-05: 1/31 (3.2%)
+      2026-06: 1/30 (3.3%)
+      2026-07: 1/31 (3.2%)
+      2026-08: 1/31 (3.2%)
+      2026-09: 0/15 (0.0%)
+  arm B: n=622 any_stale=0 (0.0%) pnl_stale=0 (0.0%)
+    stale mean_net=n/a (0 baskets)
+    real  mean_net=-149.38 n=622
+    Mon: 0.0% any_stale (0/89)
+    Tue: 0.0% any_stale (0/89)
+    Wed: 0.0% any_stale (0/90)
+    Thu: 0.0% any_stale (0/87)
+    Fri: 0.0% any_stale (0/89)
+    Sat: 0.0% any_stale (0/89)
+    Sun: 0.0% any_stale (0/89)
+    by month (stale/n):
+      2025-01: 0/31 (0.0%)
+      2025-02: 0/28 (0.0%)
+      2025-03: 0/31 (0.0%)
+      2025-04: 0/29 (0.0%)
+      2025-05: 0/31 (0.0%)
+      2025-06: 0/30 (0.0%)
+      2025-07: 0/31 (0.0%)
+      2025-08: 0/31 (0.0%)
+      2025-09: 0/30 (0.0%)
+      2025-10: 0/31 (0.0%)
+      2025-11: 0/30 (0.0%)
+      2025-12: 0/31 (0.0%)
+      2026-01: 0/31 (0.0%)
+      2026-02: 0/28 (0.0%)
+      2026-03: 0/31 (0.0%)
+      2026-04: 0/29 (0.0%)
+      2026-05: 0/31 (0.0%)
+      2026-06: 0/30 (0.0%)
+      2026-07: 0/31 (0.0%)
+      2026-08: 0/31 (0.0%)
+      2026-09: 0/16 (0.0%)
+
+===== STEP 3 — STALE PROT DAYS (arm A live D+3 legs) =====
+  n_stale_prot_legs=40 n_days=20
+  A) days: whole D+2 missing=20  only-1730-missing=0  mixed=0
+  B) no earlier mark on D+2 at all (D+2 lag undefined)
+  C) |spot move|% entry->exit (arm A):
+    stale days: n=20 mean=2.223 median=1.412 p90=5.660
+    other days: n=592 mean=2.212 median=1.579 p90=4.887
+    stale/other mean-move ratio = 1.00x
+  stale prot legs:
+    2025-01-29 Wed call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=2.16 net=1983.3 C-BTC-102400-010225
+    2025-01-29 Wed put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=2.16 net=1983.3 P-BTC-102400-010225
+    2025-02-26 Wed call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=8.99 net=-10488.0 C-BTC-88200-010325
+    2025-02-26 Wed put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=8.99 net=-10488.0 P-BTC-88200-010325
+    2025-03-29 Sat call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.17 net=2427.7 C-BTC-82400-010425
+    2025-03-29 Sat put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.17 net=2427.7 P-BTC-82400-010425
+    2025-04-28 Mon call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.11 net=2795.1 C-BTC-95200-010525
+    2025-04-28 Mon put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.11 net=2795.1 P-BTC-95200-010525
+    2025-05-29 Thu call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=4.80 net=-5565.3 C-BTC-108600-010625
+    2025-05-29 Thu put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=4.80 net=-5565.3 P-BTC-108600-010625
+    2025-06-28 Sat call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.35 net=1077.0 C-BTC-107200-010725
+    2025-06-28 Sat put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.35 net=1077.0 P-BTC-107200-010725
+    2025-07-29 Tue call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.42 net=2048.0 C-BTC-118800-010825
+    2025-07-29 Tue put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.42 net=2048.0 P-BTC-118800-010825
+    2025-08-29 Fri call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=2.52 net=-1992.2 C-BTC-111200-010925
+    2025-08-29 Fri put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=2.52 net=-1992.2 P-BTC-111200-010925
+    2025-09-28 Sun call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=3.30 net=-3303.8 C-BTC-109400-011025
+    2025-09-28 Sun put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=3.30 net=-3303.8 P-BTC-109400-011025
+    2025-10-29 Wed call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=2.44 net=740.7 C-BTC-113000-011125
+    2025-10-29 Wed put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=2.44 net=740.7 P-BTC-113000-011125
+    2025-11-28 Fri call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.47 net=1465.3 C-BTC-91400-011225
+    2025-11-28 Fri put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.47 net=1465.3 P-BTC-91400-011225
+    2025-12-29 Mon call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=1.91 net=954.9 C-BTC-87200-010126
+    2025-12-29 Mon put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=1.91 net=954.9 P-BTC-87200-010126
+    2026-01-29 Thu call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=5.60 net=-5866.0 C-BTC-88000-010226
+    2026-01-29 Thu put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=5.60 net=-5866.0 P-BTC-88000-010226
+    2026-02-26 Thu call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=6.24 net=-3844.2 C-BTC-68200-010326
+    2026-02-26 Thu put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=6.24 net=-3844.2 P-BTC-68200-010326
+    2026-03-29 Sun call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.10 net=2292.4 C-BTC-66800-010426
+    2026-03-29 Sun put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.10 net=2292.4 P-BTC-66800-010426
+    2026-04-28 Tue call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.17 net=1808.8 C-BTC-76000-010526
+    2026-04-28 Tue put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.17 net=1808.8 P-BTC-76000-010526
+    2026-05-29 Fri call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.88 net=690.3 C-BTC-73400-010626
+    2026-05-29 Fri put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.88 net=690.3 P-BTC-73400-010626
+    2026-06-28 Sun call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=2.10 net=775.0 C-BTC-60400-010726
+    2026-06-28 Sun put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=2.10 net=775.0 P-BTC-60400-010726
+    2026-07-29 Wed call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.84 net=1212.8 C-BTC-64400-010826
+    2026-07-29 Wed put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.84 net=1212.8 P-BTC-64400-010826
+    2026-08-29 Sat call WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.91 net=558.6 C-BTC-77600-010926
+    2026-08-29 Sat put WHOLE_D+2_DAY_MISSING n_prints_d2=0 lag_hold=None move%=0.91 net=558.6 P-BTC-77600-010926
+
+elapsed_s=853.6 csv=s010_stale_audit_20261001T051559Z.csv
