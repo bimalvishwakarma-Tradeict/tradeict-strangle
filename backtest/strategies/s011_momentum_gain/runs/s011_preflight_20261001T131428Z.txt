@@ -1,0 +1,165 @@
+===== S011 PREFLIGHT (no P&L engine) =====
+csv=backtest\data_1m\BTCUSD_1m_20240630_20260921.csv columns=['open_time_unix', 'open_time_utc', 'open_time_ist', 'open', 'high', 'low', 'close', 'volume']
+max_days=10 cutoff_utc=2025-01-11
+DATA_START=2025-01-01 volume_column=yes
+GAP_POINTS=[100, 150, 200, 250, 300] RSI_LEN=14 RSI_UP=60.0 RSI_DN=40.0
+n_signals=45
+--- signal counts GAP x direction ---
+  gap=100 UP: 4
+  gap=100 DOWN: 5
+  gap=150 UP: 4
+  gap=150 DOWN: 5
+  gap=200 UP: 4
+  gap=200 DOWN: 5
+  gap=250 UP: 4
+  gap=250 DOWN: 5
+  gap=300 UP: 4
+  gap=300 DOWN: 5
+--- per month (any direction) ---
+  gap=100: 2025-01=9
+  gap=150: 2025-01=9
+  gap=200: 2025-01=9
+  gap=250: 2025-01=9
+  gap=300: 2025-01=9
+--- per half ---
+  gap=100 UP H1=4 H2=0
+  gap=100 DOWN H1=5 H2=0
+  gap=150 UP H1=4 H2=0
+  gap=150 DOWN H1=5 H2=0
+  gap=200 UP H1=4 H2=0
+  gap=200 DOWN H1=5 H2=0
+  gap=250 UP H1=4 H2=0
+  gap=250 DOWN H1=5 H2=0
+  gap=300 UP H1=4 H2=0
+  gap=300 DOWN H1=5 H2=0
+--- hit% / edge by (GAP, expiry, horizon) x half ---
+  gap=100 0DTE 1h H1: sig_hit=0.00% n=4 rand_pooled=16.67% n=24 rand20261001=16.67% n=12 rand20261002=16.67% n=12 edge=-16.67pp CI=[-33.33,-4.17] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.371 exc/B_rand=0.636
+  gap=100 0DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 0DTE 2h H1: sig_hit=0.00% n=4 rand_pooled=41.67% n=24 rand20261001=41.67% n=12 rand20261002=41.67% n=12 edge=-41.67pp CI=[-62.50,-20.83] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.483 exc/B_rand=0.799
+  gap=100 0DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 0DTE 4h H1: sig_hit=25.00% n=4 rand_pooled=66.67% n=24 rand20261001=66.67% n=12 rand20261002=66.67% n=12 edge=-41.67pp CI=[-79.17,12.50] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.867 exc/B_rand=1.084
+  gap=100 0DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 0DTE to_expiry H1: sig_hit=50.00% n=4 rand_pooled=91.67% n=24 rand20261001=91.67% n=12 rand20261002=91.67% n=12 edge=-41.67pp CI=[-95.83,8.33] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=1.195 exc/B_rand=1.287
+  gap=100 0DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 1DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.424 exc/B_rand=0.257
+  gap=100 1DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 1DTE 2h H1: sig_hit=22.22% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=22.22pp CI=[0.00,55.56] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.606 exc/B_rand=0.326
+  gap=100 1DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 1DTE 4h H1: sig_hit=33.33% n=9 rand_pooled=7.41% n=54 rand20261001=7.41% n=27 rand20261002=7.41% n=27 edge=25.93pp CI=[-3.70,61.11] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.855 exc/B_rand=0.494
+  gap=100 1DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 1DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=88.89% n=54 rand20261001=88.89% n=27 rand20261002=88.89% n=27 edge=-11.11pp CI=[-42.59,14.81] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=1.546 exc/B_rand=1.546
+  gap=100 1DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 2DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.300 exc/B_rand=0.133
+  gap=100 2DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 2DTE 2h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.427 exc/B_rand=0.169
+  gap=100 2DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 2DTE 4h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.622 exc/B_rand=0.256
+  gap=100 2DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=100 2DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=100.00% n=54 rand20261001=100.00% n=27 rand20261002=100.00% n=27 edge=-22.22pp CI=[-55.56,0.00] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=1.507 exc/B_rand=1.570
+  gap=100 2DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 0DTE 1h H1: sig_hit=0.00% n=4 rand_pooled=16.67% n=24 rand20261001=16.67% n=12 rand20261002=16.67% n=12 edge=-16.67pp CI=[-33.33,-4.17] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.371 exc/B_rand=0.636
+  gap=150 0DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 0DTE 2h H1: sig_hit=0.00% n=4 rand_pooled=41.67% n=24 rand20261001=41.67% n=12 rand20261002=41.67% n=12 edge=-41.67pp CI=[-62.50,-20.83] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.483 exc/B_rand=0.799
+  gap=150 0DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 0DTE 4h H1: sig_hit=25.00% n=4 rand_pooled=66.67% n=24 rand20261001=66.67% n=12 rand20261002=66.67% n=12 edge=-41.67pp CI=[-79.17,12.50] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.867 exc/B_rand=1.084
+  gap=150 0DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 0DTE to_expiry H1: sig_hit=50.00% n=4 rand_pooled=91.67% n=24 rand20261001=91.67% n=12 rand20261002=91.67% n=12 edge=-41.67pp CI=[-95.83,8.33] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=1.195 exc/B_rand=1.287
+  gap=150 0DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 1DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.424 exc/B_rand=0.257
+  gap=150 1DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 1DTE 2h H1: sig_hit=22.22% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=22.22pp CI=[0.00,55.56] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.606 exc/B_rand=0.326
+  gap=150 1DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 1DTE 4h H1: sig_hit=33.33% n=9 rand_pooled=7.41% n=54 rand20261001=7.41% n=27 rand20261002=7.41% n=27 edge=25.93pp CI=[-5.56,59.26] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.855 exc/B_rand=0.494
+  gap=150 1DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 1DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=88.89% n=54 rand20261001=88.89% n=27 rand20261002=88.89% n=27 edge=-11.11pp CI=[-44.44,14.81] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=1.546 exc/B_rand=1.546
+  gap=150 1DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 2DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.300 exc/B_rand=0.133
+  gap=150 2DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 2DTE 2h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.427 exc/B_rand=0.169
+  gap=150 2DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 2DTE 4h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.622 exc/B_rand=0.256
+  gap=150 2DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=150 2DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=100.00% n=54 rand20261001=100.00% n=27 rand20261002=100.00% n=27 edge=-22.22pp CI=[-55.56,0.00] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=1.507 exc/B_rand=1.570
+  gap=150 2DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 0DTE 1h H1: sig_hit=0.00% n=4 rand_pooled=16.67% n=24 rand20261001=16.67% n=12 rand20261002=16.67% n=12 edge=-16.67pp CI=[-33.33,-4.17] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.371 exc/B_rand=0.636
+  gap=200 0DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 0DTE 2h H1: sig_hit=0.00% n=4 rand_pooled=41.67% n=24 rand20261001=41.67% n=12 rand20261002=41.67% n=12 edge=-41.67pp CI=[-62.50,-20.83] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.483 exc/B_rand=0.799
+  gap=200 0DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 0DTE 4h H1: sig_hit=25.00% n=4 rand_pooled=66.67% n=24 rand20261001=66.67% n=12 rand20261002=66.67% n=12 edge=-41.67pp CI=[-79.17,12.50] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.867 exc/B_rand=1.084
+  gap=200 0DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 0DTE to_expiry H1: sig_hit=50.00% n=4 rand_pooled=91.67% n=24 rand20261001=91.67% n=12 rand20261002=91.67% n=12 edge=-41.67pp CI=[-91.77,8.33] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=1.195 exc/B_rand=1.287
+  gap=200 0DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 1DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.424 exc/B_rand=0.257
+  gap=200 1DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 1DTE 2h H1: sig_hit=22.22% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=22.22pp CI=[0.00,55.56] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.606 exc/B_rand=0.326
+  gap=200 1DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 1DTE 4h H1: sig_hit=33.33% n=9 rand_pooled=7.41% n=54 rand20261001=7.41% n=27 rand20261002=7.41% n=27 edge=25.93pp CI=[-3.75,59.26] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.855 exc/B_rand=0.494
+  gap=200 1DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 1DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=88.89% n=54 rand20261001=88.89% n=27 rand20261002=88.89% n=27 edge=-11.11pp CI=[-42.59,12.96] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=1.546 exc/B_rand=1.546
+  gap=200 1DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 2DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.300 exc/B_rand=0.133
+  gap=200 2DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 2DTE 2h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.427 exc/B_rand=0.169
+  gap=200 2DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 2DTE 4h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.622 exc/B_rand=0.256
+  gap=200 2DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=200 2DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=100.00% n=54 rand20261001=100.00% n=27 rand20261002=100.00% n=27 edge=-22.22pp CI=[-55.56,0.00] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=1.507 exc/B_rand=1.570
+  gap=200 2DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 0DTE 1h H1: sig_hit=0.00% n=4 rand_pooled=16.67% n=24 rand20261001=16.67% n=12 rand20261002=16.67% n=12 edge=-16.67pp CI=[-33.33,-4.17] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.371 exc/B_rand=0.636
+  gap=250 0DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 0DTE 2h H1: sig_hit=0.00% n=4 rand_pooled=41.67% n=24 rand20261001=41.67% n=12 rand20261002=41.67% n=12 edge=-41.67pp CI=[-62.50,-20.83] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.483 exc/B_rand=0.799
+  gap=250 0DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 0DTE 4h H1: sig_hit=25.00% n=4 rand_pooled=66.67% n=24 rand20261001=66.67% n=12 rand20261002=66.67% n=12 edge=-41.67pp CI=[-79.17,12.50] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.867 exc/B_rand=1.084
+  gap=250 0DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 0DTE to_expiry H1: sig_hit=50.00% n=4 rand_pooled=91.67% n=24 rand20261001=91.67% n=12 rand20261002=91.67% n=12 edge=-41.67pp CI=[-95.83,8.33] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=1.195 exc/B_rand=1.287
+  gap=250 0DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 1DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.424 exc/B_rand=0.257
+  gap=250 1DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 1DTE 2h H1: sig_hit=22.22% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=22.22pp CI=[0.00,55.56] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.606 exc/B_rand=0.326
+  gap=250 1DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 1DTE 4h H1: sig_hit=33.33% n=9 rand_pooled=7.41% n=54 rand20261001=7.41% n=27 rand20261002=7.41% n=27 edge=25.93pp CI=[-3.70,59.26] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.855 exc/B_rand=0.494
+  gap=250 1DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 1DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=88.89% n=54 rand20261001=88.89% n=27 rand20261002=88.89% n=27 edge=-11.11pp CI=[-42.64,14.81] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=1.546 exc/B_rand=1.546
+  gap=250 1DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 2DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.300 exc/B_rand=0.133
+  gap=250 2DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 2DTE 2h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.427 exc/B_rand=0.169
+  gap=250 2DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 2DTE 4h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.622 exc/B_rand=0.256
+  gap=250 2DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=250 2DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=100.00% n=54 rand20261001=100.00% n=27 rand20261002=100.00% n=27 edge=-22.22pp CI=[-55.56,0.00] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=1.507 exc/B_rand=1.570
+  gap=250 2DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 0DTE 1h H1: sig_hit=0.00% n=4 rand_pooled=16.67% n=24 rand20261001=16.67% n=12 rand20261002=16.67% n=12 edge=-16.67pp CI=[-33.33,-4.17] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.371 exc/B_rand=0.636
+  gap=300 0DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 0DTE 2h H1: sig_hit=0.00% n=4 rand_pooled=41.67% n=24 rand20261001=41.67% n=12 rand20261002=41.67% n=12 edge=-41.67pp CI=[-62.50,-20.83] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.483 exc/B_rand=0.799
+  gap=300 0DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 0DTE 4h H1: sig_hit=25.00% n=4 rand_pooled=66.67% n=24 rand20261001=66.67% n=12 rand20261002=66.67% n=12 edge=-41.67pp CI=[-79.17,12.50] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=0.867 exc/B_rand=1.084
+  gap=300 0DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 0DTE to_expiry H1: sig_hit=50.00% n=4 rand_pooled=91.67% n=24 rand20261001=91.67% n=12 rand20261002=91.67% n=12 edge=-41.67pp CI=[-91.67,8.33] meanB_sig=1199.97 meanB_rand=394.34 exc/B_sig=1.195 exc/B_rand=1.287
+  gap=300 0DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 1DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.424 exc/B_rand=0.257
+  gap=300 1DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 1DTE 2h H1: sig_hit=22.22% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=22.22pp CI=[0.00,55.56] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.606 exc/B_rand=0.326
+  gap=300 1DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 1DTE 4h H1: sig_hit=33.33% n=9 rand_pooled=7.41% n=54 rand20261001=7.41% n=27 rand20261002=7.41% n=27 edge=25.93pp CI=[-5.56,59.26] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=0.855 exc/B_rand=0.494
+  gap=300 1DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 1DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=88.89% n=54 rand20261001=88.89% n=27 rand20261002=88.89% n=27 edge=-11.11pp CI=[-42.59,14.81] meanB_sig=1931.51 meanB_rand=1231.22 exc/B_sig=1.546 exc/B_rand=1.546
+  gap=300 1DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 2DTE 1h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.300 exc/B_rand=0.133
+  gap=300 2DTE 1h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 2DTE 2h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.427 exc/B_rand=0.169
+  gap=300 2DTE 2h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 2DTE 4h H1: sig_hit=11.11% n=9 rand_pooled=0.00% n=54 rand20261001=0.00% n=27 rand20261002=0.00% n=27 edge=11.11pp CI=[0.00,33.33] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=0.622 exc/B_rand=0.256
+  gap=300 2DTE 4h H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+  gap=300 2DTE to_expiry H1: sig_hit=77.78% n=9 rand_pooled=100.00% n=54 rand20261001=100.00% n=27 rand20261002=100.00% n=27 edge=-22.22pp CI=[-55.56,0.00] meanB_sig=2638.79 meanB_rand=2265.73 exc/B_sig=1.507 exc/B_rand=1.570
+  gap=300 2DTE to_expiry H2: sig_hit=nan% n=0 rand_pooled=nan% n=0 rand20261001=nan% n=0 rand20261002=nan% n=0 edge=nanpp CI=[nan,nan] meanB_sig=nan meanB_rand=nan exc/B_sig=nan exc/B_rand=nan
+--- delta 0.75 / 0.90 (signal entries, both legs) ---
+  delta=0.75 mean_capital=4267.31 mean_extrinsic=824.45 missing=10/220 (4.5%)
+  delta=0.90 mean_capital=6620.33 mean_extrinsic=429.86 missing=10/220 (4.5%)
+--- skip reasons ---
+  skipped_0dte_late: 175
+  random_underfilled: 90
+  random_pool_short: 45
+FAIL
+no (GAP, expiry, horizon) had edge>=+5.0pp and CI_lo>0 in BOTH H1 and H2
+elapsed_s=96.5 n_signals=45
