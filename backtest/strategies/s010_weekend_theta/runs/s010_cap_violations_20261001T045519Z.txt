@@ -1,0 +1,21 @@
+===== S010 WEEKEND THETA =====
+generated_utc=2026-10-01T04:55:19.569888+00:00
+DATA_START=2025-01-01 n_entry_dates=626
+qty straddle=1000 strangle=1000 prot=2000 MARGIN_MULT=1.0
+Arm A = D+3 calendar protection; Arm B = D+2 same-expiry control (independent run, Trap 1).
+
+===== CAP_INVARIANT (arm A, not excluded) =====
+  n_baskets=612 violations=5 (0.8%)
+  causes among violations: A_missing=5 B_same_option=0 C_below_intrinsic=5 unclassified=0
+  by month: 2025-02:1, 2025-05:1, 2025-09:1, 2026-01:1, 2026-02:1
+  by dow: Sun:1, Thu:3, Wed:1
+  mark_source: missing:5
+  worst net=-10487.99 date=2025-02-26 dow=Wed spot_entry=88298 spot_exit=80362 src=missing prot_exit C=1613.50 P=1396.38
+  violating dates:
+    2025-02-26 Wed net=-10488.0 cap=-2232.8 src=missing A=1 B=0 C=1
+    2026-01-29 Thu net=-5866.0 cap=-1451.6 src=missing A=1 B=0 C=1
+    2025-05-29 Thu net=-5565.3 cap=-1931.0 src=missing A=1 B=0 C=1
+    2026-02-26 Thu net=-3844.2 cap=-1544.0 src=missing A=1 B=0 C=1
+    2025-09-28 Sun net=-3303.8 cap=-2648.9 src=missing A=1 B=0 C=1
+csv=backtest\strategies\s010_weekend_theta\runs\s010_cap_violations_20261001T045519Z.csv
+scan_total=743.3s chain_loads=1248 cache_hits=0

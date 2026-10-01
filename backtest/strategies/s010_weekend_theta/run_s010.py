@@ -33,6 +33,7 @@ from backtest.strategies.s010_weekend_theta import config as cfg  # noqa: E402
 from backtest.strategies.s010_weekend_theta.engine import (  # noqa: E402
     BasketResult,
     candidate_dates,
+    intrinsic,
     ist_str,
     load_spot_ohlc,
     simulate_day,
@@ -115,6 +116,136 @@ def write_basket_csv(path: Path, rows: list[BasketResult]) -> None:
                     _fmt(r.worst_intracycle_mtm),
                 ]
             )
+
+
+VIOLATION_COLUMNS = [
+    "date",
+    "dow",
+    "spot_entry",
+    "spot_exit",
+    "atm_strike",
+    "short_call_k",
+    "short_put_k",
+    "prot_expiry",
+    "prot_strike",
+    "prot_call_prem_ENTRY",
+    "prot_put_prem_ENTRY",
+    "prot_call_prem_EXIT",
+    "prot_put_prem_EXIT",
+    "prot_call_intrinsic_at_exit",
+    "prot_put_intrinsic_at_exit",
+    "entry_debit",
+    "cap",
+    "net_pnl",
+    "gross_pnl",
+    "prot_mark_source_exit",
+    "cause_A_missing",
+    "cause_B_same_option",
+    "cause_C_below_intrinsic",
+    "exit_reason",
+    "ts_on",
+]
+
+
+def write_violations_csv(path: Path, rows: list[BasketResult]) -> None:
+    rows = sorted(rows, key=lambda r: r.entry_ts)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(VIOLATION_COLUMNS)
+        for r in rows:
+            w.writerow(
+                [
+                    r.d.isoformat(),
+                    r.dow,
+                    _fmt(r.spot_entry),
+                    _fmt(r.spot_exit),
+                    _fmt(r.atm_strike),
+                    _fmt(r.short_call_k),
+                    _fmt(r.short_put_k),
+                    r.prot_expiry.isoformat(),
+                    _fmt(r.prot_strike),
+                    _fmt(r.prot_call_prem),
+                    _fmt(r.prot_put_prem),
+                    _fmt(r.prot_call_prem_exit),
+                    _fmt(r.prot_put_prem_exit),
+                    _fmt(intrinsic("call", r.prot_strike, r.spot_exit)),
+                    _fmt(intrinsic("put", r.prot_strike, r.spot_exit)),
+                    _fmt(r.entry_debit),
+                    _fmt(r.cap),
+                    _fmt(r.net_pnl),
+                    _fmt(r.gross_pnl),
+                    r.prot_mark_source_exit,
+                    int(r.cause_a_missing_mark),
+                    int(r.cause_b_same_option_fail),
+                    int(r.cause_c_below_intrinsic),
+                    r.exit_reason,
+                    int(r.ts_on),
+                ]
+            )
+
+
+def cap_invariant_report(arm_a: list[BasketResult]) -> list[str]:
+    n = len(arm_a)
+    viol = [r for r in arm_a if r.cap_violation]
+    pct = 100.0 * len(viol) / n if n else 0.0
+    lines = [
+        "===== CAP_INVARIANT (arm A, not excluded) =====",
+        f"  n_baskets={n} violations={len(viol)} ({pct:.1f}%)",
+    ]
+    n_a = sum(1 for r in viol if r.cause_a_missing_mark)
+    n_b = sum(1 for r in viol if r.cause_b_same_option_fail)
+    n_c = sum(1 for r in viol if r.cause_c_below_intrinsic)
+    n_none = sum(
+        1
+        for r in viol
+        if not (
+            r.cause_a_missing_mark
+            or r.cause_b_same_option_fail
+            or r.cause_c_below_intrinsic
+        )
+    )
+    lines.append(
+        f"  causes among violations: A_missing={n_a} B_same_option={n_b} "
+        f"C_below_intrinsic={n_c} unclassified={n_none}"
+    )
+    if viol:
+        months: dict[str, int] = {}
+        dows: dict[str, int] = {}
+        src: dict[str, int] = {}
+        for r in viol:
+            ym = f"{r.d.year:04d}-{r.d.month:02d}"
+            months[ym] = months.get(ym, 0) + 1
+            dows[r.dow] = dows.get(r.dow, 0) + 1
+            src[r.prot_mark_source_exit] = src.get(r.prot_mark_source_exit, 0) + 1
+        lines.append(
+            "  by month: "
+            + ", ".join(f"{k}:{v}" for k, v in sorted(months.items()))
+        )
+        lines.append(
+            "  by dow: " + ", ".join(f"{k}:{v}" for k, v in sorted(dows.items()))
+        )
+        lines.append(
+            "  mark_source: "
+            + ", ".join(f"{k}:{v}" for k, v in sorted(src.items()))
+        )
+        worst = min(viol, key=lambda r: r.net_pnl)
+        lines.append(
+            f"  worst net={worst.net_pnl:.2f} date={worst.d} dow={worst.dow} "
+            f"spot_entry={worst.spot_entry:.0f} spot_exit={worst.spot_exit:.0f} "
+            f"src={worst.prot_mark_source_exit} "
+            f"prot_exit C={worst.prot_call_prem_exit:.2f} "
+            f"P={worst.prot_put_prem_exit:.2f}"
+        )
+        lines.append("  violating dates:")
+        for r in sorted(viol, key=lambda x: x.net_pnl):
+            lines.append(
+                f"    {r.d} {r.dow} net={r.net_pnl:.1f} cap={r.cap:.1f} "
+                f"src={r.prot_mark_source_exit} "
+                f"A={int(r.cause_a_missing_mark)} "
+                f"B={int(r.cause_b_same_option_fail)} "
+                f"C={int(r.cause_c_below_intrinsic)}"
+            )
+    return lines
 
 
 def max_drawdown(nets: list[float]) -> float:
@@ -341,6 +472,28 @@ def test_data_start(
     print(f"DATA_START PASS dates={len(dates)} traded_checked={n}")
 
 
+def test_cap_invariant(
+    dates: list[date],
+    spot: dict,
+    store: MarksStore,
+    cache: ChainCache,
+) -> None:
+    """Permanent: count arm A baskets with net < theoretical cap. Do not exclude."""
+    arm_a: list[BasketResult] = []
+    for d in dates:
+        res, _ = simulate_day(
+            d=d, spot=spot, store=store, chain_cache=cache, arm="A", ts_on=False
+        )
+        if res is not None:
+            arm_a.append(res)
+        if len(arm_a) >= 20:
+            break
+    n = len(arm_a)
+    n_v = sum(1 for r in arm_a if r.cap_violation)
+    pct = 100.0 * n_v / n if n else 0.0
+    print(f"CAP_INVARIANT PASS n={n} violations={n_v} ({pct:.1f}%) [flag only]")
+
+
 def run_tests(
     dates: list[date],
     spot: dict,
@@ -353,6 +506,7 @@ def run_tests(
     test_arm_b_full(dates, spot, store, cache)
     test_skip_count(dates, spot, store, cache)
     test_data_start(dates, spot, store, cache)
+    test_cap_invariant(dates, spot, store, cache)
     print("ALL S010 ENGINE TESTS PASS")
 
 
@@ -414,6 +568,11 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-days", type=int, default=0)
     ap.add_argument("--no-tests", action="store_true")
+    ap.add_argument(
+        "--forensic-cap",
+        action="store_true",
+        help="Scan all arm A tsOFF days, dump cap violations, skip 28-arm grid",
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -452,6 +611,43 @@ def main() -> int:
     ]
 
     stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    all_arm_a: list[BasketResult] = []
+
+    if args.forensic_cap:
+        print("=== FORENSIC CAP SCAN (arm A tsOFF, all DOW) ===", flush=True)
+        for i, d in enumerate(dates, 1):
+            res, reason = simulate_day(
+                d=d, spot=spot, store=store, chain_cache=cache, arm="A", ts_on=False
+            )
+            if res is not None:
+                all_arm_a.append(res)
+            if i % cfg.PROGRESS_EVERY == 0 or i == len(dates):
+                n_v = sum(1 for r in all_arm_a if r.cap_violation)
+                print(
+                    f"  .. {i}/{len(dates)} day={d} traded={len(all_arm_a)} "
+                    f"violations={n_v}",
+                    flush=True,
+                )
+        viol = [r for r in all_arm_a if r.cap_violation]
+        vpath = out_dir / f"s010_cap_violations_{stamp}.csv"
+        write_violations_csv(vpath, viol)
+        cap_lines = cap_invariant_report(all_arm_a)
+        lines.extend(cap_lines)
+        lines.append(f"csv={vpath}")
+        elapsed = time.monotonic() - t0
+        lines.append(
+            f"scan_total={elapsed:.1f}s chain_loads={cache.loads} "
+            f"cache_hits={cache.hits}"
+        )
+        txt_path = out_dir / f"s010_cap_violations_{stamp}.txt"
+        txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        for ln in lines:
+            print(ln, flush=True)
+        print(f"txt={txt_path}", flush=True)
+        print(f"DONE in {elapsed:.1f}s", flush=True)
+        store.close()
+        return 0
+
     n_arms = 2 * 7 * 2
     arm_i = 0
     for arm in ("A", "B"):
@@ -470,6 +666,8 @@ def main() -> int:
                     dow=dow,
                     ts_on=ts_on,
                 )
+                if arm == "A":
+                    all_arm_a.extend(rows)
                 st = ArmStats(rows)
                 csv_path = out_dir / f"s010_{label}_{stamp}.csv"
                 write_basket_csv(csv_path, rows)
@@ -490,6 +688,12 @@ def main() -> int:
                 )
 
     elapsed = time.monotonic() - t0
+    viol = [r for r in all_arm_a if r.cap_violation]
+    vpath = out_dir / f"s010_cap_violations_{stamp}.csv"
+    write_violations_csv(vpath, viol)
+    lines.append("")
+    lines.extend(cap_invariant_report(all_arm_a))
+    lines.append(f"violations_csv={vpath}")
     lines.append("")
     lines.append(
         f"grid_total={elapsed:.1f}s chain_loads={cache.loads} "

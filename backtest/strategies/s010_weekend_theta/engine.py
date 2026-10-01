@@ -201,6 +201,19 @@ class BasketResult:
     prot_strike: float
     prot_call_prem: float
     prot_put_prem: float
+    atm_call_prem: float
+    atm_put_prem: float
+    prot_call_prem_exit: float
+    prot_put_prem_exit: float
+    prot_call_symbol: str
+    prot_put_symbol: str
+    prot_mark_source_exit: str
+    entry_debit: float
+    cap: float
+    cap_violation: bool
+    cause_a_missing_mark: bool
+    cause_b_same_option_fail: bool
+    cause_c_below_intrinsic: bool
     capital_used: float
     target_usd: float
     stop_usd: float
@@ -304,8 +317,58 @@ def build_legs(
         "prot_k": prot_k,
         "prot_c": prot_c,
         "prot_p": prot_p,
+        "atm_c": atm_c,
+        "atm_p": atm_p,
     }
     return legs, meta, ""
+
+
+def classify_mark_source(
+    series: dict[int, float], ts: int, *, seed: float, used: float
+) -> str:
+    """How the exit mark was obtained. Does not change the value used.
+
+    db        = exact-minute close in the series
+    stale     = nearest bar within MARK_TOL_SEC, not the exact minute
+    fallback  = ffill from an earlier bar in the holding window
+    missing   = no usable series point; engine kept the entry seed
+    """
+    minute = (int(ts) // 60) * 60
+    exact = series.get(minute)
+    if exact is not None and exact > 0:
+        return "db"
+    tol = cfg.MARK_TOL_SEC
+    for delta in range(60, tol + 1, 60):
+        for cand in (minute - delta, minute + delta):
+            m = series.get(cand)
+            if m is not None and m > 0:
+                return "stale"
+    earlier = [
+        t for t, m in series.items() if t < minute and m is not None and m > 0
+    ]
+    if earlier:
+        return "fallback"
+    return "missing"
+
+
+def arm_a_entry_debit(
+    atm_call: float,
+    atm_put: float,
+    short_call: float,
+    short_put: float,
+    prot_call: float,
+    prot_put: float,
+) -> float:
+    """Net debit in USD at 1:1:2 sizing (1000/1000/2000 × 0.001 BTC).
+
+    2*(D+3 ATM) − (D+2 ATM) − (D+2 strangle), in premium-point units
+    which equal USD at this lot size.
+    """
+    return (
+        2.0 * (prot_call + prot_put)
+        - (atm_call + atm_put)
+        - (short_call + short_put)
+    )
 
 
 def _ffill_series(
@@ -380,9 +443,9 @@ def simulate_day(
     if reason:
         return None, reason
 
-    cap = capital_used_usd(legs)
-    target_usd = cfg.TARGET_PCT * cap
-    stop_usd = cfg.STOP_PCT * cap
+    capital = capital_used_usd(legs)
+    target_usd = cfg.TARGET_PCT * capital
+    stop_usd = cfg.STOP_PCT * capital
 
     # Minute grid entry .. settle inclusive.
     n_min = int((settle_ts - entry_ts) // 60) + 1
@@ -477,6 +540,68 @@ def simulate_day(
         slippage = entry_slip + exit_slip
 
     net = gross - fees - slippage
+
+    prot_call_lg = next(lg for lg in legs if lg.side == "long" and lg.opt == "call")
+    prot_put_lg = next(lg for lg in legs if lg.side == "long" and lg.opt == "put")
+    prot_call_exit = float(exit_marks[legs.index(prot_call_lg)])
+    prot_put_exit = float(exit_marks[legs.index(prot_put_lg)])
+    src_c = classify_mark_source(
+        series[legs.index(prot_call_lg)],
+        exit_ts,
+        seed=prot_call_lg.entry_mark,
+        used=prot_call_exit,
+    )
+    src_p = classify_mark_source(
+        series[legs.index(prot_put_lg)],
+        exit_ts,
+        seed=prot_put_lg.entry_mark,
+        used=prot_put_exit,
+    )
+    prot_src = src_c if src_c == src_p else f"call:{src_c}|put:{src_p}"
+
+    want_c = format_symbol("C", prot_call_lg.strike, prot_call_lg.expiry)
+    want_p = format_symbol("P", prot_put_lg.strike, prot_put_lg.expiry)
+    same_option_ok = (
+        prot_call_lg.symbol == want_c
+        and prot_put_lg.symbol == want_p
+        and prot_call_lg.strike == meta["prot_k"]
+        and prot_put_lg.strike == meta["prot_k"]
+        and prot_call_lg.expiry == (d + timedelta(days=2 if arm == "B" else 3))
+        and prot_put_lg.expiry == prot_call_lg.expiry
+    )
+
+    entry_debit = arm_a_entry_debit(
+        meta["atm_c"],
+        meta["atm_p"],
+        meta["sc_px"],
+        meta["sp_px"],
+        meta["prot_c"],
+        meta["prot_p"],
+    )
+    total_cost = fees + slippage
+    inv_cap = -(entry_debit + total_cost) - 1.0
+    cap_violation = bool(arm == "A" and net < inv_cap)
+
+    cause_a = bool(
+        arm == "A"
+        and (
+            src_c == "missing"
+            or src_p == "missing"
+            or prot_call_exit <= 0.0
+            or prot_put_exit <= 0.0
+        )
+    )
+    cause_b = bool(arm == "A" and not same_option_ok)
+    call_intr = intrinsic("call", prot_call_lg.strike, exit_spot)
+    put_intr = intrinsic("put", prot_put_lg.strike, exit_spot)
+    cause_c = bool(
+        arm == "A"
+        and (
+            prot_call_exit < call_intr - 1e-6
+            or prot_put_exit < put_intr - 1e-6
+        )
+    )
+
     res = BasketResult(
         d=d,
         dow=dow,
@@ -496,7 +621,20 @@ def simulate_day(
         prot_strike=meta["prot_k"],
         prot_call_prem=meta["prot_c"],
         prot_put_prem=meta["prot_p"],
-        capital_used=cap,
+        atm_call_prem=meta["atm_c"],
+        atm_put_prem=meta["atm_p"],
+        prot_call_prem_exit=prot_call_exit,
+        prot_put_prem_exit=prot_put_exit,
+        prot_call_symbol=prot_call_lg.symbol,
+        prot_put_symbol=prot_put_lg.symbol,
+        prot_mark_source_exit=prot_src,
+        entry_debit=entry_debit,
+        cap=inv_cap,
+        cap_violation=cap_violation,
+        cause_a_missing_mark=cause_a,
+        cause_b_same_option_fail=cause_b,
+        cause_c_below_intrinsic=cause_c,
+        capital_used=capital,
         target_usd=target_usd,
         stop_usd=stop_usd,
         exit_ts=exit_ts,
