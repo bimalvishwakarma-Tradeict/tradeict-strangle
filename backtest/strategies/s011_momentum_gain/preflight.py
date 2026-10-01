@@ -13,16 +13,18 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import math
 import random
 import sys
 import time
+from bisect import bisect_left
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from statistics import fmean, median
+from statistics import fmean
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -381,20 +383,100 @@ def max_excursion(
 
 
 def bootstrap_edge(
-    sig: list[float], rnd: list[float], n: int, seed: int
+    sig: list[float],
+    sig_days: list[date],
+    rnd: list[float],
+    rnd_days: list[date],
+    n: int,
+    seed: int,
 ) -> tuple[float, float, float]:
-    if not sig or not rnd:
+    """Resample IST days with replacement (not individual rows)."""
+    if not sig or not rnd or not sig_days or not rnd_days:
+        return float("nan"), float("nan"), float("nan")
+    sig_by: dict[date, list[float]] = defaultdict(list)
+    rnd_by: dict[date, list[float]] = defaultdict(list)
+    for h, d in zip(sig, sig_days):
+        sig_by[d].append(h)
+    for h, d in zip(rnd, rnd_days):
+        rnd_by[d].append(h)
+    sd = list(sig_by.keys())
+    rd = list(rnd_by.keys())
+    if not sd or not rd:
         return float("nan"), float("nan"), float("nan")
     rng = random.Random(seed)
-    ns, nr = len(sig), len(rnd)
     diffs: list[float] = []
+    nsd, nrd = len(sd), len(rd)
     for _ in range(n):
-        s = sum(sig[rng.randrange(ns)] for _ in range(ns)) / ns
-        r = sum(rnd[rng.randrange(nr)] for _ in range(nr)) / nr
-        diffs.append((s - r) * 100.0)
+        s_vals: list[float] = []
+        for _i in range(nsd):
+            s_vals.extend(sig_by[sd[rng.randrange(nsd)]])
+        r_vals: list[float] = []
+        for _i in range(nrd):
+            r_vals.extend(rnd_by[rd[rng.randrange(nrd)]])
+        diffs.append((fmean(s_vals) - fmean(r_vals)) * 100.0)
     diffs.sort()
     edge = (fmean(sig) - fmean(rnd)) * 100.0
     return edge, _pctile(diffs, 0.025), _pctile(diffs, 0.975)
+
+
+def _json_safe(obj: Any) -> Any:
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
+def _from_json(obj: Any) -> Any:
+    if obj is None:
+        return float("nan")
+    if isinstance(obj, dict):
+        return {k: _from_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_from_json(v) for v in obj]
+    return obj
+
+
+def load_entry_cache(path: Path) -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
+    if not path.is_file():
+        return out
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            ts = int(rec["entry_ts"])
+            out[ts] = {
+                "spot_entry": float(rec["spot_entry"]),
+                "rows": _from_json(rec["rows"]),
+            }
+    return out
+
+
+def append_entry_cache(
+    fh: Any, entry_ts: int, spot_entry: float, rows: list[dict[str, Any]]
+) -> None:
+    rec = {
+        "entry_ts": int(entry_ts),
+        "spot_entry": float(spot_entry),
+        "rows": _json_safe(rows),
+    }
+    fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    fh.flush()
+
+
+def near_any(ts: int, sorted_ts: list[int], window_sec: int) -> bool:
+    if not sorted_ts:
+        return False
+    i = bisect_left(sorted_ts, ts)
+    for j in (i - 1, i):
+        if 0 <= j < len(sorted_ts) and abs(sorted_ts[j] - ts) <= window_sec:
+            return True
+    return False
 
 
 def measure_entry(
@@ -404,27 +486,22 @@ def measure_entry(
     low: np.ndarray,
     entry_ts: int,
     spot_entry: float,
-    skips: Counter,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for dte in cfg.DTE_LABELS:
         exp_d, exp_ts = expiry_of(entry_ts, dte)
         if dte == "0DTE" and hours_left(entry_ts, exp_ts) < cfg.MIN_0DTE_HOURS:
-            skips["skipped_0dte_late"] += 1
             rows.append({"dte": dte, "skip": "skipped_0dte_late"})
             continue
         if exp_ts <= entry_ts:
-            skips["expiry_already_passed"] += 1
             rows.append({"dte": dte, "skip": "expiry_already_passed"})
             continue
         calls, puts = load_chain(store, exp_d, entry_ts)
         if not calls and not puts:
-            skips["no_chain"] += 1
             rows.append({"dte": dte, "skip": "no_chain"})
             continue
         atm = atm_straddle(calls, puts, spot_entry)
         if atm is None:
-            skips["no_atm"] += 1
             rows.append({"dte": dte, "skip": "no_atm"})
             continue
         _k, b = atm
@@ -444,7 +521,6 @@ def measure_entry(
             mx = max_excursion(ts_arr, high, low, entry_ts, spot_entry, end)
             exc[hname] = mx
             if mx != mx:  # nan
-                skips["no_spot_path"] += 1
                 hits[hname] = 0
                 ratios[hname] = float("nan")
             else:
@@ -465,6 +541,21 @@ def measure_entry(
     return rows
 
 
+def skips_from_rows(rows: list[dict[str, Any]]) -> Counter:
+    c: Counter = Counter()
+    for r in rows:
+        sk = r.get("skip") or ""
+        if sk:
+            c[sk] += 1
+            continue
+        exc = r.get("exc") or {}
+        for hname in cfg.HORIZONS:
+            mx = exc.get(hname)
+            if isinstance(mx, float) and mx != mx:
+                c["no_spot_path"] += 1
+    return c
+
+
 def _mean_or_nan(xs: list[float]) -> float:
     ys = [x for x in xs if x == x]
     return fmean(ys) if ys else float("nan")
@@ -482,6 +573,11 @@ def main() -> int:
         default="backtest/strategies/s011_momentum_gain/runs",
     )
     ap.add_argument("--max-days", type=int, default=0)
+    ap.add_argument(
+        "--fresh",
+        action="store_true",
+        help="ignore and rewrite runs/s011_preflight_cache.jsonl",
+    )
     args = ap.parse_args()
     csv_path = Path(args.csv)
     out_dir = Path(args.out)
@@ -519,12 +615,13 @@ def main() -> int:
     high_arr = np.array([spot[int(t)].high for t in ts_sorted], dtype=np.float64)
     low_arr = np.array([spot[int(t)].low for t in ts_sorted], dtype=np.float64)
 
-    # days that have any signal per GAP (for random pool)
-    signal_days: dict[int, set[date]] = defaultdict(set)
-    for s in signals:
-        signal_days[s.gap].add(s.day)
+    signal_ts_by_gap: dict[int, list[int]] = {}
+    for gap in cfg.GAP_POINTS:
+        signal_ts_by_gap[int(gap)] = sorted(
+            {s.entry_ts for s in signals if s.gap == gap}
+        )
+    exclude_sec = int(cfg.RANDOM_EXCLUDE_HOURS * 3600)
 
-    # candidate (day, entry_ts) at each utc hour from 1m bars after DATA_START
     hour_slots: dict[int, list[tuple[date, int, float]]] = defaultdict(list)
     seen_slot: set[tuple[int, date]] = set()
     for ts, bar in spot.items():
@@ -544,13 +641,79 @@ def main() -> int:
         seen_slot.add(key)
         hour_slots[dt.hour].append((day, int(ts), bar.close))
 
+    pool_size: dict[int, int] = {}
+    for gap in cfg.GAP_POINTS:
+        sts = signal_ts_by_gap[int(gap)]
+        n_ok = 0
+        for _h, slots in hour_slots.items():
+            for _day, rts, _sp in slots:
+                if not near_any(rts, sts, exclude_sec):
+                    n_ok += 1
+        pool_size[int(gap)] = n_ok
+
+    cache_path = out_dir / cfg.CACHE_NAME
+    if args.fresh and cache_path.is_file():
+        cache_path.unlink()
+        print(f"fresh: removed {cache_path}", flush=True)
+    mem_cache = load_entry_cache(cache_path)
+    loaded_from_disk = set(mem_cache.keys())
+    print(f"cache_loaded={len(mem_cache)} path={cache_path}", flush=True)
+    cache_fh = cache_path.open("a", encoding="utf-8")
+
     store = MarksStore()
+    n_unique_done = 0
+    n_cache_skip = 0
+    n_measured = 0
+    seen_progress: set[int] = set()
+
+    def get_meas(entry_ts: int, spot_entry: float) -> list[dict[str, Any]]:
+        nonlocal n_unique_done, n_cache_skip, n_measured
+        ts = int(entry_ts)
+        hit = mem_cache.get(ts)
+        if hit is not None:
+            if ts not in seen_progress:
+                seen_progress.add(ts)
+                n_unique_done += 1
+                if ts in loaded_from_disk:
+                    n_cache_skip += 1
+                if n_unique_done % cfg.UNIQUE_ENTRY_PROGRESS == 0:
+                    print(
+                        f"  unique_entries={n_unique_done} "
+                        f"cache_skip={n_cache_skip} measured={n_measured} "
+                        f"elapsed_s={time.monotonic() - t0:.1f}",
+                        flush=True,
+                    )
+            return hit["rows"]
+        rows = measure_entry(
+            store, ts_sorted, high_arr, low_arr, entry_ts, spot_entry
+        )
+        mem_cache[ts] = {
+            "spot_entry": float(spot_entry),
+            "rows": rows,
+        }
+        append_entry_cache(cache_fh, entry_ts, spot_entry, rows)
+        seen_progress.add(ts)
+        n_measured += 1
+        n_unique_done += 1
+        if n_unique_done % cfg.UNIQUE_ENTRY_PROGRESS == 0:
+            print(
+                f"  unique_entries={n_unique_done} "
+                f"cache_skip={n_cache_skip} measured={n_measured} "
+                f"elapsed_s={time.monotonic() - t0:.1f}",
+                flush=True,
+            )
+        return rows
+
     csv_rows: list[dict[str, Any]] = []
-    # cells: (gap, dte, horizon, half) -> lists of hit 0/1 and ratios; random per seed
     sig_hit: dict[tuple, list[float]] = defaultdict(list)
+    sig_hit_days: dict[tuple, list[date]] = defaultdict(list)
     sig_ratio: dict[tuple, list[float]] = defaultdict(list)
     sig_b: dict[tuple, list[float]] = defaultdict(list)
+    sig_b_ge: dict[tuple, list[float]] = defaultdict(list)
     rnd_hit: dict[tuple, dict[int, list[float]]] = defaultdict(
+        lambda: {s: [] for s in cfg.RANDOM_SEEDS}
+    )
+    rnd_hit_days: dict[tuple, dict[int, list[date]]] = defaultdict(
         lambda: {s: [] for s in cfg.RANDOM_SEEDS}
     )
     rnd_ratio: dict[tuple, dict[int, list[float]]] = defaultdict(
@@ -559,16 +722,21 @@ def main() -> int:
     rnd_b: dict[tuple, dict[int, list[float]]] = defaultdict(
         lambda: {s: [] for s in cfg.RANDOM_SEEDS}
     )
+    rnd_b_ge: dict[tuple, dict[int, list[float]]] = defaultdict(
+        lambda: {s: [] for s in cfg.RANDOM_SEEDS}
+    )
     delta_cap: dict[str, list[float]] = defaultdict(list)
     delta_ext: dict[str, list[float]] = defaultdict(list)
     delta_miss = Counter()
     delta_n = Counter()
+    delta_done: set[tuple[int, str]] = set()
+    skip_counted: set[int] = set()
 
-    n_sig = len(signals)
-    for i, sig in enumerate(signals, 1):
-        meas = measure_entry(
-            store, ts_sorted, high_arr, low_arr, sig.entry_ts, sig.spot_entry, skips
-        )
+    for sig in signals:
+        meas = get_meas(sig.entry_ts, sig.spot_entry)
+        if sig.entry_ts not in skip_counted:
+            skips.update(skips_from_rows(meas))
+            skip_counted.add(sig.entry_ts)
         for row in meas:
             dte = row["dte"]
             rec = {
@@ -591,33 +759,39 @@ def main() -> int:
                     rec[f"ratio_{hname}"] = row["ratios"][hname]
                     key = (sig.gap, dte, hname, sig.half)
                     sig_hit[key].append(float(row["hits"][hname]))
+                    sig_hit_days[key].append(sig.day)
                     if row["ratios"][hname] == row["ratios"][hname]:
                         sig_ratio[key].append(float(row["ratios"][hname]))
                     sig_b[key].append(float(row["B"]))
-                for tgt, blob in row["delta"].items():
-                    cleg, pleg = blob["call"], blob["put"]
-                    delta_n[tgt] += 2
-                    for side, leg in (("c", cleg), ("p", pleg)):
-                        rec[f"d{tgt}_{side}_status"] = leg["status"]
-                        if leg["status"] != "ok":
-                            delta_miss[tgt] += 1
-                            rec[f"d{tgt}_{side}_mark"] = ""
-                            continue
-                        rec[f"d{tgt}_{side}_strike"] = leg["strike"]
-                        rec[f"d{tgt}_{side}_mark"] = leg["mark"]
-                        rec[f"d{tgt}_{side}_intr"] = leg["intrinsic"]
-                        rec[f"d{tgt}_{side}_ext"] = leg["extrinsic"]
-                    if cleg["status"] == "ok" and pleg["status"] == "ok":
-                        delta_cap[tgt].append(cleg["mark"] + pleg["mark"])
-                        delta_ext[tgt].append(
-                            cleg["extrinsic"] + pleg["extrinsic"]
-                        )
+                sig_b_ge[(sig.gap, dte)].append(float(row["B"]))
+                dkey = (sig.entry_ts, str(dte))
+                if dkey not in delta_done:
+                    delta_done.add(dkey)
+                    for tgt, blob in row["delta"].items():
+                        cleg, pleg = blob["call"], blob["put"]
+                        delta_n[tgt] += 2
+                        for side, leg in (("c", cleg), ("p", pleg)):
+                            rec[f"d{tgt}_{side}_status"] = leg["status"]
+                            if leg["status"] != "ok":
+                                delta_miss[tgt] += 1
+                                rec[f"d{tgt}_{side}_mark"] = ""
+                                continue
+                            rec[f"d{tgt}_{side}_strike"] = leg["strike"]
+                            rec[f"d{tgt}_{side}_mark"] = leg["mark"]
+                            rec[f"d{tgt}_{side}_intr"] = leg["intrinsic"]
+                            rec[f"d{tgt}_{side}_ext"] = leg["extrinsic"]
+                        if cleg["status"] == "ok" and pleg["status"] == "ok":
+                            delta_cap[tgt].append(cleg["mark"] + pleg["mark"])
+                            delta_ext[tgt].append(
+                                cleg["extrinsic"] + pleg["extrinsic"]
+                            )
             csv_rows.append(rec)
-        # random baselines (same UTC hour, days with no signal for this GAP)
+
+        sts = signal_ts_by_gap[sig.gap]
         pool = [
             t
             for t in hour_slots.get(sig.utc_hour, [])
-            if t[0] not in signal_days[sig.gap]
+            if not near_any(t[1], sts, exclude_sec)
         ]
         if len(pool) < cfg.RANDOM_N:
             skips["random_pool_short"] += 1
@@ -629,9 +803,10 @@ def main() -> int:
             if len(chosen) < cfg.RANDOM_N:
                 skips["random_underfilled"] += 1
             for _day, rts, rspot in chosen:
-                rmeas = measure_entry(
-                    store, ts_sorted, high_arr, low_arr, rts, rspot, skips
-                )
+                rmeas = get_meas(rts, rspot)
+                if rts not in skip_counted:
+                    skips.update(skips_from_rows(rmeas))
+                    skip_counted.add(rts)
                 for row in rmeas:
                     if row.get("skip"):
                         continue
@@ -658,18 +833,25 @@ def main() -> int:
                             },
                         }
                     )
+                    rhalf = _half_of(_day)
                     for hname in cfg.HORIZONS:
-                        key = (sig.gap, dte, hname, _half_of(_day))
+                        key = (sig.gap, dte, hname, rhalf)
                         rnd_hit[key][seed].append(float(row["hits"][hname]))
+                        rnd_hit_days[key][seed].append(_day)
                         if row["ratios"][hname] == row["ratios"][hname]:
                             rnd_ratio[key][seed].append(
                                 float(row["ratios"][hname])
                             )
                         rnd_b[key][seed].append(float(row["B"]))
-        if i % cfg.PROGRESS_EVERY == 0 or i == n_sig:
-            print(f"  .. {i}/{n_sig} signals measured", flush=True)
+                    rnd_b_ge[(sig.gap, dte)][seed].append(float(row["B"]))
 
+    cache_fh.close()
     store.close()
+    print(
+        f"unique_entries={n_unique_done} cache_skip={n_cache_skip} "
+        f"measured={n_measured} elapsed_s={time.monotonic() - t0:.1f}",
+        flush=True,
+    )
 
     # counts
     lines.append(f"DATA_START={cfg.DATA_START.isoformat()} volume_column=yes")
@@ -678,6 +860,27 @@ def main() -> int:
         f"RSI_UP={cfg.RSI_UP} RSI_DN={cfg.RSI_DN}"
     )
     lines.append(f"n_signals={len(signals)}")
+    lines.append("--- unique signal entry times per GAP ---")
+    for gap in cfg.GAP_POINTS:
+        n_u = len({s.entry_ts for s in signals if s.gap == gap})
+        lines.append(f"  gap={gap}: unique_entries={n_u}")
+    lines.append(
+        f"--- random pool (exclude +/-{cfg.RANDOM_EXCLUDE_HOURS}h of any "
+        "signal entry_ts for that GAP; same UTC hour) ---"
+    )
+    for gap in cfg.GAP_POINTS:
+        lines.append(f"  gap={gap}: pool_size={pool_size[int(gap)]}")
+    lines.append("--- signals sharing an IST day with another signal (same GAP) ---")
+    for gap in cfg.GAP_POINTS:
+        gs = [s for s in signals if s.gap == gap]
+        day_n = Counter(s.day for s in gs)
+        n_share = sum(1 for s in gs if day_n[s.day] > 1)
+        n_days = len(day_n)
+        n_multi = sum(1 for v in day_n.values() if v > 1)
+        lines.append(
+            f"  gap={gap}: share_day_signals={n_share}/{len(gs)} "
+            f"multi_days={n_multi}/{n_days}"
+        )
     by_gd: dict[tuple[int, str], int] = Counter()
     by_month: dict[tuple[int, str], int] = Counter()
     by_half: dict[tuple[int, str, str], int] = Counter()
@@ -713,8 +916,10 @@ def main() -> int:
                     sh = sig_hit.get(key, [])
                     # pooled random across both seeds
                     rh: list[float] = []
+                    rdays: list[date] = []
                     for seed in cfg.RANDOM_SEEDS:
                         rh.extend(rnd_hit[key][seed])
+                        rdays.extend(rnd_hit_days[key][seed])
                     sig_pct = 100.0 * fmean(sh) if sh else float("nan")
                     per_seed: list[str] = []
                     for seed in cfg.RANDOM_SEEDS:
@@ -725,7 +930,12 @@ def main() -> int:
                         )
                     rnd_pct = 100.0 * fmean(rh) if rh else float("nan")
                     edge, lo, hi = bootstrap_edge(
-                        sh, rh, cfg.BOOTSTRAP_N, cfg.BOOTSTRAP_SEED
+                        sh,
+                        sig_hit_days.get(key, []),
+                        rh,
+                        rdays,
+                        cfg.BOOTSTRAP_N,
+                        cfg.BOOTSTRAP_SEED,
                     )
                     mb = _mean_or_nan(sig_b.get(key, []))
                     mbr = _mean_or_nan(
@@ -763,6 +973,20 @@ def main() -> int:
                         else:
                             pass_cells_h2.add(cell)
 
+    lines.append("--- mean B signal vs random per (GAP, expiry) ---")
+    for gap in cfg.GAP_POINTS:
+        for dte in cfg.DTE_LABELS:
+            sb = sig_b_ge.get((gap, dte), [])
+            rb = [
+                x
+                for seed in cfg.RANDOM_SEEDS
+                for x in rnd_b_ge[(gap, dte)][seed]
+            ]
+            lines.append(
+                f"  gap={gap} {dte}: meanB_sig={_mean_or_nan(sb):.2f} n={len(sb)} "
+                f"meanB_rand={_mean_or_nan(rb):.2f} n={len(rb)}"
+            )
+
     lines.append("--- delta 0.75 / 0.90 (signal entries, both legs) ---")
     for tgt in cfg.DELTA_TARGETS:
         tag = f"{tgt:.2f}"
@@ -796,7 +1020,6 @@ def main() -> int:
         )
 
     elapsed = time.monotonic() - t0
-    lines.append(f"elapsed_s={elapsed:.1f} n_signals={len(signals)}")
 
     tpath = out_dir / f"s011_preflight_{stamp}.txt"
     cpath = out_dir / f"s011_preflight_{stamp}.csv"

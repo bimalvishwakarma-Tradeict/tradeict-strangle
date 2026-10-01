@@ -34,9 +34,12 @@ SECONDS_PER_YEAR = 365.25 * 24.0 * 3600.0
 # ---- Random baseline + bootstrap ----------------------------------------
 RANDOM_N = 5
 RANDOM_SEEDS = (20261001, 20261002)
+RANDOM_EXCLUDE_HOURS = 6
 BOOTSTRAP_N = 5000
 BOOTSTRAP_SEED = 20261001
 EDGE_PASS_PP = 5.0
 
 PROGRESS_EVERY = 25
+UNIQUE_ENTRY_PROGRESS = 50
+CACHE_NAME = "s011_preflight_cache.jsonl"
 DEFAULT_CSV = "backtest/data_1m/BTCUSD_1m_20240630_20260921.csv"
