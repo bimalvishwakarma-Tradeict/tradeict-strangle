@@ -22,7 +22,7 @@ import sqlite3
 import statistics
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -640,6 +640,39 @@ class CycleResult:
     exit_mtm: float = 0.0
     hours_to_adj1: float | None = None
     hours_to_adj2: float | None = None
+    exit_src_call: str = ""
+    exit_src_put: str = ""
+    exit_src_wing_c: str = ""
+    exit_src_wing_p: str = ""
+    exit_lookahead_any: int = 0
+    wing_c_exit_mark: float | None = None
+    wing_c_entry_mark: float | None = None
+    wing_p_exit_mark: float | None = None
+    wing_p_entry_mark: float | None = None
+    ticks_total: int = 0
+    ticks_wing_missing: int = 0
+
+
+def classify_exit_src(
+    mark_hit: float | None,
+    series: dict[int, float],
+    exit_ts: int,
+) -> tuple[str, int]:
+    """Tag how close_all() would pick m. Does not change m.
+
+    real / near follow mark_of(); last_known is s[max(s)]; entry_seed if empty.
+    lookahead=1 if last_known used a print after exit_ts.
+    """
+    minute = (int(exit_ts) // 60) * 60
+    if mark_hit is not None:
+        if minute in series:
+            return "real", 0
+        return "near", 0
+    if series:
+        last_ts = max(series)
+        lookahead = 1 if int(last_ts) > int(exit_ts) else 0
+        return "last_known", lookahead
+    return "entry_seed", 0
 
 
 SKIP_NO_CHAIN = "skipped_no_chain"
@@ -918,6 +951,15 @@ def simulate_cycle(
     exit_mtm = 0.0
     tp_touched = False
     slip_exit_samples: list[float] = []
+    ticks_total = 0
+    ticks_wing_missing = 0
+    exit_src_call = ""
+    exit_src_put = ""
+    exit_src_wing_c = ""
+    exit_src_wing_p = ""
+    exit_lookahead_any = 0
+    wing_c_exit_mark: float | None = None
+    wing_p_exit_mark: float | None = None
 
     ts = entry_ts + MONITOR_STEP_SEC
     while ts <= exp_ts:
@@ -938,6 +980,12 @@ def simulate_cycle(
         if put_leg.status == "open" and mp is None:
             ts += MONITOR_STEP_SEC
             continue
+
+        ticks_total += 1
+        if (wing_c.status == "open" and mwc is None) or (
+            wing_p.status == "open" and mwp is None
+        ):
+            ticks_wing_missing += 1
 
         # MTM (marks, no slip)
         mtm = call_leg.realized + put_leg.realized + wing_c.realized + wing_p.realized
@@ -1203,23 +1251,41 @@ def simulate_cycle(
     # Close all open legs at exit_ts
     def close_all(at: int) -> None:
         nonlocal call_leg, put_leg, wing_c, wing_p
+        nonlocal exit_src_call, exit_src_put, exit_src_wing_c, exit_src_wing_p
+        nonlocal exit_lookahead_any, wing_c_exit_mark, wing_p_exit_mark
         fwd, _ = resolve_forward(store, spot_map, expiry, at)
         if fwd is None:
             fwd = spot
         dte_now = max(0.0, hours_to_expiry(at, expiry) / 24.0)
-        for leg, is_short in (
-            (call_leg, True),
-            (put_leg, True),
-            (wing_c, False),
-            (wing_p, False),
-        ):
+        named = (
+            ("call", call_leg, True),
+            ("put", put_leg, True),
+            ("wing_c", wing_c, False),
+            ("wing_p", wing_p, False),
+        )
+        for name, leg, is_short in named:
             if leg.status != "open":
                 continue
             m = mark_of(leg, at)
+            ser = series.get(leg.symbol) or {}
+            src, lookahead = classify_exit_src(m, ser, at)
+            if name == "call":
+                exit_src_call = src
+            elif name == "put":
+                exit_src_put = src
+            elif name == "wing_c":
+                exit_src_wing_c = src
+            else:
+                exit_src_wing_p = src
+            if lookahead:
+                exit_lookahead_any = 1
             if m is None:
                 # last known
-                s = series.get(leg.symbol) or {}
-                m = s[max(s)] if s else leg.entry_mark
+                m = ser[max(ser)] if ser else leg.entry_mark
+            if name == "wing_c":
+                wing_c_exit_mark = float(m)
+            elif name == "wing_p":
+                wing_p_exit_mark = float(m)
             sf = resolve_slip_frac(m, dte_now, slip_model, slip_mult)
             slip_exit_samples.append(sf * 100.0)
             if is_short:
@@ -1324,6 +1390,17 @@ def simulate_cycle(
             exit_mtm=float(exit_mtm),
             hours_to_adj1=h_adj1,
             hours_to_adj2=h_adj2,
+            exit_src_call=exit_src_call,
+            exit_src_put=exit_src_put,
+            exit_src_wing_c=exit_src_wing_c,
+            exit_src_wing_p=exit_src_wing_p,
+            exit_lookahead_any=int(exit_lookahead_any),
+            wing_c_exit_mark=wing_c_exit_mark,
+            wing_c_entry_mark=float(wing_c.entry_mark),
+            wing_p_exit_mark=wing_p_exit_mark,
+            wing_p_entry_mark=float(wing_p.entry_mark),
+            ticks_total=int(ticks_total),
+            ticks_wing_missing=int(ticks_wing_missing),
         ),
         None,
     )
@@ -1534,6 +1611,7 @@ def simulate_synthetic_cycle(
         exit_ts = min(ts, exp_ts)
 
     # flatten open legs at exit
+    # Not reachable from run() — tests / exit-path proofs only. No source tagging here.
     for leg, is_short in (
         (call_leg, True),
         (put_leg, True),
@@ -1997,8 +2075,78 @@ def run(
             f"profit_mode={cycles[0].profit_mode} "
             f"locked_tp_usd={cycles[0].profit_target_usd:.4f}"
         )
+    lines.extend(format_exit_src_summary(cycles))
     lines.append("")
     return lines, cycles, skips
+
+
+def _src_share_line(label: str, srcs: list[str]) -> str:
+    tagged = [s for s in srcs if s]
+    n = len(tagged)
+    if n == 0:
+        return f"{label}: n=0"
+    cnt = Counter(tagged)
+    order = ("real", "near", "last_known", "entry_seed")
+    parts: list[str] = []
+    for k in order:
+        if cnt.get(k):
+            parts.append(f"{k}={cnt[k]} ({100.0 * cnt[k] / n:.1f}%)")
+    for k, v in sorted(cnt.items()):
+        if k not in order:
+            parts.append(f"{k}={v} ({100.0 * v / n:.1f}%)")
+    return f"{label}: n={n} " + ", ".join(parts)
+
+
+def _pnl_trio(xs: list[float]) -> str:
+    if not xs:
+        return "n=0"
+    return (
+        f"n={len(xs)} mean={statistics.fmean(xs):.6f} "
+        f"median={statistics.median(xs):.6f} worst={min(xs):.6f}"
+    )
+
+
+def format_exit_src_summary(cycles: list[CycleResult]) -> list[str]:
+    """Exit-mark source mix. Tagging only — does not affect P&L."""
+    short_src: list[str] = []
+    wing_src: list[str] = []
+    for c in cycles:
+        short_src.extend([c.exit_src_call, c.exit_src_put])
+        wing_src.extend([c.exit_src_wing_c, c.exit_src_wing_p])
+    non_real_tags = {"near", "last_known", "entry_seed"}
+    n_non_real = 0
+    n_lookahead = 0
+    real_pnl: list[float] = []
+    non_pnl: list[float] = []
+    for c in cycles:
+        tagged = [
+            s
+            for s in (
+                c.exit_src_call,
+                c.exit_src_put,
+                c.exit_src_wing_c,
+                c.exit_src_wing_p,
+            )
+            if s
+        ]
+        any_non = any(s in non_real_tags for s in tagged)
+        if any_non:
+            n_non_real += 1
+            non_pnl.append(c.net_pnl)
+        else:
+            real_pnl.append(c.net_pnl)
+        if int(c.exit_lookahead_any) == 1:
+            n_lookahead += 1
+    out = [
+        "===== EXIT MARK SOURCE =====",
+        _src_share_line("shorts", short_src),
+        _src_share_line("wings", wing_src),
+        f"cycles_any_non_real_exit={n_non_real}/{len(cycles)}",
+        f"cycles_lookahead={n_lookahead}/{len(cycles)}",
+        f"all_real_exit net_pnl {_pnl_trio(real_pnl)}",
+        f"any_non_real_exit net_pnl {_pnl_trio(non_pnl)}",
+    ]
+    return out
 
 
 def _fmt_num(x: Any, width: int = 8, prec: int = 4) -> str:
@@ -2096,6 +2244,10 @@ def write_cycles_csv(
         'applied_slip_pct_entry', 'applied_slip_pct_exit', 'avg_applied_slip_pct',
         'premium_mode', 'target_premium', 'profit_mode', 'profit_target_usd',
         'tp_touched', 'exit_mtm', 'hours_to_adj1', 'hours_to_adj2', 'spot_source',
+        'exit_src_call', 'exit_src_put', 'exit_src_wing_c', 'exit_src_wing_p',
+        'exit_lookahead_any',
+        'wing_c_exit_mark', 'wing_c_entry_mark', 'wing_p_exit_mark', 'wing_p_entry_mark',
+        'ticks_total', 'ticks_wing_missing',
     ]
     with out.open('w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -2158,6 +2310,33 @@ def write_cycles_csv(
                     f'{c.hours_to_adj2:.4f}' if c.hours_to_adj2 is not None else ''
                 ),
                 'spot_source': c.spot_source,
+                'exit_src_call': c.exit_src_call,
+                'exit_src_put': c.exit_src_put,
+                'exit_src_wing_c': c.exit_src_wing_c,
+                'exit_src_wing_p': c.exit_src_wing_p,
+                'exit_lookahead_any': int(c.exit_lookahead_any),
+                'wing_c_exit_mark': (
+                    f'{c.wing_c_exit_mark:.6f}'
+                    if c.wing_c_exit_mark is not None
+                    else ''
+                ),
+                'wing_c_entry_mark': (
+                    f'{c.wing_c_entry_mark:.6f}'
+                    if c.wing_c_entry_mark is not None
+                    else ''
+                ),
+                'wing_p_exit_mark': (
+                    f'{c.wing_p_exit_mark:.6f}'
+                    if c.wing_p_exit_mark is not None
+                    else ''
+                ),
+                'wing_p_entry_mark': (
+                    f'{c.wing_p_entry_mark:.6f}'
+                    if c.wing_p_entry_mark is not None
+                    else ''
+                ),
+                'ticks_total': int(c.ticks_total),
+                'ticks_wing_missing': int(c.ticks_wing_missing),
             })
     logger.info('wrote %s (%d rows)', out, len(cycles))
     return out
