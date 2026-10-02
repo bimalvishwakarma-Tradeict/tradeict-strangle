@@ -1,0 +1,36 @@
+S012F — S012 + 1h/4h Supertrend agreement (F1)
+stamp=20261002T210855Z
+TF=5 HTF_ST=3.0 ATR=10
+P2025=2025-01-01..2025-12-31  P2026=2026-01-01..2026-09-30
+raw_signals=9 after_F1=7  elapsed_sec=22.9
+
+ST=4.0 TGT=1.5
+  signal P2025 n=7 win%=14.3 mean=-247.3967 med=-210.9474 worst=-533.5345 gross=-1448.15 fees=283.63 slip=100.69 maxDD=-1731.7772 tgt%=14.3 CI95=[-337.5143, -22.1028] top5=0.465 pos_mo=0/1 rnd_mean=-32.9208
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 tgt%=nan CI95=[nan, nan] top5=nan pos_mo=0/0 rnd_mean=nan
+  random P2025 n=21 win%=38.1 mean=-32.9208 med=-67.4491 worst=-611.9001 gross=67.93 fees=759.27 slip=278.47 maxDD=-1914.4734 tgt%=52.4 CI95=[-316.0394, 279.9085] top5=-4.086 pos_mo=0/1
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 tgt%=nan CI95=[nan, nan] top5=nan pos_mo=0/0
+
+ST=4.0 TGT=2.0
+  signal P2025 n=7 win%=14.3 mean=-237.9506 med=-210.9474 worst=-533.5345 gross=-1380.88 fees=284.78 slip=101.25 maxDD=-1665.6545 tgt%=14.3 CI95=[-337.5143, 10.9586] top5=0.444 pos_mo=0/1 rnd_mean=-1.9969
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 tgt%=nan CI95=[nan, nan] top5=nan pos_mo=0/0 rnd_mean=nan
+  random P2025 n=21 win%=38.1 mean=-1.9969 med=-54.4216 worst=-611.9001 gross=710.19 fees=752.12 slip=279.87 maxDD=-1768.0742 tgt%=52.4 CI95=[-308.4015, 316.1124] top5=-72.642 pos_mo=0/1
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 tgt%=nan CI95=[nan, nan] top5=nan pos_mo=0/0
+
+ST=4.0 TGT=2.5
+  signal P2025 n=7 win%=0.0 mean=-308.2780 med=-343.3727 worst=-533.5345 gross=-1870.24 fees=287.70 slip=99.27 maxDD=-2157.9460 tgt%=0.0 CI95=[-370.9665, -189.2295] top5=0.571 pos_mo=0/1 rnd_mean=-5.3095
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 tgt%=nan CI95=[nan, nan] top5=nan pos_mo=0/0 rnd_mean=nan
+  random P2025 n=21 win%=38.1 mean=-5.3095 med=-131.0433 worst=-611.9001 gross=627.80 fees=739.30 slip=267.71 maxDD=-1768.0742 tgt%=33.3 CI95=[-318.7975, 296.3610] top5=-30.731 pos_mo=0/1
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 tgt%=nan CI95=[nan, nan] top5=nan pos_mo=0/0
+
+ST=4.0 TGT=3.0
+  signal P2025 n=7 win%=0.0 mean=-308.2780 med=-343.3727 worst=-533.5345 gross=-1870.24 fees=287.70 slip=99.27 maxDD=-2157.9460 tgt%=0.0 CI95=[-370.9665, -189.2295] top5=0.571 pos_mo=0/1 rnd_mean=-31.0377
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 tgt%=nan CI95=[nan, nan] top5=nan pos_mo=0/0 rnd_mean=nan
+  random P2025 n=21 win%=33.3 mean=-31.0377 med=-152.9159 worst=-611.9001 gross=87.86 fees=739.66 slip=266.44 maxDD=-2215.1576 tgt%=23.8 CI95=[-329.2953, 299.6389] top5=-5.383 pos_mo=0/1
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 tgt%=nan CI95=[nan, nan] top5=nan pos_mo=0/0
+
+--- PRE-REGISTERED PASS/FAIL ---
+  ST=4.0 TGT=2.5 P2025 mean=-308.27799290095766 rnd=-5.309485277125312 n=7
+  ST=4.0 TGT=2.5 P2026 mean=nan rnd=nan n=0
+FAIL: missing cell ST=4.5 TGT=2.5
+FAIL: missing cell ST=5.0 TGT=2.5
+FAIL
