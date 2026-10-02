@@ -1,0 +1,46 @@
+S012 Trend Follow — engine-lite
+stamp=20261002T140227Z
+DATA_START=2025-01-01
+H1=2025-01-01..2025-10-31  H2=2025-11-01..2026-09-30
+lookahead_fail=0  elapsed_sec=218.7
+
+TF=5 ST=3.0 TGT=1.0
+  signal H1 n=17 win%=35.3 mean=-46.6843 med=-96.1127 worst=-322.2358 gross=-158.32 fees=635.31 slip=239.50 maxDD=-1385.1407 hold_min=231.2 tgt%=52.9 0DTE%=64.7 1DTE%=35.3 wknd%=5.9 mark_missing=0 CI95=[-118.8787, 69.0566]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=51 win%=25.5 mean=-60.2042 med=-111.7124 worst=-411.4416 gross=-1149.69 fees=1920.73 slip=662.74 maxDD=-3707.3411 hold_min=175.1 tgt%=56.9 0DTE%=70.6 1DTE%=29.4 wknd%=3.9 mark_missing=0 CI95=[-167.2075, 47.5504]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+
+TF=5 ST=3.0 TGT=1.5
+  signal H1 n=17 win%=35.3 mean=-54.3492 med=-74.6345 worst=-398.9559 gross=-293.39 fees=630.54 slip=238.78 maxDD=-1783.9869 hold_min=231.2 tgt%=35.3 0DTE%=64.7 1DTE%=35.3 wknd%=5.9 mark_missing=0 CI95=[-154.1373, 87.0955]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=51 win%=23.5 mean=-69.2263 med=-118.8675 worst=-425.0858 gross=-1612.48 fees=1918.06 slip=656.17 maxDD=-4162.7125 hold_min=175.1 tgt%=41.2 0DTE%=70.6 1DTE%=29.4 wknd%=3.9 mark_missing=0 CI95=[-186.7199, 47.0086]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+
+TF=5 ST=3.0 TGT=2.0
+  signal H1 n=17 win%=35.3 mean=-20.5059 med=-74.6345 worst=-398.9559 gross=279.58 fees=628.18 slip=242.93 maxDD=-1627.6081 hold_min=231.2 tgt%=35.3 0DTE%=64.7 1DTE%=35.3 wknd%=5.9 mark_missing=0 CI95=[-142.0718, 146.2455]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=51 win%=19.6 mean=-69.2486 med=-164.9278 worst=-425.0858 gross=-1613.66 fees=1918.02 slip=655.63 maxDD=-4542.6831 hold_min=175.1 tgt%=29.4 0DTE%=70.6 1DTE%=29.4 wknd%=3.9 mark_missing=0 CI95=[-197.1802, 60.6954]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+
+TF=5 ST=3.0 TGT=2.5
+  signal H1 n=17 win%=17.6 mean=-52.3559 med=-135.6076 worst=-398.9559 gross=-266.29 fees=623.76 slip=233.13 maxDD=-1937.3854 hold_min=231.2 tgt%=5.9 0DTE%=64.7 1DTE%=35.3 wknd%=5.9 mark_missing=0 CI95=[-170.5833, 136.3750]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=51 win%=17.6 mean=-63.9011 med=-168.3613 worst=-425.0858 gross=-1341.89 fees=1917.07 slip=653.21 maxDD=-4601.4478 hold_min=175.1 tgt%=25.5 0DTE%=70.6 1DTE%=29.4 wknd%=3.9 mark_missing=0 CI95=[-212.1152, 90.5391]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+
+TF=5 ST=3.0 TGT=3.0
+  signal H1 n=17 win%=17.6 mean=-39.3872 med=-135.6076 worst=-398.9559 gross=-45.84 fees=623.75 slip=234.33 maxDD=-1937.3854 hold_min=231.2 tgt%=5.9 0DTE%=64.7 1DTE%=35.3 wknd%=5.9 mark_missing=0 CI95=[-170.2640, 173.9783]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=51 win%=17.6 mean=-51.3993 med=-168.3613 worst=-425.0858 gross=-705.03 fees=1916.34 slip=656.05 maxDD=-4087.1078 hold_min=175.1 tgt%=25.5 0DTE%=70.6 1DTE%=29.4 wknd%=3.9 mark_missing=0 CI95=[-211.9703, 113.1152]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+
+TF=5 ST=3.0 TGT=3.5
+  signal H1 n=17 win%=17.6 mean=-35.7501 med=-135.6076 worst=-398.9559 gross=15.99 fees=623.75 slip=234.68 maxDD=-1937.3854 hold_min=231.2 tgt%=5.9 0DTE%=64.7 1DTE%=35.3 wknd%=5.9 mark_missing=0 CI95=[-170.2640, 184.6414]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=51 win%=17.6 mean=-29.2046 med=-168.3613 worst=-425.0858 gross=424.94 fees=1914.38 slip=661.18 maxDD=-3535.3163 hold_min=175.1 tgt%=25.5 0DTE%=70.6 1DTE%=29.4 wknd%=3.9 mark_missing=0 CI95=[-210.4706, 165.6201]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan 0DTE%=nan 1DTE%=nan wknd%=nan mark_missing=0 CI95=[nan, nan]
+
+--- PRE-REGISTERED PASS/FAIL ---
+best_H1_cell=TF=5 ST=3.0 TGT=2.0 H1_mean=-20.505872
+H2_mean=nan H2_CI_lo=nan H2_random_mean=nan
+FAIL

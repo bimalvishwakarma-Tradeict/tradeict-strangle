@@ -385,25 +385,59 @@ def t_years(entry_ts: int, expiry_ts: int) -> float:
     return max((int(expiry_ts) - int(entry_ts)) / cfg.SECONDS_PER_YEAR, 1e-12)
 
 
+def option_symbol(is_call: bool, strike: float, expiry: date) -> str:
+    prefix = "C" if is_call else "P"
+    return f"{prefix}-BTC-{int(strike)}-{expiry.strftime('%d%m%y')}"
+
+
 def pick_delta(
     legs: dict[float, float],
     spot: float,
     t_yr: float,
     target: float,
     is_call: bool,
+    expiry: date,
+    minute: int,
 ) -> tuple[float, float] | None:
     best: tuple[float, float] | None = None
     best_err = 1e9
     for k, mark in legs.items():
-        iv = implied_vol_bisection(mark, spot, k, t_yr, is_call)
-        if iv is None:
+        iv, dlt = iv_delta(option_symbol(is_call, k, expiry), minute, mark, spot, k, t_yr, is_call)
+        if iv is None or dlt is None:
             continue
-        dlt = black76_abs_delta(spot, k, t_yr, iv, is_call)
         err = abs(dlt - target)
         if err < best_err:
             best_err = err
             best = (k, mark)
     return best
+
+
+def iv_delta(
+    symbol: str,
+    minute: int,
+    mark: float,
+    spot: float,
+    strike: float,
+    t_yr: float,
+    is_call: bool,
+) -> tuple[float | None, float | None]:
+    """Cache IV + abs delta by (symbol, minute); recompute if spot/t differ."""
+    ck = (symbol, int(minute))
+    hit = _IV.get(ck)
+    if (
+        hit is not None
+        and hit[0] == float(spot)
+        and hit[1] == float(t_yr)
+        and hit[2] == is_call
+        and hit[3] == float(mark)
+    ):
+        return hit[4], hit[5]
+    iv = implied_vol_bisection(mark, spot, strike, t_yr, is_call)
+    dlt = (
+        black76_abs_delta(spot, strike, t_yr, iv, is_call) if iv is not None else None
+    )
+    _IV[ck] = (float(spot), float(t_yr), is_call, float(mark), iv, dlt)
+    return iv, dlt
 
 
 @dataclass
@@ -426,14 +460,71 @@ class _Basket:
 
 
 _BASKET: dict[tuple[int, str], _Basket] = {}
-_CHAIN: dict[tuple[str, int], tuple[dict[float, float], dict[float, float]]] = {}
-_MARK: dict[tuple[str, bool, float, int], float | None] = {}
+_CHAIN: dict[tuple[str, int, int], tuple[dict[float, float], dict[float, float]]] = {}
+_MARK: dict[tuple[str, int], float | None] = {}  # (symbol, minute)
+_IV: dict[tuple[str, int], tuple[float, float, bool, float, float | None, float | None]] = {}
+_STRIKES: dict[str, list[tuple[float, bool]]] = {}
+
+
+def expiry_strikes(store: MarksStore, expiry: date) -> list[tuple[float, bool]]:
+    """DISTINCT strike, opt_type for this contract-expiry month. Cached."""
+    key = expiry.isoformat()
+    hit = _STRIKES.get(key)
+    if hit is not None:
+        return hit
+    conn = store.conn(expiry)
+    if conn is None:
+        _STRIKES[key] = []
+        return []
+    rows = conn.execute(
+        "SELECT DISTINCT strike, opt_type FROM marks WHERE expiry=?",
+        (key,),
+    ).fetchall()
+    out: list[tuple[float, bool]] = []
+    for strike, opt in rows:
+        out.append((float(strike), str(opt).lower().startswith("c")))
+    _STRIKES[key] = out
+    return out
+
+
+def mark_by_symbol(
+    store: MarksStore, expiry: date, symbol: str, minute: int
+) -> float | None:
+    ck = (symbol, int(minute))
+    if ck in _MARK:
+        return _MARK[ck]
+    conn = store.conn(expiry)
+    if conn is None:
+        _MARK[ck] = None
+        return None
+    tol = cfg.MARK_TOL_SEC
+    rows = conn.execute(
+        """
+        SELECT ts, close FROM marks
+        WHERE symbol=? AND ts BETWEEN ? AND ?
+          AND close IS NOT NULL AND close > 0
+        """,
+        (symbol, int(minute) - tol, int(minute) + tol),
+    ).fetchall()
+    best: float | None = None
+    best_ad = tol + 1
+    best_ts = 10**18
+    for ts_m, close in rows:
+        ad = abs(int(ts_m) - int(minute))
+        ts_i = int(ts_m)
+        if ad < best_ad or (ad == best_ad and ts_i < best_ts):
+            best_ad = ad
+            best_ts = ts_i
+            best = float(close)
+    _MARK[ck] = best
+    return best
 
 
 def load_chain(
-    store: MarksStore, expiry: date, ts: int
+    store: MarksStore, expiry: date, ts: int, spot: float
 ) -> tuple[dict[float, float], dict[float, float]]:
-    key = (expiry.isoformat(), (int(ts) // 60) * 60)
+    minute = (int(ts) // 60) * 60
+    key = (expiry.isoformat(), minute, int(round(spot)))
     hit = _CHAIN.get(key)
     if hit is not None:
         return hit
@@ -441,30 +532,20 @@ def load_chain(
     if conn is None:
         _CHAIN[key] = ({}, {})
         return {}, {}
-    minute = key[1]
-    tol = cfg.MARK_TOL_SEC
-    rows = conn.execute(
-        """
-        SELECT ts, strike, opt_type, close FROM marks
-        WHERE expiry=? AND ts BETWEEN ? AND ?
-          AND close IS NOT NULL AND close > 0
-        """,
-        (expiry.isoformat(), minute - tol, minute + tol),
-    ).fetchall()
-    best: dict[tuple[str, float], tuple[int, float]] = {}
-    for ts_m, strike, opt, close in rows:
-        ad = abs(int(ts_m) - minute)
-        ck = (str(opt).lower(), float(strike))
-        prev = best.get(ck)
-        if prev is None or ad < prev[0]:
-            best[ck] = (ad, float(close))
     calls: dict[float, float] = {}
     puts: dict[float, float] = {}
-    for (opt, k), (_, px) in best.items():
-        if opt.startswith("c"):
-            calls[k] = px
+    band = float(cfg.STRIKE_BAND)
+    for strike, is_call in expiry_strikes(store, expiry):
+        if abs(strike - float(spot)) > band:
+            continue
+        sym = option_symbol(is_call, strike, expiry)
+        px = mark_by_symbol(store, expiry, sym, minute)
+        if px is None:
+            continue
+        if is_call:
+            calls[strike] = px
         else:
-            puts[k] = px
+            puts[strike] = px
     _CHAIN[key] = (calls, puts)
     return calls, puts
 
@@ -475,13 +556,14 @@ def expiry_choice(
     """0DTE if still before 17:30 IST and Leg-1 ATM mark > 200; else 1DTE."""
     d0 = ist_date(entry_ts)
     e0 = to_unix(ist_dt(d0, cfg.EXPIRY_HOUR_IST, cfg.EXPIRY_MINUTE_IST))
+    minute = (int(entry_ts) // 60) * 60
     if e0 > entry_ts:
-        calls, puts = load_chain(store, d0, entry_ts)
+        calls, puts = load_chain(store, d0, entry_ts, spot)
         t0 = t_years(entry_ts, e0)
         if side == "long":
-            atm = pick_delta(calls, spot, t0, cfg.ATM_DELTA, True)
+            atm = pick_delta(calls, spot, t0, cfg.ATM_DELTA, True, d0, minute)
         else:
-            atm = pick_delta(puts, spot, t0, cfg.ATM_DELTA, False)
+            atm = pick_delta(puts, spot, t0, cfg.ATM_DELTA, False, d0, minute)
         if atm is not None and atm[1] > cfg.ATM_MARK_0DTE_MIN:
             return d0, e0, "0DTE"
     d1 = d0 + timedelta(days=1)
@@ -495,33 +577,9 @@ def mark_at(
     store: MarksStore, expiry: date, is_call: bool, strike: float, ts: int
 ) -> float | None:
     minute = (int(ts) // 60) * 60
-    ck = (expiry.isoformat(), is_call, float(strike), minute)
-    if ck in _MARK:
-        return _MARK[ck]
-    conn = store.conn(expiry)
-    if conn is None:
-        _MARK[ck] = None
-        return None
-    opt = "call" if is_call else "put"
-    best: float | None = None
-    best_ad = cfg.MARK_TOL_SEC + 1
-    for dlt in range(-cfg.MARK_TOL_SEC, cfg.MARK_TOL_SEC + 1, 60):
-        row = conn.execute(
-            """
-            SELECT close FROM marks
-            WHERE expiry=? AND ts=? AND opt_type=? AND strike=?
-              AND close IS NOT NULL AND close > 0
-            """,
-            (expiry.isoformat(), minute + dlt, opt, float(strike)),
-        ).fetchone()
-        if row is None:
-            continue
-        ad = abs(dlt)
-        if ad < best_ad:
-            best_ad = ad
-            best = float(row[0])
-    _MARK[ck] = best
-    return best
+    return mark_by_symbol(
+        store, expiry, option_symbol(is_call, strike, expiry), minute
+    )
 
 
 def intrinsic(is_call: bool, strike: float, spot: float) -> float:
@@ -561,15 +619,16 @@ def resolve_basket(store: MarksStore, sig: Signal) -> _Basket:
         _BASKET[key] = b
         return b
     exp_d, exp_ts, dte_lab = exp
-    calls, puts = load_chain(store, exp_d, sig.entry_ts)
+    minute = (int(sig.entry_ts) // 60) * 60
+    calls, puts = load_chain(store, exp_d, sig.entry_ts, sig.spot_entry)
     t_yr = t_years(sig.entry_ts, exp_ts)
     if sig.side == "long":
-        a = pick_delta(calls, sig.spot_entry, t_yr, cfg.ATM_DELTA, True)
-        w = pick_delta(puts, sig.spot_entry, t_yr, cfg.WING_DELTA, False)
+        a = pick_delta(calls, sig.spot_entry, t_yr, cfg.ATM_DELTA, True, exp_d, minute)
+        w = pick_delta(puts, sig.spot_entry, t_yr, cfg.WING_DELTA, False, exp_d, minute)
         a_call, w_call = True, False
     else:
-        a = pick_delta(puts, sig.spot_entry, t_yr, cfg.ATM_DELTA, False)
-        w = pick_delta(calls, sig.spot_entry, t_yr, cfg.WING_DELTA, True)
+        a = pick_delta(puts, sig.spot_entry, t_yr, cfg.ATM_DELTA, False, exp_d, minute)
+        w = pick_delta(calls, sig.spot_entry, t_yr, cfg.WING_DELTA, True, exp_d, minute)
         a_call, w_call = False, True
     if a is None or w is None:
         b = _Basket(

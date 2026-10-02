@@ -27,6 +27,7 @@ WING_DELTA = 0.25
 ATM_MARK_0DTE_MIN = 200.0
 
 MARK_TOL_SEC = 60
+STRIKE_BAND = 6000.0  # load_chain: keep strikes within ± this of spot
 SECONDS_PER_YEAR = 365.25 * 24.0 * 3600.0
 
 RANDOM_MULT = 3
