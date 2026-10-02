@@ -1,0 +1,46 @@
+S013 Smith signal + S012 basket
+stamp=20261002T200648Z
+DATA_START=2025-01-01
+H1=2025-01-01..2025-10-31  H2=2025-11-01..2026-09-30
+lookahead_fail=0  elapsed_sec=22.4
+
+RSI=14 N=1.0
+  signal H1 n=17 win%=47.1 mean=-11.5618 med=-34.2817 worst=-619.9352 gross=342.32 fees=538.87 slip=217.08 maxDD=-1788.2127 hold_min=283.5 tgt%=35.3 stop%=41.2 exp%=23.5 0DTE%=47.1 meanW=1228.64 same_bar=0 runner_wait%=11.8 mark_missing=0 CI95=[-137.0996, 192.0413]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=60 win%=43.3 mean=-59.8482 med=-34.8575 worst=-1418.0114 gross=-1584.28 fees=2006.61 slip=811.29 maxDD=-6375.8114 hold_min=410.1 tgt%=41.7 stop%=36.7 exp%=26.7 0DTE%=40.0 meanW=1067.44 same_bar=0 runner_wait%=8.3 mark_missing=0 CI95=[-205.8731, 127.2610]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+
+RSI=14 N=1.5
+  signal H1 n=17 win%=35.3 mean=-79.3141 med=-125.4483 worst=-619.9352 gross=-803.24 fees=545.10 slip=211.94 maxDD=-1928.4132 hold_min=264.9 tgt%=29.4 stop%=47.1 exp%=23.5 0DTE%=47.1 meanW=1228.64 same_bar=0 runner_wait%=11.8 mark_missing=0 CI95=[-196.1591, 121.9925]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=60 win%=36.7 mean=-35.0528 med=-138.6572 worst=-1418.0114 gross=10.47 fees=2113.64 slip=836.41 maxDD=-5077.5134 hold_min=327.0 tgt%=38.3 stop%=50.0 exp%=16.7 0DTE%=40.0 meanW=1067.44 same_bar=0 runner_wait%=6.7 mark_missing=0 CI95=[-166.2779, 147.4405]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+
+RSI=14 N=2.0
+  signal H1 n=18 win%=38.9 mean=-10.1472 med=-84.6949 worst=-327.7248 gross=413.22 fees=595.87 slip=237.41 maxDD=-987.1796 hold_min=204.5 tgt%=27.8 stop%=55.6 exp%=16.7 0DTE%=50.0 meanW=1212.12 same_bar=0 runner_wait%=11.1 mark_missing=0 CI95=[-114.9729, 146.5564]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=60 win%=28.3 mean=-49.5795 med=-138.5229 worst=-965.5238 gross=-751.78 fees=2222.99 slip=853.08 maxDD=-4457.9293 hold_min=223.3 tgt%=30.0 stop%=63.3 exp%=8.3 0DTE%=40.0 meanW=1067.44 same_bar=0 runner_wait%=6.7 mark_missing=0 CI95=[-122.0690, 55.5390]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+
+RSI=14 N=2.5
+  signal H1 n=18 win%=38.9 mean=12.9650 med=-62.2245 worst=-310.7719 gross=843.29 fees=609.92 slip=243.72 maxDD=-576.6104 hold_min=179.7 tgt%=27.8 stop%=55.6 exp%=16.7 0DTE%=50.0 meanW=1212.12 same_bar=0 runner_wait%=11.1 mark_missing=0 CI95=[-83.0235, 157.5658]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=60 win%=25.0 mean=-55.6959 med=-141.4576 worst=-961.6089 gross=-1089.36 fees=2252.40 slip=852.35 maxDD=-4792.6130 hold_min=203.5 tgt%=26.7 stop%=68.3 exp%=6.7 0DTE%=40.0 meanW=1067.44 same_bar=0 runner_wait%=6.7 mark_missing=0 CI95=[-125.7246, 51.8119]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+
+RSI=14 N=3.0
+  signal H1 n=18 win%=38.9 mean=15.9192 med=-62.6147 worst=-310.7719 gross=899.41 fees=612.87 slip=236.86 maxDD=-488.3620 hold_min=177.5 tgt%=27.8 stop%=55.6 exp%=16.7 0DTE%=50.0 meanW=1212.12 same_bar=0 runner_wait%=11.1 mark_missing=0 CI95=[-82.6331, 159.4813]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=60 win%=21.7 mean=-59.1849 med=-144.9119 worst=-955.7431 gross=-1284.80 fees=2266.29 slip=843.67 maxDD=-4672.7527 hold_min=187.0 tgt%=23.3 stop%=71.7 exp%=6.7 0DTE%=40.0 meanW=1067.44 same_bar=0 runner_wait%=6.7 mark_missing=0 CI95=[-137.4757, 56.3689]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+
+RSI=14 N=3.5
+  signal H1 n=18 win%=38.9 mean=23.9681 med=-67.0691 worst=-310.7719 gross=1050.12 fees=618.70 slip=237.38 maxDD=-482.5739 hold_min=171.1 tgt%=27.8 stop%=55.6 exp%=16.7 0DTE%=50.0 meanW=1212.12 same_bar=0 runner_wait%=11.1 mark_missing=0 CI95=[-68.4127, 173.9162]
+  signal H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+  random H1 n=60 win%=18.3 mean=-61.1861 med=-140.1350 worst=-962.9425 gross=-1387.83 fees=2283.34 slip=837.49 maxDD=-4921.8790 hold_min=159.7 tgt%=18.3 stop%=76.7 exp%=6.7 0DTE%=40.0 meanW=1067.44 same_bar=0 runner_wait%=3.3 mark_missing=0 CI95=[-134.2079, 54.2348]
+  random H2 n=0 win%=nan mean=nan med=nan worst=nan gross=0.00 fees=0.00 slip=0.00 maxDD=0.0000 hold_min=nan tgt%=nan stop%=nan exp%=nan 0DTE%=nan meanW=nan same_bar=0 runner_wait%=nan mark_missing=0 CI95=[nan, nan]
+
+--- PRE-REGISTERED PASS/FAIL ---
+best_H1_cell=RSI=14 N=3.5 H1_mean=23.968141
+H2_mean=nan H2_CI_lo=nan H2_random_mean=nan
+FAIL
