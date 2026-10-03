@@ -1,0 +1,478 @@
+S017 ST-flip engulfing scalper 1m
+stamp=20261003T172306Z ST=(20,1.0) signals=63
+=== 30s CHECK (no download) ===
+download_candles.py RESOLUTION_SECONDS has: 1m,3m,5m,15m — no 30s
+Delta GET /v2/history/candles resolution=30s -> HTTP 400
+Allowed values: 5s,1m,3m,5m,15m,30m,1h,2h,4h,6h,1d,1w
+30s supported: NO (5s yes, 30s no)
+
+=== Binance BTCUSDT 1s klines estimate (NOT downloaded) ===
+Source: data.binance.vision spot monthly 1s zips
+HEAD BTCUSDT-1s-2024-07.zip = 78.8 MB  2025-01 = 85.0 MB  2025-06 = 71.7 MB  2026-09 = 404
+Window 2024-07..2026-09 = 27 months; ~26 published * ~78 MB ~ 2.0 GB compressed
+Uncompressed CSV ~8-12x zip -> roughly 16-24 GB on disk
+Rows ~ 86400 s/day * ~820 days ~ 71e6 one-second bars
+Download time ~15-40 min on a typical home link; parse/load several hours
+
+CELL SL=candle|M=1
+  F0 2024H2 n=60 /day=20.000 win%=56.7 risk=47.29 (med=42.75) avgR=0.120 net/t=7.4667 total=448.0 maxDD=-256.0 loseStreak=5 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=60 /day=20.000 win%=6.7 risk=47.29 (med=42.75) avgR=-1.896 net/t=-66.0058 total=-3960.3 maxDD=-3960.3 loseStreak=24 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=60 /day=20.000 win%=21.7 risk=47.29 (med=42.75) avgR=-1.555 net/t=-53.4928 total=-3209.6 maxDD=-3209.6 loseStreak=11 amb=0 rnd_net=-64.8559
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=60 /day=20.000 win%=38.3 risk=47.29 (med=42.75) avgR=-0.891 net/t=-29.5065 total=-1770.4 maxDD=-1770.4 loseStreak=10 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=candle|M=2
+  F0 2024H2 n=56 /day=18.667 win%=37.5 risk=48.49 (med=44.25) avgR=0.110 net/t=7.9464 total=445.0 maxDD=-507.0 loseStreak=8 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=56 /day=18.667 win%=25.0 risk=48.49 (med=44.25) avgR=-1.824 net/t=-65.5018 total=-3668.1 maxDD=-3668.1 loseStreak=15 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=56 /day=18.667 win%=32.1 risk=48.49 (med=44.25) avgR=-1.603 net/t=-57.2321 total=-3205.0 maxDD=-3228.8 loseStreak=10 amb=0 rnd_net=-62.3588
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=56 /day=18.667 win%=33.9 risk=48.49 (med=44.25) avgR=-0.894 net/t=-31.5250 total=-1765.4 maxDD=-1900.5 loseStreak=8 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=candle|M=3
+  F0 2024H2 n=51 /day=17.000 win%=19.6 risk=48.25 (med=45.50) avgR=-0.234 net/t=-10.3039 total=-525.5 maxDD=-966.5 loseStreak=8 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=51 /day=17.000 win%=19.6 risk=48.25 (med=45.50) avgR=-2.205 net/t=-83.7311 total=-4270.3 maxDD=-4426.6 loseStreak=8 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=51 /day=17.000 win%=19.6 risk=48.25 (med=45.50) avgR=-2.098 net/t=-79.4265 total=-4050.7 maxDD=-4249.6 loseStreak=8 amb=0 rnd_net=-59.0512
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=51 /day=17.000 win%=19.6 risk=48.25 (med=45.50) avgR=-1.291 net/t=-51.9086 total=-2647.3 maxDD=-2931.7 loseStreak=8 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=candle|M=5
+  F0 2024H2 n=47 /day=15.667 win%=14.9 risk=50.41 (med=47.50) avgR=-0.125 net/t=-10.6064 total=-498.5 maxDD=-1053.5 loseStreak=9 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=47 /day=15.667 win%=14.9 risk=50.41 (med=47.50) avgR=-1.955 net/t=-83.9415 total=-3945.2 maxDD=-4203.4 loseStreak=9 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=47 /day=15.667 win%=14.9 risk=50.41 (med=47.50) avgR=-1.869 net/t=-80.6645 total=-3791.2 maxDD=-4070.7 loseStreak=9 amb=0 rnd_net=-78.8632
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=47 /day=15.667 win%=14.9 risk=50.41 (med=47.50) avgR=-1.146 net/t=-53.9929 total=-2537.7 maxDD=-2852.7 loseStreak=9 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=candle|M=10
+  F0 2024H2 n=41 /day=13.667 win%=17.1 risk=50.02 (med=47.50) avgR=0.858 net/t=47.2927 total=1939.0 maxDD=-710.0 loseStreak=17 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=41 /day=13.667 win%=17.1 risk=50.02 (med=47.50) avgR=-1.002 net/t=-25.9966 total=-1065.9 maxDD=-2583.7 loseStreak=17 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=41 /day=13.667 win%=17.1 risk=50.02 (med=47.50) avgR=-0.918 net/t=-22.2435 total=-912.0 maxDD=-2540.3 loseStreak=17 amb=0 rnd_net=-78.8632
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=41 /day=13.667 win%=17.1 risk=50.02 (med=47.50) avgR=-0.224 net/t=3.1347 total=128.5 maxDD=-1795.5 loseStreak=17 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=10|M=1
+  F0 2024H2 n=63 /day=21.000 win%=49.2 risk=10.00 (med=10.00) avgR=-0.186 net/t=-1.8571 total=-117.0 maxDD=-166.0 loseStreak=5 amb=10
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=63 /day=21.000 win%=0.0 risk=10.00 (med=10.00) avgR=-7.532 net/t=-75.3176 total=-4745.0 maxDD=-4745.0 loseStreak=63 amb=10
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=63 /day=21.000 win%=0.0 risk=10.00 (med=10.00) avgR=-6.444 net/t=-64.4412 total=-4059.8 maxDD=-4059.8 loseStreak=63 amb=10 rnd_net=-66.6167
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=63 /day=21.000 win%=0.0 risk=10.00 (med=10.00) avgR=-3.859 net/t=-38.5867 total=-2431.0 maxDD=-2431.0 loseStreak=63 amb=10
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=10|M=2
+  F0 2024H2 n=63 /day=21.000 win%=36.5 risk=10.00 (med=10.00) avgR=-0.113 net/t=-1.1349 total=-71.5 maxDD=-176.0 loseStreak=7 amb=7
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=63 /day=21.000 win%=0.0 risk=10.00 (med=10.00) avgR=-7.460 net/t=-74.5950 total=-4699.5 maxDD=-4699.5 loseStreak=63 amb=7
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=63 /day=21.000 win%=0.0 risk=10.00 (med=10.00) avgR=-6.653 net/t=-66.5263 total=-4191.2 maxDD=-4191.2 loseStreak=63 amb=7 rnd_net=-65.4183
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=63 /day=21.000 win%=0.0 risk=10.00 (med=10.00) avgR=-3.786 net/t=-37.8645 total=-2385.5 maxDD=-2385.5 loseStreak=63 amb=7
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=10|M=3
+  F0 2024H2 n=62 /day=20.667 win%=27.4 risk=10.00 (med=10.00) avgR=-0.159 net/t=-1.5887 total=-98.5 maxDD=-265.0 loseStreak=10 amb=3
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=62 /day=20.667 win%=0.0 risk=10.00 (med=10.00) avgR=-7.503 net/t=-75.0276 total=-4651.7 maxDD=-4651.7 loseStreak=62 amb=3
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=62 /day=20.667 win%=0.0 risk=10.00 (med=10.00) avgR=-6.896 net/t=-68.9571 total=-4275.3 maxDD=-4275.3 loseStreak=62 amb=3 rnd_net=-62.5180
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=62 /day=20.667 win%=0.0 risk=10.00 (med=10.00) avgR=-3.831 net/t=-38.3071 total=-2375.0 maxDD=-2375.0 loseStreak=62 amb=3
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=10|M=5
+  F0 2024H2 n=62 /day=20.667 win%=21.0 risk=10.00 (med=10.00) avgR=-0.001 net/t=-0.0081 total=-0.5 maxDD=-241.0 loseStreak=10 amb=2
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=62 /day=20.667 win%=0.0 risk=10.00 (med=10.00) avgR=-7.345 net/t=-73.4475 total=-4553.7 maxDD=-4553.7 loseStreak=62 amb=2
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=62 /day=20.667 win%=3.2 risk=10.00 (med=10.00) avgR=-6.882 net/t=-68.8182 total=-4266.7 maxDD=-4266.7 loseStreak=56 amb=2 rnd_net=-60.9312
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=62 /day=20.667 win%=21.0 risk=10.00 (med=10.00) avgR=-3.673 net/t=-36.7264 total=-2277.0 maxDD=-2277.0 loseStreak=10 amb=2
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=10|M=10
+  F0 2024H2 n=61 /day=20.333 win%=9.8 risk=10.00 (med=10.00) avgR=-0.207 net/t=-2.0738 total=-126.5 maxDD=-413.0 loseStreak=30 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=61 /day=20.333 win%=9.8 risk=10.00 (med=10.00) avgR=-7.551 net/t=-75.5056 total=-4605.8 maxDD=-4605.8 loseStreak=30 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=61 /day=20.333 win%=9.8 risk=10.00 (med=10.00) avgR=-7.331 net/t=-73.3116 total=-4472.0 maxDD=-4472.0 loseStreak=30 amb=0 rnd_net=-69.6120
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=61 /day=20.333 win%=9.8 risk=10.00 (med=10.00) avgR=-3.940 net/t=-39.4009 total=-2403.5 maxDD=-2403.5 loseStreak=30 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=20|M=1
+  F0 2024H2 n=63 /day=21.000 win%=52.4 risk=20.00 (med=20.00) avgR=0.014 net/t=0.2778 total=17.5 maxDD=-185.5 loseStreak=7 amb=3
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=63 /day=21.000 win%=0.0 risk=20.00 (med=20.00) avgR=-3.659 net/t=-73.1816 total=-4610.4 maxDD=-4610.4 loseStreak=63 amb=3
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=63 /day=21.000 win%=0.0 risk=20.00 (med=20.00) avgR=-3.082 net/t=-61.6317 total=-3882.8 maxDD=-3882.8 loseStreak=63 amb=3 rnd_net=-58.8524
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=63 /day=21.000 win%=0.0 risk=20.00 (med=20.00) avgR=-1.823 net/t=-36.4518 total=-2296.5 maxDD=-2296.5 loseStreak=63 amb=3
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=20|M=2
+  F0 2024H2 n=60 /day=20.000 win%=41.7 risk=20.00 (med=20.00) avgR=0.186 net/t=3.7167 total=223.0 maxDD=-157.0 loseStreak=7 amb=1
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=60 /day=20.000 win%=0.0 risk=20.00 (med=20.00) avgR=-3.486 net/t=-69.7289 total=-4183.7 maxDD=-4183.7 loseStreak=60 amb=1
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=60 /day=20.000 win%=0.0 risk=20.00 (med=20.00) avgR=-3.026 net/t=-60.5294 total=-3631.8 maxDD=-3631.8 loseStreak=60 amb=1 rnd_net=-50.7452
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=60 /day=20.000 win%=41.7 risk=20.00 (med=20.00) avgR=-1.650 net/t=-33.0044 total=-1980.3 maxDD=-1980.3 loseStreak=7 amb=1
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=20|M=3
+  F0 2024H2 n=60 /day=20.000 win%=31.7 risk=20.00 (med=20.00) avgR=0.198 net/t=3.9500 total=237.0 maxDD=-198.0 loseStreak=9 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=60 /day=20.000 win%=0.0 risk=20.00 (med=20.00) avgR=-3.475 net/t=-69.4946 total=-4169.7 maxDD=-4169.7 loseStreak=60 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=60 /day=20.000 win%=31.7 risk=20.00 (med=20.00) avgR=-3.125 net/t=-62.5061 total=-3750.4 maxDD=-3750.4 loseStreak=9 amb=0 rnd_net=-51.0725
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=60 /day=20.000 win%=31.7 risk=20.00 (med=20.00) avgR=-1.639 net/t=-32.7711 total=-1966.3 maxDD=-1966.3 loseStreak=9 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=20|M=5
+  F0 2024H2 n=58 /day=19.333 win%=19.0 risk=20.00 (med=20.00) avgR=0.046 net/t=0.9138 total=53.0 maxDD=-333.0 loseStreak=11 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=58 /day=19.333 win%=19.0 risk=20.00 (med=20.00) avgR=-3.628 net/t=-72.5535 total=-4208.1 maxDD=-4208.1 loseStreak=11 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=58 /day=19.333 win%=19.0 risk=20.00 (med=20.00) avgR=-3.418 net/t=-68.3536 total=-3964.5 maxDD=-3964.5 loseStreak=11 amb=0 rnd_net=-48.3027
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=58 /day=19.333 win%=19.0 risk=20.00 (med=20.00) avgR=-1.854 net/t=-37.0817 total=-2150.7 maxDD=-2150.7 loseStreak=11 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=20|M=10
+  F0 2024H2 n=56 /day=18.667 win%=8.9 risk=20.00 (med=20.00) avgR=-0.119 net/t=-2.3839 total=-133.5 maxDD=-319.0 loseStreak=13 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=56 /day=18.667 win%=8.9 risk=20.00 (med=20.00) avgR=-3.794 net/t=-75.8714 total=-4248.8 maxDD=-4248.8 loseStreak=13 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=56 /day=18.667 win%=8.9 risk=20.00 (med=20.00) avgR=-3.695 net/t=-73.8941 total=-4138.1 maxDD=-4138.1 loseStreak=13 amb=0 rnd_net=-68.8499
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=56 /day=18.667 win%=8.9 risk=20.00 (med=20.00) avgR=-2.133 net/t=-42.6606 total=-2389.0 maxDD=-2389.0 loseStreak=13 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=30|M=1
+  F0 2024H2 n=58 /day=19.333 win%=53.4 risk=30.00 (med=30.00) avgR=0.044 net/t=1.3190 total=76.5 maxDD=-202.0 loseStreak=5 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=58 /day=19.333 win%=0.0 risk=30.00 (med=30.00) avgR=-2.404 net/t=-72.1175 total=-4182.8 maxDD=-4182.8 loseStreak=58 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=58 /day=19.333 win%=0.0 risk=30.00 (med=30.00) avgR=-2.011 net/t=-60.3413 total=-3499.8 maxDD=-3499.8 loseStreak=58 amb=0 rnd_net=-59.5461
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=58 /day=19.333 win%=0.0 risk=30.00 (med=30.00) avgR=-1.180 net/t=-35.3970 total=-2053.0 maxDD=-2053.0 loseStreak=58 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=30|M=2
+  F0 2024H2 n=58 /day=19.333 win%=36.2 risk=30.00 (med=30.00) avgR=0.056 net/t=1.6897 total=98.0 maxDD=-185.0 loseStreak=6 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=58 /day=19.333 win%=0.0 risk=30.00 (med=30.00) avgR=-2.392 net/t=-71.7459 total=-4161.3 maxDD=-4161.3 loseStreak=58 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=58 /day=19.333 win%=36.2 risk=30.00 (med=30.00) avgR=-2.125 net/t=-63.7468 total=-3697.3 maxDD=-3697.3 loseStreak=6 amb=0 rnd_net=-44.9456
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=58 /day=19.333 win%=36.2 risk=30.00 (med=30.00) avgR=-1.168 net/t=-35.0263 total=-2031.5 maxDD=-2031.5 loseStreak=6 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=30|M=3
+  F0 2024H2 n=55 /day=18.333 win%=29.1 risk=30.00 (med=30.00) avgR=0.124 net/t=3.7273 total=205.0 maxDD=-258.0 loseStreak=7 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=55 /day=18.333 win%=29.1 risk=30.00 (med=30.00) avgR=-2.323 net/t=-69.7043 total=-3833.7 maxDD=-3833.7 loseStreak=7 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=55 /day=18.333 win%=29.1 risk=30.00 (med=30.00) avgR=-2.110 net/t=-63.2877 total=-3480.8 maxDD=-3480.8 loseStreak=7 amb=0 rnd_net=-40.7087
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=55 /day=18.333 win%=29.1 risk=30.00 (med=30.00) avgR=-1.100 net/t=-32.9876 total=-1814.3 maxDD=-1814.3 loseStreak=7 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=30|M=5
+  F0 2024H2 n=52 /day=17.333 win%=15.4 risk=30.00 (med=30.00) avgR=-0.125 net/t=-3.7500 total=-195.0 maxDD=-505.0 loseStreak=10 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=52 /day=17.333 win%=15.4 risk=30.00 (med=30.00) avgR=-2.573 net/t=-77.1976 total=-4014.3 maxDD=-4014.3 loseStreak=10 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=52 /day=17.333 win%=15.4 risk=30.00 (med=30.00) avgR=-2.459 net/t=-73.7766 total=-3836.4 maxDD=-3836.4 loseStreak=10 amb=0 rnd_net=-56.0219
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=52 /day=17.333 win%=15.4 risk=30.00 (med=30.00) avgR=-1.428 net/t=-42.8386 total=-2227.6 maxDD=-2227.6 loseStreak=10 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=30|M=10
+  F0 2024H2 n=47 /day=15.667 win%=12.8 risk=30.00 (med=30.00) avgR=0.354 net/t=10.6170 total=499.0 maxDD=-379.0 loseStreak=12 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=47 /day=15.667 win%=12.8 risk=30.00 (med=30.00) avgR=-2.093 net/t=-62.7998 total=-2951.6 maxDD=-2951.6 loseStreak=12 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=47 /day=15.667 win%=12.8 risk=30.00 (med=30.00) avgR=-1.999 net/t=-59.9691 total=-2818.5 maxDD=-2818.5 loseStreak=12 amb=0 rnd_net=-101.7990
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=47 /day=15.667 win%=12.8 risk=30.00 (med=30.00) avgR=-1.015 net/t=-30.4641 total=-1431.8 maxDD=-1431.8 loseStreak=12 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=40|M=1
+  F0 2024H2 n=57 /day=19.000 win%=56.1 risk=40.00 (med=40.00) avgR=0.113 net/t=4.5000 total=256.5 maxDD=-213.0 loseStreak=5 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=57 /day=19.000 win%=0.0 risk=40.00 (med=40.00) avgR=-1.723 net/t=-68.9120 total=-3928.0 maxDD=-3928.0 loseStreak=57 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=57 /day=19.000 win%=0.0 risk=40.00 (med=40.00) avgR=-1.414 net/t=-56.5495 total=-3223.3 maxDD=-3223.3 loseStreak=57 amb=0 rnd_net=-59.3590
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=57 /day=19.000 win%=56.1 risk=40.00 (med=40.00) avgR=-0.805 net/t=-32.2033 total=-1835.6 maxDD=-1840.0 loseStreak=5 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=40|M=2
+  F0 2024H2 n=55 /day=18.333 win%=40.0 risk=40.00 (med=40.00) avgR=0.188 net/t=7.5000 total=412.5 maxDD=-292.5 loseStreak=7 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=55 /day=18.333 win%=40.0 risk=40.00 (med=40.00) avgR=-1.648 net/t=-65.9272 total=-3626.0 maxDD=-3634.8 loseStreak=7 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=55 /day=18.333 win%=40.0 risk=40.00 (med=40.00) avgR=-1.428 net/t=-57.1210 total=-3141.7 maxDD=-3171.8 loseStreak=7 amb=0 rnd_net=-39.8915
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=55 /day=18.333 win%=40.0 risk=40.00 (med=40.00) avgR=-0.777 net/t=-31.0907 total=-1710.0 maxDD=-1740.2 loseStreak=7 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=40|M=3
+  F0 2024H2 n=51 /day=17.000 win%=27.5 risk=40.00 (med=40.00) avgR=0.084 net/t=3.3431 total=170.5 maxDD=-454.5 loseStreak=8 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=51 /day=17.000 win%=27.5 risk=40.00 (med=40.00) avgR=-1.753 net/t=-70.1131 total=-3575.8 maxDD=-3624.6 loseStreak=8 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=51 /day=17.000 win%=27.5 risk=40.00 (med=40.00) avgR=-1.601 net/t=-64.0459 total=-3266.3 maxDD=-3336.5 loseStreak=8 amb=0 rnd_net=-68.8949
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=51 /day=17.000 win%=27.5 risk=40.00 (med=40.00) avgR=-0.938 net/t=-37.5315 total=-1914.1 maxDD=-1984.3 loseStreak=8 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=40|M=5
+  F0 2024H2 n=50 /day=16.667 win%=16.0 risk=40.00 (med=40.00) avgR=-0.058 net/t=-2.3100 total=-115.5 maxDD=-580.5 loseStreak=10 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=50 /day=16.667 win%=16.0 risk=40.00 (med=40.00) avgR=-1.894 net/t=-75.7568 total=-3787.8 maxDD=-3787.8 loseStreak=10 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=50 /day=16.667 win%=16.0 risk=40.00 (med=40.00) avgR=-1.805 net/t=-72.2009 total=-3610.0 maxDD=-3610.0 loseStreak=10 amb=0 rnd_net=-85.8215
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=50 /day=16.667 win%=16.0 risk=40.00 (med=40.00) avgR=-1.144 net/t=-45.7655 total=-2288.3 maxDD=-2288.3 loseStreak=10 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=40|M=10
+  F0 2024H2 n=39 /day=13.000 win%=12.8 risk=40.00 (med=40.00) avgR=0.390 net/t=15.6026 total=608.5 maxDD=-324.0 loseStreak=8 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=39 /day=13.000 win%=12.8 risk=40.00 (med=40.00) avgR=-1.442 net/t=-57.6816 total=-2249.6 maxDD=-2249.6 loseStreak=8 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=39 /day=13.000 win%=12.8 risk=40.00 (med=40.00) avgR=-1.371 net/t=-54.8503 total=-2139.2 maxDD=-2139.2 loseStreak=8 amb=0 rnd_net=-109.2546
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=39 /day=13.000 win%=12.8 risk=40.00 (med=40.00) avgR=-0.776 net/t=-31.0212 total=-1209.8 maxDD=-1209.8 loseStreak=8 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=50|M=1
+  F0 2024H2 n=57 /day=19.000 win%=50.9 risk=50.00 (med=50.00) avgR=0.011 net/t=0.5702 total=32.5 maxDD=-261.5 loseStreak=5 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=57 /day=19.000 win%=0.0 risk=50.00 (med=50.00) avgR=-1.457 net/t=-72.8402 total=-4151.9 maxDD=-4151.9 loseStreak=57 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=57 /day=19.000 win%=5.3 risk=50.00 (med=50.00) avgR=-1.232 net/t=-61.6219 total=-3512.4 maxDD=-3512.6 loseStreak=51 amb=0 rnd_net=-60.4962
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=57 /day=19.000 win%=47.4 risk=50.00 (med=50.00) avgR=-0.733 net/t=-36.6550 total=-2089.3 maxDD=-2103.7 loseStreak=5 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=50|M=2
+  F0 2024H2 n=53 /day=17.667 win%=37.7 risk=50.00 (med=50.00) avgR=0.124 net/t=6.2170 total=329.5 maxDD=-560.0 loseStreak=8 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=53 /day=17.667 win%=37.7 risk=50.00 (med=50.00) avgR=-1.344 net/t=-67.2099 total=-3562.1 maxDD=-3591.0 loseStreak=8 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=53 /day=17.667 win%=37.7 risk=50.00 (med=50.00) avgR=-1.177 net/t=-58.8677 total=-3120.0 maxDD=-3170.2 loseStreak=8 amb=0 rnd_net=-43.0381
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=53 /day=17.667 win%=37.7 risk=50.00 (med=50.00) avgR=-0.674 net/t=-33.6766 total=-1784.9 maxDD=-1835.0 loseStreak=8 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=50|M=3
+  F0 2024H2 n=48 /day=16.000 win%=27.1 risk=50.00 (med=50.00) avgR=0.074 net/t=3.7188 total=178.5 maxDD=-710.5 loseStreak=10 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=48 /day=16.000 win%=27.1 risk=50.00 (med=50.00) avgR=-1.394 net/t=-69.6782 total=-3344.6 maxDD=-3344.6 loseStreak=10 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=48 /day=16.000 win%=27.1 risk=50.00 (med=50.00) avgR=-1.273 net/t=-63.6541 total=-3055.4 maxDD=-3055.4 loseStreak=10 amb=0 rnd_net=-58.9377
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=48 /day=16.000 win%=27.1 risk=50.00 (med=50.00) avgR=-0.781 net/t=-39.0647 total=-1875.1 maxDD=-1909.4 loseStreak=10 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=50|M=5
+  F0 2024H2 n=45 /day=15.000 win%=15.6 risk=50.00 (med=50.00) avgR=-0.082 net/t=-4.0778 total=-183.5 maxDD=-864.0 loseStreak=15 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=45 /day=15.000 win%=15.6 risk=50.00 (med=50.00) avgR=-1.549 net/t=-77.4672 total=-3486.0 maxDD=-3486.0 loseStreak=15 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=45 /day=15.000 win%=15.6 risk=50.00 (med=50.00) avgR=-1.480 net/t=-74.0099 total=-3330.4 maxDD=-3330.4 loseStreak=15 amb=0 rnd_net=-103.2338
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=45 /day=15.000 win%=15.6 risk=50.00 (med=50.00) avgR=-0.995 net/t=-49.7477 total=-2238.6 maxDD=-2426.8 loseStreak=15 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+CELL SL=50|M=10
+  F0 2024H2 n=37 /day=12.333 win%=10.8 risk=50.00 (med=50.00) avgR=0.174 net/t=8.7162 total=322.5 maxDD=-819.0 loseStreak=16 amb=0
+  F0 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F0 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2024H2 n=37 /day=12.333 win%=10.8 risk=50.00 (med=50.00) avgR=-1.290 net/t=-64.4768 total=-2385.6 maxDD=-2560.3 loseStreak=16 amb=0
+  F1 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F1 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2024H2 n=37 /day=12.333 win%=10.8 risk=50.00 (med=50.00) avgR=-1.242 net/t=-62.0983 total=-2297.6 maxDD=-2494.6 loseStreak=16 amb=0 rnd_net=-119.2699
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0 rnd_net=nan
+  F3 2024H2 n=37 /day=12.333 win%=10.8 risk=50.00 (med=50.00) avgR=-0.760 net/t=-37.9930 total=-1405.7 maxDD=-1775.3 loseStreak=16 amb=0
+  F3 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F3 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+
+=== SENSITIVITY ST ATR x mult (SL=candle M=2 F2, not PASS) ===
+ST=10x1.0
+  F2 2024H2 n=60 /day=20.000 win%=33.3 risk=45.10 (med=41.00) avgR=-1.694 net/t=-63.9276 total=-3835.7 maxDD=-3864.1 loseStreak=8 amb=0
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+ST=10x2.0
+  F2 2024H2 n=19 /day=6.333 win%=36.8 risk=49.18 (med=43.00) avgR=-1.501 net/t=-35.5136 total=-674.8 maxDD=-674.8 loseStreak=3 amb=0
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+ST=10x3.0
+  F2 2024H2 n=9 /day=3.000 win%=22.2 risk=54.33 (med=50.00) avgR=-1.963 net/t=-80.6041 total=-725.4 maxDD=-725.4 loseStreak=5 amb=0
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+ST=20x1.0
+  F2 2024H2 n=56 /day=18.667 win%=32.1 risk=48.49 (med=44.25) avgR=-1.603 net/t=-57.2321 total=-3205.0 maxDD=-3228.8 loseStreak=10 amb=0
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+ST=20x2.0
+  F2 2024H2 n=20 /day=6.667 win%=30.0 risk=52.33 (med=47.00) avgR=-1.615 net/t=-58.6639 total=-1173.3 maxDD=-1173.3 loseStreak=4 amb=0
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+ST=20x3.0
+  F2 2024H2 n=9 /day=3.000 win%=33.3 risk=58.94 (med=58.00) avgR=-1.400 net/t=-62.4494 total=-562.0 maxDD=-562.0 loseStreak=4 amb=0
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+ST=30x1.0
+  F2 2024H2 n=53 /day=17.667 win%=32.1 risk=49.52 (med=45.50) avgR=-1.561 net/t=-56.6348 total=-3001.6 maxDD=-3025.4 loseStreak=11 amb=0
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+ST=30x2.0
+  F2 2024H2 n=18 /day=6.000 win%=33.3 risk=55.22 (med=54.25) avgR=-1.513 net/t=-56.7872 total=-1022.2 maxDD=-1022.2 loseStreak=4 amb=0
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+ST=30x3.0
+  F2 2024H2 n=10 /day=3.333 win%=30.0 risk=57.55 (med=57.25) avgR=-1.523 net/t=-68.0635 total=-680.6 maxDD=-680.6 loseStreak=5 amb=0
+  F2 2025 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+  F2 2026 n=0 /day=0.000 win%=nan risk=nan (med=nan) avgR=nan net/t=nan total=0.0 maxDD=0.0 loseStreak=0 amb=0
+
+--- PRE-REGISTERED PASS (F2) ---
+FAIL-cand SL=candle|M=1 adj=0 | 2024H2 n=60 net=-53.492788233333336 rnd=-64.85593851666667 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=candle|M=2 adj=0 | 2024H2 n=56 net=-57.23205458928571 rnd=-62.35881078333333 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=candle|M=3 adj=0 | 2024H2 n=51 net=-79.42645092156862 rnd=-59.051242483333326 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=candle|M=5 adj=0 | 2024H2 n=47 net=-80.66454208510638 rnd=-78.86320671666667 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=candle|M=10 adj=0 | 2024H2 n=41 net=-22.243453609756088 rnd=-78.86320671666667 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=10|M=1 adj=0 | 2024H2 n=63 net=-64.44124020634919 rnd=-66.61667835666667 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=10|M=2 adj=0 | 2024H2 n=63 net=-66.5262745079365 rnd=-65.41825409 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=10|M=3 adj=0 | 2024H2 n=62 net=-68.9570993387097 rnd=-62.51796302333332 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=10|M=5 adj=0 | 2024H2 n=62 net=-68.8182190967742 rnd=-60.93115485666667 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=10|M=10 adj=0 | 2024H2 n=61 net=-73.31158627868852 rnd=-69.61197583333333 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=20|M=1 adj=0 | 2024H2 n=63 net=-61.63170888888888 rnd=-58.85243733666666 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=20|M=2 adj=0 | 2024H2 n=60 net=-60.52938716666666 rnd=-50.745187550000004 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=20|M=3 adj=0 | 2024H2 n=60 net=-62.50609156666666 rnd=-51.07246211666667 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=20|M=5 adj=0 | 2024H2 n=58 net=-68.35357712068965 rnd=-48.30268489333333 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=20|M=10 adj=0 | 2024H2 n=56 net=-73.89410103571427 rnd=-68.84986252 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=30|M=1 adj=0 | 2024H2 n=58 net=-60.34128853448275 rnd=-59.54614728333333 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=30|M=2 adj=0 | 2024H2 n=58 net=-63.74684810344827 rnd=-44.94562415 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=30|M=3 adj=0 | 2024H2 n=55 net=-63.28774318181817 rnd=-40.708703809999996 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=30|M=5 adj=0 | 2024H2 n=52 net=-73.77658942307691 rnd=-56.021861903333345 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=30|M=10 adj=0 | 2024H2 n=47 net=-59.969054765957445 rnd=-101.79897478333334 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=40|M=1 adj=0 | 2024H2 n=57 net=-56.54946643859649 rnd=-59.359024350000006 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=40|M=2 adj=0 | 2024H2 n=55 net=-57.121029763636365 rnd=-39.89150414999999 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=40|M=3 adj=0 | 2024H2 n=51 net=-64.04590384313725 rnd=-68.89489442 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=40|M=5 adj=0 | 2024H2 n=50 net=-72.20087136000001 rnd=-85.82152042 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=40|M=10 adj=0 | 2024H2 n=39 net=-54.8502572051282 rnd=-109.254611 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=50|M=1 adj=0 | 2024H2 n=57 net=-61.6218963859649 rnd=-60.49624758333333 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=50|M=2 adj=0 | 2024H2 n=53 net=-58.86769443396225 rnd=-43.03810587666666 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=50|M=3 adj=0 | 2024H2 n=48 net=-63.6540911875 rnd=-58.93773550333333 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=50|M=5 adj=0 | 2024H2 n=45 net=-74.00994022222223 rnd=-103.23382588333331 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+FAIL-cand SL=50|M=10 adj=0 | 2024H2 n=37 net=-62.098324891891885 rnd=-119.2699433 | 2025 n=0 net=nan rnd=nan | 2026 n=0 net=nan rnd=nan | adj_pos=0
+PASS cells: none
+FAIL
