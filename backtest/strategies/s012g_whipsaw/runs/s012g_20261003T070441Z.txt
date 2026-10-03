@@ -1,0 +1,17 @@
+S012G — whipsaw arms on S012F
+stamp=20261003T070441Z TGT=2.5 TF=5
+elapsed_sec=255.2 signal_counts={'A': 7}
+
+ARM=A ST=4.0
+  signal P2025 n=7 win%=0.0 mean=-308.2780 med=-343.3727 worst=-533.5345 maxDD=-2157.9460 tgt%=0.0 hold=240.7 CI95=[-370.9665, -189.2295] top5=0.571 pos_mo=0/1 slip05=-301.1876 rnd_mean=-5.3095
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan rnd_mean=nan
+  random P2025 n=21 win%=38.1 mean=-5.3095 med=-131.0433 worst=-611.9001 maxDD=-1768.0742 tgt%=33.3 hold=339.3 CI95=[-315.8762, 287.6363] top5=-30.731 pos_mo=0/1 slip05=1.0644
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan
+
+--- PRE-REGISTERED F ---
+FAIL: missing F or A at ST=4.0
+FAIL
+
+--- PRE-REGISTERED G ---
+FAIL: missing G or A at ST=4.0
+FAIL

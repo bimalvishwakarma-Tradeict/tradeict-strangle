@@ -1,0 +1,59 @@
+S012G — whipsaw arms on S012F
+stamp=20261003T070949Z TGT=2.5 TF=5
+elapsed_sec=18.9 signal_counts={'A': 7, 'B': 2, 'C': 7, 'D': 5, 'E': 7, 'F': 1, 'G': 1}
+
+ARM=A ST=4.0
+  signal P2025 n=7 win%=0.0 mean=-308.2780 med=-343.3727 worst=-533.5345 maxDD=-2157.9460 tgt%=0.0 hold=240.7 CI95=[-370.9665, -189.2295] top5=0.571 pos_mo=0/1 slip05=-301.1876 rnd_mean=-5.3095
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan rnd_mean=nan
+  random P2025 n=21 win%=38.1 mean=-5.3095 med=-131.0433 worst=-611.9001 maxDD=-1768.0742 tgt%=33.3 hold=339.3 CI95=[-315.8762, 287.6363] top5=-30.731 pos_mo=0/1 slip05=1.0644
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan
+
+ARM=B ST=4.0
+  signal P2025 n=2 win%=0.0 mean=-370.9665 med=-370.9665 worst=-392.8986 maxDD=-741.9331 tgt%=0.0 hold=345.0 CI95=[-392.8986, -349.0345] top5=1.000 pos_mo=0/1 slip05=-363.7564 rnd_mean=-48.2677
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan rnd_mean=nan
+  random P2025 n=6 win%=16.7 mean=-48.2677 med=-295.8453 worst=-402.6143 maxDD=-1517.2222 tgt%=0.0 hold=300.0 CI95=[-341.5644, 444.0014] top5=-0.390 pos_mo=0/1 slip05=-42.2380
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan
+
+ARM=C ST=4.0
+  signal P2025 n=7 win%=0.0 mean=-297.5041 med=-303.7836 worst=-526.8214 maxDD=-2082.5287 tgt%=0.0 hold=245.7 CI95=[-350.7194, -177.5767] top5=0.559 pos_mo=0/1 slip05=-290.2761 rnd_mean=-1.9639
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan rnd_mean=nan
+  random P2025 n=21 win%=38.1 mean=-1.9639 med=-100.3720 worst=-612.4577 maxDD=-1728.3643 tgt%=33.3 hold=343.1 CI95=[-307.2656, 295.9645] top5=-82.420 pos_mo=0/1 slip05=4.3780
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan
+
+ARM=D ST=4.0
+  signal P2025 n=5 win%=0.0 mean=-246.3026 med=-210.9474 worst=-349.0345 maxDD=-1231.5129 tgt%=0.0 hold=213.0 CI95=[-349.0345, -121.3398] top5=1.000 pos_mo=0/1 slip05=-239.3789 rnd_mean=-12.3352
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan rnd_mean=nan
+  random P2025 n=15 win%=26.7 mean=-12.3352 med=-113.9186 worst=-635.5384 maxDD=-1666.1225 tgt%=46.7 hold=286.7 CI95=[-256.1051, 281.3955] top5=-14.956 pos_mo=0/1 slip05=-5.7316
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan
+
+ARM=E ST=4.0
+  signal P2025 n=7 win%=0.0 mean=-308.2780 med=-343.3727 worst=-533.5345 maxDD=-2157.9460 tgt%=0.0 hold=240.7 CI95=[-370.9665, -189.2295] top5=0.571 pos_mo=0/1 slip05=-301.1876 rnd_mean=-5.3095
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan rnd_mean=nan
+  random P2025 n=21 win%=38.1 mean=-5.3095 med=-131.0433 worst=-611.9001 maxDD=-1768.0742 tgt%=33.3 hold=339.3 CI95=[-315.8762, 287.6363] top5=-30.731 pos_mo=0/1 slip05=1.0644
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan
+
+ARM=F ST=4.0
+  signal P2025 n=1 win%=0.0 mean=-303.7836 med=-303.7836 worst=-303.7836 maxDD=-303.7836 tgt%=0.0 hold=480.0 CI95=[-303.7836, -303.7836] top5=1.000 pos_mo=0/1 slip05=-295.8818 rnd_mean=344.5020
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan rnd_mean=nan
+  random P2025 n=3 win%=33.3 mean=344.5020 med=-261.0650 worst=-275.3946 maxDD=-536.4596 tgt%=0.0 hold=473.3 CI95=[-275.3946, 654.4503] top5=1.000 pos_mo=1/1 slip05=349.6069
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan
+
+ARM=G ST=4.0
+  signal P2025 n=1 win%=0.0 mean=-215.1082 med=-215.1082 worst=-215.1082 maxDD=-215.1082 tgt%=0.0 hold=480.0 CI95=[-215.1082, -215.1082] top5=1.000 pos_mo=0/1 slip05=-209.8651 rnd_mean=387.8891
+  signal P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan rnd_mean=nan
+  random P2025 n=3 win%=33.3 mean=387.8891 med=-360.1470 worst=-384.5214 maxDD=-744.6684 tgt%=0.0 hold=473.3 CI95=[-384.5214, 774.0943] top5=1.000 pos_mo=1/1 slip05=390.9368
+  random P2026 n=0 win%=nan mean=nan med=nan worst=nan maxDD=0.0000 tgt%=nan hold=nan CI95=[nan, nan] top5=nan pos_mo=0/0 slip05=nan
+
+--- PRE-REGISTERED F ---
+  F ST=4.0 P2025 mean=-303.78356691518604 rnd=344.5019725569271 A=-308.27799290095766 n=1
+  F ST=4.0 P2026 mean=nan rnd=nan A=nan n=0
+FAIL: missing F ST=3.5
+FAIL: missing F ST=4.5
+FAIL
+
+--- PRE-REGISTERED G ---
+  G ST=4.0 P2025 mean=-215.10819384776136 rnd=387.88908577471574 A=-308.27799290095766 n=1
+  G ST=4.0 P2026 mean=nan rnd=nan A=nan n=0
+FAIL: missing G ST=3.5
+FAIL: missing G ST=4.5
+FAIL
