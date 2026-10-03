@@ -1,0 +1,76 @@
+S016 Phase 0 PREFLIGHT stamp=20261003T140750Z
+
+=== 2024H2 sessions=3 ===
+A valid_range%=100.00 n_range=3
+  form_IST median=18:50 p25=18:25 p75=19:22
+  W/ATR mean=2.6385 med=2.6909 straddle_prem mean=nan W/prem mean=nan
+B tests=725 failed=3 acc_1C=3 acc_2C=3
+C accepted 1C events=3 sessions=3
+  +30m mean=-0.9961 med=-0.5887 %pos=33.3 base=-0.7183 diff_CI=[-2.0929,2.3472]
+  +1h mean=-0.0582 med=0.2471 %pos=66.7 base=-2.3200 diff_CI=[0.5727,4.0015]
+  +2h mean=-4.6301 med=-0.1237 %pos=33.3 base=-2.2805 diff_CI=[-15.2315,4.4146]
+  17:30 mean=-10.0585 med=-1.2424 %pos=33.3 base=-6.7842 diff_CI=[-39.1970,22.1595]
+C accepted 2C events=3 sessions=3
+  +30m mean=0.1183 med=0.5386 %pos=66.7 base=-0.4786 diff_CI=[-1.3863,2.1026]
+  +1h mean=1.1010 med=1.1660 %pos=66.7 base=-1.2367 diff_CI=[-1.3122,4.2839]
+  +2h mean=-3.5276 med=1.1937 %pos=66.7 base=-0.6798 diff_CI=[-14.9114,4.0237]
+  17:30 mean=-10.3437 med=-1.1953 %pos=33.3 base=-4.9778 diff_CI=[-40.8933,22.1379]
+D failed events=3 toward_mid +30m=0.5145 +1h=0.9568 +2h=-0.4201 %stay_inside=0.0 (n_fail_events=3)
+E after range, no accepted BO until 17:30: 0.00% (0/3)
+
+=== 2025 sessions=0 ===
+A valid_range%=nan n_range=0
+  form_IST median=nan p25=nan p75=nan
+  W/ATR mean=nan med=nan straddle_prem mean=nan W/prem mean=nan
+B tests=0 failed=0 acc_1C=0 acc_2C=0
+C accepted 1C events=0 sessions=0
+  +30m mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  +1h mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  +2h mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  17:30 mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+C accepted 2C events=0 sessions=0
+  +30m mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  +1h mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  +2h mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  17:30 mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+D failed events=0 toward_mid +30m=nan +1h=nan +2h=nan %stay_inside=nan (n_fail_events=0)
+E after range, no accepted BO until 17:30: nan% (0/0)
+
+=== 2026 sessions=0 ===
+A valid_range%=nan n_range=0
+  form_IST median=nan p25=nan p75=nan
+  W/ATR mean=nan med=nan straddle_prem mean=nan W/prem mean=nan
+B tests=0 failed=0 acc_1C=0 acc_2C=0
+C accepted 1C events=0 sessions=0
+  +30m mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  +1h mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  +2h mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  17:30 mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+C accepted 2C events=0 sessions=0
+  +30m mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  +1h mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  +2h mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+  17:30 mean=nan med=nan %pos=nan base=nan diff_CI=[nan,nan]
+D failed events=0 toward_mid +30m=nan +1h=nan +2h=nan %stay_inside=nan (n_fail_events=0)
+E after range, no accepted BO until 17:30: nan% (0/0)
+
+overall median formation IST minutes=1130.0 -> 18:50
+
+--- PRE-REGISTERED ACCEPT_1C ---
+median_formation_2025+2026=nan cutoff=13:30
+2025 n_sessions=0 n_events=0 diff_1h_mean=nan CI=[nan,nan]
+2026 n_sessions=0 n_events=0 diff_1h_mean=nan CI=[nan,nan]
+2024H2 extra n_sessions=3 n_events=3 (not in PASS)
+FAIL
+
+--- PRE-REGISTERED ACCEPT_2C ---
+median_formation_2025+2026=nan cutoff=13:30
+2025 n_sessions=0 n_events=0 diff_1h_mean=nan CI=[nan,nan]
+2026 n_sessions=0 n_events=0 diff_1h_mean=nan CI=[nan,nan]
+2024H2 extra n_sessions=3 n_events=3 (not in PASS)
+FAIL
+
+=== HAND-CHECK 3 sessions ===
+  2024-07-01 p1=low pivot=2024-06-30 19:15 conf=2024-06-30 19:20 p2=high pivot=2024-06-30 19:35 conf=2024-06-30 19:55 L=61582.00 H=61883.00 first_test=2024-06-30 20:00 accept=2024-07-01 00:20
+  2024-07-02 p1=low pivot=2024-07-01 17:50 conf=2024-07-01 17:55 p2=high pivot=2024-07-01 18:20 conf=2024-07-01 18:50 L=62680.50 H=62909.00 first_test=2024-07-01 19:00 accept=2024-07-01 19:00
+  2024-07-03 p1=low pivot=2024-07-02 17:45 conf=2024-07-02 17:50 p2=high pivot=2024-07-02 17:50 conf=2024-07-02 18:00 L=62730.00 H=62859.50 first_test=2024-07-02 18:10 accept=2024-07-02 18:15
