@@ -42,8 +42,11 @@ backtest/cache/*
 backtest/data_smoke/*.csv
 backtest/data_1m/
 backtest/results/
-# Strategy-local history (backtest/strategies/*/runs/) is NOT ignored —
-# needed for Strategies page. Only results/ stays out of git.
+# Strategy-local .txt reports stay in git (Strategies page).
+# Large run artifacts stay on disk but out of git:
+backtest/strategies/**/runs/*_trades.csv
+backtest/strategies/**/runs/*_events.csv
+backtest/strategies/**/runs/*.jsonl
 deploy/gdrive_credentials.json
 
 
