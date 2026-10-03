@@ -1,0 +1,80 @@
+S015 data inventory
+stamp=20261003T124624Z
+
+=== spot 1m CSV ===
+path=D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\data_1m\BTCUSD_1m_20240630_20260921.csv
+rows=1170360 first_ts=1719752820 (2024-06-30T13:07:00+00:00)
+last_ts=1789974360 (2026-09-21T07:06:00+00:00)
+gaps_gt_5min=0
+
+=== option_marks sqlite ===
+dir=D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\cache\option_marks months=25
+months_present=['2024-09', '2024-10', '2024-11', '2024-12', '2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06', '2025-07', '2025-08', '2025-09', '2025-10', '2025-11', '2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09']
+per-month ts min/max: skipped (marks PK is symbol+ts; no ts-only index; full-table MIN(ts) is too slow). Shard coverage = calendar month in filename.
+  2024-09 shard_calendar=2024-09 (file marks_2024-09.sqlite)
+  2024-10 shard_calendar=2024-10 (file marks_2024-10.sqlite)
+  2024-11 shard_calendar=2024-11 (file marks_2024-11.sqlite)
+  2024-12 shard_calendar=2024-12 (file marks_2024-12.sqlite)
+  2025-01 shard_calendar=2025-01 (file marks_2025-01.sqlite)
+  2025-02 shard_calendar=2025-02 (file marks_2025-02.sqlite)
+  2025-03 shard_calendar=2025-03 (file marks_2025-03.sqlite)
+  2025-04 shard_calendar=2025-04 (file marks_2025-04.sqlite)
+  2025-05 shard_calendar=2025-05 (file marks_2025-05.sqlite)
+  2025-06 shard_calendar=2025-06 (file marks_2025-06.sqlite)
+  2025-07 shard_calendar=2025-07 (file marks_2025-07.sqlite)
+  2025-08 shard_calendar=2025-08 (file marks_2025-08.sqlite)
+  2025-09 shard_calendar=2025-09 (file marks_2025-09.sqlite)
+  2025-10 shard_calendar=2025-10 (file marks_2025-10.sqlite)
+  2025-11 shard_calendar=2025-11 (file marks_2025-11.sqlite)
+  2025-12 shard_calendar=2025-12 (file marks_2025-12.sqlite)
+  2026-01 shard_calendar=2026-01 (file marks_2026-01.sqlite)
+  2026-02 shard_calendar=2026-02 (file marks_2026-02.sqlite)
+  2026-03 shard_calendar=2026-03 (file marks_2026-03.sqlite)
+  2026-04 shard_calendar=2026-04 (file marks_2026-04.sqlite)
+  2026-05 shard_calendar=2026-05 (file marks_2026-05.sqlite)
+  2026-06 shard_calendar=2026-06 (file marks_2026-06.sqlite)
+  2026-07 shard_calendar=2026-07 (file marks_2026-07.sqlite)
+  2026-08 shard_calendar=2026-08 (file marks_2026-08.sqlite)
+  2026-09 shard_calendar=2026-09 (file marks_2026-09.sqlite)
+
+=== cache/iv_surface ===
+dir=D:\Tradeict Short (final)\New Setup\Tradeict Short Strangle\trading-bot\backtest\cache\iv_surface exists=True
+  file=surface_full.pkl bytes=42434285
+  file=surface_heldout_train.pkl bytes=41431962
+n_smiles=64417 n_buckets=15417
+bucket_ts first=1751335200 (2025-07-01T02:00:00+00:00) last=1785066300 (2026-07-26T11:45:00+00:00)
+ATM IV available: yes (IVSurface.iv / smile a,b,c at k=ln(K/F)~0)
+25-delta skew available: yes (compute from smile IV at 25d strikes; no dedicated 25d column in pickle)
+
+=== options-trades parquet / sqlite ===
+parquet_count=14
+  parquet=options-trades-daily-BTC-2026-07-26.parquet bytes=2363337
+  parquet=options-trades-monthly-BTC-2025-07.parquet bytes=15097558
+  parquet=options-trades-monthly-BTC-2025-08.parquet bytes=17489725
+  parquet=options-trades-monthly-BTC-2025-09.parquet bytes=18815676
+  parquet=options-trades-monthly-BTC-2025-10.parquet bytes=27706420
+  parquet=options-trades-monthly-BTC-2025-11.parquet bytes=26987495
+  parquet=options-trades-monthly-BTC-2025-12.parquet bytes=30969135
+  parquet=options-trades-monthly-BTC-2026-01.csv (1).parquet bytes=40277141
+  parquet=options-trades-monthly-BTC-2026-02.csv (1).parquet bytes=45088261
+  parquet=options-trades-monthly-BTC-2026-03.csv (1).parquet bytes=47230477
+  parquet=options-trades-monthly-BTC-2026-04.parquet bytes=41662194
+  parquet=options-trades-monthly-BTC-2026-05.csv (1).parquet bytes=92502519
+  parquet=options-trades-monthly-BTC-2026-06.csv (1).parquet bytes=103679781
+  parquet=options-trades-monthly-BTC-2026-07.csv (1).parquet bytes=82956924
+parquet_filename_date_range=2025-07 .. 2026-07-26
+parquet columns: pyarrow/fastparquet not installed — schema from source zip header + sqlite shards
+zip_header_file=options-trades-daily-BTC-2026-07-26.csv.zip columns=['product_symbol', 'price', 'size', 'timestamp', 'buyer_role']
+has_size=True has_side_or_aggressor=True
+sqlite_shards=13 ['opt_trades_2025-07.sqlite', 'opt_trades_2025-08.sqlite', 'opt_trades_2025-09.sqlite', 'opt_trades_2025-10.sqlite', 'opt_trades_2025-11.sqlite', 'opt_trades_2025-12.sqlite', 'opt_trades_2026-01.sqlite', 'opt_trades_2026-02.sqlite', 'opt_trades_2026-03.sqlite', 'opt_trades_2026-04.sqlite', 'opt_trades_2026-05.sqlite', 'opt_trades_2026-06.sqlite', 'opt_trades_2026-07.sqlite']
+sqlite_trades_columns=['symbol', 'ts', 'price', 'size', 'role', 'expiry', 'opt_type', 'strike']
+sqlite has size=yes buyer_role via role (0=maker,1=taker)=yes
+
+=== OI / funding / liquidation / orderbook history ===
+open_interest: NO (no historical files under backtest/ or docs/)
+funding_rate: NO (no historical files under backtest/ or docs/)
+liquidation: NO (no historical files under backtest/ or docs/)
+l2orderbook: NO (no historical files under backtest/ or docs/)
+orderbook_history: NO (no historical files under backtest/ or docs/)
+oi_history: NO (no historical files under backtest/ or docs/)
+note: live REST orderbook exists in backend client only — not a history dataset

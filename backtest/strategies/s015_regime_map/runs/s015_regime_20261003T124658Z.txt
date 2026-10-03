@@ -1,0 +1,129 @@
+S015 Regime Map
+stamp=20261003T124658Z samples=63 days=1 stale=0 elapsed=27.9
+
+=== BASELINE all samples ===
+year=2025 n=63 mean_net_short_exp=502.9163994833578 mean_net_long_exp=-567.3623264975947
+year=2026 n=0 mean_net_short_exp=nan mean_net_long_exp=nan
+
+=== COMPRESSION score tables (net_short) ===
+year=2025 C=0 n=2 days=1 mean_exp=588.8564788679187 mean_1h=53.38975306520071 mean_2h=140.6740353737888 mean_4h=272.93462303081157 CI95=[588.8564788679187,588.8564788679187]
+year=2025 C=1 n=8 days=1 mean_exp=163.9641073923713 mean_1h=44.97088725926923 mean_2h=157.0614879026385 mean_4h=249.64150928635954 CI95=[163.9641073923713,163.9641073923713]
+year=2025 C=2 n=4 days=1 mean_exp=520.9792014378503 mean_1h=18.156513215968403 mean_2h=87.96499335018525 mean_4h=258.876383201963 CI95=[520.9792014378503,520.9792014378503]
+year=2025 C=3 n=6 days=1 mean_exp=904.837033440769 mean_1h=38.962036490367716 mean_2h=129.05455360438754 mean_4h=302.2439914452413 CI95=[904.837033440769,904.837033440769]
+year=2025 C=4 n=4 days=1 mean_exp=640.4193729056343 mean_1h=49.58671058044008 mean_2h=133.65315190007152 mean_4h=248.60841947904754 CI95=[640.4193729056343,640.4193729056343]
+year=2025 C=5 n=13 days=1 mean_exp=592.3353382298528 mean_1h=44.89876221682485 mean_2h=117.60120853912498 mean_4h=251.7416375567421 CI95=[592.3353382298528,592.3353382298528]
+year=2025 C=6 n=12 days=1 mean_exp=335.96029068129343 mean_1h=22.691123556516715 mean_2h=93.92069303653375 mean_4h=267.9428515865993 CI95=[335.96029068129343,335.96029068129343]
+year=2025 C=7 n=12 days=1 mean_exp=495.62174529930803 mean_1h=25.87610492073763 mean_2h=105.07243729788695 mean_4h=264.2068206126025 CI95=[495.62174529930803,495.62174529930803]
+year=2025 C=8 n=2 days=1 mean_exp=720.1735119014397 mean_1h=27.41397237646045 mean_2h=109.4304656894983 mean_4h=269.74151727756043 CI95=[720.1735119014397,720.1735119014397]
+year=2025 Spearman(score, bucket_mean_net_short_exp)=0.18333333333333335 baseline=502.9163994833578
+year=2026 C=0 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 C=1 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 C=2 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 C=3 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 C=4 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 C=5 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 C=6 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 C=7 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 C=8 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 Spearman(score, bucket_mean_net_short_exp)=nan baseline=nan
+
+=== AWAKENING score tables (net_long) ===
+year=2025 A=0 n=24 days=1 mean_exp=-642.0857599360221 mean_1h=-146.99824113147562 mean_2h=-227.48913030732464 mean_4h=-376.01976303881855 CI95=[-642.0857599360221,-642.0857599360221]
+year=2025 A=1 n=16 days=1 mean_exp=-419.67619695464765 mean_1h=-125.13406115031465 mean_2h=-196.34902211230826 mean_4h=-339.8413797735412 CI95=[-419.67619695464765,-419.67619695464765]
+year=2025 A=2 n=11 days=1 mean_exp=-602.9181649342788 mean_1h=-125.86204256169468 mean_2h=-213.6100537805795 mean_4h=-356.1084654532669 CI95=[-602.9181649342788,-602.9181649342788]
+year=2025 A=3 n=5 days=1 mean_exp=-595.404102876427 mean_1h=-104.9915555722124 mean_2h=-200.34656652775837 mean_4h=-365.31037127997524 CI95=[-595.404102876427,-595.404102876427]
+year=2025 A=4 n=2 days=1 mean_exp=-272.81660430638954 mean_1h=-118.29706395865367 mean_2h=-191.42990042509967 mean_4h=-326.2967765809714 CI95=[-272.81660430638954,-272.81660430638954]
+year=2025 A=5 n=5 days=1 mean_exp=-692.8391284675163 mean_1h=-118.90436030228959 mean_2h=-187.01575269504067 mean_4h=-349.3155575055803 CI95=[-692.8391284675163,-692.8391284675163]
+year=2025 A=6 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2025 Spearman(score, bucket_mean_net_long_exp)=-0.028571428571428574 baseline=-567.3623264975947
+year=2026 A=0 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 A=1 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 A=2 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 A=3 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 A=4 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 A=5 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 A=6 n=0 days=0 mean_exp=nan mean_1h=nan mean_2h=nan mean_4h=nan CI95=[nan,nan]
+year=2026 Spearman(score, bucket_mean_net_long_exp)=nan baseline=nan
+
+EXPLORATORY, NOT PASS BASIS
+=== single-feature quintiles (net_short_exp) ===
+year=2025 feat=range_ratio quintile_edges=[np.float64(0.6866014682503809), np.float64(0.7875290063534881), np.float64(0.9200866280566135), np.float64(1.2057494078645241)]
+  Q1 n=13 mean_net_short_exp=565.2572866556753
+  Q2 n=12 mean_net_short_exp=443.17425639525436
+  Q3 n=13 mean_net_short_exp=549.7625689199205
+  Q4 n=12 mean_net_short_exp=691.9217836999946
+  Q5 n=13 mean_net_short_exp=274.4094279866008
+year=2025 feat=atr14 quintile_edges=[np.float64(80.62614809736233), np.float64(119.52585283258094), np.float64(142.7777342824377), np.float64(183.79246735970577)]
+  Q1 n=13 mean_net_short_exp=276.62485466752275
+  Q2 n=12 mean_net_short_exp=287.159858610714
+  Q3 n=13 mean_net_short_exp=467.90934703488307
+  Q4 n=12 mean_net_short_exp=561.8515577116085
+  Q5 n=13 mean_net_short_exp=908.973196111723
+year=2025 feat=bbw quintile_edges=[np.float64(0.004076752449086879), np.float64(0.00489916372192791), np.float64(0.005712903796247403), np.float64(0.008308411755754723)]
+  Q1 n=13 mean_net_short_exp=270.1935312267256
+  Q2 n=12 mean_net_short_exp=473.0696199229755
+  Q3 n=13 mean_net_short_exp=611.3214413163989
+  Q4 n=12 mean_net_short_exp=617.0495458516208
+  Q5 n=13 mean_net_short_exp=549.4314257765976
+year=2025 feat=adx_5m quintile_edges=[np.float64(14.554500457954173), np.float64(16.779129803924036), np.float64(19.917572350625637), np.float64(24.496027810026142)]
+  Q1 n=13 mean_net_short_exp=363.8248106844863
+  Q2 n=12 mean_net_short_exp=554.7037817901837
+  Q3 n=13 mean_net_short_exp=514.7005477310214
+  Q4 n=12 mean_net_short_exp=507.3445389710036
+  Q5 n=13 mean_net_short_exp=578.3325891473612
+year=2025 feat=chop14 quintile_edges=[np.float64(38.98919758718096), np.float64(49.643923549695295), np.float64(55.19550977203771), np.float64(62.25637083023469)]
+  Q1 n=13 mean_net_short_exp=303.5798993724748
+  Q2 n=12 mean_net_short_exp=556.454806501502
+  Q3 n=13 mean_net_short_exp=503.93235291445944
+  Q4 n=12 mean_net_short_exp=540.0819473855926
+  Q5 n=13 mean_net_short_exp=617.5102185443278
+year=2025 feat=vol_ratio quintile_edges=[np.float64(0.3928523546016037), np.float64(0.5326492062277643), np.float64(0.9264251832727498), np.float64(1.2277104450260679)]
+  Q1 n=13 mean_net_short_exp=620.8590187971719
+  Q2 n=12 mean_net_short_exp=581.7320381956357
+  Q3 n=13 mean_net_short_exp=397.88880742604886
+  Q4 n=12 mean_net_short_exp=537.7628470539262
+  Q5 n=13 mean_net_short_exp=385.08252335037935
+year=2025 feat=atm_iv quintile_edges=[np.float64(0.30437918832898136), np.float64(0.31501649287343014), np.float64(0.3519826757609844), np.float64(0.4043149207085371)]
+  Q1 n=13 mean_net_short_exp=239.981588147729
+  Q2 n=12 mean_net_short_exp=275.00440696333317
+  Q3 n=13 mean_net_short_exp=365.72011095413814
+  Q4 n=12 mean_net_short_exp=724.4088871762393
+  Q5 n=13 mean_net_short_exp=908.973196111723
+year=2025 feat=iv_chg_15m quintile_edges=[np.float64(-0.0080360510647297), np.float64(-0.004983942598104373), np.float64(-0.0011917014718055838), np.float64(0.0015245373547077225)]
+  Q1 n=13 mean_net_short_exp=535.653884872806
+  Q2 n=12 mean_net_short_exp=624.0292382329786
+  Q3 n=12 mean_net_short_exp=424.0648624430252
+  Q4 n=12 mean_net_short_exp=521.9541626497328
+  Q5 n=13 mean_net_short_exp=374.79106591702083
+year=2025 feat=rv_1h quintile_edges=[np.float64(0.17407451010629202), np.float64(0.29207987480045133), np.float64(0.38099265477270666), np.float64(0.4338301329919218)]
+  Q1 n=13 mean_net_short_exp=290.969852580957
+  Q2 n=12 mean_net_short_exp=265.3149965550547
+  Q3 n=13 mean_net_short_exp=407.5093378002627
+  Q4 n=12 mean_net_short_exp=778.7828379462188
+  Q5 n=13 mean_net_short_exp=774.9484368061848
+year=2025 feat=iv_minus_rv1h quintile_edges=[np.float64(-0.048758983976944614), np.float64(-0.005118741599423567), np.float64(0.041703017665581245), np.float64(0.1335409833402965)]
+  Q1 n=13 mean_net_short_exp=612.9644736988496
+  Q2 n=12 mean_net_short_exp=608.852299196726
+  Q3 n=13 mean_net_short_exp=651.7162776524575
+  Q4 n=12 mean_net_short_exp=346.1706438309498
+  Q5 n=13 mean_net_short_exp=290.969852580957
+year=2026 feat=range_ratio n=0 (skip)
+year=2026 feat=atr14 n=0 (skip)
+year=2026 feat=bbw n=0 (skip)
+year=2026 feat=adx_5m n=0 (skip)
+year=2026 feat=chop14 n=0 (skip)
+year=2026 feat=vol_ratio n=0 (skip)
+year=2026 feat=atm_iv n=0 (skip)
+year=2026 feat=iv_chg_15m n=0 (skip)
+year=2026 feat=rv_1h n=0 (skip)
+year=2026 feat=iv_minus_rv1h n=0 (skip)
+
+--- PRE-REGISTERED SHORT (compression>=6) ---
+year=2025 days=1 mean=439.20505598346523 baseline=502.9163994833578 spearman=0.18333333333333335
+year=2026 days=0 mean=nan baseline=nan spearman=nan
+FAIL
+
+--- PRE-REGISTERED LONG (awakening>=4) ---
+year=2025 days=1 mean=-572.8326929929087 baseline=-567.3623264975947 spearman=-0.028571428571428574
+year=2026 days=0 mean=nan baseline=nan spearman=nan
+FAIL
