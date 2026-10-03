@@ -1,0 +1,201 @@
+S017B 3m/5m ST-flip engulfing gate
+stamp=20261003T174448Z grid TF=(3, 5) ATR=(10, 20) mult=(1.0, 2.0, 3.0) exits=('M2', 'M3', 'M5', 'STFLIP') SL=candle
+F0 none; F2 taker 0.05% entry, maker 0.02% TP, taker 0.05% SL/STFLIP, GST 1.18
+CELL TF=3m ST=10x1.0 M2
+  2024H2 n=19 /day=6.333 win%=31.6 medRisk=91.50 holdMin=40.1 F0gross/t=-9.4474 F2net/t=-74.3748 maxDD=-1543.2 rndF2=-50.3268
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x1.0 M3
+  2024H2 n=19 /day=6.333 win%=31.6 medRisk=91.50 holdMin=43.3 F0gross/t=14.6579 F2net/t=-51.4251 maxDD=-1450.7 rndF2=-43.6781
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x1.0 M5
+  2024H2 n=18 /day=6.000 win%=11.1 medRisk=93.50 holdMin=59.5 F0gross/t=-38.9444 F2net/t=-109.6434 maxDD=-2190.6 rndF2=-64.6873
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x1.0 STFLIP
+  2024H2 n=18 /day=6.000 win%=16.7 medRisk=90.00 holdMin=27.2 F0gross/t=15.1111 F2net/t=-58.0574 maxDD=-1275.7 rndF2=-58.8294
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x2.0 M2
+  2024H2 n=4 /day=1.333 win%=50.0 medRisk=130.25 holdMin=40.5 F0gross/t=11.7500 F2net/t=-50.4658 maxDD=-445.8 rndF2=-70.4907
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x2.0 M3
+  2024H2 n=4 /day=1.333 win%=0.0 medRisk=130.25 holdMin=51.0 F0gross/t=-117.8750 F2net/t=-190.9426 maxDD=-763.8 rndF2=-68.5411
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x2.0 M5
+  2024H2 n=4 /day=1.333 win%=0.0 medRisk=130.25 holdMin=51.0 F0gross/t=-117.8750 F2net/t=-190.9426 maxDD=-763.8 rndF2=-64.6420
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x2.0 STFLIP
+  2024H2 n=4 /day=1.333 win%=0.0 medRisk=130.25 holdMin=46.5 F0gross/t=-62.0000 F2net/t=-135.0563 maxDD=-540.2 rndF2=-77.3934
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x3.0 M2
+  2024H2 n=2 /day=0.667 win%=50.0 medRisk=77.00 holdMin=33.0 F0gross/t=47.2500 F2net/t=-14.6960 maxDD=-145.6 rndF2=-75.7033
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x3.0 M3
+  2024H2 n=2 /day=0.667 win%=0.0 medRisk=77.00 holdMin=39.0 F0gross/t=-77.5000 F2net/t=-150.0724 maxDD=-300.1 rndF2=-75.7033
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x3.0 M5
+  2024H2 n=2 /day=0.667 win%=0.0 medRisk=77.00 holdMin=39.0 F0gross/t=-77.5000 F2net/t=-150.0724 maxDD=-300.1 rndF2=-75.7033
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=10x3.0 STFLIP
+  2024H2 n=2 /day=0.667 win%=0.0 medRisk=77.00 holdMin=39.0 F0gross/t=-77.5000 F2net/t=-150.0724 maxDD=-300.1 rndF2=-75.7033
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x1.0 M2
+  2024H2 n=16 /day=5.333 win%=31.2 medRisk=93.50 holdMin=46.1 F0gross/t=-16.1875 F2net/t=-82.5417 maxDD=-1467.0 rndF2=-50.3268
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x1.0 M3
+  2024H2 n=16 /day=5.333 win%=31.2 medRisk=93.50 holdMin=49.7 F0gross/t=10.9062 F2net/t=-55.4496 maxDD=-1346.0 rndF2=-43.6781
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x1.0 M5
+  2024H2 n=16 /day=5.333 win%=12.5 medRisk=93.50 holdMin=66.0 F0gross/t=-37.5625 F2net/t=-108.0707 maxDD=-2085.9 rndF2=-64.6873
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x1.0 STFLIP
+  2024H2 n=16 /day=5.333 win%=12.5 medRisk=93.50 holdMin=27.8 F0gross/t=10.5938 F2net/t=-62.6825 maxDD=-1226.7 rndF2=-52.3665
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x2.0 M2
+  2024H2 n=5 /day=1.667 win%=40.0 medRisk=129.50 holdMin=34.8 F0gross/t=3.7000 F2net/t=-60.3273 maxDD=-445.8 rndF2=-69.9779
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x2.0 M3
+  2024H2 n=5 /day=1.667 win%=0.0 medRisk=129.50 holdMin=43.2 F0gross/t=-100.0000 F2net/t=-172.7088 maxDD=-863.5 rndF2=-68.1383
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x2.0 M5
+  2024H2 n=5 /day=1.667 win%=0.0 medRisk=129.50 holdMin=43.2 F0gross/t=-100.0000 F2net/t=-172.7088 maxDD=-863.5 rndF2=-64.4592
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x2.0 STFLIP
+  2024H2 n=5 /day=1.667 win%=0.0 medRisk=129.50 holdMin=40.8 F0gross/t=-60.1000 F2net/t=-132.7969 maxDD=-664.0 rndF2=-67.9627
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x3.0 M2
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=71.00 holdMin=33.0 F0gross/t=-71.5000 F2net/t=-145.5565 maxDD=-145.6 rndF2=-69.9534
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x3.0 M3
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=71.00 holdMin=33.0 F0gross/t=-71.5000 F2net/t=-145.5565 maxDD=-145.6 rndF2=-69.9534
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x3.0 M5
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=71.00 holdMin=33.0 F0gross/t=-71.5000 F2net/t=-145.5565 maxDD=-145.6 rndF2=-69.9534
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=3m ST=20x3.0 STFLIP
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=71.00 holdMin=33.0 F0gross/t=-71.5000 F2net/t=-145.5565 maxDD=-145.6 rndF2=-69.9534
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x1.0 M2
+  2024H2 n=11 /day=3.667 win%=27.3 medRisk=88.00 holdMin=39.1 F0gross/t=37.1364 F2net/t=-30.1659 maxDD=-1090.5 rndF2=-84.7773
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x1.0 M3
+  2024H2 n=11 /day=3.667 win%=18.2 medRisk=88.00 holdMin=48.6 F0gross/t=-22.2273 F2net/t=-91.4211 maxDD=-1005.6 rndF2=-83.8442
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x1.0 M5
+  2024H2 n=11 /day=3.667 win%=18.2 medRisk=88.00 holdMin=61.8 F0gross/t=18.9545 F2net/t=-50.2296 maxDD=-819.0 rndF2=-81.9779
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x1.0 STFLIP
+  2024H2 n=11 /day=3.667 win%=9.1 medRisk=88.00 holdMin=31.4 F0gross/t=-18.5455 F2net/t=-91.7633 maxDD=-1268.3 rndF2=-87.2280
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x2.0 M2
+  2024H2 n=3 /day=1.000 win%=66.7 medRisk=229.00 holdMin=186.7 F0gross/t=209.5000 F2net/t=151.8647 maxDD=-300.5 rndF2=-102.7215
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x2.0 M3
+  2024H2 n=3 /day=1.000 win%=33.3 medRisk=229.00 holdMin=220.0 F0gross/t=-38.3333 F2net/t=-102.9116 maxDD=-664.4 rndF2=-102.7215
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x2.0 M5
+  2024H2 n=3 /day=1.000 win%=33.3 medRisk=229.00 holdMin=270.0 F0gross/t=52.3333 F2net/t=-12.2235 maxDD=-664.4 rndF2=-102.7215
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x2.0 STFLIP
+  2024H2 n=3 /day=1.000 win%=33.3 medRisk=229.00 holdMin=115.0 F0gross/t=78.8333 F2net/t=6.5958 maxDD=-353.4 rndF2=-102.7215
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x3.0 M2
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=229.00 holdMin=20.0 F0gross/t=-229.5000 F2net/t=-300.5245 maxDD=-300.5 rndF2=-113.2387
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x3.0 M3
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=229.00 holdMin=20.0 F0gross/t=-229.5000 F2net/t=-300.5245 maxDD=-300.5 rndF2=-113.2387
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x3.0 M5
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=229.00 holdMin=20.0 F0gross/t=-229.5000 F2net/t=-300.5245 maxDD=-300.5 rndF2=-113.2387
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=10x3.0 STFLIP
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=229.00 holdMin=20.0 F0gross/t=-229.5000 F2net/t=-300.5245 maxDD=-300.5 rndF2=-113.2387
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x1.0 M2
+  2024H2 n=8 /day=2.667 win%=37.5 medRisk=95.75 holdMin=48.1 F0gross/t=76.4375 F2net/t=11.6327 maxDD=-665.6 rndF2=-87.8764
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x1.0 M3
+  2024H2 n=8 /day=2.667 win%=25.0 medRisk=95.75 holdMin=61.2 F0gross/t=-5.1875 F2net/t=-72.5932 maxDD=-580.7 rndF2=-86.9433
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x1.0 M5
+  2024H2 n=8 /day=2.667 win%=25.0 medRisk=95.75 holdMin=79.4 F0gross/t=51.4375 F2net/t=-15.9548 maxDD=-501.5 rndF2=-85.0770
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x1.0 STFLIP
+  2024H2 n=8 /day=2.667 win%=12.5 medRisk=95.50 holdMin=37.5 F0gross/t=-0.1250 F2net/t=-73.0637 maxDD=-843.4 rndF2=-89.4526
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x2.0 M2
+  2024H2 n=3 /day=1.000 win%=66.7 medRisk=231.50 holdMin=188.3 F0gross/t=208.6667 F2net/t=150.9805 maxDD=-303.2 rndF2=-102.7215
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x2.0 M3
+  2024H2 n=3 /day=1.000 win%=33.3 medRisk=231.50 holdMin=221.7 F0gross/t=-39.1667 F2net/t=-103.7958 maxDD=-667.1 rndF2=-102.7215
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x2.0 M5
+  2024H2 n=3 /day=1.000 win%=33.3 medRisk=231.50 holdMin=271.7 F0gross/t=51.5000 F2net/t=-13.1077 maxDD=-667.1 rndF2=-102.7215
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x2.0 STFLIP
+  2024H2 n=3 /day=1.000 win%=33.3 medRisk=231.50 holdMin=150.0 F0gross/t=83.6667 F2net/t=11.3692 maxDD=-370.5 rndF2=-102.7215
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x3.0 M2
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=229.00 holdMin=20.0 F0gross/t=-229.5000 F2net/t=-300.5245 maxDD=-300.5 rndF2=-113.2387
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x3.0 M3
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=229.00 holdMin=20.0 F0gross/t=-229.5000 F2net/t=-300.5245 maxDD=-300.5 rndF2=-113.2387
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x3.0 M5
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=229.00 holdMin=20.0 F0gross/t=-229.5000 F2net/t=-300.5245 maxDD=-300.5 rndF2=-113.2387
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+CELL TF=5m ST=20x3.0 STFLIP
+  2024H2 n=1 /day=0.333 win%=0.0 medRisk=229.00 holdMin=20.0 F0gross/t=-229.5000 F2net/t=-300.5245 maxDD=-300.5 rndF2=-113.2387
+  2025 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+  2026 n=0 /day=0.000 win%=nan medRisk=nan holdMin=nan F0gross/t=nan F2net/t=nan maxDD=0.0 rndF2=nan
+
+--- OPTION_GATE (F0 gross>=60/t AND n>=100 all periods; >=2 neighbors same) ---
+NONE
+
+--- FUTURES_PASS (F2 net>0 all 3 AND > random; >=2 neighbors F2 net>0 all 3) ---
+NONE

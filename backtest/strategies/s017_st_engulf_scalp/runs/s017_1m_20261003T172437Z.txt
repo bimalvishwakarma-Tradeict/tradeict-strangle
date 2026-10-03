@@ -1,0 +1,478 @@
+S017 ST-flip engulfing scalper 1m
+stamp=20261003T172437Z ST=(20,1.0) signals=21597
+=== 30s CHECK (no download) ===
+download_candles.py RESOLUTION_SECONDS has: 1m,3m,5m,15m — no 30s
+Delta GET /v2/history/candles resolution=30s -> HTTP 400
+Allowed values: 5s,1m,3m,5m,15m,30m,1h,2h,4h,6h,1d,1w
+30s supported: NO (5s yes, 30s no)
+
+=== Binance BTCUSDT 1s klines estimate (NOT downloaded) ===
+Source: data.binance.vision spot monthly 1s zips
+HEAD BTCUSDT-1s-2024-07.zip = 78.8 MB  2025-01 = 85.0 MB  2025-06 = 71.7 MB  2026-09 = 404
+Window 2024-07..2026-09 = 27 months; ~26 published * ~78 MB ~ 2.0 GB compressed
+Uncompressed CSV ~8-12x zip -> roughly 16-24 GB on disk
+Rows ~ 86400 s/day * ~820 days ~ 71e6 one-second bars
+Download time ~15-40 min on a typical home link; parse/load several hours
+
+CELL SL=candle|M=1
+  F0 2024H2 n=3801 /day=20.658 win%=49.0 risk=75.15 (med=59.00) avgR=-0.030 net/t=-0.9262 total=-3520.5 maxDD=-9232.0 loseStreak=12 amb=20
+  F0 2025 n=9198 /day=25.200 win%=49.2 risk=85.03 (med=67.50) avgR=-0.021 net/t=-0.6340 total=-5831.5 maxDD=-13988.0 loseStreak=11 amb=51
+  F0 2026 n=6917 /day=26.201 win%=48.7 risk=60.30 (med=47.50) avgR=-0.033 net/t=-1.2868 total=-8900.5 maxDD=-15593.0 loseStreak=11 amb=40
+  F1 2024H2 n=3801 /day=20.658 win%=15.0 risk=75.15 (med=59.00) avgR=-1.746 net/t=-86.5408 total=-328941.6 maxDD=-328941.6 loseStreak=109 amb=20
+  F1 2025 n=9198 /day=25.200 win%=9.7 risk=85.03 (med=67.50) avgR=-2.325 net/t=-120.9055 total=-1112088.9 maxDD=-1112088.9 loseStreak=148 amb=51
+  F1 2026 n=6917 /day=26.201 win%=9.2 risk=60.30 (med=47.50) avgR=-2.339 net/t=-87.2665 total=-603622.3 maxDD=-603622.3 loseStreak=152 amb=40
+  F2 2024H2 n=3801 /day=20.658 win%=25.2 risk=75.15 (med=59.00) avgR=-1.494 net/t=-73.9722 total=-281168.3 maxDD=-281168.3 loseStreak=82 amb=20 rnd_net=-105.8668
+  F2 2025 n=9198 /day=25.200 win%=18.7 risk=85.03 (med=67.50) avgR=-1.988 net/t=-103.1275 total=-948566.6 maxDD=-948572.0 loseStreak=99 amb=51 rnd_net=-106.1284
+  F2 2026 n=6917 /day=26.201 win%=17.5 risk=60.30 (med=47.50) avgR=-2.001 net/t=-74.6942 total=-516659.7 maxDD=-516659.7 loseStreak=97 amb=40 rnd_net=-96.6538
+  F3 2024H2 n=3801 /day=20.658 win%=35.3 risk=75.15 (med=59.00) avgR=-0.890 net/t=-43.9891 total=-167202.7 maxDD=-167334.2 loseStreak=30 amb=20
+  F3 2025 n=9198 /day=25.200 win%=28.8 risk=85.03 (med=67.50) avgR=-1.178 net/t=-61.3109 total=-563938.0 maxDD=-563979.1 loseStreak=61 amb=51
+  F3 2026 n=6917 /day=26.201 win%=27.1 risk=60.30 (med=47.50) avgR=-1.193 net/t=-44.7651 total=-309640.2 maxDD=-309640.2 loseStreak=64 amb=40
+CELL SL=candle|M=2
+  F0 2024H2 n=3539 /day=19.234 win%=33.4 risk=76.06 (med=60.00) avgR=-0.009 net/t=-1.4927 total=-5282.5 maxDD=-12437.0 loseStreak=14 amb=3
+  F0 2025 n=8516 /day=23.332 win%=34.1 risk=85.84 (med=68.50) avgR=0.015 net/t=1.3250 total=11284.0 maxDD=-11033.0 loseStreak=19 amb=24
+  F0 2026 n=6345 /day=24.034 win%=33.4 risk=61.08 (med=48.00) avgR=-0.006 net/t=-0.3160 total=-2005.0 maxDD=-21754.5 loseStreak=20 amb=17
+  F1 2024H2 n=3539 /day=19.234 win%=23.8 risk=76.06 (med=60.00) avgR=-1.708 net/t=-87.1483 total=-308417.9 maxDD=-308509.4 loseStreak=32 amb=3
+  F1 2025 n=8516 /day=23.332 win%=19.6 risk=85.84 (med=68.50) avgR=-2.265 net/t=-118.7957 total=-1011664.4 maxDD=-1011746.6 loseStreak=61 amb=24
+  F1 2026 n=6345 /day=24.034 win%=18.8 risk=61.08 (med=48.00) avgR=-2.280 net/t=-86.2449 total=-547224.0 maxDD=-547224.0 loseStreak=56 amb=17
+  F2 2024H2 n=3539 /day=19.234 win%=28.5 risk=76.06 (med=60.00) avgR=-1.533 net/t=-78.5768 total=-278083.4 maxDD=-278274.4 loseStreak=23 amb=3 rnd_net=-107.8058
+  F2 2025 n=8516 /day=23.332 win%=25.4 risk=85.84 (med=68.50) avgR=-2.027 net/t=-106.4855 total=-906830.5 maxDD=-906979.3 loseStreak=51 amb=24 rnd_net=-106.0845
+  F2 2026 n=6345 /day=24.034 win%=25.2 risk=61.08 (med=48.00) avgR=-2.045 net/t=-77.6278 total=-492548.2 maxDD=-492548.2 loseStreak=34 amb=17 rnd_net=-89.9451
+  F3 2024H2 n=3539 /day=19.234 win%=31.6 risk=76.06 (med=60.00) avgR=-0.877 net/t=-46.0401 total=-162936.1 maxDD=-163229.7 loseStreak=21 amb=3
+  F3 2025 n=8516 /day=23.332 win%=29.5 risk=85.84 (med=68.50) avgR=-1.150 net/t=-61.1779 total=-520991.3 maxDD=-521184.5 loseStreak=41 amb=24
+  F3 2026 n=6345 /day=24.034 win%=28.9 risk=61.08 (med=48.00) avgR=-1.171 net/t=-45.0369 total=-285759.4 maxDD=-285759.4 loseStreak=23 amb=17
+CELL SL=candle|M=3
+  F0 2024H2 n=3318 /day=18.033 win%=24.8 risk=76.98 (med=60.50) avgR=-0.020 net/t=-3.5300 total=-11712.5 maxDD=-13692.5 loseStreak=20 amb=1
+  F0 2025 n=7914 /day=21.682 win%=26.2 risk=86.06 (med=68.50) avgR=0.040 net/t=3.2121 total=25420.5 maxDD=-10094.0 loseStreak=26 amb=14
+  F0 2026 n=5826 /day=22.068 win%=25.6 risk=61.95 (med=48.50) avgR=0.012 net/t=-0.8411 total=-4900.5 maxDD=-25706.5 loseStreak=23 amb=8
+  F1 2024H2 n=3318 /day=18.033 win%=21.5 risk=76.98 (med=60.50) avgR=-1.706 net/t=-89.2095 total=-295997.0 maxDD=-296102.6 loseStreak=24 amb=1
+  F1 2025 n=7914 /day=21.682 win%=20.3 risk=86.06 (med=68.50) avgR=-2.226 net/t=-116.7403 total=-923882.9 maxDD=-924117.1 loseStreak=48 amb=14
+  F1 2026 n=5826 /day=22.068 win%=19.9 risk=61.95 (med=48.50) avgR=-2.227 net/t=-86.7081 total=-505161.1 maxDD=-505161.1 loseStreak=45 amb=8
+  F2 2024H2 n=3318 /day=18.033 win%=23.8 risk=76.98 (med=60.50) avgR=-1.574 net/t=-82.8720 total=-274969.3 maxDD=-275108.1 loseStreak=20 amb=1 rnd_net=-106.0016
+  F2 2025 n=7914 /day=21.682 win%=23.2 risk=86.06 (med=68.50) avgR=-2.041 net/t=-107.2815 total=-849026.0 maxDD=-849326.8 loseStreak=35 amb=14 rnd_net=-103.9823
+  F2 2026 n=5826 /day=22.068 win%=22.7 risk=61.95 (med=48.50) avgR=-2.048 net/t=-80.1439 total=-466918.1 maxDD=-466918.1 loseStreak=24 amb=8 rnd_net=-95.5316
+  F3 2024H2 n=3318 /day=18.033 win%=24.5 risk=76.98 (med=60.50) avgR=-0.908 net/t=-50.0681 total=-166126.0 maxDD=-166286.9 loseStreak=20 amb=1
+  F3 2025 n=7914 /day=21.682 win%=24.9 risk=86.06 (med=68.50) avgR=-1.144 net/t=-61.3661 total=-485650.9 maxDD=-485996.0 loseStreak=31 amb=14
+  F3 2026 n=5826 /day=22.068 win%=24.5 risk=61.95 (med=48.50) avgR=-1.163 net/t=-47.0656 total=-274204.1 maxDD=-274204.1 loseStreak=24 amb=8
+CELL SL=candle|M=5
+  F0 2024H2 n=2961 /day=16.092 win%=16.4 risk=78.53 (med=61.50) avgR=-0.029 net/t=-6.4242 total=-19022.0 maxDD=-20551.5 loseStreak=39 amb=1
+  F0 2025 n=6548 /day=17.940 win%=17.1 risk=88.21 (med=70.00) avgR=0.015 net/t=0.1123 total=735.5 maxDD=-25094.5 loseStreak=41 amb=4
+  F0 2026 n=5031 /day=19.057 win%=17.5 risk=63.93 (med=50.00) avgR=0.036 net/t=0.0984 total=495.0 maxDD=-20514.5 loseStreak=41 amb=2
+  F1 2024H2 n=2961 /day=16.092 win%=15.9 risk=78.53 (med=61.50) avgR=-1.687 net/t=-91.9584 total=-272288.7 maxDD=-272538.2 loseStreak=39 amb=1
+  F1 2025 n=6548 /day=17.940 win%=15.6 risk=88.21 (med=70.00) avgR=-2.207 net/t=-119.2852 total=-781079.6 maxDD=-781617.7 loseStreak=41 amb=4
+  F1 2026 n=5031 /day=19.057 win%=16.3 risk=63.93 (med=50.00) avgR=-2.143 net/t=-85.9725 total=-432527.6 maxDD=-432527.6 loseStreak=41 amb=2
+  F2 2024H2 n=2961 /day=16.092 win%=16.3 risk=78.53 (med=61.50) avgR=-1.599 net/t=-87.8288 total=-260061.0 maxDD=-260343.7 loseStreak=39 amb=1 rnd_net=-119.5907
+  F2 2025 n=6548 /day=17.940 win%=16.5 risk=88.21 (med=70.00) avgR=-2.084 net/t=-113.1611 total=-740979.0 maxDD=-741583.7 loseStreak=41 amb=4 rnd_net=-108.8514
+  F2 2026 n=5031 /day=19.057 win%=17.1 risk=63.93 (med=50.00) avgR=-2.023 net/t=-81.4672 total=-409861.5 maxDD=-409861.5 loseStreak=41 amb=2 rnd_net=-87.8306
+  F3 2024H2 n=2961 /day=16.092 win%=16.3 risk=78.53 (med=61.50) avgR=-0.946 net/t=-55.5692 total=-164540.3 maxDD=-164823.0 loseStreak=39 amb=1
+  F3 2025 n=6548 /day=17.940 win%=16.8 risk=88.21 (med=70.00) avgR=-1.209 net/t=-68.4606 total=-448279.8 maxDD=-448906.8 loseStreak=41 amb=4
+  F3 2026 n=5031 /day=19.057 win%=17.3 risk=63.93 (med=50.00) avgR=-1.156 net/t=-48.5983 total=-244498.0 maxDD=-244498.0 loseStreak=41 amb=2
+CELL SL=candle|M=10
+  F0 2024H2 n=2254 /day=12.250 win%=9.4 risk=82.18 (med=65.00) avgR=0.016 net/t=-3.4858 total=-7857.0 maxDD=-14469.0 loseStreak=70 amb=0
+  F0 2025 n=4659 /day=12.764 win%=8.9 risk=94.46 (med=74.00) avgR=-0.035 net/t=-3.2178 total=-14991.5 maxDD=-33970.5 loseStreak=67 amb=2
+  F0 2026 n=3808 /day=14.424 win%=9.8 risk=67.13 (med=52.50) avgR=0.069 net/t=1.3750 total=5236.0 maxDD=-27976.0 loseStreak=45 amb=0
+  F1 2024H2 n=2254 /day=12.250 win%=9.3 risk=82.18 (med=65.00) avgR=-1.571 net/t=-89.1337 total=-200907.3 maxDD=-202345.9 loseStreak=70 amb=0
+  F1 2025 n=4659 /day=12.764 win%=8.7 risk=94.46 (med=74.00) avgR=-2.103 net/t=-123.0127 total=-573116.3 maxDD=-574155.7 loseStreak=67 amb=2
+  F1 2026 n=3808 /day=14.424 win%=9.7 risk=67.13 (med=52.50) avgR=-2.035 net/t=-85.1250 total=-324155.9 maxDD=-324839.5 loseStreak=51 amb=0
+  F2 2024H2 n=2254 /day=12.250 win%=9.3 risk=82.18 (med=65.00) avgR=-1.520 net/t=-86.7386 total=-195508.7 maxDD=-197070.1 loseStreak=70 amb=0 rnd_net=-116.5459
+  F2 2025 n=4659 /day=12.764 win%=8.8 risk=94.46 (med=74.00) avgR=-2.047 net/t=-119.8304 total=-558289.7 maxDD=-559461.7 loseStreak=67 amb=2 rnd_net=-111.2944
+  F2 2026 n=3808 /day=14.424 win%=9.8 risk=67.13 (med=52.50) avgR=-1.970 net/t=-82.5936 total=-314516.3 maxDD=-315314.9 loseStreak=51 amb=0 rnd_net=-74.9387
+  F3 2024H2 n=2254 /day=12.250 win%=9.4 risk=82.18 (med=65.00) avgR=-0.913 net/t=-55.4165 total=-124908.9 maxDD=-126730.4 loseStreak=70 amb=0
+  F3 2025 n=4659 /day=12.764 win%=8.9 risk=94.46 (med=74.00) avgR=-1.236 net/t=-75.8367 total=-353323.4 maxDD=-354704.5 loseStreak=67 amb=2
+  F3 2026 n=3808 /day=14.424 win%=9.8 risk=67.13 (med=52.50) avgR=-1.146 net/t=-50.5529 total=-192505.6 maxDD=-194039.7 loseStreak=45 amb=0
+CELL SL=10|M=1
+  F0 2024H2 n=4025 /day=21.875 win%=33.2 risk=10.00 (med=10.00) avgR=-0.487 net/t=-4.8728 total=-19613.0 maxDD=-19652.0 loseStreak=20 amb=1171
+  F0 2025 n=9906 /day=27.140 win%=32.7 risk=10.00 (med=10.00) avgR=-0.420 net/t=-4.2049 total=-41653.5 maxDD=-41653.5 loseStreak=29 amb=3075
+  F0 2026 n=7514 /day=28.462 win%=34.3 risk=10.00 (med=10.00) avgR=-0.364 net/t=-3.6401 total=-27352.0 maxDD=-27374.5 loseStreak=32 amb=1846
+  F1 2024H2 n=4025 /day=21.875 win%=0.0 risk=10.00 (med=10.00) avgR=-9.035 net/t=-90.3459 total=-363642.3 maxDD=-363642.3 loseStreak=4025 amb=1171
+  F1 2025 n=9906 /day=27.140 win%=0.0 risk=10.00 (med=10.00) avgR=-12.448 net/t=-124.4841 total=-1233139.5 maxDD=-1233139.5 loseStreak=9906 amb=3075
+  F1 2026 n=7514 /day=28.462 win%=0.0 risk=10.00 (med=10.00) avgR=-8.958 net/t=-89.5849 total=-673141.1 maxDD=-673141.1 loseStreak=7514 amb=1846
+  F2 2024H2 n=4025 /day=21.875 win%=0.0 risk=10.00 (med=10.00) avgR=-8.195 net/t=-81.9543 total=-329865.9 maxDD=-329865.9 loseStreak=4025 amb=1171 rnd_net=-100.9490
+  F2 2025 n=9906 /day=27.140 win%=0.0 risk=10.00 (med=10.00) avgR=-11.262 net/t=-112.6225 total=-1115638.8 maxDD=-1115638.8 loseStreak=9906 amb=3075 rnd_net=-102.1245
+  F2 2026 n=7514 /day=28.462 win%=0.0 risk=10.00 (med=10.00) avgR=-8.069 net/t=-80.6931 total=-606328.2 maxDD=-606328.2 loseStreak=7514 amb=1846 rnd_net=-87.9104
+  F3 2024H2 n=4025 /day=21.875 win%=0.0 risk=10.00 (med=10.00) avgR=-4.761 net/t=-47.6095 total=-191628.1 maxDD=-191628.1 loseStreak=4025 amb=1171
+  F3 2025 n=9906 /day=27.140 win%=0.0 risk=10.00 (med=10.00) avgR=-6.434 net/t=-64.3445 total=-637396.8 maxDD=-637396.8 loseStreak=9906 amb=3075
+  F3 2026 n=7514 /day=28.462 win%=0.0 risk=10.00 (med=10.00) avgR=-4.662 net/t=-46.6195 total=-350298.6 maxDD=-350298.6 loseStreak=7514 amb=1846
+CELL SL=10|M=2
+  F0 2024H2 n=4009 /day=21.788 win%=29.2 risk=10.00 (med=10.00) avgR=-0.281 net/t=-2.8088 total=-11260.5 maxDD=-11365.0 loseStreak=23 amb=788
+  F0 2025 n=9868 /day=27.036 win%=29.8 risk=10.00 (med=10.00) avgR=-0.183 net/t=-1.8306 total=-18064.0 maxDD=-18073.5 loseStreak=30 amb=2214
+  F0 2026 n=7462 /day=28.265 win%=29.6 risk=10.00 (med=10.00) avgR=-0.163 net/t=-1.6283 total=-12150.5 maxDD=-12697.0 loseStreak=38 amb=1209
+  F1 2024H2 n=4009 /day=21.788 win%=0.0 risk=10.00 (med=10.00) avgR=-8.832 net/t=-88.3167 total=-354061.5 maxDD=-354061.5 loseStreak=4009 amb=788
+  F1 2025 n=9868 /day=27.036 win%=0.0 risk=10.00 (med=10.00) avgR=-12.211 net/t=-122.1108 total=-1204989.1 maxDD=-1204989.1 loseStreak=9868 amb=2214
+  F1 2026 n=7462 /day=28.265 win%=0.0 risk=10.00 (med=10.00) avgR=-8.757 net/t=-87.5688 total=-653438.3 maxDD=-653438.3 loseStreak=7462 amb=1209
+  F2 2024H2 n=4009 /day=21.788 win%=0.0 risk=10.00 (med=10.00) avgR=-8.087 net/t=-80.8703 total=-324209.2 maxDD=-324209.2 loseStreak=4009 amb=788 rnd_net=-97.7754
+  F2 2025 n=9868 /day=27.036 win%=0.0 risk=10.00 (med=10.00) avgR=-11.130 net/t=-111.3012 total=-1098320.1 maxDD=-1098320.1 loseStreak=9868 amb=2214 rnd_net=-102.3789
+  F2 2026 n=7462 /day=28.265 win%=0.0 risk=10.00 (med=10.00) avgR=-7.986 net/t=-79.8623 total=-595932.2 maxDD=-595932.2 loseStreak=7462 amb=1209 rnd_net=-85.9033
+  F3 2024H2 n=4009 /day=21.788 win%=0.0 risk=10.00 (med=10.00) avgR=-4.556 net/t=-45.5628 total=-182661.4 maxDD=-182661.4 loseStreak=4009 amb=788
+  F3 2025 n=9868 /day=27.036 win%=0.0 risk=10.00 (med=10.00) avgR=-6.197 net/t=-61.9707 total=-611527.2 maxDD=-611527.2 loseStreak=9868 amb=2214
+  F3 2026 n=7462 /day=28.265 win%=0.0 risk=10.00 (med=10.00) avgR=-4.462 net/t=-44.6238 total=-332982.5 maxDD=-332982.5 loseStreak=7462 amb=1209
+CELL SL=10|M=3
+  F0 2024H2 n=3996 /day=21.717 win%=25.6 risk=10.00 (med=10.00) avgR=-0.137 net/t=-1.3744 total=-5492.0 maxDD=-5652.5 loseStreak=23 amb=562
+  F0 2025 n=9828 /day=26.926 win%=27.0 risk=10.00 (med=10.00) avgR=0.000 net/t=0.0018 total=17.5 maxDD=-2736.0 loseStreak=30 amb=1634
+  F0 2026 n=7406 /day=28.053 win%=25.6 risk=10.00 (med=10.00) avgR=-0.030 net/t=-0.3031 total=-2245.0 maxDD=-4945.5 loseStreak=38 amb=846
+  F1 2024H2 n=3996 /day=21.717 win%=0.0 risk=10.00 (med=10.00) avgR=-8.690 net/t=-86.8995 total=-347250.3 maxDD=-347250.3 loseStreak=3996 amb=562
+  F1 2025 n=9828 /day=26.926 win%=0.0 risk=10.00 (med=10.00) avgR=-12.027 net/t=-120.2679 total=-1181992.9 maxDD=-1181992.9 loseStreak=9828 amb=1634
+  F1 2026 n=7406 /day=28.053 win%=0.0 risk=10.00 (med=10.00) avgR=-8.625 net/t=-86.2451 total=-638731.6 maxDD=-638731.6 loseStreak=7406 amb=846
+  F2 2024H2 n=3996 /day=21.717 win%=0.0 risk=10.00 (med=10.00) avgR=-8.032 net/t=-80.3164 total=-320944.3 maxDD=-320944.3 loseStreak=3996 amb=562 rnd_net=-97.9723
+  F2 2025 n=9828 /day=26.926 win%=0.0 risk=10.00 (med=10.00) avgR=-11.048 net/t=-110.4794 total=-1085791.2 maxDD=-1085791.2 loseStreak=9828 amb=1634 rnd_net=-103.0152
+  F2 2026 n=7406 /day=28.053 win%=0.0 risk=10.00 (med=10.00) avgR=-7.958 net/t=-79.5791 total=-589362.5 maxDD=-589362.5 loseStreak=7406 amb=846 rnd_net=-90.9659
+  F3 2024H2 n=3996 /day=21.717 win%=0.0 risk=10.00 (med=10.00) avgR=-4.414 net/t=-44.1370 total=-176371.6 maxDD=-176371.6 loseStreak=3996 amb=562
+  F3 2025 n=9828 /day=26.926 win%=0.0 risk=10.00 (med=10.00) avgR=-6.013 net/t=-60.1332 total=-590988.8 maxDD=-590988.8 loseStreak=9828 amb=1634
+  F3 2026 n=7406 /day=28.053 win%=0.0 risk=10.00 (med=10.00) avgR=-4.334 net/t=-43.3354 total=-320941.9 maxDD=-320941.9 loseStreak=7406 amb=846
+CELL SL=10|M=5
+  F0 2024H2 n=3958 /day=21.511 win%=21.1 risk=10.00 (med=10.00) avgR=0.098 net/t=0.9809 total=3882.5 maxDD=-900.5 loseStreak=30 amb=306
+  F0 2025 n=9760 /day=26.740 win%=22.1 risk=10.00 (med=10.00) avgR=0.244 net/t=2.4410 total=23824.5 maxDD=-683.5 loseStreak=30 amb=968
+  F0 2026 n=7335 /day=27.784 win%=20.1 risk=10.00 (med=10.00) avgR=0.148 net/t=1.4828 total=10876.5 maxDD=-762.5 loseStreak=40 amb=456
+  F1 2024H2 n=3958 /day=21.511 win%=0.0 risk=10.00 (med=10.00) avgR=-8.462 net/t=-84.6185 total=-334920.0 maxDD=-334920.0 loseStreak=3958 amb=306
+  F1 2025 n=9760 /day=26.740 win%=0.0 risk=10.00 (med=10.00) avgR=-11.782 net/t=-117.8151 total=-1149875.4 maxDD=-1149875.4 loseStreak=9760 amb=968
+  F1 2026 n=7335 /day=27.784 win%=0.0 risk=10.00 (med=10.00) avgR=-8.446 net/t=-84.4551 total=-619478.4 maxDD=-619478.4 loseStreak=7335 amb=456
+  F2 2024H2 n=3958 /day=21.511 win%=5.0 risk=10.00 (med=10.00) avgR=-7.912 net/t=-79.1229 total=-313168.5 maxDD=-313168.5 loseStreak=1835 amb=306 rnd_net=-95.4376
+  F2 2025 n=9760 /day=26.740 win%=0.0 risk=10.00 (med=10.00) avgR=-10.979 net/t=-109.7927 total=-1071576.4 maxDD=-1071576.4 loseStreak=9760 amb=968 rnd_net=-103.9796
+  F2 2026 n=7335 /day=27.784 win%=0.4 risk=10.00 (med=10.00) avgR=-7.921 net/t=-79.2107 total=-581010.7 maxDD=-581010.7 loseStreak=4218 amb=456 rnd_net=-90.6120
+  F3 2024H2 n=3958 /day=21.511 win%=14.7 risk=10.00 (med=10.00) avgR=-4.185 net/t=-41.8468 total=-165629.6 maxDD=-165629.6 loseStreak=1103 amb=306
+  F3 2025 n=9760 /day=26.740 win%=1.7 risk=10.00 (med=10.00) avgR=-5.770 net/t=-57.6974 total=-563126.5 maxDD=-563126.5 loseStreak=5887 amb=968
+  F3 2026 n=7335 /day=27.784 win%=17.2 risk=10.00 (med=10.00) avgR=-4.160 net/t=-41.6021 total=-305151.2 maxDD=-305151.2 loseStreak=794 amb=456
+CELL SL=10|M=10
+  F0 2024H2 n=3899 /day=21.190 win%=13.6 risk=10.00 (med=10.00) avgR=0.318 net/t=3.1768 total=12386.5 maxDD=-1055.0 loseStreak=50 amb=86
+  F0 2025 n=9626 /day=26.373 win%=14.3 risk=10.00 (med=10.00) avgR=0.484 net/t=4.8370 total=46561.0 maxDD=-855.5 loseStreak=49 amb=337
+  F0 2026 n=7132 /day=27.015 win%=12.2 risk=10.00 (med=10.00) avgR=0.280 net/t=2.7969 total=19947.5 maxDD=-909.0 loseStreak=52 amb=122
+  F1 2024H2 n=3899 /day=21.190 win%=9.2 risk=10.00 (med=10.00) avgR=-8.249 net/t=-82.4944 total=-321645.8 maxDD=-321645.8 loseStreak=1095 amb=86
+  F1 2025 n=9626 /day=26.373 win%=1.1 risk=10.00 (med=10.00) avgR=-11.539 net/t=-115.3946 total=-1110788.1 maxDD=-1110788.1 loseStreak=5800 amb=337
+  F1 2026 n=7132 /day=27.015 win%=10.5 risk=10.00 (med=10.00) avgR=-8.313 net/t=-83.1339 total=-592910.8 maxDD=-592910.8 loseStreak=768 amb=122
+  F2 2024H2 n=3899 /day=21.190 win%=13.6 risk=10.00 (med=10.00) avgR=-7.893 net/t=-78.9335 total=-307761.6 maxDD=-307761.6 loseStreak=50 amb=86 rnd_net=-95.7398
+  F2 2025 n=9626 /day=26.373 win%=13.9 risk=10.00 (med=10.00) avgR=-11.022 net/t=-110.2165 total=-1060944.4 maxDD=-1060944.4 loseStreak=221 amb=337 rnd_net=-107.2160
+  F2 2026 n=7132 /day=27.015 win%=12.2 risk=10.00 (med=10.00) avgR=-7.996 net/t=-79.9589 total=-570266.5 maxDD=-570266.5 loseStreak=52 amb=122 rnd_net=-97.8167
+  F3 2024H2 n=3899 /day=21.190 win%=13.6 risk=10.00 (med=10.00) avgR=-3.982 net/t=-39.8153 total=-155239.9 maxDD=-155239.9 loseStreak=50 amb=86
+  F3 2025 n=9626 /day=26.373 win%=14.3 risk=10.00 (med=10.00) avgR=-5.544 net/t=-55.4440 total=-533703.6 maxDD=-533703.6 loseStreak=49 amb=337
+  F3 2026 n=7132 /day=27.015 win%=12.2 risk=10.00 (med=10.00) avgR=-4.060 net/t=-40.6027 total=-289578.3 maxDD=-289578.3 loseStreak=52 amb=122
+CELL SL=20|M=1
+  F0 2024H2 n=3997 /day=21.723 win%=41.6 risk=20.00 (med=20.00) avgR=-0.215 net/t=-4.2913 total=-17152.5 maxDD=-17280.0 loseStreak=15 amb=517
+  F0 2025 n=9835 /day=26.945 win%=40.2 risk=20.00 (med=20.00) avgR=-0.219 net/t=-4.3849 total=-43125.0 maxDD=-43144.5 loseStreak=23 amb=1610
+  F0 2026 n=7382 /day=27.962 win%=42.6 risk=20.00 (med=20.00) avgR=-0.165 net/t=-3.2995 total=-24357.0 maxDD=-24807.0 loseStreak=21 amb=772
+  F1 2024H2 n=3997 /day=21.723 win%=0.0 risk=20.00 (med=20.00) avgR=-4.490 net/t=-89.7948 total=-358909.9 maxDD=-358909.9 loseStreak=3997 amb=517
+  F1 2025 n=9835 /day=26.945 win%=0.0 risk=20.00 (med=20.00) avgR=-6.233 net/t=-124.6557 total=-1225988.9 maxDD=-1225988.9 loseStreak=9835 amb=1610
+  F1 2026 n=7382 /day=27.962 win%=0.0 risk=20.00 (med=20.00) avgR=-4.464 net/t=-89.2725 total=-659009.8 maxDD=-659009.8 loseStreak=7382 amb=772
+  F2 2024H2 n=3997 /day=21.723 win%=0.0 risk=20.00 (med=20.00) avgR=-3.962 net/t=-79.2339 total=-316698.1 maxDD=-316698.1 loseStreak=3997 amb=517 rnd_net=-99.5075
+  F2 2025 n=9835 /day=26.945 win%=0.0 risk=20.00 (med=20.00) avgR=-5.505 net/t=-110.0999 total=-1082832.2 maxDD=-1082832.2 loseStreak=9835 amb=1610 rnd_net=-101.1166
+  F2 2026 n=7382 /day=27.962 win%=0.0 risk=20.00 (med=20.00) avgR=-3.913 net/t=-78.2509 total=-577648.2 maxDD=-577648.2 loseStreak=7382 amb=772 rnd_net=-82.1790
+  F3 2024H2 n=3997 /day=21.723 win%=0.0 risk=20.00 (med=20.00) avgR=-2.352 net/t=-47.0432 total=-188031.8 maxDD=-188031.8 loseStreak=3997 amb=517
+  F3 2025 n=9835 /day=26.945 win%=0.0 risk=20.00 (med=20.00) avgR=-3.226 net/t=-64.5268 total=-634621.5 maxDD=-634621.5 loseStreak=9835 amb=1610
+  F3 2026 n=7382 /day=27.962 win%=0.0 risk=20.00 (med=20.00) avgR=-2.318 net/t=-46.3570 total=-342207.1 maxDD=-342207.1 loseStreak=7382 amb=772
+CELL SL=20|M=2
+  F0 2024H2 n=3947 /day=21.451 win%=33.5 risk=20.00 (med=20.00) avgR=-0.048 net/t=-0.9602 total=-3790.0 maxDD=-4129.0 loseStreak=16 amb=265
+  F0 2025 n=9717 /day=26.622 win%=33.1 risk=20.00 (med=20.00) avgR=-0.033 net/t=-0.6633 total=-6445.5 maxDD=-8619.5 loseStreak=23 amb=883
+  F0 2026 n=7230 /day=27.386 win%=33.3 risk=20.00 (med=20.00) avgR=-0.019 net/t=-0.3873 total=-2800.5 maxDD=-7139.0 loseStreak=21 amb=399
+  F1 2024H2 n=3947 /day=21.451 win%=0.0 risk=20.00 (med=20.00) avgR=-4.329 net/t=-86.5740 total=-341707.5 maxDD=-341707.5 loseStreak=3947 amb=265
+  F1 2025 n=9717 /day=26.622 win%=0.0 risk=20.00 (med=20.00) avgR=-6.046 net/t=-120.9230 total=-1175008.4 maxDD=-1175008.4 loseStreak=9717 amb=883
+  F1 2026 n=7230 /day=27.386 win%=0.0 risk=20.00 (med=20.00) avgR=-4.318 net/t=-86.3653 total=-624421.3 maxDD=-624421.3 loseStreak=7230 amb=399
+  F2 2024H2 n=3947 /day=21.451 win%=0.0 risk=20.00 (med=20.00) avgR=-3.899 net/t=-77.9766 total=-307773.6 maxDD=-307773.6 loseStreak=3947 amb=265 rnd_net=-97.8466
+  F2 2025 n=9717 /day=26.622 win%=0.0 risk=20.00 (med=20.00) avgR=-5.447 net/t=-108.9408 total=-1058577.6 maxDD=-1058577.6 loseStreak=9717 amb=883 rnd_net=-101.5375
+  F2 2026 n=7230 /day=27.386 win%=0.0 risk=20.00 (med=20.00) avgR=-3.886 net/t=-77.7208 total=-561921.1 maxDD=-561921.1 loseStreak=7230 amb=399 rnd_net=-86.6564
+  F3 2024H2 n=3947 /day=21.451 win%=20.2 risk=20.00 (med=20.00) avgR=-2.189 net/t=-43.7746 total=-172778.5 maxDD=-172778.5 loseStreak=1243 amb=265
+  F3 2025 n=9717 /day=26.622 win%=0.0 risk=20.00 (med=20.00) avgR=-3.041 net/t=-60.8114 total=-590904.7 maxDD=-590904.7 loseStreak=9717 amb=883
+  F3 2026 n=7230 /day=27.386 win%=12.5 risk=20.00 (med=20.00) avgR=-2.177 net/t=-43.5470 total=-314844.8 maxDD=-314844.8 loseStreak=1606 amb=399
+CELL SL=20|M=3
+  F0 2024H2 n=3905 /day=21.223 win%=27.5 risk=20.00 (med=20.00) avgR=0.045 net/t=0.9029 total=3526.0 maxDD=-1451.0 loseStreak=21 amb=170
+  F0 2025 n=9640 /day=26.411 win%=27.3 risk=20.00 (med=20.00) avgR=0.066 net/t=1.3206 total=12731.0 maxDD=-2430.0 loseStreak=27 amb=559
+  F0 2026 n=7093 /day=26.867 win%=26.0 risk=20.00 (med=20.00) avgR=0.018 net/t=0.3576 total=2536.5 maxDD=-3396.0 loseStreak=23 amb=218
+  F1 2024H2 n=3905 /day=21.223 win%=0.0 risk=20.00 (med=20.00) avgR=-4.240 net/t=-84.8008 total=-331147.2 maxDD=-331147.2 loseStreak=3905 amb=170
+  F1 2025 n=9640 /day=26.411 win%=0.0 risk=20.00 (med=20.00) avgR=-5.947 net/t=-118.9407 total=-1146587.9 maxDD=-1146587.9 loseStreak=9640 amb=559
+  F1 2026 n=7093 /day=26.867 win%=0.0 risk=20.00 (med=20.00) avgR=-4.281 net/t=-85.6267 total=-607350.5 maxDD=-607350.5 loseStreak=7093 amb=218
+  F2 2024H2 n=3905 /day=21.223 win%=18.5 risk=20.00 (med=20.00) avgR=-3.883 net/t=-77.6587 total=-303257.1 maxDD=-303257.1 loseStreak=1217 amb=170 rnd_net=-94.9770
+  F2 2025 n=9640 /day=26.411 win%=0.0 risk=20.00 (med=20.00) avgR=-5.451 net/t=-109.0201 total=-1050953.7 maxDD=-1050953.7 loseStreak=9640 amb=559 rnd_net=-100.4539
+  F2 2026 n=7093 /day=26.867 win%=13.2 risk=20.00 (med=20.00) avgR=-3.944 net/t=-78.8882 total=-559554.3 maxDD=-559554.3 loseStreak=1368 amb=218 rnd_net=-84.0950
+  F3 2024H2 n=3905 /day=21.223 win%=26.5 risk=20.00 (med=20.00) avgR=-2.102 net/t=-42.0411 total=-164170.4 maxDD=-164170.4 loseStreak=80 amb=170
+  F3 2025 n=9640 /day=26.411 win%=11.5 risk=20.00 (med=20.00) avgR=-2.945 net/t=-58.9026 total=-567821.4 maxDD=-567821.4 loseStreak=3618 amb=559
+  F3 2026 n=7093 /day=26.867 win%=25.8 risk=20.00 (med=20.00) avgR=-2.148 net/t=-42.9689 total=-304778.4 maxDD=-304778.4 loseStreak=23 amb=218
+CELL SL=20|M=5
+  F0 2024H2 n=3831 /day=20.821 win%=20.0 risk=20.00 (med=20.00) avgR=0.142 net/t=2.8320 total=10849.5 maxDD=-1429.5 loseStreak=42 amb=70
+  F0 2025 n=9471 /day=25.948 win%=19.8 risk=20.00 (med=20.00) avgR=0.160 net/t=3.2043 total=30348.0 maxDD=-2123.0 loseStreak=38 amb=247
+  F0 2026 n=6847 /day=25.936 win%=18.5 risk=20.00 (med=20.00) avgR=0.088 net/t=1.7505 total=11986.0 maxDD=-3315.0 loseStreak=38 amb=84
+  F1 2024H2 n=3831 /day=20.821 win%=13.9 risk=20.00 (med=20.00) avgR=-4.148 net/t=-82.9516 total=-317787.5 maxDD=-317787.5 loseStreak=1088 amb=70
+  F1 2025 n=9471 /day=25.948 win%=1.6 risk=20.00 (med=20.00) avgR=-5.852 net/t=-117.0471 total=-1108553.0 maxDD=-1108553.0 loseStreak=5712 amb=247
+  F1 2026 n=6847 /day=25.936 win%=16.3 risk=20.00 (med=20.00) avgR=-4.212 net/t=-84.2494 total=-576855.5 maxDD=-576855.5 loseStreak=742 amb=84
+  F2 2024H2 n=3831 /day=20.821 win%=20.0 risk=20.00 (med=20.00) avgR=-3.888 net/t=-77.7627 total=-297908.9 maxDD=-297908.9 loseStreak=42 amb=70 rnd_net=-96.5193
+  F2 2025 n=9471 /day=25.948 win%=19.3 risk=20.00 (med=20.00) avgR=-5.493 net/t=-109.8611 total=-1040494.5 maxDD=-1040494.5 loseStreak=118 amb=247 rnd_net=-95.2022
+  F2 2026 n=6847 /day=25.936 win%=18.5 risk=20.00 (med=20.00) avgR=-3.973 net/t=-79.4588 total=-544054.5 maxDD=-544054.5 loseStreak=38 amb=84 rnd_net=-89.7021
+  F3 2024H2 n=3831 /day=20.821 win%=20.0 risk=20.00 (med=20.00) avgR=-2.020 net/t=-40.3998 total=-154771.7 maxDD=-154771.7 loseStreak=42 amb=70
+  F3 2025 n=9471 /day=25.948 win%=19.8 risk=20.00 (med=20.00) avgR=-2.863 net/t=-57.2672 total=-542378.1 maxDD=-542378.1 loseStreak=38 amb=247
+  F3 2026 n=6847 /day=25.936 win%=18.5 risk=20.00 (med=20.00) avgR=-2.104 net/t=-42.0729 total=-288073.2 maxDD=-288073.2 loseStreak=38 amb=84
+CELL SL=20|M=10
+  F0 2024H2 n=3660 /day=19.891 win%=11.0 risk=20.00 (med=20.00) avgR=0.151 net/t=3.0294 total=11087.5 maxDD=-1941.0 loseStreak=56 amb=10
+  F0 2025 n=9093 /day=24.912 win%=11.5 risk=20.00 (med=20.00) avgR=0.236 net/t=4.7245 total=42959.5 maxDD=-2974.0 loseStreak=69 amb=55
+  F0 2026 n=6350 /day=24.053 win%=11.0 risk=20.00 (med=20.00) avgR=0.185 net/t=3.6994 total=23491.0 maxDD=-3484.0 loseStreak=71 amb=23
+  F1 2024H2 n=3660 /day=19.891 win%=11.0 risk=20.00 (med=20.00) avgR=-4.149 net/t=-82.9756 total=-303690.5 maxDD=-303690.5 loseStreak=56 amb=10
+  F1 2025 n=9093 /day=24.912 win%=11.5 risk=20.00 (med=20.00) avgR=-5.773 net/t=-115.4646 total=-1049919.2 maxDD=-1049919.2 loseStreak=69 amb=55
+  F1 2026 n=6350 /day=24.053 win%=11.0 risk=20.00 (med=20.00) avgR=-4.118 net/t=-82.3511 total=-522929.6 maxDD=-522929.6 loseStreak=71 amb=23
+  F2 2024H2 n=3660 /day=19.891 win%=11.0 risk=20.00 (med=20.00) avgR=-4.006 net/t=-80.1171 total=-293228.8 maxDD=-293228.8 loseStreak=56 amb=10 rnd_net=-114.7071
+  F2 2025 n=9093 /day=24.912 win%=11.5 risk=20.00 (med=20.00) avgR=-5.565 net/t=-111.2980 total=-1012032.4 maxDD=-1012032.4 loseStreak=69 amb=55 rnd_net=-84.0159
+  F2 2026 n=6350 /day=24.053 win%=11.0 risk=20.00 (med=20.00) avgR=-3.975 net/t=-79.5084 total=-504878.3 maxDD=-504878.3 loseStreak=71 amb=23 rnd_net=-93.6612
+  F3 2024H2 n=3660 /day=19.891 win%=11.0 risk=20.00 (med=20.00) avgR=-2.066 net/t=-41.3200 total=-151231.0 maxDD=-151231.0 loseStreak=56 amb=10
+  F3 2025 n=9093 /day=24.912 win%=11.5 risk=20.00 (med=20.00) avgR=-2.838 net/t=-56.7602 total=-516120.7 maxDD=-516189.3 loseStreak=69 amb=55
+  F3 2026 n=6350 /day=24.053 win%=11.0 risk=20.00 (med=20.00) avgR=-2.060 net/t=-41.2048 total=-261650.3 maxDD=-261654.7 loseStreak=71 amb=23
+CELL SL=30|M=1
+  F0 2024H2 n=3950 /day=21.467 win%=45.3 risk=30.00 (med=30.00) avgR=-0.119 net/t=-3.5690 total=-14097.5 maxDD=-14423.0 loseStreak=13 amb=254
+  F0 2025 n=9720 /day=26.630 win%=44.4 risk=30.00 (med=30.00) avgR=-0.125 net/t=-3.7358 total=-36312.0 maxDD=-36371.5 loseStreak=17 amb=866
+  F0 2026 n=7196 /day=27.258 win%=46.0 risk=30.00 (med=30.00) avgR=-0.089 net/t=-2.6834 total=-19309.5 maxDD=-20766.0 loseStreak=15 amb=359
+  F1 2024H2 n=3950 /day=21.467 win%=0.0 risk=30.00 (med=30.00) avgR=-2.973 net/t=-89.1810 total=-352264.8 maxDD=-352264.8 loseStreak=3950 amb=254
+  F1 2025 n=9720 /day=26.630 win%=0.0 risk=30.00 (med=30.00) avgR=-4.134 net/t=-124.0113 total=-1205390.1 maxDD=-1205390.1 loseStreak=9720 amb=866
+  F1 2026 n=7196 /day=27.258 win%=0.0 risk=30.00 (med=30.00) avgR=-2.956 net/t=-88.6910 total=-638220.3 maxDD=-638220.3 loseStreak=7196 amb=359
+  F2 2024H2 n=3950 /day=21.467 win%=0.0 risk=30.00 (med=30.00) avgR=-2.588 net/t=-77.6365 total=-306664.2 maxDD=-306664.2 loseStreak=3950 amb=254 rnd_net=-90.5197
+  F2 2025 n=9720 /day=26.630 win%=0.0 risk=30.00 (med=30.00) avgR=-3.598 net/t=-107.9451 total=-1049226.8 maxDD=-1049226.8 loseStreak=9720 amb=866 rnd_net=-104.6494
+  F2 2026 n=7196 /day=27.258 win%=0.0 risk=30.00 (med=30.00) avgR=-2.560 net/t=-76.7880 total=-552566.7 maxDD=-552566.7 loseStreak=7196 amb=359 rnd_net=-84.4049
+  F3 2024H2 n=3950 /day=21.467 win%=0.0 risk=30.00 (med=30.00) avgR=-1.547 net/t=-46.4071 total=-183308.1 maxDD=-183308.1 loseStreak=3950 amb=254
+  F3 2025 n=9720 /day=26.630 win%=0.0 risk=30.00 (med=30.00) avgR=-2.130 net/t=-63.8943 total=-621052.3 maxDD=-621052.3 loseStreak=9720 amb=866
+  F3 2026 n=7196 /day=27.258 win%=0.0 risk=30.00 (med=30.00) avgR=-1.529 net/t=-45.8772 total=-330132.0 maxDD=-330132.0 loseStreak=7196 amb=359
+CELL SL=30|M=2
+  F0 2024H2 n=3867 /day=21.016 win%=33.6 risk=30.00 (med=30.00) avgR=-0.019 net/t=-0.5687 total=-2199.0 maxDD=-3984.5 loseStreak=17 amb=122
+  F0 2025 n=9556 /day=26.181 win%=33.9 risk=30.00 (med=30.00) avgR=0.003 net/t=0.0832 total=795.0 maxDD=-6817.0 loseStreak=23 amb=412
+  F0 2026 n=6949 /day=26.322 win%=33.3 risk=30.00 (med=30.00) avgR=-0.012 net/t=-0.3685 total=-2560.5 maxDD=-5810.0 loseStreak=20 amb=149
+  F1 2024H2 n=3867 /day=21.016 win%=0.0 risk=30.00 (med=30.00) avgR=-2.880 net/t=-86.3876 total=-334060.8 maxDD=-334060.8 loseStreak=3867 amb=122
+  F1 2025 n=9556 /day=26.181 win%=0.0 risk=30.00 (med=30.00) avgR=-4.006 net/t=-120.1944 total=-1148577.5 maxDD=-1148577.5 loseStreak=9556 amb=412
+  F1 2026 n=6949 /day=26.322 win%=0.0 risk=30.00 (med=30.00) avgR=-2.880 net/t=-86.3859 total=-600295.7 maxDD=-600295.7 loseStreak=6949 amb=149
+  F2 2024H2 n=3867 /day=21.016 win%=23.0 risk=30.00 (med=30.00) avgR=-2.590 net/t=-77.7052 total=-300485.9 maxDD=-300485.9 loseStreak=1215 amb=122 rnd_net=-83.3130
+  F2 2025 n=9556 /day=26.181 win%=0.0 risk=30.00 (med=30.00) avgR=-3.596 net/t=-107.8945 total=-1031040.0 maxDD=-1031040.0 loseStreak=9556 amb=412 rnd_net=-105.2806
+  F2 2026 n=6949 /day=26.322 win%=17.1 risk=30.00 (med=30.00) avgR=-2.592 net/t=-77.7482 total=-540272.1 maxDD=-540272.1 loseStreak=1344 amb=149 rnd_net=-85.7043
+  F3 2024H2 n=3867 /day=21.016 win%=32.4 risk=30.00 (med=30.00) avgR=-1.455 net/t=-43.6617 total=-168839.8 maxDD=-168844.7 loseStreak=80 amb=122
+  F3 2025 n=9556 /day=26.181 win%=14.2 risk=30.00 (med=30.00) avgR=-2.007 net/t=-60.2089 total=-575356.5 maxDD=-575356.5 loseStreak=3587 amb=412
+  F3 2026 n=6949 /day=26.322 win%=33.1 risk=30.00 (med=30.00) avgR=-1.462 net/t=-43.8723 total=-304868.5 maxDD=-304868.5 loseStreak=20 amb=149
+CELL SL=30|M=3
+  F0 2024H2 n=3795 /day=20.625 win%=26.7 risk=30.00 (med=30.00) avgR=0.039 net/t=1.1725 total=4449.5 maxDD=-2484.0 loseStreak=26 amb=59
+  F0 2025 n=9385 /day=25.712 win%=27.1 risk=30.00 (med=30.00) avgR=0.069 net/t=2.0722 total=19448.0 maxDD=-2768.0 loseStreak=33 amb=223
+  F0 2026 n=6717 /day=25.443 win%=25.8 risk=30.00 (med=30.00) avgR=0.018 net/t=0.5533 total=3716.5 maxDD=-6273.0 loseStreak=22 amb=81
+  F1 2024H2 n=3795 /day=20.625 win%=18.6 risk=30.00 (med=30.00) avgR=-2.825 net/t=-84.7528 total=-321637.0 maxDD=-321637.0 loseStreak=1151 amb=59
+  F1 2025 n=9385 /day=25.712 win%=0.0 risk=30.00 (med=30.00) avgR=-3.940 net/t=-118.2043 total=-1109347.7 maxDD=-1109347.7 loseStreak=7025 amb=223
+  F1 2026 n=6717 /day=25.443 win%=15.6 risk=30.00 (med=30.00) avgR=-2.850 net/t=-85.4859 total=-574209.1 maxDD=-574209.1 loseStreak=858 amb=81
+  F2 2024H2 n=3795 /day=20.625 win%=26.7 risk=30.00 (med=30.00) avgR=-2.595 net/t=-77.8440 total=-295417.8 maxDD=-295430.6 loseStreak=26 amb=59 rnd_net=-80.5589
+  F2 2025 n=9385 /day=25.712 win%=18.2 risk=30.00 (med=30.00) avgR=-3.612 net/t=-108.3679 total=-1017032.6 maxDD=-1017032.6 loseStreak=1311 amb=223 rnd_net=-99.2673
+  F2 2026 n=6717 /day=25.443 win%=25.8 risk=30.00 (med=30.00) avgR=-2.627 net/t=-78.7963 total=-529274.9 maxDD=-529274.9 loseStreak=22 amb=81 rnd_net=-84.9582
+  F3 2024H2 n=3795 /day=20.625 win%=26.7 risk=30.00 (med=30.00) avgR=-1.409 net/t=-42.2728 total=-160425.2 maxDD=-160460.1 loseStreak=26 amb=59
+  F3 2025 n=9385 /day=25.712 win%=27.0 risk=30.00 (med=30.00) avgR=-1.950 net/t=-58.4908 total=-548935.8 maxDD=-548935.8 loseStreak=33 amb=223
+  F3 2026 n=6717 /day=25.443 win%=25.8 risk=30.00 (med=30.00) avgR=-1.449 net/t=-43.4794 total=-292051.3 maxDD=-292051.3 loseStreak=22 amb=81
+CELL SL=30|M=5
+  F0 2024H2 n=3660 /day=19.891 win%=18.8 risk=30.00 (med=30.00) avgR=0.096 net/t=2.8820 total=10548.0 maxDD=-2302.0 loseStreak=49 amb=19
+  F0 2025 n=9082 /day=24.882 win%=18.9 risk=30.00 (med=30.00) avgR=0.115 net/t=3.4359 total=31205.0 maxDD=-2743.0 loseStreak=46 amb=83
+  F0 2026 n=6329 /day=23.973 win%=18.3 risk=30.00 (med=30.00) avgR=0.081 net/t=2.4316 total=15389.5 maxDD=-4109.0 loseStreak=35 amb=30
+  F1 2024H2 n=3660 /day=19.891 win%=18.8 risk=30.00 (med=30.00) avgR=-2.775 net/t=-83.2566 total=-304719.1 maxDD=-304758.7 loseStreak=49 amb=19
+  F1 2025 n=9082 /day=24.882 win%=18.9 risk=30.00 (med=30.00) avgR=-3.892 net/t=-116.7738 total=-1060539.9 maxDD=-1060539.9 loseStreak=46 amb=83
+  F1 2026 n=6329 /day=23.973 win%=18.3 risk=30.00 (med=30.00) avgR=-2.787 net/t=-83.6114 total=-529176.7 maxDD=-529176.7 loseStreak=35 amb=30
+  F2 2024H2 n=3660 /day=19.891 win%=18.8 risk=30.00 (med=30.00) avgR=-2.613 net/t=-78.3752 total=-286853.1 maxDD=-286925.9 loseStreak=49 amb=19 rnd_net=-76.3919
+  F2 2025 n=9082 /day=24.882 win%=18.9 risk=30.00 (med=30.00) avgR=-3.665 net/t=-109.9512 total=-998577.0 maxDD=-998577.0 loseStreak=46 amb=83 rnd_net=-100.7115
+  F2 2026 n=6329 /day=23.973 win%=18.3 risk=30.00 (med=30.00) avgR=-2.629 net/t=-78.8843 total=-499258.5 maxDD=-499258.5 loseStreak=35 amb=30 rnd_net=-96.2171
+  F3 2024H2 n=3660 /day=19.891 win%=18.8 risk=30.00 (med=30.00) avgR=-1.380 net/t=-41.3899 total=-151487.1 maxDD=-151590.9 loseStreak=49 amb=19
+  F3 2025 n=9082 /day=24.882 win%=18.9 risk=30.00 (med=30.00) avgR=-1.931 net/t=-57.9408 total=-526218.0 maxDD=-526226.6 loseStreak=46 amb=83
+  F3 2026 n=6329 /day=23.973 win%=18.3 risk=30.00 (med=30.00) avgR=-1.421 net/t=-42.6291 total=-269799.7 maxDD=-269799.7 loseStreak=35 amb=30
+CELL SL=30|M=10
+  F0 2024H2 n=3434 /day=18.663 win%=9.8 risk=30.00 (med=30.00) avgR=0.045 net/t=1.3561 total=4657.0 maxDD=-4485.0 loseStreak=63 amb=2
+  F0 2025 n=8477 /day=23.225 win%=10.6 risk=30.00 (med=30.00) avgR=0.146 net/t=4.3773 total=37106.5 maxDD=-3811.5 loseStreak=70 amb=8
+  F0 2026 n=5636 /day=21.348 win%=10.2 risk=30.00 (med=30.00) avgR=0.108 net/t=3.2371 total=18244.5 maxDD=-3387.0 loseStreak=50 amb=2
+  F1 2024H2 n=3434 /day=18.663 win%=9.8 risk=30.00 (med=30.00) avgR=-2.835 net/t=-85.0531 total=-292072.2 maxDD=-292072.2 loseStreak=63 amb=2
+  F1 2025 n=8477 /day=23.225 win%=10.6 risk=30.00 (med=30.00) avgR=-3.857 net/t=-115.7064 total=-980842.8 maxDD=-980890.7 loseStreak=70 amb=8
+  F1 2026 n=5636 /day=21.348 win%=10.2 risk=30.00 (med=30.00) avgR=-2.762 net/t=-82.8572 total=-466983.4 maxDD=-466983.4 loseStreak=50 amb=2
+  F2 2024H2 n=3434 /day=18.663 win%=9.8 risk=30.00 (med=30.00) avgR=-2.751 net/t=-82.5289 total=-283404.2 maxDD=-283404.2 loseStreak=63 amb=2 rnd_net=-94.1808
+  F2 2025 n=8477 /day=23.225 win%=10.6 risk=30.00 (med=30.00) avgR=-3.729 net/t=-111.8775 total=-948385.9 maxDD=-948489.3 loseStreak=70 amb=8 rnd_net=-92.9482
+  F2 2026 n=5636 /day=21.348 win%=10.2 risk=30.00 (med=30.00) avgR=-2.674 net/t=-80.2084 total=-452054.6 maxDD=-452054.6 loseStreak=50 amb=2 rnd_net=-93.9447
+  F3 2024H2 n=3434 /day=18.663 win%=9.8 risk=30.00 (med=30.00) avgR=-1.492 net/t=-44.7573 total=-153696.6 maxDD=-153696.6 loseStreak=63 amb=2
+  F3 2025 n=8477 /day=23.225 win%=10.6 risk=30.00 (med=30.00) avgR=-1.972 net/t=-59.1638 total=-501531.9 maxDD=-501878.5 loseStreak=70 amb=8
+  F3 2026 n=5636 /day=21.348 win%=10.2 risk=30.00 (med=30.00) avgR=-1.455 net/t=-43.6483 total=-246001.6 maxDD=-246001.6 loseStreak=50 amb=2
+CELL SL=40|M=1
+  F0 2024H2 n=3886 /day=21.120 win%=46.3 risk=40.00 (med=40.00) avgR=-0.089 net/t=-3.5621 total=-13842.5 maxDD=-14180.5 loseStreak=20 amb=145
+  F0 2025 n=9587 /day=26.266 win%=46.3 risk=40.00 (med=40.00) avgR=-0.083 net/t=-3.3328 total=-31951.5 maxDD=-32282.5 loseStreak=18 amb=493
+  F0 2026 n=7003 /day=26.527 win%=47.6 risk=40.00 (med=40.00) avgR=-0.054 net/t=-2.1777 total=-15250.5 maxDD=-16649.5 loseStreak=12 amb=207
+  F1 2024H2 n=3886 /day=21.120 win%=0.0 risk=40.00 (med=40.00) avgR=-2.233 net/t=-89.3073 total=-347048.1 maxDD=-347048.1 loseStreak=3886 amb=145
+  F1 2025 n=9587 /day=26.266 win%=0.0 risk=40.00 (med=40.00) avgR=-3.090 net/t=-123.5960 total=-1184914.4 maxDD=-1184914.4 loseStreak=9587 amb=493
+  F1 2026 n=7003 /day=26.527 win%=0.0 risk=40.00 (med=40.00) avgR=-2.207 net/t=-88.2641 total=-618113.6 maxDD=-618113.6 loseStreak=7003 amb=207
+  F2 2024H2 n=3886 /day=21.120 win%=0.0 risk=40.00 (med=40.00) avgR=-1.937 net/t=-77.4612 total=-301014.4 maxDD=-301014.4 loseStreak=3886 amb=145 rnd_net=-88.4592
+  F2 2025 n=9587 /day=26.266 win%=0.0 risk=40.00 (med=40.00) avgR=-2.672 net/t=-106.8640 total=-1024504.7 maxDD=-1024504.7 loseStreak=9587 amb=493 rnd_net=-106.1450
+  F2 2026 n=7003 /day=26.527 win%=0.0 risk=40.00 (med=40.00) avgR=-1.898 net/t=-75.9359 total=-531779.0 maxDD=-531779.0 loseStreak=7003 amb=207 rnd_net=-90.8113
+  F3 2024H2 n=3886 /day=21.120 win%=28.4 risk=40.00 (med=40.00) avgR=-1.164 net/t=-46.5676 total=-180961.8 maxDD=-180961.8 loseStreak=1236 amb=145
+  F3 2025 n=9587 /day=26.266 win%=0.0 risk=40.00 (med=40.00) avgR=-1.590 net/t=-63.5846 total=-609585.9 maxDD=-609585.9 loseStreak=9587 amb=493
+  F3 2026 n=7003 /day=26.527 win%=17.5 risk=40.00 (med=40.00) avgR=-1.141 net/t=-45.6535 total=-319711.4 maxDD=-319711.4 loseStreak=1568 amb=207
+CELL SL=40|M=2
+  F0 2024H2 n=3762 /day=20.446 win%=33.6 risk=40.00 (med=40.00) avgR=-0.011 net/t=-0.4556 total=-1714.0 maxDD=-4845.5 loseStreak=21 amb=54
+  F0 2025 n=9315 /day=25.521 win%=33.8 risk=40.00 (med=40.00) avgR=0.004 net/t=0.1665 total=1550.5 maxDD=-6687.5 loseStreak=18 amb=206
+  F0 2026 n=6610 /day=25.038 win%=32.7 risk=40.00 (med=40.00) avgR=-0.028 net/t=-1.1308 total=-7474.5 maxDD=-10411.5 loseStreak=16 amb=81
+  F1 2024H2 n=3762 /day=20.446 win%=20.2 risk=40.00 (med=40.00) avgR=-2.161 net/t=-86.4405 total=-325189.1 maxDD=-325189.1 loseStreak=1221 amb=54
+  F1 2025 n=9315 /day=25.521 win%=0.0 risk=40.00 (med=40.00) avgR=-3.002 net/t=-120.0869 total=-1118609.9 maxDD=-1118609.9 loseStreak=9315 amb=206
+  F1 2026 n=6610 /day=25.038 win%=12.0 risk=40.00 (med=40.00) avgR=-2.181 net/t=-87.2309 total=-576596.6 maxDD=-576596.6 loseStreak=1479 amb=81
+  F2 2024H2 n=3762 /day=20.446 win%=28.7 risk=40.00 (med=40.00) avgR=-1.945 net/t=-77.8012 total=-292688.2 maxDD=-292691.0 loseStreak=219 amb=54 rnd_net=-79.9910
+  F2 2025 n=9315 /day=25.521 win%=12.2 risk=40.00 (med=40.00) avgR=-2.696 net/t=-107.8413 total=-1004542.1 maxDD=-1004542.1 loseStreak=4982 amb=206 rnd_net=-103.3391
+  F2 2026 n=6610 /day=25.038 win%=32.6 risk=40.00 (med=40.00) avgR=-1.969 net/t=-78.7557 total=-520575.0 maxDD=-520575.0 loseStreak=21 amb=81 rnd_net=-88.7741
+  F3 2024H2 n=3762 /day=20.446 win%=33.6 risk=40.00 (med=40.00) avgR=-1.102 net/t=-44.0690 total=-165787.4 maxDD=-165812.3 loseStreak=21 amb=54
+  F3 2025 n=9315 /day=25.521 win%=33.5 risk=40.00 (med=40.00) avgR=-1.511 net/t=-60.4282 total=-562888.9 maxDD=-562888.9 loseStreak=18 amb=206
+  F3 2026 n=6610 /day=25.038 win%=32.7 risk=40.00 (med=40.00) avgR=-1.133 net/t=-45.3389 total=-299690.3 maxDD=-299690.3 loseStreak=16 amb=81
+CELL SL=40|M=3
+  F0 2024H2 n=3647 /day=19.821 win%=26.6 risk=40.00 (med=40.00) avgR=0.043 net/t=1.7228 total=6283.0 maxDD=-4007.0 loseStreak=23 amb=27
+  F0 2025 n=9052 /day=24.800 win%=26.1 risk=40.00 (med=40.00) avgR=0.032 net/t=1.2823 total=11607.5 maxDD=-5722.0 loseStreak=26 amb=104
+  F0 2026 n=6319 /day=23.936 win%=25.9 risk=40.00 (med=40.00) avgR=0.025 net/t=0.9811 total=6199.5 maxDD=-5734.0 loseStreak=22 amb=40
+  F1 2024H2 n=3647 /day=19.821 win%=25.6 risk=40.00 (med=40.00) avgR=-2.110 net/t=-84.4080 total=-307835.9 maxDD=-307845.5 loseStreak=94 amb=27
+  F1 2025 n=9052 /day=24.800 win%=11.3 risk=40.00 (med=40.00) avgR=-2.974 net/t=-118.9593 total=-1076819.3 maxDD=-1076819.3 loseStreak=3367 amb=104
+  F1 2026 n=6319 /day=23.936 win%=25.9 risk=40.00 (med=40.00) avgR=-2.128 net/t=-85.1158 total=-537846.8 maxDD=-537846.8 loseStreak=22 amb=40
+  F2 2024H2 n=3647 /day=19.821 win%=26.6 risk=40.00 (med=40.00) avgR=-1.940 net/t=-77.5851 total=-282953.0 maxDD=-282995.7 loseStreak=23 amb=27 rnd_net=-72.5432
+  F2 2025 n=9052 /day=24.800 win%=26.1 risk=40.00 (med=40.00) avgR=-2.738 net/t=-109.5194 total=-991369.2 maxDD=-991369.2 loseStreak=26 amb=104 rnd_net=-108.5541
+  F2 2026 n=6319 /day=23.936 win%=25.9 risk=40.00 (med=40.00) avgR=-1.961 net/t=-78.4298 total=-495598.2 maxDD=-495598.2 loseStreak=22 amb=40 rnd_net=-99.9855
+  F3 2024H2 n=3647 /day=19.821 win%=26.6 risk=40.00 (med=40.00) avgR=-1.062 net/t=-42.4743 total=-154903.6 maxDD=-154968.5 loseStreak=23 amb=27
+  F3 2025 n=9052 /day=24.800 win%=26.1 risk=40.00 (med=40.00) avgR=-1.499 net/t=-59.9596 total=-542753.9 maxDD=-542753.9 loseStreak=26 amb=104
+  F3 2026 n=6319 /day=23.936 win%=25.9 risk=40.00 (med=40.00) avgR=-1.099 net/t=-43.9484 total=-277710.1 maxDD=-277710.1 loseStreak=22 amb=40
+CELL SL=40|M=5
+  F0 2024H2 n=3439 /day=18.690 win%=17.1 risk=40.00 (med=40.00) avgR=0.004 net/t=0.1682 total=578.5 maxDD=-6554.0 loseStreak=56 amb=6
+  F0 2025 n=8615 /day=23.603 win%=18.0 risk=40.00 (med=40.00) avgR=0.068 net/t=2.7369 total=23578.5 maxDD=-6446.5 loseStreak=46 amb=38
+  F0 2026 n=5783 /day=21.905 win%=18.2 risk=40.00 (med=40.00) avgR=0.083 net/t=3.3103 total=19143.5 maxDD=-4297.0 loseStreak=42 amb=14
+  F1 2024H2 n=3439 /day=18.690 win%=17.1 risk=40.00 (med=40.00) avgR=-2.155 net/t=-86.2099 total=-296475.7 maxDD=-296565.3 loseStreak=56 amb=6
+  F1 2025 n=8615 /day=23.603 win%=18.0 risk=40.00 (med=40.00) avgR=-2.936 net/t=-117.4560 total=-1011883.7 maxDD=-1011883.7 loseStreak=46 amb=38
+  F1 2026 n=5783 /day=21.905 win%=18.2 risk=40.00 (med=40.00) avgR=-2.070 net/t=-82.7810 total=-478722.5 maxDD=-478722.5 loseStreak=42 amb=14
+  F2 2024H2 n=3439 /day=18.690 win%=17.1 risk=40.00 (med=40.00) avgR=-2.046 net/t=-81.8208 total=-281381.8 maxDD=-281504.5 loseStreak=56 amb=6 rnd_net=-96.5821
+  F2 2025 n=8615 /day=23.603 win%=18.0 risk=40.00 (med=40.00) avgR=-2.774 net/t=-110.9448 total=-955789.4 maxDD=-955789.4 loseStreak=46 amb=38 rnd_net=-97.2136
+  F2 2026 n=5783 /day=21.905 win%=18.2 risk=40.00 (med=40.00) avgR=-1.952 net/t=-78.0699 total=-451478.2 maxDD=-451478.2 loseStreak=42 amb=14 rnd_net=-104.6088
+  F3 2024H2 n=3439 /day=18.690 win%=17.1 risk=40.00 (med=40.00) avgR=-1.144 net/t=-45.7659 total=-157389.0 maxDD=-157533.8 loseStreak=56 amb=6
+  F3 2025 n=8615 /day=23.603 win%=18.0 risk=40.00 (med=40.00) avgR=-1.499 net/t=-59.9744 total=-516679.8 maxDD=-516728.4 loseStreak=46 amb=38
+  F3 2026 n=5783 /day=21.905 win%=18.2 risk=40.00 (med=40.00) avgR=-1.081 net/t=-43.2430 total=-250074.4 maxDD=-250163.9 loseStreak=42 amb=14
+CELL SL=40|M=10
+  F0 2024H2 n=3130 /day=17.011 win%=9.6 risk=40.00 (med=40.00) avgR=0.027 net/t=1.0807 total=3382.5 maxDD=-4366.0 loseStreak=62 amb=0
+  F0 2025 n=7783 /day=21.323 win%=9.8 risk=40.00 (med=40.00) avgR=0.061 net/t=2.4462 total=19039.0 maxDD=-7994.5 loseStreak=83 amb=5
+  F0 2026 n=5061 /day=19.170 win%=9.6 risk=40.00 (med=40.00) avgR=0.047 net/t=1.8675 total=9451.5 maxDD=-5984.0 loseStreak=58 amb=2
+  F1 2024H2 n=3130 /day=17.011 win%=9.6 risk=40.00 (med=40.00) avgR=-2.144 net/t=-85.7431 total=-268376.1 maxDD=-268376.1 loseStreak=62 amb=0
+  F1 2025 n=7783 /day=21.323 win%=9.8 risk=40.00 (med=40.00) avgR=-2.941 net/t=-117.6247 total=-915473.1 maxDD=-915737.4 loseStreak=83 amb=5
+  F1 2026 n=5061 /day=19.170 win%=9.6 risk=40.00 (med=40.00) avgR=-2.106 net/t=-84.2259 total=-426267.4 maxDD=-426267.4 loseStreak=58 amb=2
+  F2 2024H2 n=3130 /day=17.011 win%=9.6 risk=40.00 (med=40.00) avgR=-2.082 net/t=-83.2926 total=-260705.9 maxDD=-260705.9 loseStreak=62 amb=0 rnd_net=-91.1187
+  F2 2025 n=7783 /day=21.323 win%=9.8 risk=40.00 (med=40.00) avgR=-2.853 net/t=-114.1018 total=-888054.2 maxDD=-888417.6 loseStreak=83 amb=5 rnd_net=-82.3004
+  F2 2026 n=5061 /day=19.170 win%=9.6 risk=40.00 (med=40.00) avgR=-2.044 net/t=-81.7410 total=-413691.2 maxDD=-413691.2 loseStreak=58 amb=2 rnd_net=-93.5780
+  F3 2024H2 n=3130 /day=17.011 win%=9.6 risk=40.00 (med=40.00) avgR=-1.172 net/t=-46.8907 total=-146767.8 maxDD=-146767.8 loseStreak=62 amb=0
+  F3 2025 n=7783 /day=21.323 win%=9.8 risk=40.00 (med=40.00) avgR=-1.576 net/t=-63.0547 total=-490755.1 maxDD=-491420.0 loseStreak=83 amb=5
+  F3 2026 n=5061 /day=19.170 win%=9.6 risk=40.00 (med=40.00) avgR=-1.170 net/t=-46.7865 total=-236786.3 maxDD=-236786.3 loseStreak=58 amb=2
+CELL SL=50|M=1
+  F0 2024H2 n=3818 /day=20.750 win%=47.8 risk=50.00 (med=50.00) avgR=-0.057 net/t=-2.8398 total=-10842.5 maxDD=-11236.5 loseStreak=15 amb=89
+  F0 2025 n=9416 /day=25.797 win%=47.2 risk=50.00 (med=50.00) avgR=-0.062 net/t=-3.0937 total=-29130.5 maxDD=-29180.0 loseStreak=14 amb=301
+  F0 2026 n=6784 /day=25.697 win%=48.7 risk=50.00 (med=50.00) avgR=-0.032 net/t=-1.6201 total=-10990.5 maxDD=-12925.5 loseStreak=10 amb=125
+  F1 2024H2 n=3818 /day=20.750 win%=0.0 risk=50.00 (med=50.00) avgR=-1.774 net/t=-88.6957 total=-338640.2 maxDD=-338640.2 loseStreak=3818 amb=89
+  F1 2025 n=9416 /day=25.797 win%=0.0 risk=50.00 (med=50.00) avgR=-2.467 net/t=-123.3622 total=-1161578.9 maxDD=-1161578.9 loseStreak=9416 amb=301
+  F1 2026 n=6784 /day=25.697 win%=0.0 risk=50.00 (med=50.00) avgR=-1.755 net/t=-87.7402 total=-595229.2 maxDD=-595229.2 loseStreak=6784 amb=125
+  F2 2024H2 n=3818 /day=20.750 win%=12.0 risk=50.00 (med=50.00) avgR=-1.528 net/t=-76.4236 total=-291785.4 maxDD=-291785.4 loseStreak=1780 amb=89 rnd_net=-87.8997
+  F2 2025 n=9416 /day=25.797 win%=0.0 risk=50.00 (med=50.00) avgR=-2.125 net/t=-106.2595 total=-1000539.0 maxDD=-1000539.0 loseStreak=9416 amb=301 rnd_net=-112.3433
+  F2 2026 n=6784 /day=25.697 win%=1.1 risk=50.00 (med=50.00) avgR=-1.503 net/t=-75.1587 total=-509876.7 maxDD=-509876.7 loseStreak=3956 amb=125 rnd_net=-90.3417
+  F3 2024H2 n=3818 /day=20.750 win%=33.9 risk=50.00 (med=50.00) avgR=-0.922 net/t=-46.0974 total=-175999.8 maxDD=-175999.8 loseStreak=1089 amb=89
+  F3 2025 n=9416 /day=25.797 win%=3.7 risk=50.00 (med=50.00) avgR=-1.270 net/t=-63.5138 total=-598046.4 maxDD=-598046.4 loseStreak=5670 amb=301
+  F3 2026 n=6784 /day=25.697 win%=42.0 risk=50.00 (med=50.00) avgR=-0.908 net/t=-45.3848 total=-307890.6 maxDD=-307892.4 loseStreak=757 amb=125
+CELL SL=50|M=2
+  F0 2024H2 n=3625 /day=19.701 win%=34.2 risk=50.00 (med=50.00) avgR=0.012 net/t=0.6234 total=2260.0 maxDD=-3593.5 loseStreak=20 amb=28
+  F0 2025 n=9031 /day=24.742 win%=34.1 risk=50.00 (med=50.00) avgR=0.014 net/t=0.6870 total=6204.0 maxDD=-10053.0 loseStreak=17 amb=114
+  F0 2026 n=6254 /day=23.689 win%=32.7 risk=50.00 (med=50.00) avgR=-0.027 net/t=-1.3601 total=-8506.0 maxDD=-11275.5 loseStreak=19 amb=39
+  F1 2024H2 n=3625 /day=19.701 win%=24.4 risk=50.00 (med=50.00) avgR=-1.711 net/t=-85.5505 total=-310120.4 maxDD=-310120.4 loseStreak=1067 amb=28
+  F1 2025 n=9031 /day=24.742 win%=2.6 risk=50.00 (med=50.00) avgR=-2.391 net/t=-119.5335 total=-1079506.7 maxDD=-1079506.7 loseStreak=5423 amb=114
+  F1 2026 n=6254 /day=23.689 win%=29.1 risk=50.00 (med=50.00) avgR=-1.750 net/t=-87.4786 total=-547091.0 maxDD=-547094.6 loseStreak=687 amb=39
+  F2 2024H2 n=3625 /day=19.701 win%=34.2 risk=50.00 (med=50.00) avgR=-1.535 net/t=-76.7270 total=-278135.5 maxDD=-278203.4 loseStreak=20 amb=28 rnd_net=-82.6617
+  F2 2025 n=9031 /day=24.742 win%=33.1 risk=50.00 (med=50.00) avgR=-2.144 net/t=-107.1877 total=-968012.2 maxDD=-968012.2 loseStreak=109 amb=114 rnd_net=-110.8293
+  F2 2026 n=6254 /day=23.689 win%=32.7 risk=50.00 (med=50.00) avgR=-1.581 net/t=-79.0379 total=-494302.9 maxDD=-494335.4 loseStreak=19 amb=39 rnd_net=-86.2502
+  F3 2024H2 n=3625 /day=19.701 win%=34.2 risk=50.00 (med=50.00) avgR=-0.873 net/t=-43.6650 total=-158285.6 maxDD=-158419.9 loseStreak=20 amb=28
+  F3 2025 n=9031 /day=24.742 win%=34.1 risk=50.00 (med=50.00) avgR=-1.208 net/t=-60.3916 total=-545396.8 maxDD=-545396.8 loseStreak=17 amb=114
+  F3 2026 n=6254 /day=23.689 win%=32.7 risk=50.00 (med=50.00) avgR=-0.929 net/t=-46.4290 total=-290367.1 maxDD=-290418.8 loseStreak=19 amb=39
+CELL SL=50|M=3
+  F0 2024H2 n=3463 /day=18.821 win%=26.4 risk=50.00 (med=50.00) avgR=0.039 net/t=1.9408 total=6721.0 maxDD=-4860.5 loseStreak=28 amb=13
+  F0 2025 n=8676 /day=23.770 win%=26.0 risk=50.00 (med=50.00) avgR=0.030 net/t=1.4903 total=12930.0 maxDD=-8694.5 loseStreak=44 amb=46
+  F0 2026 n=5875 /day=22.254 win%=25.1 risk=50.00 (med=50.00) avgR=-0.002 net/t=-0.1157 total=-679.5 maxDD=-7022.0 loseStreak=27 amb=18
+  F1 2024H2 n=3463 /day=18.821 win%=26.4 risk=50.00 (med=50.00) avgR=-1.690 net/t=-84.5053 total=-292641.8 maxDD=-292760.3 loseStreak=28 amb=13
+  F1 2025 n=8676 /day=23.770 win%=26.0 risk=50.00 (med=50.00) avgR=-2.373 net/t=-118.6719 total=-1029597.6 maxDD=-1029597.6 loseStreak=44 amb=46
+  F1 2026 n=5875 /day=22.254 win%=25.1 risk=50.00 (med=50.00) avgR=-1.725 net/t=-86.2610 total=-506783.5 maxDD=-506837.1 loseStreak=27 amb=18
+  F2 2024H2 n=3463 /day=18.821 win%=26.4 risk=50.00 (med=50.00) avgR=-1.554 net/t=-77.6805 total=-269007.5 maxDD=-269225.4 loseStreak=28 amb=13 rnd_net=-74.4092
+  F2 2025 n=8676 /day=23.770 win%=26.0 risk=50.00 (med=50.00) avgR=-2.186 net/t=-109.2833 total=-948142.1 maxDD=-948142.1 loseStreak=44 amb=46 rnd_net=-109.7348
+  F2 2026 n=5875 /day=22.254 win%=25.1 risk=50.00 (med=50.00) avgR=-1.595 net/t=-79.7553 total=-468562.1 maxDD=-468644.6 loseStreak=27 amb=18 rnd_net=-85.1852
+  F3 2024H2 n=3463 /day=18.821 win%=26.4 risk=50.00 (med=50.00) avgR=-0.869 net/t=-43.4687 total=-150532.3 maxDD=-150850.9 loseStreak=28 amb=13
+  F3 2025 n=8676 /day=23.770 win%=26.0 risk=50.00 (med=50.00) avgR=-1.215 net/t=-60.7569 total=-527127.1 maxDD=-527127.1 loseStreak=44 amb=46
+  F3 2026 n=5875 /day=22.254 win%=25.1 risk=50.00 (med=50.00) avgR=-0.929 net/t=-46.4462 total=-272871.2 maxDD=-272973.0 loseStreak=27 amb=18
+CELL SL=50|M=5
+  F0 2024H2 n=3241 /day=17.614 win%=16.7 risk=50.00 (med=50.00) avgR=-0.016 net/t=-0.8081 total=-2619.0 maxDD=-9819.5 loseStreak=40 amb=3
+  F0 2025 n=8127 /day=22.266 win%=18.0 risk=50.00 (med=50.00) avgR=0.069 net/t=3.4683 total=28187.0 maxDD=-10467.0 loseStreak=44 amb=17
+  F0 2026 n=5300 /day=20.076 win%=17.2 risk=50.00 (med=50.00) avgR=0.021 net/t=1.0704 total=5673.0 maxDD=-4898.5 loseStreak=43 amb=4
+  F1 2024H2 n=3241 /day=17.614 win%=16.7 risk=50.00 (med=50.00) avgR=-1.749 net/t=-87.4721 total=-283497.2 maxDD=-283636.8 loseStreak=40 amb=3
+  F1 2025 n=8127 /day=22.266 win%=18.0 risk=50.00 (med=50.00) avgR=-2.332 net/t=-116.6057 total=-947654.1 maxDD=-947654.1 loseStreak=44 amb=17
+  F1 2026 n=5300 /day=20.076 win%=17.2 risk=50.00 (med=50.00) avgR=-1.701 net/t=-85.0573 total=-450803.5 maxDD=-450957.1 loseStreak=43 amb=4
+  F2 2024H2 n=3241 /day=17.614 win%=16.7 risk=50.00 (med=50.00) avgR=-1.664 net/t=-83.1904 total=-269620.0 maxDD=-269792.8 loseStreak=40 amb=3 rnd_net=-100.0392
+  F2 2025 n=8127 /day=22.266 win%=18.0 risk=50.00 (med=50.00) avgR=-2.202 net/t=-110.0942 total=-894735.6 maxDD=-894746.7 loseStreak=44 amb=17 rnd_net=-107.4662
+  F2 2026 n=5300 /day=20.076 win%=17.2 risk=50.00 (med=50.00) avgR=-1.612 net/t=-80.6198 total=-427285.0 maxDD=-427467.6 loseStreak=43 amb=4 rnd_net=-75.3968
+  F3 2024H2 n=3241 /day=17.614 win%=16.7 risk=50.00 (med=50.00) avgR=-0.962 net/t=-48.1016 total=-155897.2 maxDD=-156280.2 loseStreak=40 amb=3
+  F3 2025 n=8127 /day=22.266 win%=18.0 risk=50.00 (med=50.00) avgR=-1.215 net/t=-60.7369 total=-493609.1 maxDD=-493697.8 loseStreak=44 amb=17
+  F3 2026 n=5300 /day=20.076 win%=17.2 risk=50.00 (med=50.00) avgR=-0.941 net/t=-47.0710 total=-249476.3 maxDD=-249678.0 loseStreak=43 amb=4
+CELL SL=50|M=10
+  F0 2024H2 n=2865 /day=15.571 win%=9.3 risk=50.00 (med=50.00) avgR=0.004 net/t=0.2187 total=626.5 maxDD=-6938.5 loseStreak=48 amb=0
+  F0 2025 n=7188 /day=19.693 win%=9.3 risk=50.00 (med=50.00) avgR=0.011 net/t=0.5608 total=4031.0 maxDD=-12263.0 loseStreak=60 amb=2
+  F0 2026 n=4501 /day=17.049 win%=9.4 risk=50.00 (med=50.00) avgR=0.029 net/t=1.4479 total=6517.0 maxDD=-7529.5 loseStreak=82 amb=1
+  F1 2024H2 n=2865 /day=15.571 win%=9.3 risk=50.00 (med=50.00) avgR=-1.740 net/t=-87.0198 total=-249311.8 maxDD=-249486.5 loseStreak=48 amb=0
+  F1 2025 n=7188 /day=19.693 win%=9.3 risk=50.00 (med=50.00) avgR=-2.388 net/t=-119.4207 total=-858396.2 maxDD=-859217.6 loseStreak=60 amb=2
+  F1 2026 n=4501 /day=17.049 win%=9.4 risk=50.00 (med=50.00) avgR=-1.691 net/t=-84.5651 total=-380627.7 maxDD=-380627.7 loseStreak=82 amb=1
+  F2 2024H2 n=2865 /day=15.571 win%=9.3 risk=50.00 (med=50.00) avgR=-1.692 net/t=-84.6178 total=-242430.0 maxDD=-242626.9 loseStreak=48 amb=0 rnd_net=-77.4004
+  F2 2025 n=7188 /day=19.693 win%=9.3 risk=50.00 (med=50.00) avgR=-2.321 net/t=-116.0645 total=-834271.8 maxDD=-835258.8 loseStreak=60 amb=2 rnd_net=-104.6124
+  F2 2026 n=4501 /day=17.049 win%=9.4 risk=50.00 (med=50.00) avgR=-1.643 net/t=-82.1253 total=-369646.2 maxDD=-369646.2 loseStreak=82 amb=1 rnd_net=-62.7580
+  F3 2024H2 n=2865 /day=15.571 win%=9.3 risk=50.00 (med=50.00) avgR=-0.990 net/t=-49.5163 total=-141864.1 maxDD=-142233.7 loseStreak=48 amb=0
+  F3 2025 n=7188 /day=19.693 win%=9.3 risk=50.00 (med=50.00) avgR=-1.336 net/t=-66.8241 total=-480331.6 maxDD=-481727.1 loseStreak=60 amb=2
+  F3 2026 n=4501 /day=17.049 win%=9.4 risk=50.00 (med=50.00) avgR=-0.977 net/t=-48.8603 total=-219920.3 maxDD=-219920.3 loseStreak=82 amb=1
+
+=== SENSITIVITY ST ATR x mult (SL=candle M=2 F2, not PASS) ===
+ST=10x1.0
+  F2 2024H2 n=3608 /day=19.609 win%=28.5 risk=75.31 (med=59.00) avgR=-1.545 net/t=-78.8029 total=-284321.0 maxDD=-284540.4 loseStreak=22 amb=3
+  F2 2025 n=8703 /day=23.844 win%=25.2 risk=82.99 (med=66.50) avgR=-2.046 net/t=-105.5047 total=-918207.1 maxDD=-918355.8 loseStreak=51 amb=17
+  F2 2026 n=6503 /day=24.633 win%=24.9 risk=59.98 (med=47.00) avgR=-2.085 net/t=-77.7874 total=-505851.5 maxDD=-505851.5 loseStreak=37 amb=20
+ST=10x2.0
+  F2 2024H2 n=1254 /day=6.815 win%=28.8 risk=84.59 (med=64.00) avgR=-1.500 net/t=-78.6793 total=-98663.9 maxDD=-98681.5 loseStreak=17 amb=1
+  F2 2025 n=3503 /day=9.597 win%=26.9 risk=90.72 (med=72.00) avgR=-1.934 net/t=-105.2874 total=-368821.7 maxDD=-368904.2 loseStreak=33 amb=8
+  F2 2026 n=2637 /day=9.989 win%=25.9 risk=64.65 (med=50.50) avgR=-2.051 net/t=-75.3189 total=-198616.0 maxDD=-198616.0 loseStreak=26 amb=7
+ST=10x3.0
+  F2 2024H2 n=659 /day=3.582 win%=28.8 risk=78.61 (med=61.50) avgR=-1.663 net/t=-80.1003 total=-52786.1 maxDD=-52786.1 loseStreak=16 amb=2
+  F2 2025 n=1881 /day=5.153 win%=27.2 risk=91.82 (med=71.50) avgR=-1.931 net/t=-107.2306 total=-201700.8 maxDD=-201959.6 loseStreak=25 amb=5
+  F2 2026 n=1430 /day=5.417 win%=24.4 risk=69.04 (med=54.00) avgR=-1.965 net/t=-80.5715 total=-115217.2 maxDD=-115217.2 loseStreak=35 amb=4
+ST=20x1.0
+  F2 2024H2 n=3539 /day=19.234 win%=28.5 risk=76.06 (med=60.00) avgR=-1.533 net/t=-78.5768 total=-278083.4 maxDD=-278274.4 loseStreak=23 amb=3
+  F2 2025 n=8516 /day=23.332 win%=25.4 risk=85.84 (med=68.50) avgR=-2.027 net/t=-106.4855 total=-906830.5 maxDD=-906979.3 loseStreak=51 amb=24
+  F2 2026 n=6345 /day=24.034 win%=25.2 risk=61.08 (med=48.00) avgR=-2.045 net/t=-77.6278 total=-492548.2 maxDD=-492548.2 loseStreak=34 amb=17
+ST=20x2.0
+  F2 2024H2 n=1228 /day=6.674 win%=28.7 risk=85.55 (med=65.00) avgR=-1.513 net/t=-81.2376 total=-99759.8 maxDD=-99759.8 loseStreak=15 amb=2
+  F2 2025 n=3411 /day=9.345 win%=27.3 risk=89.96 (med=72.00) avgR=-1.944 net/t=-104.0975 total=-355076.4 maxDD=-355183.6 loseStreak=30 amb=8
+  F2 2026 n=2636 /day=9.985 win%=26.5 risk=67.09 (med=52.00) avgR=-1.918 net/t=-74.5915 total=-196623.1 maxDD=-196623.1 loseStreak=36 amb=1
+ST=20x3.0
+  F2 2024H2 n=690 /day=3.750 win%=26.8 risk=82.35 (med=63.00) avgR=-1.706 net/t=-81.7634 total=-56416.8 maxDD=-56418.3 loseStreak=13 amb=4
+  F2 2025 n=1871 /day=5.126 win%=27.0 risk=94.86 (med=73.50) avgR=-1.919 net/t=-107.0471 total=-200285.1 maxDD=-200375.7 loseStreak=30 amb=8
+  F2 2026 n=1446 /day=5.477 win%=26.2 risk=71.01 (med=54.50) avgR=-1.964 net/t=-78.6898 total=-113785.5 maxDD=-113785.5 loseStreak=17 amb=4
+ST=30x1.0
+  F2 2024H2 n=3503 /day=19.038 win%=28.5 risk=77.02 (med=60.50) avgR=-1.523 net/t=-78.8618 total=-276253.0 maxDD=-276444.0 loseStreak=23 amb=3
+  F2 2025 n=8438 /day=23.118 win%=25.6 risk=86.46 (med=69.00) avgR=-1.995 net/t=-105.8986 total=-893572.7 maxDD=-893721.5 loseStreak=50 amb=23
+  F2 2026 n=6246 /day=23.659 win%=25.4 risk=61.87 (med=48.50) avgR=-2.010 net/t=-77.0050 total=-480973.5 maxDD=-480973.5 loseStreak=33 amb=17
+ST=30x2.0
+  F2 2024H2 n=1216 /day=6.609 win%=29.3 risk=86.54 (med=65.00) avgR=-1.464 net/t=-79.3185 total=-96451.3 maxDD=-96451.3 loseStreak=18 amb=2
+  F2 2025 n=3418 /day=9.364 win%=27.6 risk=90.63 (med=72.50) avgR=-1.949 net/t=-102.1511 total=-349152.5 maxDD=-349235.0 loseStreak=29 amb=8
+  F2 2026 n=2628 /day=9.955 win%=27.0 risk=68.29 (med=53.00) avgR=-1.884 net/t=-74.2059 total=-195013.2 maxDD=-195013.2 loseStreak=27 amb=3
+ST=30x3.0
+  F2 2024H2 n=687 /day=3.734 win%=27.5 risk=83.12 (med=63.00) avgR=-1.646 net/t=-81.0032 total=-55649.2 maxDD=-56125.1 loseStreak=13 amb=3
+  F2 2025 n=1874 /day=5.134 win%=27.9 risk=97.18 (med=75.00) avgR=-1.855 net/t=-103.5703 total=-194090.8 maxDD=-194181.4 loseStreak=28 amb=7
+  F2 2026 n=1451 /day=5.496 win%=27.5 risk=72.54 (med=54.50) avgR=-1.855 net/t=-76.6083 total=-111158.7 maxDD=-111158.7 loseStreak=14 amb=4
+
+--- PRE-REGISTERED PASS (F2) ---
+FAIL-cand SL=candle|M=1 adj=0 | 2024H2 n=3801 net=-73.97219999973692 rnd=-105.86677195081583 | 2025 n=9198 net=-103.12748285692541 rnd=-106.12844406923077 | 2026 n=6917 net=-74.69419484588694 rnd=-96.6538326848485 | adj_pos=0
+FAIL-cand SL=candle|M=2 adj=0 | 2024H2 n=3539 net=-78.57682258095507 rnd=-107.80583851037295 | 2025 n=8516 net=-106.48549983407703 rnd=-106.08449392065934 | 2026 n=6345 net=-77.62776643451537 rnd=-89.94510257828283 | adj_pos=0
+FAIL-cand SL=candle|M=3 adj=0 | 2024H2 n=3318 net=-82.87200849578058 rnd=-106.00157179125874 | 2025 n=7914 net=-107.28153171961081 rnd=-103.98231256351649 | 2026 n=5826 net=-80.14386070545828 rnd=-95.53155459267677 | adj_pos=0
+FAIL-cand SL=candle|M=5 adj=0 | 2024H2 n=2961 net=-87.8287613171226 rnd=-119.59067248216782 | 2025 n=6548 net=-113.16111485858275 rnd=-108.851390587326 | 2026 n=5031 net=-81.46720884814152 rnd=-87.83059467045454 | adj_pos=0
+FAIL-cand SL=candle|M=10 adj=0 | 2024H2 n=2254 net=-86.73856598136645 rnd=-116.54591520944055 | 2025 n=4659 net=-119.83038125520498 rnd=-111.2944470330403 | 2026 n=3808 net=-82.59357256801471 rnd=-74.93867138989899 | adj_pos=0
+FAIL-cand SL=10|M=1 adj=0 | 2024H2 n=4025 net=-81.95425436397517 rnd=-100.94899172843823 | 2025 n=9906 net=-112.62253558116292 rnd=-102.12449463897435 | 2026 n=7514 net=-80.69313885533671 rnd=-87.91044464025974 | adj_pos=0
+FAIL-cand SL=10|M=2 adj=0 | 2024H2 n=4009 net=-80.87034880643552 rnd=-97.77538404079255 | 2025 n=9868 net=-111.30118630989055 rnd=-102.37890155208791 | 2026 n=7462 net=-79.86226437563656 rnd=-85.90326096961039 | adj_pos=0
+FAIL-cand SL=10|M=3 adj=0 | 2024H2 n=3996 net=-80.31638645195194 rnd=-97.97226250314684 | 2025 n=9828 net=-110.47936233506307 rnd=-103.01519096043955 | 2026 n=7406 net=-79.57905988860384 rnd=-90.96590328441559 | adj_pos=0
+FAIL-cand SL=10|M=5 adj=0 | 2024H2 n=3958 net=-79.1229130841334 rnd=-95.43761352785548 | 2025 n=9760 net=-109.79266476168031 rnd=-103.97961930285715 | 2026 n=7335 net=-79.21072573851399 rnd=-90.61198785038961 | adj_pos=0
+FAIL-cand SL=10|M=10 adj=0 | 2024H2 n=3899 net=-78.93346356758144 rnd=-95.73976104125873 | 2025 n=9626 net=-110.21653880438394 rnd=-107.21595839604397 | 2026 n=7132 net=-79.95885136399326 rnd=-97.81671273151514 | adj_pos=0
+FAIL-cand SL=20|M=1 adj=0 | 2024H2 n=3997 net=-79.23394568326245 rnd=-99.5074738997669 | 2025 n=9835 net=-110.09986376847993 rnd=-101.11656559384615 | 2026 n=7382 net=-78.25090781170414 rnd=-82.17896434675325 | adj_pos=0
+FAIL-cand SL=20|M=2 adj=0 | 2024H2 n=3947 net=-77.97658534887256 rnd=-97.84663971806528 | 2025 n=9717 net=-108.9407823005043 rnd=-101.53754931208792 | 2026 n=7230 net=-77.7207663745505 rnd=-86.65635895818181 | adj_pos=0
+FAIL-cand SL=20|M=3 adj=0 | 2024H2 n=3905 net=-77.65866864097312 rnd=-94.97701115815849 | 2025 n=9640 net=-109.02009679885892 rnd=-100.45385371831502 | 2026 n=7093 net=-78.88824199633441 rnd=-84.09501089111112 | adj_pos=0
+FAIL-cand SL=20|M=5 adj=0 | 2024H2 n=3831 net=-77.76271179613678 rnd=-96.51927267855477 | 2025 n=9471 net=-109.86110310125645 rnd=-95.20218000410256 | 2026 n=6847 net=-79.45881130246825 rnd=-89.70206462181817 | adj_pos=0
+FAIL-cand SL=20|M=10 adj=0 | 2024H2 n=3660 net=-80.11714865546448 rnd=-114.70708260710956 | 2025 n=9093 net=-111.29796233355327 rnd=-84.0159204542857 | 2026 n=6350 net=-79.50839427307086 rnd=-93.66117000282829 | adj_pos=0
+FAIL-cand SL=30|M=1 adj=0 | 2024H2 n=3950 net=-77.63650592405064 rnd=-90.5196712532634 | 2025 n=9720 net=-107.94514089094649 rnd=-104.64940061186815 | 2026 n=7196 net=-76.78802961534186 rnd=-84.40492258848485 | adj_pos=0
+FAIL-cand SL=30|M=2 adj=0 | 2024H2 n=3867 net=-77.70517827695888 rnd=-83.31302683531467 | 2025 n=9556 net=-107.89451207293847 rnd=-105.28063162615385 | 2026 n=6949 net=-77.74817831889479 rnd=-85.70425474727274 | adj_pos=0
+FAIL-cand SL=30|M=3 adj=0 | 2024H2 n=3795 net=-77.84396001343875 rnd=-80.55889709522145 | 2025 n=9385 net=-108.36787997133725 rnd=-99.26731440857142 | 2026 n=6717 net=-78.79632229432781 rnd=-84.95823457555555 | adj_pos=0
+FAIL-cand SL=30|M=5 adj=0 | 2024H2 n=3660 net=-78.37517468387979 rnd=-76.39186727261072 | 2025 n=9082 net=-109.95121987601848 rnd=-100.71154579509157 | 2026 n=6329 net=-78.8842640668352 rnd=-96.21714899898988 | adj_pos=0
+FAIL-cand SL=30|M=10 adj=0 | 2024H2 n=3434 net=-82.52888867122888 rnd=-94.18082553076923 | 2025 n=8477 net=-111.87754274590067 rnd=-92.94819980915752 | 2026 n=5636 net=-80.20841454932575 rnd=-93.94472905050505 | adj_pos=0
+FAIL-cand SL=40|M=1 adj=0 | 2024H2 n=3886 net=-77.46124141276375 rnd=-88.45921098123544 | 2025 n=9587 net=-106.86395555815166 rnd=-106.14497038556776 | 2026 n=7003 net=-75.93588158803371 rnd=-90.8112830359596 | adj_pos=0
+FAIL-cand SL=40|M=2 adj=0 | 2024H2 n=3762 net=-77.80122156671983 rnd=-79.99102422972028 | 2025 n=9315 net=-107.8413450115942 rnd=-103.33907484610499 | 2026 n=6610 net=-78.75566673267775 rnd=-88.77405550686869 | adj_pos=0
+FAIL-cand SL=40|M=3 adj=0 | 2024H2 n=3647 net=-77.58512700411296 rnd=-72.54320046060607 | 2025 n=9052 net=-109.51935696520104 rnd=-108.55405215934066 | 2026 n=6319 net=-78.42984413514796 rnd=-99.98547264646463 | adj_pos=0
+FAIL-cand SL=40|M=5 adj=0 | 2024H2 n=3439 net=-81.82081776533876 rnd=-96.58210731130535 | 2025 n=8615 net=-110.94479598293672 rnd=-97.21358485311355 | 2026 n=5783 net=-78.06990074131073 rnd=-104.60882366060605 | adj_pos=0
+FAIL-cand SL=40|M=10 adj=0 | 2024H2 n=3130 net=-83.2926120370607 rnd=-91.11865904708624 | 2025 n=7783 net=-114.10178089541307 rnd=-82.30036347948719 | 2026 n=5061 net=-81.7409905520648 rnd=-93.57802211024531 | adj_pos=0
+FAIL-cand SL=50|M=1 adj=0 | 2024H2 n=3818 net=-76.42361537218439 rnd=-87.8996565560606 | 2025 n=9416 net=-106.25945052124044 rnd=-112.34333120239316 | 2026 n=6784 net=-75.15871034316038 rnd=-90.34166746585858 | adj_pos=0
+FAIL-cand SL=50|M=2 adj=0 | 2024H2 n=3625 net=-76.7270213693793 rnd=-82.66167966643357 | 2025 n=9031 net=-107.18771260823829 rnd=-110.82933361863249 | 2026 n=6254 net=-79.03787523137193 rnd=-86.25019189919192 | adj_pos=0
+FAIL-cand SL=50|M=3 adj=0 | 2024H2 n=3463 net=-77.6804688960439 rnd=-74.40918296363637 | 2025 n=8676 net=-109.28332101763485 rnd=-109.73476357692307 | 2026 n=5875 net=-79.75525821089362 rnd=-85.18517300176768 | adj_pos=0
+FAIL-cand SL=50|M=5 adj=0 | 2024H2 n=3241 net=-83.19038246251155 rnd=-100.03918070874124 | 2025 n=8127 net=-110.09420173606496 rnd=-107.46622953858363 | 2026 n=5300 net=-80.61981866301886 rnd=-75.39681189166666 | adj_pos=0
+FAIL-cand SL=50|M=10 adj=0 | 2024H2 n=2865 net=-84.61778381221642 rnd=-77.40043531177156 | 2025 n=7188 net=-116.06451862632166 rnd=-104.61235453565325 | 2026 n=4501 net=-82.1253412363919 rnd=-62.75795015833332 | adj_pos=0
+PASS cells: none
+FAIL
