@@ -85,6 +85,10 @@ class Cell:
         )
 
 
+ORIGINAL_CELL = Cell(tf=240, ef=3, es=12, stm=1.0, tgt=250, sl=250, emode="0DTE")
+HEDGE_MARK = {"PRIMARY": s018.P_LO, "H1000": 1000.0}
+
+
 class GuardStore:
     """Refuse sqlite months in forbid_year+ (Stage A: no 2026 marks)."""
 
@@ -177,12 +181,13 @@ def pick_basket_at(
     exp_ts = s018.expiry_unix(exp)
     t_yr = t_years(t, exp_ts)
     dte = max(0, (exp - ist_date(t)).days)
+    lo_tgt = float(HEDGE_MARK.get(arm, s018.P_LO))
     if side == "long":
         hi = s018.nearest(rows, True, s018.P_HI)
-        lo = s018.nearest(rows, False, s018.P_LO)
+        lo = s018.nearest(rows, False, lo_tgt)
     else:
         hi = s018.nearest(rows, False, s018.P_HI)
-        lo = s018.nearest(rows, True, s018.P_LO)
+        lo = s018.nearest(rows, True, lo_tgt)
     if hi is None:
         return None
     chosen = [hi] if arm == "C1" else [hi, lo]
@@ -615,12 +620,217 @@ def stats_of(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def fmt_stats(s: dict[str, Any]) -> str:
+    extra = ""
+    if "avg_dlt" in s:
+        dlt = s["avg_dlt"]
+        tv = s["avg_tv"]
+        dlt_s = f"{dlt:.4f}" if np.isfinite(dlt) else "nan"
+        tv_s = f"{tv:.2f}" if np.isfinite(tv) else "nan"
+        extra = f" avg_dlt={dlt_s} avg_tv={tv_s}"
     return (
         f"n={s['n']} win%={s['win']:.1f} mean={s['mean']:.2f} med={s['med']:.2f} "
         f"gross/t={s['gross']:.2f} fee/t={s['fee']:.2f} slip/t={s['slip']:.2f} "
         f"worst={s['worst']:.2f} maxDD={s['maxdd']:.1f} top5%={s['top5']:.1f} "
-        f"exits={s['exits']}"
+        f"exits={s['exits']}{extra}"
     )
+
+
+def entry_net_delta(legs: list[dict[str, Any]]) -> float:
+    xs = [float(lg["delta"]) for lg in legs if np.isfinite(float(lg.get("delta", float("nan"))))]
+    return float(sum(xs)) if xs else float("nan")
+
+
+def entry_time_value_usd(legs: list[dict[str, Any]], spot: float) -> float:
+    if spot <= 0:
+        return float("nan")
+    tot = 0.0
+    for lg in legs:
+        inn = intrinsic(bool(lg["is_call"]), float(lg["strike"]), float(spot))
+        tot += (float(lg["mark"]) - inn) * s018.QTY * OPTIONS_CONTRACT_VALUE
+    return tot
+
+
+def load_arm_compare_cells() -> list[Cell]:
+    out = [ORIGINAL_CELL]
+    seen = {ORIGINAL_CELL.key()}
+    if FINALISTS_PATH.exists():
+        raw = json.loads(FINALISTS_PATH.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            for s in raw:
+                if not isinstance(s, dict) or "cell" not in s:
+                    continue
+                c = Cell(**s["cell"])
+                if c.key() not in seen:
+                    seen.add(c.key())
+                    out.append(c)
+    return out
+
+
+def run_arm_on_cell(
+    store: Any,
+    spot_c: dict[int, float],
+    ts1: np.ndarray,
+    o1: np.ndarray,
+    h1: np.ndarray,
+    l1: np.ndarray,
+    c1: np.ndarray,
+    cell: Cell,
+    arm: str,
+    start_ts: int,
+    cutoff: int,
+    win_from: date,
+    win_to: date,
+    tf_pack: dict[int, tuple],
+) -> dict[str, Any]:
+    tf = int(cell.tf)
+    if tf not in tf_pack:
+        tf_pack[tf] = resample_tf(ts1, o1, h1, l1, c1, tf)
+    _kk, hh, ll, cc, close_t = tf_pack[tf]
+    _tr, st = supertrend(hh, ll, cc, 1, float(cell.stm))
+    ema_f = s018.ema(cc, int(cell.ef))
+    ema_s = s018.ema(cc, int(cell.es))
+    trend_long = trend_exit_ts(close_t, ema_f, st, "long")
+    trend_short = trend_exit_ts(close_t, ema_f, st, "short")
+    sigs = detect_signals(ema_f, ema_s, st)
+    entries: list[dict[str, Any]] = []
+    n_paths = 0
+    for i, side in sigs:
+        t = int(close_t[i])
+        if t < start_ts or t >= cutoff:
+            continue
+        if not in_window(t, win_from, win_to):
+            continue
+        exp = expiry_mode(t, cell.emode)
+        if win_to.year < 2026 and exp.year >= 2026:
+            continue
+        sp = spot_c.get(t)
+        if sp is None:
+            continue
+        fp = cache_file(t, side, exp, arm)
+        path = load_path(fp)
+        if path is None:
+            legs = pick_basket_at(store, side, t, float(sp), exp, arm)
+            if legs is None:
+                continue
+            path = build_path(store, spot_c, legs, t, exp, close_t)
+            if path is None:
+                continue
+            save_path(fp, path)
+            n_paths += 1
+        entries.append(
+            {
+                "ts": t,
+                "side": side,
+                "path": path,
+                "trend": trend_long if side == "long" else trend_short,
+                "spot": float(sp),
+            }
+        )
+    busy = -1
+    rows: list[dict[str, Any]] = []
+    for e in entries:
+        if int(e["ts"]) <= busy:
+            continue
+        walked = scan_path(
+            e["path"],
+            float(cell.tgt),
+            float(cell.sl),
+            e["side"],
+            e["trend"],
+            spot_c,
+            arm,
+        )
+        if walked is None:
+            continue
+        legs = list(e["path"]["legs"])
+        rows.append(
+            {
+                "entry_ts": e["ts"],
+                "side": e["side"],
+                "hod": s018.hod_ist(e["ts"]),
+                "entry_dlt": entry_net_delta(legs),
+                "entry_tv": entry_time_value_usd(legs, float(e["spot"])),
+                **walked,
+            }
+        )
+        busy = int(walked["exit_ts"])
+    stt = stats_of(rows)
+    dlts = [float(r["entry_dlt"]) for r in rows if np.isfinite(r.get("entry_dlt", float("nan")))]
+    tvs = [float(r["entry_tv"]) for r in rows if np.isfinite(r.get("entry_tv", float("nan")))]
+    stt["avg_dlt"] = float(np.mean(dlts)) if dlts else float("nan")
+    stt["avg_tv"] = float(np.mean(tvs)) if tvs else float("nan")
+    stt["n_paths"] = n_paths
+    del entries
+    gc.collect()
+    return stt
+
+
+def stage_arm_compare(args: argparse.Namespace) -> None:
+    print_entry_timing()
+    load_slip_table()
+    cache_gb = float(args.cache_gb)
+    reset_mark_cache(max_bytes=int(cache_gb * 1024**3))
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    holdout = bool(getattr(args, "holdout", False))
+    if holdout:
+        win_from, win_to = HOLD_FROM, HOLD_TO
+        forbid = None
+        tag = "holdout"
+        start_ts = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
+        cutoff = int(datetime(2026, 9, 22, tzinfo=timezone.utc).timestamp())
+    else:
+        win_from, win_to = TRAIN_FROM, TRAIN_TO
+        forbid = 2026
+        tag = "train"
+        start_ts = int(datetime(2024, 9, 1, tzinfo=timezone.utc).timestamp())
+        cutoff = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
+    spot = s018.load_spot_1m(args.csv)
+    ts1, o1, h1, l1, c1 = s018.bars_1m(spot)
+    if args.max_days:
+        cutoff = start_ts + int(args.max_days) * 86400
+        lo = start_ts - 5 * 86400
+        hi = cutoff + 3 * 86400
+        sel = (ts1 >= lo) & (ts1 < hi)
+        ts1, o1, h1, l1, c1 = ts1[sel], o1[sel], h1[sel], l1[sel], c1[sel]
+        print(f"SMOKE max-days={args.max_days} cutoff_ts={cutoff} window={tag}", flush=True)
+    spot_c = {int(t): float(c) for t, c in zip(ts1, c1)}
+    inner = MarksStore()
+    store = GuardStore(inner, forbid_year=forbid)
+    cells = load_arm_compare_cells()
+    print(
+        f"ARM COMPARE {tag} {win_from}..{win_to} cells={len(cells)} "
+        f"H300=PRIMARY hedge~$300 vs H1000 hedge~$1000 qty={s018.QTY}",
+        flush=True,
+    )
+    tf_pack: dict[int, tuple] = {}
+    lines = [
+        f"S018 ARM COMPARE {tag.upper()} {win_from}..{win_to}",
+        f"stamp={stamp} cells={len(cells)}",
+        "H300 = PRIMARY (call/put ~$1000 + opposite ~$300); "
+        "H1000 = same first leg + opposite-type nearest $1000; qty=1000/leg",
+    ]
+    for cell in cells:
+        print(f"cell {cell.key()}", flush=True)
+        s300 = run_arm_on_cell(
+            store, spot_c, ts1, o1, h1, l1, c1, cell, "PRIMARY",
+            start_ts, cutoff, win_from, win_to, tf_pack,
+        )
+        s1000 = run_arm_on_cell(
+            store, spot_c, ts1, o1, h1, l1, c1, cell, "H1000",
+            start_ts, cutoff, win_from, win_to, tf_pack,
+        )
+        lines.append(f"CELL {cell.key()}")
+        lines.append(f"  H300  {fmt_stats(s300)}")
+        lines.append(f"  H1000 {fmt_stats(s1000)}")
+        print(f"  H300  {fmt_stats(s300)}", flush=True)
+        print(f"  H1000 {fmt_stats(s1000)}", flush=True)
+        gc.collect()
+    txtp = OUT_DIR / f"s018_armcmp_{tag}_{stamp}.txt"
+    txtp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("\n".join(lines))
+    print(f"wrote {txtp}")
+    store.close()
 
 
 def neighbors(c: Cell) -> list[Cell]:
@@ -1197,10 +1407,14 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--cache-gb", type=float, default=1.0)
     ap.add_argument("--tf", default="", help="comma TF minutes, e.g. 15 or 240,60,15")
+    ap.add_argument("--arm-compare", action="store_true")
+    ap.add_argument("--holdout", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    if args.stage == "A":
+    if args.arm_compare:
+        stage_arm_compare(args)
+    elif args.stage == "A":
         stage_a(args)
     else:
         reset_mark_cache(max_bytes=int(float(args.cache_gb) * 1024**3))
