@@ -1,0 +1,19 @@
+S018 4h trend long-option basket
+stamp=20261004T175623Z ST=1x1.0 EMA3/12 tgt/sl=±250.0
+expiry: <12:00 IST -> today 17:30; else next day. qty=1000 lots/leg
+fees=estimate_option_fee * 1.18 GST; slip=slip_pct; stale>5m tagged never fwd-fill
+ARM PRIMARY
+  2024-09..12 n=4 sig/day=0.667 win%=0.0 meanNet=-293.58 medNet=-286.32 gross/t=-266.60 cost/t=26.98 worst=-333.38 maxDD=-1174.3 top5%=nan holdHrs=5.64 premHi=979.3 premLo=280.1 dHi=-0.361 dLo=0.145 src real=87.5% stale=0.0% settle=12.5% exits={'SL': 3, 'EXPIRY': 1} C2mean=-89.72
+  2025 n=0 sig/day=4.000 win%=nan meanNet=nan medNet=nan gross/t=nan cost/t=nan worst=nan maxDD=0.0 top5%=nan holdHrs=nan premHi=nan premLo=nan dHi=nan dLo=nan src real=0.0% stale=0.0% settle=0.0% exits={} C2mean=nan
+  2026 n=0 sig/day=4.000 win%=nan meanNet=nan medNet=nan gross/t=nan cost/t=nan worst=nan maxDD=0.0 top5%=nan holdHrs=nan premHi=nan premLo=nan dHi=nan dLo=nan src real=0.0% stale=0.0% settle=0.0% exits={} C2mean=nan
+ARM C1
+  2024-09..12 n=4 sig/day=0.667 win%=50.0 meanNet=-31.23 medNet=-18.45 gross/t=-17.70 cost/t=13.53 worst=-327.65 maxDD=-359.4 top5%=100.0 holdHrs=3.34 premHi=979.3 premLo=nan dHi=-0.361 dLo=nan src real=100.0% stale=0.0% settle=0.0% exits={'TARGET': 2, 'SL': 2}
+  2025 n=0 sig/day=0.000 win%=nan meanNet=nan medNet=nan gross/t=nan cost/t=nan worst=nan maxDD=0.0 top5%=nan holdHrs=nan premHi=nan premLo=nan dHi=nan dLo=nan src real=0.0% stale=0.0% settle=0.0% exits={}
+  2026 n=0 sig/day=0.000 win%=nan meanNet=nan medNet=nan gross/t=nan cost/t=nan worst=nan maxDD=0.0 top5%=nan holdHrs=nan premHi=nan premLo=nan dHi=nan dLo=nan src real=0.0% stale=0.0% settle=0.0% exits={}
+
+--- PRE-REGISTERED PASS (PRIMARY 2025 & 2026) ---
+FAIL
+  2025 n=0 mean=nan c2=nan top5=nan | 2026 n=0 mean=nan c2=nan top5=nan
+C1 same windows:
+  2025 n=0 sig/day=0.000 win%=nan meanNet=nan medNet=nan gross/t=nan cost/t=nan worst=nan maxDD=0.0 top5%=nan holdHrs=nan premHi=nan premLo=nan dHi=nan dLo=nan src real=0.0% stale=0.0% settle=0.0% exits={}
+  2026 n=0 sig/day=0.000 win%=nan meanNet=nan medNet=nan gross/t=nan cost/t=nan worst=nan maxDD=0.0 top5%=nan holdHrs=nan premHi=nan premLo=nan dHi=nan dLo=nan src real=0.0% stale=0.0% settle=0.0% exits={}
