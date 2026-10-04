@@ -1,0 +1,28 @@
+S018 GRID STAGE A TRAIN 2024-09-01..2025-12-31
+stamp=20261004T190750Z signal_sets=4 unique_entries~=22 new_paths=22
+share n>=40 & mean>0: 0/112 = 0.00%
+histogram mean net: <-400=0 -400..-200=10 -200..-100=99 -100..-50=3 -50..0=0 0..50=0 50..100=0 100..200=0 200..400=0 >400=0
+RSS hist=n/a
+TOP 20 by mean net (any n):
+  TF=4h|Ef=2|Es=8|STm=1|T=100|SL=200|E=0DTE n=7 win%=57.1 mean=-51.85 med=69.51 gross/t=-25.64 fee/t=26.21 slip/t=17.33 worst=-249.07 maxDD=-512.2 top5%=100.0 exits={'TARGET': 4, 'SL': 3}
+  TF=4h|Ef=2|Es=8|STm=1|T=100|SL=250|E=0DTE n=7 win%=57.1 mean=-67.76 med=69.51 gross/t=-41.65 fee/t=26.11 slip/t=16.25 worst=-288.47 maxDD=-623.6 top5%=100.0 exits={'TARGET': 4, 'EXPIRY': 1, 'SL': 2}
+  TF=4h|Ef=2|Es=8|STm=1|T=100|SL=100|E=0DTE n=7 win%=28.6 mean=-76.52 med=-135.44 gross/t=-49.88 fee/t=26.63 slip/t=16.75 worst=-140.75 maxDD=-684.9 top5%=100.0 exits={'TARGET': 2, 'SL': 5}
+  TF=4h|Ef=2|Es=8|STm=1|T=400|SL=150|E=1DTE n=7 win%=14.3 mean=-104.60 med=-193.24 gross/t=-78.05 fee/t=26.55 slip/t=16.64 worst=-201.05 maxDD=-786.0 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=100|SL=100|E=2DTE n=7 win%=14.3 mean=-109.52 med=-138.14 gross/t=-82.71 fee/t=26.81 slip/t=16.79 worst=-153.50 maxDD=-766.6 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=100|SL=150|E=2DTE n=7 win%=28.6 mean=-110.72 med=-184.94 gross/t=-83.93 fee/t=26.79 slip/t=16.83 worst=-206.28 maxDD=-775.1 top5%=100.0 exits={'SL': 5, 'TARGET': 2}
+  TF=4h|Ef=2|Es=8|STm=1|T=100|SL=150|E=0DTE n=7 win%=28.6 mean=-113.94 med=-186.38 gross/t=-87.31 fee/t=26.63 slip/t=16.45 worst=-197.00 maxDD=-946.8 top5%=100.0 exits={'TARGET': 2, 'SL': 5}
+  TF=4h|Ef=2|Es=8|STm=1|T=350|SL=150|E=2DTE n=7 win%=14.3 mean=-115.31 med=-185.77 gross/t=-88.51 fee/t=26.80 slip/t=16.71 worst=-231.30 maxDD=-808.1 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=400|SL=150|E=2DTE n=7 win%=14.3 mean=-115.31 med=-185.77 gross/t=-88.51 fee/t=26.80 slip/t=16.71 worst=-231.30 maxDD=-808.1 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=350|SL=150|E=1DTE n=7 win%=14.3 mean=-121.48 med=-193.24 gross/t=-94.88 fee/t=26.61 slip/t=16.55 worst=-201.05 maxDD=-850.4 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=200|SL=150|E=1DTE n=7 win%=14.3 mean=-123.80 med=-193.24 gross/t=-97.20 fee/t=26.61 slip/t=16.54 worst=-201.05 maxDD=-866.6 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=250|SL=150|E=1DTE n=7 win%=14.3 mean=-123.80 med=-193.24 gross/t=-97.20 fee/t=26.61 slip/t=16.54 worst=-201.05 maxDD=-866.6 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=300|SL=150|E=1DTE n=7 win%=14.3 mean=-123.80 med=-193.24 gross/t=-97.20 fee/t=26.61 slip/t=16.54 worst=-201.05 maxDD=-866.6 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=250|SL=150|E=2DTE n=7 win%=14.3 mean=-128.59 med=-185.77 gross/t=-101.80 fee/t=26.80 slip/t=16.64 worst=-231.30 maxDD=-900.1 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=300|SL=150|E=2DTE n=7 win%=14.3 mean=-128.59 med=-185.77 gross/t=-101.80 fee/t=26.80 slip/t=16.64 worst=-231.30 maxDD=-900.1 top5%=100.0 exits={'SL': 6, 'TARGET': 1}
+  TF=4h|Ef=2|Es=8|STm=1|T=100|SL=100|E=1DTE n=7 win%=0.0 mean=-138.13 med=-136.48 gross/t=-111.30 fee/t=26.83 slip/t=16.25 worst=-146.50 maxDD=-966.9 top5%=nan exits={'SL': 7}
+  TF=4h|Ef=2|Es=8|STm=1|T=150|SL=100|E=1DTE n=7 win%=0.0 mean=-138.13 med=-136.48 gross/t=-111.30 fee/t=26.83 slip/t=16.25 worst=-146.50 maxDD=-966.9 top5%=nan exits={'SL': 7}
+  TF=4h|Ef=2|Es=8|STm=1|T=200|SL=100|E=1DTE n=7 win%=0.0 mean=-138.13 med=-136.48 gross/t=-111.30 fee/t=26.83 slip/t=16.25 worst=-146.50 maxDD=-966.9 top5%=nan exits={'SL': 7}
+  TF=4h|Ef=2|Es=8|STm=1|T=250|SL=100|E=1DTE n=7 win%=0.0 mean=-138.13 med=-136.48 gross/t=-111.30 fee/t=26.83 slip/t=16.25 worst=-146.50 maxDD=-966.9 top5%=nan exits={'SL': 7}
+  TF=4h|Ef=2|Es=8|STm=1|T=300|SL=100|E=1DTE n=7 win%=0.0 mean=-138.13 med=-136.48 gross/t=-111.30 fee/t=26.83 slip/t=16.25 worst=-146.50 maxDD=-966.9 top5%=nan exits={'SL': 7}
+FINALISTS (top mean n>=40, >=50% neighbors mean>0):
+  NONE

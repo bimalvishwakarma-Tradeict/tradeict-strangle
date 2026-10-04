@@ -8,11 +8,10 @@ python backtest\\strategies\\s018_4h_trend\\run_s018_grid.py --stage B
 from __future__ import annotations
 
 import argparse
-import gzip
+import gc
 import json
 import logging
 import math
-import pickle
 import sys
 import time
 from collections import defaultdict
@@ -31,6 +30,7 @@ for _p in (str(_ROOT), str(_BACKTEST)):
 
 from backtest.fees_sim import OPTIONS_CONTRACT_VALUE  # noqa: E402
 from backtest.harness.data import MarksStore, load_symbol_series  # noqa: E402
+from backtest.harness.mark_cache import reset_mark_cache  # noqa: E402
 from backtest.slippage_model import load_slip_table  # noqa: E402
 from backtest.strategies.s012_trend_follow.engine import (  # noqa: E402
     intrinsic,
@@ -52,7 +52,7 @@ TRAIN_TO = date(2025, 12, 31)
 HOLD_FROM = date(2026, 1, 1)
 HOLD_TO = date(2026, 9, 21)
 
-TFS = (15, 60, 240)
+TFS = (240, 60, 15)  # 4h, 1h, 15m — same grid, 4h first
 EMA_F = (2, 3, 4, 5, 6)
 EMA_S = (8, 10, 12, 14, 16, 18, 20, 22)
 ST_M = (1.0, 2.0, 3.0)
@@ -63,6 +63,9 @@ N_SIGNAL_SETS = len(TFS) * len(EMA_F) * len(EMA_S) * len(ST_M) * len(EMODES)
 N_CELLS = N_SIGNAL_SETS * len(TGTS) * len(SLS)
 
 TF_LAB = {15: "15m", 60: "1h", 240: "4h"}
+SRC_CODE = {"real": 1, "stale": 2, "settle": 3}
+SRC_NAME = {1: "real", 2: "stale", 3: "settle"}
+PATH_VER = "v2"
 
 
 @dataclass(frozen=True)
@@ -209,21 +212,109 @@ def pick_basket_at(
     return legs
 
 
+def rss_mb() -> float | None:
+    try:
+        import psutil  # noqa: PLC0415
+
+        return float(psutil.Process().memory_info().rss) / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+            wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        ok = psapi.GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+        )
+        if ok:
+            return float(counters.WorkingSetSize) / (1024.0 * 1024.0)
+    except Exception:
+        return None
+    return None
+
+
+def ts_in_sorted(t: int, arr: np.ndarray) -> bool:
+    if arr.size == 0:
+        return False
+    i = int(np.searchsorted(arr, t))
+    return i < arr.size and int(arr[i]) == int(t)
+
+
 def cache_file(entry_ts: int, side: str, exp: date, arm: str) -> Path:
-    return CACHE_DIR / f"{entry_ts}_{side}_{exp.isoformat()}_{arm}.pkl.gz"
+    return CACHE_DIR / f"{entry_ts}_{side}_{exp.isoformat()}_{arm}_{PATH_VER}.npz"
 
 
 def load_path(p: Path) -> dict[str, Any] | None:
     if not p.exists():
         return None
-    with gzip.open(p, "rb") as f:
-        return pickle.load(f)  # noqa: S301
+    z = np.load(p, allow_pickle=False)
+    raw = z["meta_json"][0]
+    if isinstance(raw, (bytes, np.bytes_)):
+        meta = json.loads(bytes(raw).decode("utf-8"))
+    else:
+        meta = json.loads(str(raw))
+    return {
+        "entry_ts": int(z["entry_ts"][0]),
+        "exp": str(meta["exp"]),
+        "exp_ts": int(z["exp_ts"][0]),
+        "dte": int(z["dte"][0]),
+        "legs": meta["legs"],
+        "ts": z["ts"],
+        "ok": z["ok"],
+        "pnl": z["pnl"],
+        "spot": z["spot"],
+        "tf_close": z["tf_close"],
+        "px0": z["px0"],
+        "px1": z["px1"],
+        "src0": z["src0"],
+        "src1": z["src1"],
+    }
 
 
 def save_path(p: Path, obj: dict[str, Any]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(p, "wb") as f:
-        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+    meta = json.dumps({"exp": obj["exp"], "legs": obj["legs"]})
+    np.savez_compressed(
+        p,
+        ts=obj["ts"],
+        ok=obj["ok"],
+        pnl=obj["pnl"],
+        spot=obj["spot"],
+        tf_close=obj["tf_close"],
+        px0=obj["px0"],
+        px1=obj["px1"],
+        src0=obj["src0"],
+        src1=obj["src1"],
+        entry_ts=np.array([obj["entry_ts"]], dtype=np.int64),
+        exp_ts=np.array([obj["exp_ts"]], dtype=np.int64),
+        dte=np.array([obj["dte"]], dtype=np.int32),
+        meta_json=np.array([meta.encode("utf-8")]),
+    )
 
 
 def build_path(
@@ -232,32 +323,36 @@ def build_path(
     legs: list[s018.Leg],
     entry_ts: int,
     exp: date,
-    close_set: set[int],
+    close_t: np.ndarray,
 ) -> dict[str, Any] | None:
     exp_ts = s018.expiry_unix(exp)
     series = [load_symbol_series(store, lg.symbol, entry_ts, exp_ts) for lg in legs]
-    minutes: list[dict[str, Any]] = []
-    t = int(entry_ts) + 60
-    while t <= exp_ts:
+    ts = np.arange(int(entry_ts) + 60, int(exp_ts) + 1, 60, dtype=np.int64)
+    n = int(ts.size)
+    ok = np.zeros(n, dtype=np.bool_)
+    pnl = np.full(n, np.nan, dtype=np.float32)
+    spot = np.zeros(n, dtype=np.float32)
+    px0 = np.zeros(n, dtype=np.float32)
+    px1 = np.zeros(n, dtype=np.float32)
+    src0 = np.zeros(n, dtype=np.int8)
+    src1 = np.zeros(n, dtype=np.int8)
+    j = np.searchsorted(close_t, ts)
+    jclip = np.minimum(j, max(len(close_t) - 1, 0))
+    tf_close = (j < len(close_t)) & (close_t[jclip] == ts) if len(close_t) else np.zeros(n, dtype=np.bool_)
+    nleg = len(legs)
+    for i in range(n):
+        t = int(ts[i])
+        spot[i] = float(spot_c.get(t, 0.0))
         qs = [s018.series_le(ser, t) for ser in series]
-        rec: dict[str, Any] = {
-            "ts": t,
-            "tf_close": 1 if t in close_set else 0,
-            "spot": float(spot_c.get(t, 0.0)),
-            "ok": 0,
-            "pnl": None,
-            "px": [],
-            "src": [],
-            "qts": [],
-        }
-        if all(q is not None for q in qs):
-            rec["ok"] = 1
-            rec["pnl"] = s018.mark_pnl(legs, qs)  # type: ignore[arg-type]
-            rec["px"] = [q.px for q in qs]  # type: ignore[union-attr]
-            rec["src"] = [q.src for q in qs]  # type: ignore[union-attr]
-            rec["qts"] = [q.ts for q in qs]  # type: ignore[union-attr]
-        minutes.append(rec)
-        t += 60
+        if any(q is None for q in qs):
+            continue
+        ok[i] = True
+        pnl[i] = np.float32(s018.mark_pnl(legs, qs))  # type: ignore[arg-type]
+        px0[i] = np.float32(qs[0].px)  # type: ignore[union-attr]
+        src0[i] = np.int8(SRC_CODE.get(qs[0].src, 0))  # type: ignore[union-attr]
+        if nleg > 1:
+            px1[i] = np.float32(qs[1].px)  # type: ignore[union-attr]
+            src1[i] = np.int8(SRC_CODE.get(qs[1].src, 0))  # type: ignore[union-attr]
     dte = max(0, (exp - ist_date(entry_ts)).days)
     el: list[dict[str, Any]] = []
     for lg in legs:
@@ -284,25 +379,27 @@ def build_path(
         "exp_ts": exp_ts,
         "dte": dte,
         "legs": el,
-        "minutes": minutes,
+        "ts": ts,
+        "ok": ok,
+        "pnl": pnl,
+        "spot": spot,
+        "tf_close": tf_close,
+        "px0": px0,
+        "px1": px1,
+        "src0": src0,
+        "src1": src1,
     }
 
 
-def trend_exits(
+def trend_exit_ts(
     close_t: np.ndarray, ema_f: np.ndarray, st: np.ndarray, side: str
-) -> set[int]:
-    out: set[int] = set()
-    for i in range(len(close_t)):
-        if math.isnan(float(ema_f[i])) or math.isnan(float(st[i])):
-            continue
-        hit = (
-            float(ema_f[i]) < float(st[i])
-            if side == "long"
-            else float(ema_f[i]) > float(st[i])
-        )
-        if hit:
-            out.add(int(close_t[i]))
-    return out
+) -> np.ndarray:
+    finite = np.isfinite(ema_f) & np.isfinite(st)
+    if side == "long":
+        hit = finite & (ema_f < st)
+    else:
+        hit = finite & (ema_f > st)
+    return np.ascontiguousarray(close_t[hit], dtype=np.int64)
 
 
 def scan_path(
@@ -310,39 +407,51 @@ def scan_path(
     tgt: float,
     sl: float,
     side: str,
-    trend_set: set[int],
+    trend_ts: np.ndarray,
     spot_c: dict[int, float],
     arm: str,
 ) -> dict[str, Any] | None:
-    legs_raw = path["legs"]
+    legs_raw = list(path["legs"])
     if arm == "C1":
         legs_raw = [lg for lg in legs_raw if lg["role"] == "hi"]
     fills = [float(lg["fill"]) for lg in legs_raw]
     entry_fee = sum(float(lg["fee"]) for lg in legs_raw)
     entry_slip = sum(float(lg["slip"]) for lg in legs_raw)
     exp_ts = int(path["exp_ts"])
-    exp = date.fromisoformat(str(path["exp"]))
     dte0 = int(path["dte"])
-    for rec in path["minutes"]:
-        t = int(rec["ts"])
-        if rec.get("ok") and rec.get("pnl") is not None:
-            pnl = float(rec["pnl"])
-            if arm == "C1" and rec.get("px"):
-                pnl = (float(rec["px"][0]) - fills[0]) * s018.QTY * OPTIONS_CONTRACT_VALUE
+    ts = path["ts"]
+    ok = path["ok"]
+    pnl_a = path["pnl"]
+    tf_c = path["tf_close"]
+    px0 = path["px0"]
+    px1 = path["px1"]
+    src0 = path["src0"]
+    src1 = path["src1"]
+    spot_a = path["spot"]
+    n = int(ts.size)
+    for i in range(n):
+        t = int(ts[i])
+        if bool(ok[i]) and np.isfinite(pnl_a[i]):
+            pnl = float(pnl_a[i])
+            if arm == "C1":
+                pnl = (float(px0[i]) - fills[0]) * s018.QTY * OPTIONS_CONTRACT_VALUE
             if pnl >= tgt:
-                return _exit_from_rec(
-                    rec, fills, legs_raw, t, "TARGET", dte0, spot_c, entry_fee, entry_slip
+                return _exit_from_idx(
+                    i, fills, legs_raw, t, "TARGET", dte0, spot_c, entry_fee, entry_slip,
+                    px0, px1, src0, src1, spot_a,
                 )
             if pnl <= -sl:
-                return _exit_from_rec(
-                    rec, fills, legs_raw, t, "SL", dte0, spot_c, entry_fee, entry_slip
+                return _exit_from_idx(
+                    i, fills, legs_raw, t, "SL", dte0, spot_c, entry_fee, entry_slip,
+                    px0, px1, src0, src1, spot_a,
                 )
-            if rec.get("tf_close") and t in trend_set:
-                return _exit_from_rec(
-                    rec, fills, legs_raw, t, "TREND", dte0, spot_c, entry_fee, entry_slip
+            if bool(tf_c[i]) and ts_in_sorted(t, trend_ts):
+                return _exit_from_idx(
+                    i, fills, legs_raw, t, "TREND", dte0, spot_c, entry_fee, entry_slip,
+                    px0, px1, src0, src1, spot_a,
                 )
         if t == exp_ts:
-            sp = float(spot_c.get(t, 0.0))
+            sp = float(spot_a[i]) if float(spot_a[i]) > 0 else float(spot_c.get(t, 0.0))
             if sp <= 0:
                 return None
             gross = 0.0
@@ -367,8 +476,8 @@ def scan_path(
     return None
 
 
-def _exit_from_rec(
-    rec: dict[str, Any],
+def _exit_from_idx(
+    i: int,
     fills: list[float],
     legs_raw: list[dict[str, Any]],
     t: int,
@@ -377,19 +486,28 @@ def _exit_from_rec(
     spot_c: dict[int, float],
     entry_fee: float,
     entry_slip: float,
+    px0: np.ndarray,
+    px1: np.ndarray,
+    src0: np.ndarray,
+    src1: np.ndarray,
+    spot_a: np.ndarray,
 ) -> dict[str, Any]:
-    idx = float(rec.get("spot") or spot_c.get(t, 0.0))
-    px = [float(x) for x in rec["px"][: len(fills)]]
+    idx = float(spot_a[i]) or float(spot_c.get(t, 0.0))
+    pxs = [float(px0[i])]
+    srcs_m = [int(src0[i])]
+    if len(fills) > 1:
+        pxs.append(float(px1[i]))
+        srcs_m.append(int(src1[i]))
     gross = 0.0
     fees = entry_fee
     slip = entry_slip
     srcs = [str(lg["src"]) for lg in legs_raw]
-    for fill, mark, lg, src in zip(fills, px, legs_raw, rec["src"]):
+    for fill, mark, src_i in zip(fills, pxs, srcs_m):
         xf, _ = s018.sell_fill(mark, dte)
         gross += (xf - fill) * s018.QTY * OPTIONS_CONTRACT_VALUE
         fees += s018.fee_gst(mark, idx if idx else 1.0)
         slip += (mark - xf) * s018.QTY * OPTIONS_CONTRACT_VALUE
-        srcs.append(str(src))
+        srcs.append(SRC_NAME.get(src_i, "real"))
     return {
         "exit_ts": t,
         "reason": reason,
@@ -427,9 +545,9 @@ def detect_signals(
     return out
 
 
-def signal_sets(max_n: int) -> list[tuple[int, int, int, float, str]]:
+def signal_sets(max_n: int, tfs: tuple[int, ...] | None = None) -> list[tuple[int, int, int, float, str]]:
     out: list[tuple[int, int, int, float, str]] = []
-    for tf in TFS:
+    for tf in (tfs if tfs is not None else TFS):
         for ef in EMA_F:
             for es in EMA_S:
                 if es <= ef:
@@ -440,6 +558,21 @@ def signal_sets(max_n: int) -> list[tuple[int, int, int, float, str]]:
                         if max_n and len(out) >= max_n:
                             return out
     return out
+
+
+def set_cell_keys(tf: int, ef: int, es: int, stm: float, emode: str) -> list[str]:
+    return [
+        Cell(tf=tf, ef=ef, es=es, stm=stm, tgt=int(tgt), sl=int(slv), emode=emode).key()
+        for tgt in TGTS
+        for slv in SLS
+    ]
+
+
+def set_complete(done: dict[str, Any] | set[str], tf: int, ef: int, es: int, stm: float, emode: str) -> bool:
+    keys = set_cell_keys(tf, ef, es, stm, emode)
+    if isinstance(done, dict):
+        return all(k in done for k in keys)
+    return all(k in done for k in keys)
 
 
 def max_dd(nets: list[float]) -> float:
@@ -615,17 +748,21 @@ def random_c2(
 def stage_a(args: argparse.Namespace) -> None:
     print_entry_timing()
     load_slip_table()
+    cache_gb = float(args.cache_gb)
+    reset_mark_cache(max_bytes=int(cache_gb * 1024**3))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     if args.fresh and CKPT_A.exists():
         CKPT_A.unlink()
         print("fresh: dropped Stage A checkpoint")
     if args.fresh:
-        for p in CACHE_DIR.glob("*.pkl.gz"):
-            p.unlink()
+        for pth in CACHE_DIR.glob("*.pkl.gz"):
+            pth.unlink(missing_ok=True)
+        for pth in CACHE_DIR.glob(f"*_{PATH_VER}.npz"):
+            pth.unlink(missing_ok=True)
         print("fresh: dropped path cache")
 
-    done = load_ckpt(CKPT_A)
+    done: dict[str, dict[str, Any]] = {} if args.fresh else load_ckpt(CKPT_A)
     spot = s018.load_spot_1m(args.csv)
     ts1, o1, h1, l1, c1 = s018.bars_1m(spot)
     start_ts = int(datetime(2024, 9, 1, tzinfo=timezone.utc).timestamp())
@@ -641,28 +778,52 @@ def stage_a(args: argparse.Namespace) -> None:
     inner = MarksStore()
     store = GuardStore(inner, forbid_year=2026)
 
-    sets = signal_sets(int(args.max_signal_sets) if args.max_signal_sets else 0)
+    tfs = TFS
+    if getattr(args, "tf", None):
+        tfs = tuple(int(x) for x in str(args.tf).split(",") if x.strip())
+    sets = signal_sets(int(args.max_signal_sets) if args.max_signal_sets else 0, tfs)
     print(
         f"FULL GRID cells={N_CELLS} signal_sets={N_SIGNAL_SETS} "
-        f"tgt/sl={len(TGTS)*len(SLS)} this_run_signal_sets={len(sets)}",
+        f"tgt/sl={len(TGTS)*len(SLS)} this_run_signal_sets={len(sets)} "
+        f"TF_order={[TF_LAB[t] for t in tfs]} mark_cache_gb={cache_gb}",
         flush=True,
     )
+    print("EST: stream per signal set x 28 cells. ETA after first completed set.", flush=True)
 
-    tf_pack: dict[int, tuple] = {}
-    unique: set[tuple[int, str, str]] = set()
-    packed: list[dict[str, Any]] = []
-    t0 = time.perf_counter()
+    t_run = time.perf_counter()
+    n_unique = 0
     n_paths = 0
-    for tf, ef, es, stm, emode in sets:
-        if tf not in tf_pack:
+    rss_hist: list[float] = []
+    cur_tf: int | None = None
+    hh = ll = cc = close_t = None  # type: ignore[assignment]
+
+    for k_set, (tf, ef, es, stm, emode) in enumerate(sets, start=1):
+        t_set = time.perf_counter()
+        if (not args.fresh) and set_complete(done, tf, ef, es, stm, emode):
+            elapsed = time.perf_counter() - t_run
+            eta = (elapsed / k_set) * (len(sets) - k_set)
+            mem = rss_mb()
+            extra = f" RSS={mem:.0f}MB" if mem is not None else ""
+            if mem is not None:
+                rss_hist.append(mem)
+            print(
+                f"done {k_set}/{len(sets)} SKIP completed "
+                f"TF={TF_LAB[tf]} Ef={ef} Es={es} STm={stm:g} {emode} "
+                f"elapsed={elapsed:.0f}s ETA={eta:.0f}s{extra}",
+                flush=True,
+            )
+            continue
+        if cur_tf != tf:
+            hh = ll = cc = close_t = None
+            gc.collect()
             _k, hh, ll, cc, close_t = resample_tf(ts1, o1, h1, l1, c1, tf)
-            tf_pack[tf] = (hh, ll, cc, close_t)
+            cur_tf = tf
             print(f"resample {TF_LAB[tf]} bars={len(close_t)}", flush=True)
-        hh, ll, cc, close_t = tf_pack[tf]
         _tr, st = supertrend(hh, ll, cc, 1, float(stm))
         ema_f = s018.ema(cc, int(ef))
         ema_s = s018.ema(cc, int(es))
-        close_set = {int(x) for x in close_t}
+        trend_long = trend_exit_ts(close_t, ema_f, st, "long")
+        trend_short = trend_exit_ts(close_t, ema_f, st, "short")
         sigs = detect_signals(ema_f, ema_s, st)
         entries: list[dict[str, Any]] = []
         for i, side in sigs:
@@ -677,121 +838,103 @@ def stage_a(args: argparse.Namespace) -> None:
             sp = spot_c.get(t)
             if sp is None:
                 continue
-            uk = (t, side, exp.isoformat())
-            unique.add(uk)
+            n_unique += 1
             fp = cache_file(t, side, exp, "PRIMARY")
             path = None if args.fresh else load_path(fp)
             if path is None:
                 legs = pick_basket_at(store, side, t, float(sp), exp, "PRIMARY")
                 if legs is None:
                     continue
-                path = build_path(store, spot_c, legs, t, exp, close_set)
+                path = build_path(store, spot_c, legs, t, exp, close_t)
                 if path is None:
                     continue
                 save_path(fp, path)
                 n_paths += 1
-            trset = trend_exits(close_t, ema_f, st, side)
             entries.append(
                 {
-                    "i": i,
                     "ts": t,
                     "side": side,
-                    "exp": exp.isoformat(),
                     "path": path,
-                    "trend": trset,
+                    "trend": trend_long if side == "long" else trend_short,
                     "hod": s018.hod_ist(t),
                 }
             )
-        packed.append(
-            {
-                "tf": tf, "ef": ef, "es": es, "stm": stm, "emode": emode,
-                "entries": entries, "close_t": close_t, "ema_f": ema_f, "st": st,
-            }
-        )
-        print(
-            f"signal-set TF={TF_LAB[tf]} Ef={ef} Es={es} STm={stm:g} {emode} "
-            f"entries={len(entries)}",
-            flush=True,
-        )
-
-    elapsed = time.perf_counter() - t0
-    n_unique = len(unique)
-    per = elapsed / max(n_paths, 1)
-    est_full_paths = (n_unique / max(len(sets), 1)) * N_SIGNAL_SETS
-    est_min = (est_full_paths * per + N_CELLS * 0.002) / 60.0
-    print(
-        f"UNIQUE entries (entry_ts,dir,expiry)={n_unique} new_paths={n_paths} "
-        f"path_build_s={elapsed:.1f} ~{per:.3f}s/new_path",
-        flush=True,
-    )
-    print(
-        f"EST full grid (rough): ~{est_full_paths:.0f} unique-scale paths, "
-        f"~{est_min:.0f} min if path-rate holds + cell scans. "
-        f"NOT starting remaining {N_SIGNAL_SETS - len(sets)} signal-sets "
-        f"(smoke/cap).",
-        flush=True,
-    )
-
-    cell_stats: dict[str, dict[str, Any]] = dict(done)
-    cell_rows: dict[str, list[dict[str, Any]]] = {}
-    n_scan = 0
-    for pack in packed:
         for tgt in TGTS:
             for slv in SLS:
                 cell = Cell(
-                    tf=int(pack["tf"]),
-                    ef=int(pack["ef"]),
-                    es=int(pack["es"]),
-                    stm=float(pack["stm"]),
+                    tf=int(tf),
+                    ef=int(ef),
+                    es=int(es),
+                    stm=float(stm),
                     tgt=int(tgt),
                     sl=int(slv),
-                    emode=str(pack["emode"]),
+                    emode=str(emode),
                 )
                 ck = cell.key()
+                if ck in done and not args.fresh:
+                    continue
                 busy = -1
                 rows: list[dict[str, Any]] = []
-                if ck in done and not args.fresh:
-                    cell_stats[ck] = done[ck]
-                    n_scan += 1
-                    continue
-                for e in pack["entries"]:
+                for e in entries:
                     if int(e["ts"]) <= busy:
                         continue
                     walked = scan_path(
-                        e["path"], float(tgt), float(slv), e["side"],
-                        e["trend"], spot_c, "PRIMARY",
+                        e["path"],
+                        float(tgt),
+                        float(slv),
+                        e["side"],
+                        e["trend"],
+                        spot_c,
+                        "PRIMARY",
                     )
                     if walked is None:
                         continue
-                    rec = {
-                        "entry_ts": e["ts"],
-                        "side": e["side"],
-                        "hod": e["hod"],
-                        **walked,
-                    }
-                    rows.append(rec)
+                    rows.append(
+                        {
+                            "entry_ts": e["ts"],
+                            "side": e["side"],
+                            "hod": e["hod"],
+                            **walked,
+                        }
+                    )
                     busy = int(walked["exit_ts"])
                 stt = stats_of(rows)
                 stt["key"] = ck
                 stt["cell"] = asdict(cell)
-                cell_stats[ck] = stt
-                cell_rows[ck] = rows
                 append_ckpt(CKPT_A, stt)
-                n_scan += 1
-        print(f"scanned TF={TF_LAB[pack['tf']]} {pack['emode']} cells so far={n_scan}", flush=True)
+                done[ck] = stt
+        del entries, ema_f, ema_s, st, trend_long, trend_short, _tr
+        gc.collect()
+        elapsed = time.perf_counter() - t_run
+        dt = time.perf_counter() - t_set
+        eta = (elapsed / k_set) * (len(sets) - k_set)
+        mem = rss_mb()
+        extra = f" RSS={mem:.0f}MB" if mem is not None else ""
+        if mem is not None:
+            rss_hist.append(mem)
+        print(
+            f"done {k_set}/{len(sets)} TF={TF_LAB[tf]} Ef={ef} Es={es} "
+            f"STm={stm:g} {emode} n_entry={n_unique} new_paths={n_paths} "
+            f"set_s={dt:.1f} elapsed={elapsed:.0f}s ETA={eta:.0f}s{extra}",
+            flush=True,
+        )
 
+    cell_stats = load_ckpt(CKPT_A)
     means = [float(s["mean"]) for s in cell_stats.values() if "mean" in s]
     n40p = sum(
         1
         for s in cell_stats.values()
-        if int(s.get("n", 0)) >= 40 and np.isfinite(s.get("mean", float("nan"))) and s["mean"] > 0
+        if int(s.get("n", 0)) >= 40
+        and np.isfinite(s.get("mean", float("nan")))
+        and s["mean"] > 0
     )
     lines = [
         f"S018 GRID STAGE A TRAIN {TRAIN_FROM}..{TRAIN_TO}",
-        f"stamp={stamp} signal_sets={len(sets)} cells_scanned={n_scan} unique_entries={n_unique}",
+        f"stamp={stamp} signal_sets={len(sets)} unique_entries~={n_unique} new_paths={n_paths}",
         f"share n>=40 & mean>0: {n40p}/{len(cell_stats)} = "
         f"{(100.0 * n40p / max(len(cell_stats), 1)):.2f}%",
         f"histogram mean net: {hist_mean(means)}",
+        f"RSS hist MB={rss_hist}" if rss_hist else "RSS hist=n/a",
         "TOP 20 by mean net (any n):",
     ]
     ranked = sorted(
@@ -801,7 +944,6 @@ def stage_a(args: argparse.Namespace) -> None:
     )
     for s in ranked[:20]:
         lines.append(f"  {s.get('key')} {fmt_stats(s)}")
-
     elig = [
         s
         for s in ranked
@@ -824,25 +966,19 @@ def stage_a(args: argparse.Namespace) -> None:
             finalists.append(s)
         if len(finalists) >= 5:
             break
-
     lines.append("FINALISTS (top mean n>=40, >=50% neighbors mean>0):")
     if not finalists:
         lines.append("  NONE")
     for s in finalists:
         lines.append(f"  {s['key']} {fmt_stats(s)} nb_frac={s['nb_frac']:.2f}")
-        rows = cell_rows.get(str(s["key"]), [])
-        lines.append("  DOW train:")
-        lines.extend(dow_table(rows))
-
     FINALISTS_PATH.write_text(json.dumps(finalists, indent=2, default=str), encoding="utf-8")
-    txt = OUT_DIR / f"s018_gridA_{stamp}.txt"
-    txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    txtp = OUT_DIR / f"s018_gridA_{stamp}.txt"
+    txtp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
-    print(f"wrote {txt}")
+    print(f"wrote {txtp}")
     print(f"wrote {FINALISTS_PATH}")
     print("STAGE A STOP")
     store.close()
-
 
 def _run_entries_holdout(
     store: Any,
@@ -858,8 +994,9 @@ def _run_entries_holdout(
     close_t = pack["close_t"]
     ema_f = pack["ema_f"]
     st = pack["st"]
-    close_set = {int(x) for x in close_t}
     emode = pack["emode"]
+    trend_long = trend_exit_ts(close_t, ema_f, st, "long")
+    trend_short = trend_exit_ts(close_t, ema_f, st, "short")
     if forced is None:
         plan = [(e["i"], e["side"], e["ts"]) for e in pack["entries"]]
     else:
@@ -881,11 +1018,11 @@ def _run_entries_holdout(
             legs = pick_basket_at(store, side, t, float(sp), exp, arm)
             if legs is None:
                 continue
-            path = build_path(store, spot_c, legs, t, exp, close_set)
+            path = build_path(store, spot_c, legs, t, exp, close_t)
             if path is None:
                 continue
             save_path(fp, path)
-        trset = trend_exits(close_t, ema_f, st, side)
+        trset = trend_long if side == "long" else trend_short
         walked = scan_path(path, float(tgt), float(slv), side, trset, spot_c, arm)
         if walked is None:
             continue
@@ -936,7 +1073,6 @@ def stage_b(args: argparse.Namespace) -> None:
         _tr, st = supertrend(hh, ll, cc, 1, float(stm))
         ema_f = s018.ema(cc, int(ef))
         ema_s = s018.ema(cc, int(es))
-        close_set = {int(x) for x in close_t}
         sigs = detect_signals(ema_f, ema_s, st)
         entries = []
         for i, side in sigs:
@@ -947,7 +1083,6 @@ def stage_b(args: argparse.Namespace) -> None:
         pack = {
             "tf": tf, "ef": ef, "es": es, "stm": stm, "emode": emode,
             "entries": entries, "close_t": close_t, "ema_f": ema_f, "st": st,
-            "close_set": close_set,
         }
         sig_pack[k] = pack
         return pack
@@ -969,7 +1104,7 @@ def stage_b(args: argparse.Namespace) -> None:
                 legs = pick_basket_at(store, e["side"], t, float(sp), exp, "PRIMARY")
                 if legs is None:
                     continue
-                path = build_path(store, spot_c, legs, t, exp, pack["close_set"])
+                path = build_path(store, spot_c, legs, t, exp, pack["close_t"])
                 if path is None:
                     continue
                 save_path(fp, path)
@@ -977,7 +1112,9 @@ def stage_b(args: argparse.Namespace) -> None:
                 {
                     **e,
                     "path": path,
-                    "trend": trend_exits(pack["close_t"], pack["ema_f"], pack["st"], e["side"]),
+                    "trend": trend_exit_ts(
+                        pack["close_t"], pack["ema_f"], pack["st"], e["side"]
+                    ),
                     "hod": s018.hod_ist(t),
                 }
             )
@@ -1058,12 +1195,15 @@ def main() -> None:
     ap.add_argument("--max-days", type=int, default=0)
     ap.add_argument("--max-signal-sets", type=int, default=0)
     ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--cache-gb", type=float, default=1.0)
+    ap.add_argument("--tf", default="", help="comma TF minutes, e.g. 15 or 240,60,15")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     if args.stage == "A":
         stage_a(args)
     else:
+        reset_mark_cache(max_bytes=int(float(args.cache_gb) * 1024**3))
         stage_b(args)
 
 
