@@ -1,0 +1,27 @@
+S018 GRID STAGE A TRAIN 2024-09-01..2025-12-31
+stamp=20261004T181258Z signal_sets=2 cells_scanned=56 unique_entries=112
+share n>=40 & mean>0: 0/56 = 0.00%
+histogram mean net: <-400=0 -400..-200=0 -200..-100=0 -100..-50=56 -50..0=0 0..50=0 50..100=0 100..200=0 200..400=0 >400=0
+TOP 20 by mean net (any n):
+  TF=15m|Ef=2|Es=8|STm=1|T=400|SL=200|E=1DTE n=64 win%=15.6 mean=-56.21 med=-111.52 gross/t=-29.69 fee/t=26.51 slip/t=17.04 worst=-244.45 maxDD=-3597.3 top5%=63.7 exits={'TREND': 51, 'SL': 5, 'TARGET': 8}
+  TF=15m|Ef=2|Es=8|STm=1|T=400|SL=250|E=1DTE n=64 win%=15.6 mean=-58.08 med=-111.52 gross/t=-31.57 fee/t=26.51 slip/t=17.03 worst=-286.60 maxDD=-3717.2 top5%=63.7 exits={'TREND': 55, 'SL': 1, 'TARGET': 8}
+  TF=15m|Ef=2|Es=8|STm=1|T=350|SL=200|E=1DTE n=64 win%=15.6 mean=-61.78 med=-111.52 gross/t=-35.25 fee/t=26.53 slip/t=17.03 worst=-244.45 maxDD=-3953.8 top5%=65.3 exits={'TREND': 51, 'SL': 5, 'TARGET': 8}
+  TF=15m|Ef=2|Es=8|STm=1|T=400|SL=150|E=1DTE n=64 win%=14.1 mean=-62.29 med=-111.87 gross/t=-35.70 fee/t=26.59 slip/t=16.97 worst=-204.68 maxDD=-3986.9 top5%=72.0 exits={'TREND': 43, 'SL': 14, 'TARGET': 7}
+  TF=15m|Ef=2|Es=8|STm=1|T=400|SL=100|E=1DTE n=65 win%=12.3 mean=-62.62 med=-116.34 gross/t=-35.99 fee/t=26.63 slip/t=16.95 worst=-151.54 maxDD=-4070.5 top5%=82.2 exits={'TREND': 33, 'SL': 26, 'TARGET': 6}
+  TF=15m|Ef=2|Es=8|STm=1|T=350|SL=250|E=1DTE n=64 win%=15.6 mean=-63.65 med=-111.52 gross/t=-37.12 fee/t=26.53 slip/t=17.01 worst=-286.60 maxDD=-4073.8 top5%=65.3 exits={'TREND': 55, 'SL': 1, 'TARGET': 8}
+  TF=15m|Ef=2|Es=8|STm=1|T=400|SL=200|E=0DTE n=64 win%=14.1 mean=-64.02 med=-117.24 gross/t=-37.67 fee/t=26.35 slip/t=17.18 worst=-241.78 maxDD=-4097.2 top5%=66.5 exits={'TREND': 49, 'SL': 7, 'TARGET': 8}
+  TF=15m|Ef=2|Es=8|STm=1|T=100|SL=100|E=1DTE n=68 win%=26.5 mean=-64.02 med=-111.87 gross/t=-37.30 fee/t=26.73 slip/t=16.97 worst=-151.54 maxDD=-4353.5 top5%=36.7 exits={'TREND': 25, 'SL': 25, 'TARGET': 18}
+  TF=15m|Ef=2|Es=8|STm=1|T=400|SL=100|E=0DTE n=65 win%=10.8 mean=-64.29 med=-127.43 gross/t=-37.82 fee/t=26.47 slip/t=17.13 worst=-151.54 maxDD=-4259.5 top5%=84.7 exits={'TREND': 29, 'SL': 30, 'TARGET': 6}
+  TF=15m|Ef=2|Es=8|STm=1|T=100|SL=150|E=1DTE n=68 win%=29.4 mean=-65.50 med=-106.76 gross/t=-38.78 fee/t=26.72 slip/t=16.97 worst=-204.68 maxDD=-4454.2 top5%=34.9 exits={'TREND': 36, 'SL': 12, 'TARGET': 20}
+  TF=15m|Ef=2|Es=8|STm=1|T=400|SL=250|E=0DTE n=64 win%=14.1 mean=-65.66 med=-117.24 gross/t=-39.31 fee/t=26.35 slip/t=17.17 worst=-286.60 maxDD=-4202.3 top5%=66.5 exits={'TREND': 55, 'SL': 1, 'TARGET': 8}
+  TF=15m|Ef=2|Es=8|STm=1|T=350|SL=150|E=1DTE n=64 win%=14.1 mean=-66.63 med=-111.87 gross/t=-40.03 fee/t=26.60 slip/t=16.95 worst=-204.68 maxDD=-4264.4 top5%=73.5 exits={'TREND': 43, 'SL': 14, 'TARGET': 7}
+  TF=15m|Ef=2|Es=8|STm=1|T=350|SL=100|E=0DTE n=65 win%=10.8 mean=-66.83 med=-127.43 gross/t=-40.36 fee/t=26.48 slip/t=17.13 worst=-151.54 maxDD=-4344.1 top5%=85.2 exits={'TREND': 29, 'SL': 30, 'TARGET': 6}
+  TF=15m|Ef=2|Es=8|STm=1|T=350|SL=100|E=1DTE n=65 win%=12.3 mean=-66.89 med=-116.34 gross/t=-40.26 fee/t=26.64 slip/t=16.93 worst=-151.54 maxDD=-4348.0 top5%=82.9 exits={'TREND': 33, 'SL': 26, 'TARGET': 6}
+  TF=15m|Ef=2|Es=8|STm=1|T=350|SL=200|E=0DTE n=64 win%=14.1 mean=-67.83 med=-117.24 gross/t=-41.47 fee/t=26.37 slip/t=17.17 worst=-241.78 maxDD=-4341.4 top5%=68.5 exits={'TREND': 49, 'SL': 7, 'TARGET': 8}
+  TF=15m|Ef=2|Es=8|STm=1|T=100|SL=200|E=1DTE n=68 win%=29.4 mean=-68.48 med=-106.76 gross/t=-41.76 fee/t=26.72 slip/t=16.98 worst=-244.45 maxDD=-4656.4 top5%=34.9 exits={'TREND': 43, 'SL': 5, 'TARGET': 20}
+  TF=15m|Ef=2|Es=8|STm=1|T=100|SL=100|E=0DTE n=70 win%=25.7 mean=-68.67 med=-111.87 gross/t=-41.99 fee/t=26.69 slip/t=16.96 worst=-151.54 maxDD=-4807.2 top5%=37.8 exits={'TREND': 23, 'SL': 29, 'TARGET': 18}
+  TF=15m|Ef=2|Es=8|STm=1|T=350|SL=250|E=0DTE n=64 win%=14.1 mean=-69.48 med=-117.24 gross/t=-43.11 fee/t=26.37 slip/t=17.16 worst=-286.60 maxDD=-4446.5 top5%=68.5 exits={'TREND': 55, 'SL': 1, 'TARGET': 8}
+  TF=15m|Ef=2|Es=8|STm=1|T=400|SL=150|E=0DTE n=65 win%=12.3 mean=-69.67 med=-123.69 gross/t=-43.23 fee/t=26.44 slip/t=17.12 worst=-208.65 maxDD=-4528.3 top5%=74.7 exits={'TREND': 39, 'SL': 19, 'TARGET': 7}
+  TF=15m|Ef=2|Es=8|STm=1|T=300|SL=200|E=1DTE n=64 win%=15.6 mean=-70.20 med=-111.52 gross/t=-43.58 fee/t=26.62 slip/t=16.94 worst=-244.45 maxDD=-4492.6 top5%=64.6 exits={'TREND': 51, 'SL': 5, 'TARGET': 8}
+FINALISTS (top mean n>=40, >=50% neighbors mean>0):
+  NONE

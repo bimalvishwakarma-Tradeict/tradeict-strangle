@@ -47,6 +47,8 @@ backtest/results/
 backtest/strategies/**/runs/*_trades.csv
 backtest/strategies/**/runs/*_events.csv
 backtest/strategies/**/runs/*.jsonl
+backtest/strategies/**/runs/s018_pathcache/
+backtest/strategies/**/runs/s018_pathcache/**
 deploy/gdrive_credentials.json
 
 
