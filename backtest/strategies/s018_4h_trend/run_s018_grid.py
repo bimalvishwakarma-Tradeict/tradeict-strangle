@@ -86,7 +86,47 @@ class Cell:
 
 
 ORIGINAL_CELL = Cell(tf=240, ef=3, es=12, stm=1.0, tgt=250, sl=250, emode="0DTE")
-HEDGE_MARK = {"PRIMARY": s018.P_LO, "H1000": 1000.0}
+GRID_ARMS = ("H300", "H2K1K")
+
+
+def norm_grid_arm(arm: str) -> str:
+    if arm in ("H300", "PRIMARY", ""):
+        return "H300"
+    return str(arm)
+
+
+def arm_premia(grid_arm: str) -> tuple[float, float]:
+    """(hi_mark, lo_mark). H300 unchanged vs PRIMARY: $1000 + $300."""
+    g = norm_grid_arm(grid_arm)
+    if g == "H2K1K":
+        return (2000.0, 1000.0)
+    if g == "H1000":
+        return (s018.P_HI, 1000.0)
+    return (s018.P_HI, s018.P_LO)
+
+
+def cache_tag(arm: str, grid_arm: str | None = None) -> str:
+    """Path-cache suffix. H300 stays PRIMARY so existing files still hit."""
+    if arm == "C1":
+        g = norm_grid_arm(grid_arm or "H300")
+        return "C1" if g == "H300" else f"C1_{g}"
+    if arm in ("H300", "PRIMARY"):
+        return "PRIMARY"
+    return arm
+
+
+def ckpt_a_path(grid_arm: str) -> Path:
+    g = norm_grid_arm(grid_arm)
+    if g == "H300":
+        return OUT_DIR / "s018_gridA_ckpt.jsonl"
+    return OUT_DIR / f"s018_gridA_ckpt_{g}.jsonl"
+
+
+def finalists_file(grid_arm: str) -> Path:
+    g = norm_grid_arm(grid_arm)
+    if g == "H300":
+        return OUT_DIR / "s018_finalists.json"
+    return OUT_DIR / f"s018_finalists_{g}.json"
 
 
 class GuardStore:
@@ -103,6 +143,52 @@ class GuardStore:
 
     def close(self) -> None:
         self.inner.close()
+
+
+def print_legs_preview(path: dict[str, Any], side: str, ts: int) -> None:
+    print(
+        f"  ts={s018.ist_str(ts)} side={side} exp={path.get('exp')}",
+        flush=True,
+    )
+    for lg in path.get("legs", []):
+        kind = "CALL" if lg.get("is_call") else "PUT"
+        print(
+            f"    {lg.get('role')} {kind} K={float(lg['strike']):.0f} "
+            f"mark={float(lg['mark']):.2f} delta={float(lg.get('delta', float('nan'))):.4f} "
+            f"src={lg.get('src')}",
+            flush=True,
+        )
+
+
+def drop_arm_fresh(grid_arm: str) -> None:
+    ck = ckpt_a_path(grid_arm)
+    if ck.exists():
+        ck.unlink()
+        print(f"fresh: dropped {ck.name} only")
+    if not CACHE_DIR.exists():
+        return
+    tags = {cache_tag(grid_arm), cache_tag("C1", grid_arm)}
+    n = 0
+    for tag in tags:
+        for pth in CACHE_DIR.glob(f"*_{tag}_{PATH_VER}.npz"):
+            pth.unlink(missing_ok=True)
+            n += 1
+    print(f"fresh: dropped {n} {grid_arm} path-cache files (other arms untouched)")
+
+
+def count_complete_sets(
+    done: dict[str, Any], tfs: tuple[int, ...]
+) -> tuple[int, int | None, tuple | None]:
+    n = 0
+    nxt_i: int | None = None
+    nxt: tuple | None = None
+    for i, s in enumerate(signal_sets(0, tfs), start=1):
+        if set_complete(done, s[0], s[1], s[2], s[3], s[4]):
+            n += 1
+        elif nxt is None:
+            nxt_i = i
+            nxt = s
+    return n, nxt_i, nxt
 
 
 def print_entry_timing() -> None:
@@ -172,7 +258,13 @@ def resample_tf(
 
 
 def pick_basket_at(
-    store: Any, side: str, t: int, spot: float, exp: date, arm: str
+    store: Any,
+    side: str,
+    t: int,
+    spot: float,
+    exp: date,
+    arm: str,
+    grid_arm: str | None = None,
 ) -> list[s018.Leg] | None:
     packed = s018.load_chain(store, exp, t)
     if packed is None:
@@ -181,12 +273,13 @@ def pick_basket_at(
     exp_ts = s018.expiry_unix(exp)
     t_yr = t_years(t, exp_ts)
     dte = max(0, (exp - ist_date(t)).days)
-    lo_tgt = float(HEDGE_MARK.get(arm, s018.P_LO))
+    parent = grid_arm if arm == "C1" else arm
+    hi_tgt, lo_tgt = arm_premia(parent if parent is not None else arm)
     if side == "long":
-        hi = s018.nearest(rows, True, s018.P_HI)
+        hi = s018.nearest(rows, True, hi_tgt)
         lo = s018.nearest(rows, False, lo_tgt)
     else:
-        hi = s018.nearest(rows, False, s018.P_HI)
+        hi = s018.nearest(rows, False, hi_tgt)
         lo = s018.nearest(rows, True, lo_tgt)
     if hi is None:
         return None
@@ -650,11 +743,12 @@ def entry_time_value_usd(legs: list[dict[str, Any]], spot: float) -> float:
     return tot
 
 
-def load_arm_compare_cells() -> list[Cell]:
+def load_arm_compare_cells(grid_arm: str) -> list[Cell]:
     out = [ORIGINAL_CELL]
     seen = {ORIGINAL_CELL.key()}
-    if FINALISTS_PATH.exists():
-        raw = json.loads(FINALISTS_PATH.read_text(encoding="utf-8"))
+    fp = finalists_file(grid_arm)
+    if fp.exists():
+        raw = json.loads(fp.read_text(encoding="utf-8"))
         if isinstance(raw, list):
             for s in raw:
                 if not isinstance(s, dict) or "cell" not in s:
@@ -797,7 +891,7 @@ def stage_arm_compare(args: argparse.Namespace) -> None:
     spot_c = {int(t): float(c) for t, c in zip(ts1, c1)}
     inner = MarksStore()
     store = GuardStore(inner, forbid_year=forbid)
-    cells = load_arm_compare_cells()
+    cells = load_arm_compare_cells(norm_grid_arm(getattr(args, "arm", "H300")))
     print(
         f"ARM COMPARE {tag} {win_from}..{win_to} cells={len(cells)} "
         f"H300=PRIMARY hedge~$300 vs H1000 hedge~$1000 qty={s018.QTY}",
@@ -956,23 +1050,21 @@ def random_c2(
 
 
 def stage_a(args: argparse.Namespace) -> None:
+    print("Disable PC sleep")
     print_entry_timing()
     load_slip_table()
+    grid_arm = norm_grid_arm(str(getattr(args, "arm", "H300")))
+    tag = cache_tag(grid_arm)
+    ckpt_path = ckpt_a_path(grid_arm)
+    fin_path = finalists_file(grid_arm)
     cache_gb = float(args.cache_gb)
     reset_mark_cache(max_bytes=int(cache_gb * 1024**3))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    if args.fresh and CKPT_A.exists():
-        CKPT_A.unlink()
-        print("fresh: dropped Stage A checkpoint")
     if args.fresh:
-        for pth in CACHE_DIR.glob("*.pkl.gz"):
-            pth.unlink(missing_ok=True)
-        for pth in CACHE_DIR.glob(f"*_{PATH_VER}.npz"):
-            pth.unlink(missing_ok=True)
-        print("fresh: dropped path cache")
+        drop_arm_fresh(grid_arm)
 
-    done: dict[str, dict[str, Any]] = {} if args.fresh else load_ckpt(CKPT_A)
+    done: dict[str, dict[str, Any]] = {} if args.fresh else load_ckpt(ckpt_path)
     spot = s018.load_spot_1m(args.csv)
     ts1, o1, h1, l1, c1 = s018.bars_1m(spot)
     start_ts = int(datetime(2024, 9, 1, tzinfo=timezone.utc).timestamp())
@@ -992,6 +1084,18 @@ def stage_a(args: argparse.Namespace) -> None:
     if getattr(args, "tf", None):
         tfs = tuple(int(x) for x in str(args.tf).split(",") if x.strip())
     sets = signal_sets(int(args.max_signal_sets) if args.max_signal_sets else 0, tfs)
+    n_done, nxt_i, nxt = count_complete_sets(done, tfs)
+    nxt_s = ""
+    if nxt is not None and nxt_i is not None:
+        nxt_s = (
+            f" next={nxt_i} TF={TF_LAB[int(nxt[0])]} Ef={nxt[1]} Es={nxt[2]} "
+            f"STm={nxt[3]:g} {nxt[4]}"
+        )
+    print(
+        f"arm={grid_arm} cache_tag={tag} ckpt={ckpt_path.name} "
+        f"completed_signal_sets={n_done}/{N_SIGNAL_SETS}{nxt_s}",
+        flush=True,
+    )
     print(
         f"FULL GRID cells={N_CELLS} signal_sets={N_SIGNAL_SETS} "
         f"tgt/sl={len(TGTS)*len(SLS)} this_run_signal_sets={len(sets)} "
@@ -1006,6 +1110,7 @@ def stage_a(args: argparse.Namespace) -> None:
     rss_hist: list[float] = []
     cur_tf: int | None = None
     hh = ll = cc = close_t = None  # type: ignore[assignment]
+    preview_left = 3
 
     for k_set, (tf, ef, es, stm, emode) in enumerate(sets, start=1):
         t_set = time.perf_counter()
@@ -1035,7 +1140,10 @@ def stage_a(args: argparse.Namespace) -> None:
         trend_long = trend_exit_ts(close_t, ema_f, st, "long")
         trend_short = trend_exit_ts(close_t, ema_f, st, "short")
         sigs = detect_signals(ema_f, ema_s, st)
-        entries: list[dict[str, Any]] = []
+        meta: list[tuple[int, str, Path]] = []
+        n_set = 0
+        if preview_left == 3:
+            print(f"=== FIRST 3 {grid_arm} ENTRIES (both legs) ===", flush=True)
         for i, side in sigs:
             t = int(close_t[i])
             if t < start_ts or t >= cutoff:
@@ -1049,10 +1157,11 @@ def stage_a(args: argparse.Namespace) -> None:
             if sp is None:
                 continue
             n_unique += 1
-            fp = cache_file(t, side, exp, "PRIMARY")
+            n_set += 1
+            fp = cache_file(t, side, exp, tag)
             path = None if args.fresh else load_path(fp)
             if path is None:
-                legs = pick_basket_at(store, side, t, float(sp), exp, "PRIMARY")
+                legs = pick_basket_at(store, side, t, float(sp), exp, grid_arm)
                 if legs is None:
                     continue
                 path = build_path(store, spot_c, legs, t, exp, close_t)
@@ -1060,15 +1169,12 @@ def stage_a(args: argparse.Namespace) -> None:
                     continue
                 save_path(fp, path)
                 n_paths += 1
-            entries.append(
-                {
-                    "ts": t,
-                    "side": side,
-                    "path": path,
-                    "trend": trend_long if side == "long" else trend_short,
-                    "hod": s018.hod_ist(t),
-                }
-            )
+            if preview_left > 0:
+                print_legs_preview(path, side, t)
+                preview_left -= 1
+            del path
+            meta.append((t, side, fp))
+        acc: dict[str, dict[str, Any]] = {}
         for tgt in TGTS:
             for slv in SLS:
                 cell = Cell(
@@ -1083,37 +1189,46 @@ def stage_a(args: argparse.Namespace) -> None:
                 ck = cell.key()
                 if ck in done and not args.fresh:
                     continue
-                busy = -1
-                rows: list[dict[str, Any]] = []
-                for e in entries:
-                    if int(e["ts"]) <= busy:
-                        continue
-                    walked = scan_path(
-                        e["path"],
-                        float(tgt),
-                        float(slv),
-                        e["side"],
-                        e["trend"],
-                        spot_c,
-                        "PRIMARY",
-                    )
-                    if walked is None:
-                        continue
-                    rows.append(
-                        {
-                            "entry_ts": e["ts"],
-                            "side": e["side"],
-                            "hod": e["hod"],
-                            **walked,
-                        }
-                    )
-                    busy = int(walked["exit_ts"])
-                stt = stats_of(rows)
-                stt["key"] = ck
-                stt["cell"] = asdict(cell)
-                append_ckpt(CKPT_A, stt)
-                done[ck] = stt
-        del entries, ema_f, ema_s, st, trend_long, trend_short, _tr
+                acc[ck] = {"cell": cell, "busy": -1, "mini": []}
+        for t, side, fp in meta:
+            path = load_path(fp)
+            if path is None:
+                continue
+            trset = trend_long if side == "long" else trend_short
+            for a in acc.values():
+                if t <= int(a["busy"]):
+                    continue
+                cell = a["cell"]
+                walked = scan_path(
+                    path,
+                    float(cell.tgt),
+                    float(cell.sl),
+                    side,
+                    trset,
+                    spot_c,
+                    tag,
+                )
+                if walked is None:
+                    continue
+                a["mini"].append(
+                    {
+                        "net": walked["net"],
+                        "reason": walked["reason"],
+                        "gross": walked["gross"],
+                        "fees": walked["fees"],
+                        "slip": walked["slip"],
+                    }
+                )
+                a["busy"] = int(walked["exit_ts"])
+            del path
+        for ck, a in acc.items():
+            stt = stats_of(a["mini"])
+            stt["key"] = ck
+            stt["cell"] = asdict(a["cell"])
+            append_ckpt(ckpt_path, stt)
+            done[ck] = stt
+        del meta, acc, ema_f, ema_s, st, trend_long, trend_short, _tr
+        s018._CHAIN.clear()
         gc.collect()
         elapsed = time.perf_counter() - t_run
         dt = time.perf_counter() - t_set
@@ -1124,12 +1239,12 @@ def stage_a(args: argparse.Namespace) -> None:
             rss_hist.append(mem)
         print(
             f"done {k_set}/{len(sets)} TF={TF_LAB[tf]} Ef={ef} Es={es} "
-            f"STm={stm:g} {emode} n_entry={n_unique} new_paths={n_paths} "
+            f"STm={stm:g} {emode} n_entry={n_set} new_paths={n_paths} "
             f"set_s={dt:.1f} elapsed={elapsed:.0f}s ETA={eta:.0f}s{extra}",
             flush=True,
         )
 
-    cell_stats = load_ckpt(CKPT_A)
+    cell_stats = done
     means = [float(s["mean"]) for s in cell_stats.values() if "mean" in s]
     n40p = sum(
         1
@@ -1139,7 +1254,7 @@ def stage_a(args: argparse.Namespace) -> None:
         and s["mean"] > 0
     )
     lines = [
-        f"S018 GRID STAGE A TRAIN {TRAIN_FROM}..{TRAIN_TO}",
+        f"S018 GRID STAGE A TRAIN {TRAIN_FROM}..{TRAIN_TO} arm={grid_arm}",
         f"stamp={stamp} signal_sets={len(sets)} unique_entries~={n_unique} new_paths={n_paths}",
         f"share n>=40 & mean>0: {n40p}/{len(cell_stats)} = "
         f"{(100.0 * n40p / max(len(cell_stats), 1)):.2f}%",
@@ -1181,30 +1296,35 @@ def stage_a(args: argparse.Namespace) -> None:
         lines.append("  NONE")
     for s in finalists:
         lines.append(f"  {s['key']} {fmt_stats(s)} nb_frac={s['nb_frac']:.2f}")
-    FINALISTS_PATH.write_text(json.dumps(finalists, indent=2, default=str), encoding="utf-8")
-    txtp = OUT_DIR / f"s018_gridA_{stamp}.txt"
+    fin_path.write_text(json.dumps(finalists, indent=2, default=str), encoding="utf-8")
+    txt_name = f"s018_gridA_{stamp}.txt" if grid_arm == "H300" else f"s018_gridA_{grid_arm}_{stamp}.txt"
+    txtp = OUT_DIR / txt_name
     txtp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     print(f"wrote {txtp}")
-    print(f"wrote {FINALISTS_PATH}")
+    print(f"wrote {fin_path}")
     print("STAGE A STOP")
     store.close()
 
-def _run_entries_holdout(
+def _run_entries_window(
     store: Any,
     spot_c: dict[int, float],
     pack: dict[str, Any],
     tgt: int,
     slv: int,
-    arm: str,
+    grid_arm: str,
+    scan_arm: str,
     forced: list[tuple[int, str]] | None,
     start_ts: int,
     cutoff: int,
+    win_from: date,
+    win_to: date,
 ) -> list[dict[str, Any]]:
     close_t = pack["close_t"]
     ema_f = pack["ema_f"]
     st = pack["st"]
     emode = pack["emode"]
+    tag = cache_tag(grid_arm)
     trend_long = trend_exit_ts(close_t, ema_f, st, "long")
     trend_short = trend_exit_ts(close_t, ema_f, st, "short")
     if forced is None:
@@ -1216,16 +1336,20 @@ def _run_entries_holdout(
     for i, side, t in plan:
         if t < start_ts or t >= cutoff or t <= busy:
             continue
-        if not in_window(t, HOLD_FROM, HOLD_TO):
+        if not in_window(t, win_from, win_to):
             continue
         exp = expiry_mode(t, emode)
+        if win_to.year < 2026 and exp.year >= 2026:
+            continue
         sp = spot_c.get(t)
         if sp is None:
             continue
-        fp = cache_file(t, side, exp, arm)
+        fp = cache_file(t, side, exp, tag)
         path = load_path(fp)
         if path is None:
-            legs = pick_basket_at(store, side, t, float(sp), exp, arm)
+            legs = pick_basket_at(
+                store, side, t, float(sp), exp, grid_arm, grid_arm=grid_arm
+            )
             if legs is None:
                 continue
             path = build_path(store, spot_c, legs, t, exp, close_t)
@@ -1233,7 +1357,9 @@ def _run_entries_holdout(
                 continue
             save_path(fp, path)
         trset = trend_long if side == "long" else trend_short
-        walked = scan_path(path, float(tgt), float(slv), side, trset, spot_c, arm)
+        walked = scan_path(
+            path, float(tgt), float(slv), side, trset, spot_c, scan_arm
+        )
         if walked is None:
             continue
         rows.append({"entry_ts": t, "side": side, "hod": s018.hod_ist(t), **walked})
@@ -1241,21 +1367,53 @@ def _run_entries_holdout(
     return rows
 
 
+def _run_entries_holdout(
+    store: Any,
+    spot_c: dict[int, float],
+    pack: dict[str, Any],
+    tgt: int,
+    slv: int,
+    arm: str,
+    forced: list[tuple[int, str]] | None,
+    start_ts: int,
+    cutoff: int,
+    grid_arm: str = "H300",
+) -> list[dict[str, Any]]:
+    scan = "C1" if arm == "C1" else cache_tag(grid_arm)
+    return _run_entries_window(
+        store,
+        spot_c,
+        pack,
+        tgt,
+        slv,
+        grid_arm,
+        scan,
+        forced,
+        start_ts,
+        cutoff,
+        HOLD_FROM,
+        HOLD_TO,
+    )
+
+
 def stage_b(args: argparse.Namespace) -> None:
+    print("Disable PC sleep")
     print_entry_timing()
     load_slip_table()
-    if not FINALISTS_PATH.exists():
-        print("NO finalists json — run Stage A first")
+    grid_arm = norm_grid_arm(str(getattr(args, "arm", "H300")))
+    tag = cache_tag(grid_arm)
+    fin_path = finalists_file(grid_arm)
+    if not fin_path.exists():
+        print(f"NO finalists json for {grid_arm} — run Stage A first ({fin_path})")
         return
-    finalists = json.loads(FINALISTS_PATH.read_text(encoding="utf-8"))
+    finalists = json.loads(fin_path.read_text(encoding="utf-8"))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     spot = s018.load_spot_1m(args.csv)
     ts1, o1, h1, l1, c1 = s018.bars_1m(spot)
     start_ts = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
     cutoff = int(datetime(2026, 9, 22, tzinfo=timezone.utc).timestamp())
-    lo = start_ts - 10 * 86400
-    sel = (ts1 >= lo) & (ts1 < cutoff + 86400)
-    ts1, o1, h1, l1, c1 = ts1[sel], o1[sel], h1[sel], l1[sel], c1[sel]
+    train_start = int(datetime(2024, 9, 1, tzinfo=timezone.utc).timestamp())
+    train_cut = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
     spot_c = {int(t): float(c) for t, c in zip(ts1, c1)}
     store = MarksStore()
 
@@ -1270,7 +1428,11 @@ def stage_b(args: argparse.Namespace) -> None:
 
     tf_pack: dict[int, tuple] = {}
     sig_pack: dict[tuple, dict[str, Any]] = {}
-    lines = [f"S018 GRID STAGE B HOLDOUT {HOLD_FROM}..{HOLD_TO}", f"stamp={stamp}"]
+    c1_note = "$2000 hi-leg only" if grid_arm == "H2K1K" else "$1000 hi-leg only"
+    lines = [
+        f"S018 GRID STAGE B HOLDOUT {HOLD_FROM}..{HOLD_TO} arm={grid_arm}",
+        f"stamp={stamp} C1={c1_note}",
+    ]
 
     def get_pack(tf: int, ef: int, es: int, stm: float, emode: str) -> dict[str, Any]:
         k = (tf, ef, es, stm, emode)
@@ -1284,12 +1446,9 @@ def stage_b(args: argparse.Namespace) -> None:
         ema_f = s018.ema(cc, int(ef))
         ema_s = s018.ema(cc, int(es))
         sigs = detect_signals(ema_f, ema_s, st)
-        entries = []
-        for i, side in sigs:
-            t = int(close_t[i])
-            if t < start_ts or t >= cutoff:
-                continue
-            entries.append({"i": i, "ts": t, "side": side})
+        entries = [
+            {"i": i, "ts": int(close_t[i]), "side": side} for i, side in sigs
+        ]
         pack = {
             "tf": tf, "ef": ef, "es": es, "stm": stm, "emode": emode,
             "entries": entries, "close_t": close_t, "ema_f": ema_f, "st": st,
@@ -1297,68 +1456,33 @@ def stage_b(args: argparse.Namespace) -> None:
         sig_pack[k] = pack
         return pack
 
+    fin_keys = [Cell(**s["cell"]).key() for s in finalists]
     results: dict[str, dict[str, Any]] = {}
     for c in need_cells:
         pack = get_pack(c.tf, c.ef, c.es, c.stm, c.emode)
-        # rebuild entries with paths
-        ent2 = []
-        for e in pack["entries"]:
-            t = int(e["ts"])
-            exp = expiry_mode(t, c.emode)
-            sp = spot_c.get(t)
-            if sp is None:
-                continue
-            fp = cache_file(t, e["side"], exp, "PRIMARY")
-            path = load_path(fp)
-            if path is None:
-                legs = pick_basket_at(store, e["side"], t, float(sp), exp, "PRIMARY")
-                if legs is None:
-                    continue
-                path = build_path(store, spot_c, legs, t, exp, pack["close_t"])
-                if path is None:
-                    continue
-                save_path(fp, path)
-            ent2.append(
-                {
-                    **e,
-                    "path": path,
-                    "trend": trend_exit_ts(
-                        pack["close_t"], pack["ema_f"], pack["st"], e["side"]
-                    ),
-                    "hod": s018.hod_ist(t),
-                }
-            )
-        pack_h = {**pack, "entries": ent2}
-        rows = []
-        busy = -1
-        for e in ent2:
-            if int(e["ts"]) <= busy:
-                continue
-            w = scan_path(
-                e["path"], float(c.tgt), float(c.sl), e["side"], e["trend"], spot_c, "PRIMARY"
-            )
-            if w is None:
-                continue
-            rows.append({"entry_ts": e["ts"], "side": e["side"], **w})
-            busy = int(w["exit_ts"])
+        rows = _run_entries_window(
+            store, spot_c, pack, c.tgt, c.sl, grid_arm, tag, None,
+            start_ts, cutoff, HOLD_FROM, HOLD_TO,
+        )
         stt = stats_of(rows)
-        stt["rows"] = rows
+        if c.key() in fin_keys:
+            stt["rows"] = rows
         results[c.key()] = stt
+        gc.collect()
 
-    fin_keys = [Cell(**s["cell"]).key() for s in finalists]
     for fk in fin_keys:
         c = Cell(**next(s["cell"] for s in finalists if Cell(**s["cell"]).key() == fk))
         pack = get_pack(c.tf, c.ef, c.es, c.stm, c.emode)
         prim = results[fk]
         rows = prim.get("rows", [])
         c1 = _run_entries_holdout(
-            store, spot_c, pack, c.tgt, c.sl, "C1", None, start_ts, cutoff
+            store, spot_c, pack, c.tgt, c.sl, "C1", None, start_ts, cutoff, grid_arm
         )
         c2s = []
         for seed in s018.RANDOM_SEEDS:
             forced = random_c2(rows, pack["close_t"], start_ts, cutoff, seed, HOLD_FROM, HOLD_TO)
             rr = _run_entries_holdout(
-                store, spot_c, pack, c.tgt, c.sl, "PRIMARY", forced, start_ts, cutoff
+                store, spot_c, pack, c.tgt, c.sl, tag, forced, start_ts, cutoff, grid_arm
             )
             if rr:
                 c2s.append(float(np.mean([x["net"] for x in rr])))
@@ -1383,15 +1507,23 @@ def stage_b(args: argparse.Namespace) -> None:
             and s["top5"] < 100.0
             and frac >= 0.5
         )
+        train_rows = _run_entries_window(
+            store, spot_c, pack, c.tgt, c.sl, grid_arm, tag, None,
+            train_start, train_cut, TRAIN_FROM, TRAIN_TO,
+        )
         lines.append(f"FINALIST {fk}")
-        lines.append(f"  HOLDOUT PRIMARY {fmt_stats(s)} C2mean={c2m:.2f} nb_pos_frac={frac:.2f}")
-        lines.append(f"  C1 {fmt_stats(stats_of(c1))}")
+        lines.append(
+            f"  HOLDOUT {grid_arm} {fmt_stats(s)} C2mean={c2m:.2f} nb_pos_frac={frac:.2f}"
+        )
+        lines.append(f"  C1 ({c1_note}) {fmt_stats(stats_of(c1))}")
         lines.append("  PASS" if ok else "  FAIL")
         lines.append("  DOW holdout:")
         lines.extend(dow_table(rows))
-        lines.append("  DOW train: (from Stage A json if present)")
+        lines.append("  DOW train:")
+        lines.extend(dow_table(train_rows))
 
-    txt = OUT_DIR / f"s018_gridB_{stamp}.txt"
+    txt_name = f"s018_gridB_{stamp}.txt" if grid_arm == "H300" else f"s018_gridB_{grid_arm}_{stamp}.txt"
+    txt = OUT_DIR / txt_name
     txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     print(f"wrote {txt}")
@@ -1407,10 +1539,17 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--cache-gb", type=float, default=1.0)
     ap.add_argument("--tf", default="", help="comma TF minutes, e.g. 15 or 240,60,15")
+    ap.add_argument("--arm", choices=GRID_ARMS, default="H300")
     ap.add_argument("--arm-compare", action="store_true")
     ap.add_argument("--holdout", action="store_true")
+    ap.add_argument(
+        "--no-sleep-check",
+        action="store_true",
+        help="Print Disable PC sleep reminder (also printed by default).",
+    )
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    print("Disable PC sleep")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     if args.arm_compare:
         stage_arm_compare(args)

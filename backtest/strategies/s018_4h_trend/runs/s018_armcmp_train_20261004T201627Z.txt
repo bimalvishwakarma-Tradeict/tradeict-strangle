@@ -1,0 +1,6 @@
+S018 ARM COMPARE TRAIN 2024-09-01..2025-12-31
+stamp=20261004T201627Z cells=1
+H300 = PRIMARY (call/put ~$1000 + opposite ~$300); H1000 = same first leg + opposite-type nearest $1000; qty=1000/leg
+CELL TF=4h|Ef=3|Es=12|STm=1|T=250|SL=250|E=0DTE
+  H300  n=268 win%=41.4 mean=-77.88 med=-289.33 gross/t=-36.34 fee/t=41.54 slip/t=17.55 worst=-404.43 maxDD=-20870.8 top5%=7.0 exits={'SL': 141, 'EXPIRY': 7, 'TARGET': 110, 'TREND': 10} avg_dlt=0.0131 avg_tv=680.98
+  H1000 n=264 win%=34.5 mean=-95.71 med=-230.21 gross/t=-51.77 fee/t=43.94 slip/t=22.39 worst=-371.99 maxDD=-25663.7 top5%=10.7 exits={'TREND': 32, 'EXPIRY': 26, 'SL': 120, 'TARGET': 86} avg_dlt=-0.0177 avg_tv=799.20
