@@ -257,6 +257,43 @@ def resample_tf(
     )
 
 
+SHORT_OTM_TGT = 100.0
+SHORT_OTM_MIN = 60.0
+SHORT_OTM_MAX = 160.0
+
+
+def nearest_short_otm(
+    rows: list[dict[str, Any]], is_call: bool, hedge_strike: float
+) -> dict[str, Any] | None:
+    cand: list[dict[str, Any]] = []
+    for r in rows:
+        if bool(r["is_call"]) != is_call:
+            continue
+        mk = float(r["mark"])
+        if mk < SHORT_OTM_MIN or mk > SHORT_OTM_MAX:
+            continue
+        k = float(r["strike"])
+        if is_call and k <= hedge_strike:
+            continue
+        if (not is_call) and k >= hedge_strike:
+            continue
+        cand.append(r)
+    if not cand:
+        return None
+    return min(cand, key=lambda r: (abs(float(r["mark"]) - SHORT_OTM_TGT), float(r["strike"])))
+
+
+def leg_sign(role: str) -> float:
+    return -1.0 if role == "short_otm" else 1.0
+
+
+def combined_mark_pnl(legs: list[s018.Leg], qs: list[Any]) -> float:
+    tot = 0.0
+    for lg, q in zip(legs, qs):
+        tot += leg_sign(lg.role) * (q.px - lg.fill) * s018.QTY * OPTIONS_CONTRACT_VALUE
+    return tot
+
+
 def pick_basket_at(
     store: Any,
     side: str,
@@ -283,23 +320,36 @@ def pick_basket_at(
         lo = s018.nearest(rows, True, lo_tgt)
     if hi is None:
         return None
-    chosen = [hi] if arm == "C1" else [hi, lo]
+    if arm == "H300S":
+        if lo is None:
+            return None
+        sh = nearest_short_otm(rows, bool(lo["is_call"]), float(lo["strike"]))
+        if sh is None:
+            return None
+        chosen = [hi, lo, sh]
+    else:
+        chosen = [hi] if arm == "C1" else [hi, lo]
     if any(x is None for x in chosen):
         return None
+    roles = ["hi", "lo", "short_otm"]
     legs: list[s018.Leg] = []
     for i, r in enumerate(chosen):
         assert r is not None
         q = s018.mark_le(store, exp, str(r["symbol"]), t)
         if q is None:
             return None
-        fill, _sf = s018.buy_fill(q.px, dte)
+        role = roles[i] if i < 3 else "lo"
+        if role == "short_otm":
+            fill, _sf = s018.sell_fill(q.px, dte)
+        else:
+            fill, _sf = s018.buy_fill(q.px, dte)
         dlt = s018.signed_delta(q.px, spot, float(r["strike"]), t_yr, bool(r["is_call"]))
         legs.append(
             s018.Leg(
                 symbol=str(r["symbol"]),
                 strike=float(r["strike"]),
                 is_call=bool(r["is_call"]),
-                role="hi" if i == 0 else "lo",
+                role="hi" if i == 0 else ("lo" if i == 1 else "short_otm"),
                 mark=q.px,
                 fill=fill,
                 src=q.src,
@@ -391,6 +441,8 @@ def load_path(p: Path) -> dict[str, Any] | None:
         "px1": z["px1"],
         "src0": z["src0"],
         "src1": z["src1"],
+        "px2": z["px2"] if "px2" in z.files else np.zeros(int(z["ts"].size), dtype=np.float32),
+        "src2": z["src2"] if "src2" in z.files else np.zeros(int(z["ts"].size), dtype=np.int8),
     }
 
 
@@ -408,6 +460,8 @@ def save_path(p: Path, obj: dict[str, Any]) -> None:
         px1=obj["px1"],
         src0=obj["src0"],
         src1=obj["src1"],
+        px2=obj["px2"],
+        src2=obj["src2"],
         entry_ts=np.array([obj["entry_ts"]], dtype=np.int64),
         exp_ts=np.array([obj["exp_ts"]], dtype=np.int64),
         dte=np.array([obj["dte"]], dtype=np.int32),
@@ -432,8 +486,10 @@ def build_path(
     spot = np.zeros(n, dtype=np.float32)
     px0 = np.zeros(n, dtype=np.float32)
     px1 = np.zeros(n, dtype=np.float32)
+    px2 = np.zeros(n, dtype=np.float32)
     src0 = np.zeros(n, dtype=np.int8)
     src1 = np.zeros(n, dtype=np.int8)
+    src2 = np.zeros(n, dtype=np.int8)
     j = np.searchsorted(close_t, ts)
     jclip = np.minimum(j, max(len(close_t) - 1, 0))
     tf_close = (j < len(close_t)) & (close_t[jclip] == ts) if len(close_t) else np.zeros(n, dtype=np.bool_)
@@ -445,16 +501,22 @@ def build_path(
         if any(q is None for q in qs):
             continue
         ok[i] = True
-        pnl[i] = np.float32(s018.mark_pnl(legs, qs))  # type: ignore[arg-type]
+        pnl[i] = np.float32(combined_mark_pnl(legs, qs))  # type: ignore[arg-type]
         px0[i] = np.float32(qs[0].px)  # type: ignore[union-attr]
         src0[i] = np.int8(SRC_CODE.get(qs[0].src, 0))  # type: ignore[union-attr]
         if nleg > 1:
             px1[i] = np.float32(qs[1].px)  # type: ignore[union-attr]
             src1[i] = np.int8(SRC_CODE.get(qs[1].src, 0))  # type: ignore[union-attr]
+        if nleg > 2:
+            px2[i] = np.float32(qs[2].px)  # type: ignore[union-attr]
+            src2[i] = np.int8(SRC_CODE.get(qs[2].src, 0))  # type: ignore[union-attr]
     dte = max(0, (exp - ist_date(entry_ts)).days)
     el: list[dict[str, Any]] = []
     for lg in legs:
-        slip = (lg.fill - lg.mark) * s018.QTY * OPTIONS_CONTRACT_VALUE
+        if lg.role == "short_otm":
+            slip = (lg.mark - lg.fill) * s018.QTY * OPTIONS_CONTRACT_VALUE
+        else:
+            slip = (lg.fill - lg.mark) * s018.QTY * OPTIONS_CONTRACT_VALUE
         fee = s018.fee_gst(lg.mark, float(spot_c.get(lg.ts, 0.0)))
         el.append(
             {
@@ -484,8 +546,10 @@ def build_path(
         "tf_close": tf_close,
         "px0": px0,
         "px1": px1,
+        "px2": px2,
         "src0": src0,
         "src1": src1,
+        "src2": src2,
     }
 
 
@@ -523,8 +587,10 @@ def scan_path(
     tf_c = path["tf_close"]
     px0 = path["px0"]
     px1 = path["px1"]
+    px2 = path.get("px2")
     src0 = path["src0"]
     src1 = path["src1"]
+    src2 = path.get("src2")
     spot_a = path["spot"]
     n = int(ts.size)
     for i in range(n):
@@ -536,17 +602,17 @@ def scan_path(
             if pnl >= tgt:
                 return _exit_from_idx(
                     i, fills, legs_raw, t, "TARGET", dte0, spot_c, entry_fee, entry_slip,
-                    px0, px1, src0, src1, spot_a,
+                    px0, px1, src0, src1, spot_a, px2, src2,
                 )
             if pnl <= -sl:
                 return _exit_from_idx(
                     i, fills, legs_raw, t, "SL", dte0, spot_c, entry_fee, entry_slip,
-                    px0, px1, src0, src1, spot_a,
+                    px0, px1, src0, src1, spot_a, px2, src2,
                 )
             if bool(tf_c[i]) and ts_in_sorted(t, trend_ts):
                 return _exit_from_idx(
                     i, fills, legs_raw, t, "TREND", dte0, spot_c, entry_fee, entry_slip,
-                    px0, px1, src0, src1, spot_a,
+                    px0, px1, src0, src1, spot_a, px2, src2,
                 )
         if t == exp_ts:
             sp = float(spot_a[i]) if float(spot_a[i]) > 0 else float(spot_c.get(t, 0.0))
@@ -558,7 +624,8 @@ def scan_path(
             srcs = [str(lg["src"]) for lg in legs_raw]
             for lg in legs_raw:
                 px = intrinsic(bool(lg["is_call"]), float(lg["strike"]), sp)
-                gross += (px - float(lg["fill"])) * s018.QTY * OPTIONS_CONTRACT_VALUE
+                sgn = leg_sign(str(lg.get("role", "hi")))
+                gross += sgn * (px - float(lg["fill"])) * s018.QTY * OPTIONS_CONTRACT_VALUE
                 if px > 0:
                     fees += s018.fee_gst(px, sp)
                 srcs.append("settle")
@@ -589,6 +656,8 @@ def _exit_from_idx(
     src0: np.ndarray,
     src1: np.ndarray,
     spot_a: np.ndarray,
+    px2: np.ndarray | None = None,
+    src2: np.ndarray | None = None,
 ) -> dict[str, Any]:
     idx = float(spot_a[i]) or float(spot_c.get(t, 0.0))
     pxs = [float(px0[i])]
@@ -596,15 +665,23 @@ def _exit_from_idx(
     if len(fills) > 1:
         pxs.append(float(px1[i]))
         srcs_m.append(int(src1[i]))
+    if len(fills) > 2 and px2 is not None and src2 is not None:
+        pxs.append(float(px2[i]))
+        srcs_m.append(int(src2[i]))
     gross = 0.0
     fees = entry_fee
     slip = entry_slip
     srcs = [str(lg["src"]) for lg in legs_raw]
-    for fill, mark, src_i in zip(fills, pxs, srcs_m):
-        xf, _ = s018.sell_fill(mark, dte)
-        gross += (xf - fill) * s018.QTY * OPTIONS_CONTRACT_VALUE
+    for lg, fill, mark, src_i in zip(legs_raw, fills, pxs, srcs_m):
+        if str(lg.get("role")) == "short_otm":
+            xf, _ = s018.buy_fill(mark, dte)
+            gross += (fill - xf) * s018.QTY * OPTIONS_CONTRACT_VALUE
+            slip += (xf - mark) * s018.QTY * OPTIONS_CONTRACT_VALUE
+        else:
+            xf, _ = s018.sell_fill(mark, dte)
+            gross += (xf - fill) * s018.QTY * OPTIONS_CONTRACT_VALUE
+            slip += (mark - xf) * s018.QTY * OPTIONS_CONTRACT_VALUE
         fees += s018.fee_gst(mark, idx if idx else 1.0)
-        slip += (mark - xf) * s018.QTY * OPTIONS_CONTRACT_VALUE
         srcs.append(SRC_NAME.get(src_i, "real"))
     return {
         "exit_ts": t,
@@ -720,6 +797,10 @@ def fmt_stats(s: dict[str, Any]) -> str:
         dlt_s = f"{dlt:.4f}" if np.isfinite(dlt) else "nan"
         tv_s = f"{tv:.2f}" if np.isfinite(tv) else "nan"
         extra = f" avg_dlt={dlt_s} avg_tv={tv_s}"
+    if "skipped" in s:
+        d4 = s.get("decay4h", float("nan"))
+        d4s = f"{d4:.2f}" if np.isfinite(d4) else "nan"
+        extra += f" skipped={int(s['skipped'])} decay4h={d4s}"
     return (
         f"n={s['n']} win%={s['win']:.1f} mean={s['mean']:.2f} med={s['med']:.2f} "
         f"gross/t={s['gross']:.2f} fee/t={s['fee']:.2f} slip/t={s['slip']:.2f} "
@@ -729,8 +810,15 @@ def fmt_stats(s: dict[str, Any]) -> str:
 
 
 def entry_net_delta(legs: list[dict[str, Any]]) -> float:
-    xs = [float(lg["delta"]) for lg in legs if np.isfinite(float(lg.get("delta", float("nan"))))]
-    return float(sum(xs)) if xs else float("nan")
+    tot = 0.0
+    n = 0
+    for lg in legs:
+        d = float(lg.get("delta", float("nan")))
+        if not np.isfinite(d):
+            continue
+        tot += d * leg_sign(str(lg.get("role", "hi")))
+        n += 1
+    return tot if n else float("nan")
 
 
 def entry_time_value_usd(legs: list[dict[str, Any]], spot: float) -> float:
@@ -739,8 +827,31 @@ def entry_time_value_usd(legs: list[dict[str, Any]], spot: float) -> float:
     tot = 0.0
     for lg in legs:
         inn = intrinsic(bool(lg["is_call"]), float(lg["strike"]), float(spot))
-        tot += (float(lg["mark"]) - inn) * s018.QTY * OPTIONS_CONTRACT_VALUE
+        tot += (
+            leg_sign(str(lg.get("role", "hi")))
+            * (float(lg["mark"]) - inn)
+            * s018.QTY
+            * OPTIONS_CONTRACT_VALUE
+        )
     return tot
+
+
+def decay_4h_usd(path: dict[str, Any], spot0: float, entry_ts: int) -> float:
+    if spot0 <= 0:
+        return float("nan")
+    t4 = int(entry_ts) + 4 * 3600
+    ts = path["ts"]
+    i = int(np.searchsorted(ts, t4))
+    if i >= int(ts.size) or int(ts[i]) != t4:
+        return float("nan")
+    if not bool(path["ok"][i]) or not np.isfinite(path["pnl"][i]):
+        return float("nan")
+    s1 = float(path["spot"][i])
+    if s1 <= 0:
+        return float("nan")
+    if abs(s1 / spot0 - 1.0) >= 0.002:
+        return float("nan")
+    return float(path["pnl"][i])
 
 
 def load_arm_compare_cells(grid_arm: str) -> list[Cell]:
@@ -775,6 +886,7 @@ def run_arm_on_cell(
     win_from: date,
     win_to: date,
     tf_pack: dict[int, tuple],
+    preview_n: int = 0,
 ) -> dict[str, Any]:
     tf = int(cell.tf)
     if tf not in tf_pack:
@@ -786,8 +898,13 @@ def run_arm_on_cell(
     trend_long = trend_exit_ts(close_t, ema_f, st, "long")
     trend_short = trend_exit_ts(close_t, ema_f, st, "short")
     sigs = detect_signals(ema_f, ema_s, st)
+    cache_arm = "PRIMARY" if arm == "C1" else arm
+    scan_arm = arm
     entries: list[dict[str, Any]] = []
     n_paths = 0
+    n_cand = 0
+    n_skip = 0
+    shown = 0
     for i, side in sigs:
         t = int(close_t[i])
         if t < start_ts or t >= cutoff:
@@ -800,17 +917,41 @@ def run_arm_on_cell(
         sp = spot_c.get(t)
         if sp is None:
             continue
-        fp = cache_file(t, side, exp, arm)
-        path = load_path(fp)
-        if path is None:
-            legs = pick_basket_at(store, side, t, float(sp), exp, arm)
-            if legs is None:
-                continue
-            path = build_path(store, spot_c, legs, t, exp, close_t)
+        n_cand += 1
+        path = None
+        if arm == "C1":
+            path = load_path(cache_file(t, side, exp, "PRIMARY"))
             if path is None:
-                continue
-            save_path(fp, path)
-            n_paths += 1
+                fp = cache_file(t, side, exp, "C1")
+                path = load_path(fp)
+                if path is None:
+                    legs = pick_basket_at(store, side, t, float(sp), exp, "C1")
+                    if legs is None:
+                        n_skip += 1
+                        continue
+                    path = build_path(store, spot_c, legs, t, exp, close_t)
+                    if path is None:
+                        n_skip += 1
+                        continue
+                    save_path(fp, path)
+                    n_paths += 1
+        else:
+            fp = cache_file(t, side, exp, cache_arm)
+            path = load_path(fp)
+            if path is None:
+                legs = pick_basket_at(store, side, t, float(sp), exp, arm)
+                if legs is None:
+                    n_skip += 1
+                    continue
+                path = build_path(store, spot_c, legs, t, exp, close_t)
+                if path is None:
+                    n_skip += 1
+                    continue
+                save_path(fp, path)
+                n_paths += 1
+        if preview_n and shown < preview_n:
+            print_legs_preview(path, side, t)
+            shown += 1
         entries.append(
             {
                 "ts": t,
@@ -822,6 +963,7 @@ def run_arm_on_cell(
         )
     busy = -1
     rows: list[dict[str, Any]] = []
+    decays: list[float] = []
     for e in entries:
         if int(e["ts"]) <= busy:
             continue
@@ -832,11 +974,16 @@ def run_arm_on_cell(
             e["side"],
             e["trend"],
             spot_c,
-            arm,
+            scan_arm,
         )
         if walked is None:
             continue
         legs = list(e["path"]["legs"])
+        if scan_arm == "C1":
+            legs = [lg for lg in legs if lg.get("role") == "hi"]
+        d4 = decay_4h_usd(e["path"], float(e["spot"]), int(e["ts"]))
+        if np.isfinite(d4):
+            decays.append(d4)
         rows.append(
             {
                 "entry_ts": e["ts"],
@@ -854,6 +1001,9 @@ def run_arm_on_cell(
     stt["avg_dlt"] = float(np.mean(dlts)) if dlts else float("nan")
     stt["avg_tv"] = float(np.mean(tvs)) if tvs else float("nan")
     stt["n_paths"] = n_paths
+    stt["skipped"] = n_skip
+    stt["n_cand"] = n_cand
+    stt["decay4h"] = float(np.mean(decays)) if len(decays) >= 3 else float("nan")
     del entries
     gc.collect()
     return stt
@@ -891,34 +1041,46 @@ def stage_arm_compare(args: argparse.Namespace) -> None:
     spot_c = {int(t): float(c) for t, c in zip(ts1, c1)}
     inner = MarksStore()
     store = GuardStore(inner, forbid_year=forbid)
-    cells = load_arm_compare_cells(norm_grid_arm(getattr(args, "arm", "H300")))
+    cells = load_arm_compare_cells("H300")
     print(
         f"ARM COMPARE {tag} {win_from}..{win_to} cells={len(cells)} "
-        f"H300=PRIMARY hedge~$300 vs H1000 hedge~$1000 qty={s018.QTY}",
+        f"H300 vs H300S vs C1 qty={s018.QTY}",
         flush=True,
     )
     tf_pack: dict[int, tuple] = {}
     lines = [
         f"S018 ARM COMPARE {tag.upper()} {win_from}..{win_to}",
         f"stamp={stamp} cells={len(cells)}",
-        "H300 = PRIMARY (call/put ~$1000 + opposite ~$300); "
-        "H1000 = same first leg + opposite-type nearest $1000; qty=1000/leg",
+        "H300 = buy ~$1000 + buy hedge ~$300; "
+        "H300S = H300 + sell further-OTM hedge-type ~$100 (mark $60-160); "
+        "C1 = $1000 hi-leg only; qty=1000/leg",
     ]
+    preview_left = 2
     for cell in cells:
         print(f"cell {cell.key()}", flush=True)
         s300 = run_arm_on_cell(
             store, spot_c, ts1, o1, h1, l1, c1, cell, "PRIMARY",
             start_ts, cutoff, win_from, win_to, tf_pack,
         )
-        s1000 = run_arm_on_cell(
-            store, spot_c, ts1, o1, h1, l1, c1, cell, "H1000",
+        if preview_left:
+            print(f"=== {preview_left} H300S ENTRIES (3 legs) ===", flush=True)
+        s300s = run_arm_on_cell(
+            store, spot_c, ts1, o1, h1, l1, c1, cell, "H300S",
+            start_ts, cutoff, win_from, win_to, tf_pack,
+            preview_n=preview_left,
+        )
+        preview_left = 0
+        sc1 = run_arm_on_cell(
+            store, spot_c, ts1, o1, h1, l1, c1, cell, "C1",
             start_ts, cutoff, win_from, win_to, tf_pack,
         )
         lines.append(f"CELL {cell.key()}")
         lines.append(f"  H300  {fmt_stats(s300)}")
-        lines.append(f"  H1000 {fmt_stats(s1000)}")
+        lines.append(f"  H300S {fmt_stats(s300s)}")
+        lines.append(f"  C1    {fmt_stats(sc1)}")
         print(f"  H300  {fmt_stats(s300)}", flush=True)
-        print(f"  H1000 {fmt_stats(s1000)}", flush=True)
+        print(f"  H300S {fmt_stats(s300s)}", flush=True)
+        print(f"  C1    {fmt_stats(sc1)}", flush=True)
         gc.collect()
     txtp = OUT_DIR / f"s018_armcmp_{tag}_{stamp}.txt"
     txtp.write_text("\n".join(lines) + "\n", encoding="utf-8")

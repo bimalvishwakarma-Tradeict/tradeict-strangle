@@ -1,0 +1,7 @@
+S018 ARM COMPARE TRAIN 2024-09-01..2025-12-31
+stamp=20261005T082353Z cells=1
+H300 = buy ~$1000 + buy hedge ~$300; H300S = H300 + sell further-OTM hedge-type ~$100 (mark $60-160); C1 = $1000 hi-leg only; qty=1000/leg
+CELL TF=4h|Ef=3|Es=12|STm=1|T=250|SL=250|E=0DTE
+  H300  n=8 win%=25.0 mean=-158.55 med=-286.32 gross/t=-132.15 fee/t=26.40 slip/t=16.07 worst=-333.38 maxDD=-1484.5 top5%=100.0 exits={'TARGET': 2, 'SL': 5, 'EXPIRY': 1} avg_dlt=-0.1201 avg_tv=425.58 skipped=0 decay4h=nan
+  H300S n=8 win%=25.0 mean=-183.33 med=-303.55 gross/t=-148.56 fee/t=34.77 slip/t=23.30 worst=-356.69 maxDD=-1676.4 top5%=100.0 exits={'TARGET': 2, 'SL': 6} avg_dlt=-0.1518 avg_tv=327.35 skipped=0 decay4h=nan
+  C1    n=8 win%=50.0 mean=-17.00 med=-19.24 gross/t=-3.58 fee/t=13.42 slip/t=11.59 worst=-327.65 maxDD=-603.3 top5%=100.0 exits={'TARGET': 4, 'SL': 4} avg_dlt=-0.1877 avg_tv=153.25 skipped=0 decay4h=nan
