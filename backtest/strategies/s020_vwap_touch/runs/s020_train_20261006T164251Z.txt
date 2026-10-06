@@ -1,0 +1,134 @@
+S020 VWAP swing-touch basket TRAIN 2024-09-01..2025-12-31
+stamp=20261006T164251Z signals=263 both_skip=2 stale_skip~=0
+expiry=next IST day 17:30 (1DTE); LONG put~1000+call~500+call~300; SHORT call~1000+put~500+put~300; qty=1000
+fees=estimate_option_fee*1.18; slip=slip_pct; stale>5m skip
+NOTE: weekday/weekend and chop splits are informational; a split is only actionable if it holds in TRAIN and HOLDOUT.
+PRIMARY T=250 SL=250
+PRIMARY ALL n=15 sig/day=52.600 win%=53.3 mean=2.71 med=205.62 gross/t=42.07 fee/t=39.36 slip/t=25.19 worst=-312.94 maxDD=-804.8 top5%=70.6 holdHrs=4.53 avg_dlt=0.0888 avg_tv=1157.32 exits={'TARGET': 8, 'SL': 7}
+PRIMARY WEEKDAY n=12 win%=50.0 mean=-18.60 med=-48.08 gross=20.87 worst=-312.94 maxDD=-705.0
+PRIMARY WEEKEND n=3 win%=66.7 mean=87.94 med=259.52 gross=126.87 worst=-305.47 maxDD=-305.5
+GRID (all T x SL):
+  T=300|SL=250 ALL n=14 sig/day=52.600 win%=57.1 mean=34.37 med=251.99 gross/t=73.06 fee/t=38.69 slip/t=25.39 worst=-312.94 maxDD=-605.1 top5%=67.0 holdHrs=5.35 avg_dlt=0.0777 avg_tv=1163.32 exits={'TARGET': 8, 'SL': 6}
+    WEEKDAY n=11 win%=54.5 mean=19.75 med=249.73 gross=58.38 worst=-312.94 maxDD=-605.1
+    WEEKEND n=3 win%=66.7 mean=87.94 med=259.52 gross=126.87 worst=-305.47 maxDD=-305.5
+  T=300|SL=200 ALL n=16 sig/day=52.600 win%=50.0 mean=24.85 med=-2.60 gross/t=65.14 fee/t=40.29 slip/t=24.97 worst=-259.95 maxDD=-515.1 top5%=68.8 holdHrs=4.21 avg_dlt=0.0984 avg_tv=1123.18 exits={'TARGET': 8, 'SL': 8}
+    WEEKDAY n=12 win%=41.7 mean=-22.96 med=-252.69 gross=17.55 worst=-258.69 maxDD=-515.1
+    WEEKEND n=4 win%=75.0 mean=168.26 med=284.64 gross=207.88 worst=-259.95 maxDD=-259.9
+  T=300|SL=150 ALL n=20 sig/day=52.600 win%=45.0 mean=14.60 med=-201.76 gross/t=54.64 fee/t=40.04 slip/t=25.16 worst=-216.62 maxDD=-791.6 top5%=60.6 holdHrs=3.24 avg_dlt=0.0884 avg_tv=1135.34 exits={'TARGET': 9, 'SL': 11}
+    WEEKDAY n=16 win%=37.5 mean=-21.95 med=-202.51 gross=18.17 worst=-216.62 maxDD=-791.6
+    WEEKEND n=4 win%=75.0 mean=160.79 med=271.73 gross=200.53 worst=-210.06 maxDD=-210.1
+  T=250|SL=200 ALL n=16 sig/day=52.600 win%=50.0 mean=11.93 med=-20.43 gross/t=52.22 fee/t=40.30 slip/t=24.90 worst=-259.95 maxDD=-588.8 top5%=70.5 holdHrs=4.14 avg_dlt=0.0984 avg_tv=1123.18 exits={'TARGET': 8, 'SL': 8}
+    WEEKDAY n=12 win%=41.7 mean=-28.37 med=-252.69 gross=12.15 worst=-258.69 maxDD=-550.8
+    WEEKEND n=4 win%=75.0 mean=132.81 med=240.72 gross=172.46 worst=-259.95 maxDD=-259.9
+  T=250|SL=150 ALL n=20 sig/day=52.600 win%=45.0 mean=5.12 med=-201.76 gross/t=45.17 fee/t=40.05 slip/t=24.99 worst=-216.62 maxDD=-796.2 top5%=62.3 holdHrs=3.10 avg_dlt=0.0884 avg_tv=1135.34 exits={'TARGET': 9, 'SL': 11}
+    WEEKDAY n=16 win%=37.5 mean=-31.02 med=-202.51 gross=9.11 worst=-216.62 maxDD=-796.2
+    WEEKEND n=4 win%=75.0 mean=149.69 med=249.53 gross=189.43 worst=-210.06 maxDD=-210.1
+  T=250|SL=250 ALL n=15 sig/day=52.600 win%=53.3 mean=2.71 med=205.62 gross/t=42.07 fee/t=39.36 slip/t=25.19 worst=-312.94 maxDD=-804.8 top5%=70.6 holdHrs=4.53 avg_dlt=0.0888 avg_tv=1157.32 exits={'TARGET': 8, 'SL': 7}
+    WEEKDAY n=12 win%=50.0 mean=-18.60 med=-48.08 gross=20.87 worst=-312.94 maxDD=-705.0
+    WEEKEND n=3 win%=66.7 mean=87.94 med=259.52 gross=126.87 worst=-305.47 maxDD=-305.5
+  T=200|SL=150 ALL n=23 sig/day=52.600 win%=52.2 mean=-7.42 med=145.78 gross/t=32.94 fee/t=40.37 slip/t=24.84 worst=-216.62 maxDD=-1160.3 top5%=48.2 holdHrs=2.52 avg_dlt=0.0918 avg_tv=1110.35 exits={'TARGET': 12, 'SL': 11}
+    WEEKDAY n=16 win%=43.8 mean=-39.40 med=-201.76 gross=0.80 worst=-216.62 maxDD=-1160.3
+    WEEKEND n=7 win%=71.4 mean=65.67 med=151.74 gross=106.42 worst=-210.06 maxDD=-242.9
+  T=250|SL=100 ALL n=27 sig/day=52.600 win%=33.3 mean=-19.68 med=-153.63 gross/t=21.16 fee/t=40.85 slip/t=24.80 worst=-166.74 maxDD=-963.1 top5%=62.4 holdHrs=2.33 avg_dlt=0.0868 avg_tv=1102.05 exits={'TARGET': 9, 'SL': 18}
+    WEEKDAY n=21 win%=33.3 mean=-19.11 med=-153.63 gross=21.61 worst=-166.74 maxDD=-703.4
+    WEEKEND n=6 win%=33.3 mean=-21.68 med=-154.32 gross=19.59 worst=-156.69 maxDD=-465.3
+  T=100|SL=150 ALL n=26 sig/day=52.600 win%=61.5 mean=-20.70 med=57.44 gross/t=19.98 fee/t=40.68 slip/t=24.73 worst=-216.62 maxDD=-1107.9 top5%=49.7 holdHrs=2.12 avg_dlt=0.0931 avg_tv=1099.60 exits={'TARGET': 16, 'SL': 10}
+    WEEKDAY n=18 win%=55.6 mean=-41.04 med=50.86 gross=-0.49 worst=-216.62 maxDD=-1107.9
+    WEEKEND n=8 win%=75.0 mean=25.06 med=67.78 gross=66.05 worst=-210.06 maxDD=-299.0
+  T=200|SL=100 ALL n=29 sig/day=52.600 win%=41.4 mean=-23.63 med=-153.28 gross/t=17.24 fee/t=40.87 slip/t=24.80 worst=-166.74 maxDD=-1380.5 top5%=45.7 holdHrs=2.11 avg_dlt=0.0954 avg_tv=1097.77 exits={'TARGET': 12, 'SL': 17}
+    WEEKDAY n=21 win%=38.1 mean=-32.63 med=-153.28 gross=8.15 worst=-166.74 maxDD=-1064.8
+    WEEKEND n=8 win%=50.0 mean=-0.01 med=-3.90 gross=41.10 worst=-157.56 maxDD=-465.3
+  T=300|SL=100 ALL n=26 sig/day=52.600 win%=30.8 mean=-23.78 med=-153.83 gross/t=17.02 fee/t=40.80 slip/t=24.79 worst=-166.74 maxDD=-1069.4 top5%=65.8 holdHrs=2.43 avg_dlt=0.0871 avg_tv=1101.32 exits={'TARGET': 8, 'SL': 18}
+    WEEKDAY n=20 win%=30.0 mean=-25.51 med=-153.83 gross=15.14 worst=-166.74 maxDD=-853.8
+    WEEKEND n=6 win%=33.3 mean=-18.00 med=-154.32 gross=23.28 worst=-156.69 maxDD=-465.3
+  T=150|SL=150 ALL n=24 sig/day=52.600 win%=54.2 mean=-24.24 med=99.36 gross/t=16.36 fee/t=40.60 slip/t=24.98 worst=-216.62 maxDD=-1335.0 top5%=49.5 holdHrs=2.36 avg_dlt=0.0932 avg_tv=1107.96 exits={'TARGET': 13, 'SL': 11}
+    WEEKDAY n=17 win%=47.1 mean=-53.21 med=-201.84 gross=-12.67 worst=-216.62 maxDD=-1335.0
+    WEEKEND n=7 win%=71.4 mean=46.12 med=110.55 gross=86.87 worst=-210.06 maxDD=-242.9
+  T=100|SL=200 ALL n=22 sig/day=52.600 win%=68.2 mean=-25.11 med=60.85 gross/t=15.66 fee/t=40.77 slip/t=24.83 worst=-259.95 maxDD=-1165.2 top5%=45.9 holdHrs=2.60 avg_dlt=0.1014 avg_tv=1114.04 exits={'TARGET': 15, 'SL': 7}
+    WEEKDAY n=16 win%=62.5 mean=-42.36 med=56.24 gross=-1.66 worst=-255.54 maxDD=-1046.9
+    WEEKEND n=6 win%=83.3 mean=20.89 med=67.28 gross=61.85 worst=-259.95 maxDD=-259.9
+  T=100|SL=100 ALL n=29 sig/day=52.600 win%=51.7 mean=-29.38 med=48.90 gross/t=11.43 fee/t=40.81 slip/t=24.84 worst=-166.74 maxDD=-1392.4 top5%=46.7 holdHrs=1.80 avg_dlt=0.0954 avg_tv=1097.77 exits={'TARGET': 15, 'SL': 14}
+    WEEKDAY n=21 win%=47.6 mean=-38.00 med=-151.88 gross=2.80 worst=-166.74 maxDD=-1167.1
+    WEEKEND n=8 win%=62.5 mean=-6.78 med=57.47 gross=34.08 worst=-157.56 maxDD=-367.0
+  T=150|SL=200 ALL n=20 sig/day=52.600 win%=60.0 mean=-30.78 med=101.46 gross/t=10.05 fee/t=40.82 slip/t=24.84 worst=-259.95 maxDD=-1382.8 top5%=48.1 holdHrs=3.24 avg_dlt=0.1062 avg_tv=1109.53 exits={'TARGET': 12, 'SL': 8}
+    WEEKDAY n=14 win%=50.0 mean=-68.52 med=-76.00 gross=-27.79 worst=-255.80 maxDD=-1290.6
+    WEEKEND n=6 win%=83.3 mean=57.30 med=110.20 gross=98.32 worst=-259.95 maxDD=-259.9
+  T=200|SL=200 ALL n=19 sig/day=52.600 win%=52.6 mean=-31.88 med=145.78 gross/t=8.93 fee/t=40.80 slip/t=24.64 worst=-258.69 maxDD=-1204.5 top5%=55.5 holdHrs=3.42 avg_dlt=0.0960 avg_tv=1127.00 exits={'TARGET': 10, 'SL': 9}
+    WEEKDAY n=14 win%=42.9 mean=-75.35 med=-252.69 gross=-34.65 worst=-258.69 maxDD=-1204.5
+    WEEKEND n=5 win%=80.0 mean=89.84 med=151.74 gross=130.93 worst=-253.38 maxDD=-253.4
+  T=150|SL=100 ALL n=29 sig/day=52.600 win%=44.8 mean=-33.31 med=-152.43 gross/t=7.53 fee/t=40.84 slip/t=24.81 worst=-166.74 maxDD=-1651.1 top5%=46.9 holdHrs=2.04 avg_dlt=0.0954 avg_tv=1097.77 exits={'TARGET': 13, 'SL': 16}
+    WEEKDAY n=21 win%=42.9 mean=-36.74 med=-152.43 gross=4.06 worst=-166.74 maxDD=-1229.7
+    WEEKEND n=8 win%=50.0 mean=-24.30 med=-27.02 gross=16.64 worst=-157.56 maxDD=-520.6
+  T=150|SL=250 ALL n=19 sig/day=52.600 win%=63.2 mean=-42.72 med=99.19 gross/t=-2.29 fee/t=40.43 slip/t=25.29 worst=-310.82 maxDD=-1579.0 top5%=46.5 holdHrs=3.38 avg_dlt=0.0969 avg_tv=1133.70 exits={'TARGET': 12, 'SL': 7}
+    WEEKDAY n=14 win%=57.1 mean=-67.31 med=96.72 gross=-27.03 worst=-310.82 maxDD=-1372.7
+    WEEKEND n=5 win%=80.0 mean=26.11 med=109.85 gross=66.98 worst=-305.47 maxDD=-305.5
+  T=250|SL=300 ALL n=16 sig/day=52.600 win%=50.0 mean=-45.32 med=-75.35 gross/t=-5.30 fee/t=40.02 slip/t=24.58 worst=-366.32 maxDD=-1294.4 top5%=69.9 holdHrs=4.65 avg_dlt=0.0908 avg_tv=1143.58 exits={'TARGET': 8, 'SL': 8}
+    WEEKDAY n=13 win%=46.2 mean=-72.48 med=-352.08 gross=-32.27 worst=-366.32 maxDD=-1153.7
+    WEEKEND n=3 win%=66.7 mean=72.39 med=259.52 gross=111.58 worst=-352.10 maxDD=-352.1
+  T=100|SL=250 ALL n=21 sig/day=52.600 win%=66.7 mean=-46.32 med=62.05 gross/t=-5.82 fee/t=40.50 slip/t=24.92 worst=-310.82 maxDD=-1585.5 top5%=48.8 holdHrs=2.98 avg_dlt=0.0953 avg_tv=1131.99 exits={'TARGET': 14, 'SL': 7}
+    WEEKDAY n=16 win%=62.5 mean=-62.48 med=51.55 gross=-22.04 worst=-310.82 maxDD=-1368.8
+    WEEKEND n=5 win%=80.0 mean=5.39 med=72.51 gross=46.11 worst=-305.47 maxDD=-305.5
+  T=200|SL=250 ALL n=17 sig/day=52.600 win%=52.9 mean=-54.47 med=145.78 gross/t=-14.14 fee/t=40.33 slip/t=24.83 worst=-312.94 maxDD=-1389.1 top5%=59.5 holdHrs=4.16 avg_dlt=0.1009 avg_tv=1122.62 exits={'TARGET': 9, 'SL': 8}
+    WEEKDAY n=12 win%=41.7 mean=-105.65 med=-302.03 gross=-65.62 worst=-312.94 maxDD=-1267.8
+    WEEKEND n=5 win%=80.0 mean=68.35 med=151.74 gross=109.40 worst=-302.30 maxDD=-302.3
+  T=100|SL=300 ALL n=22 sig/day=52.600 win%=68.2 mean=-56.40 med=58.04 gross/t=-15.77 fee/t=40.63 slip/t=24.51 worst=-378.14 maxDD=-1853.5 top5%=49.1 holdHrs=2.94 avg_dlt=0.0963 avg_tv=1128.40 exits={'TARGET': 15, 'SL': 7}
+    WEEKDAY n=17 win%=64.7 mean=-71.82 med=52.82 gross=-31.27 worst=-378.14 maxDD=-1555.5
+    WEEKEND n=5 win%=80.0 mean=-3.94 med=72.51 gross=36.94 worst=-352.10 maxDD=-352.1
+  T=150|SL=300 ALL n=20 sig/day=52.600 win%=60.0 mean=-70.49 med=101.46 gross/t=-29.84 fee/t=40.66 slip/t=24.52 worst=-366.32 maxDD=-2177.1 top5%=47.9 holdHrs=3.63 avg_dlt=0.1009 avg_tv=1122.19 exits={'TARGET': 12, 'SL': 8}
+    WEEKDAY n=15 win%=53.3 mean=-99.59 med=100.45 gross=-59.05 worst=-366.32 maxDD=-1952.0
+    WEEKEND n=5 win%=80.0 mean=16.78 med=109.85 gross=57.81 worst=-352.10 maxDD=-352.1
+  T=300|SL=300 ALL n=14 sig/day=52.600 win%=42.9 mean=-76.71 med=-352.09 gross/t=-36.76 fee/t=39.95 slip/t=24.85 worst=-366.32 maxDD=-1643.2 top5%=85.6 holdHrs=5.43 avg_dlt=0.0988 avg_tv=1139.19 exits={'TARGET': 6, 'SL': 8}
+    WEEKDAY n=11 win%=36.4 mean=-117.37 med=-352.44 gross=-77.22 worst=-366.32 maxDD=-1291.1
+    WEEKEND n=3 win%=66.7 mean=72.39 med=259.52 gross=111.58 worst=-352.10 maxDD=-352.1
+  T=200|SL=300 ALL n=18 sig/day=52.600 win%=50.0 mean=-96.57 med=-103.03 gross/t=-55.91 fee/t=40.66 slip/t=24.21 worst=-366.32 maxDD=-2201.2 top5%=59.4 holdHrs=4.31 avg_dlt=0.0993 avg_tv=1136.37 exits={'TARGET': 9, 'SL': 9}
+    WEEKDAY n=14 win%=42.9 mean=-131.84 med=-352.10 gross=-91.29 worst=-366.32 maxDD=-1995.3
+    WEEKEND n=4 win%=75.0 mean=26.88 med=148.76 gross=67.93 worst=-355.53 maxDD=-355.5
+CONTROLS (primary + best-train cell):
+  T=300|SL=250 C2mean=-32.19 (seeds=20) C3 n=12 sig/day=2.800 win%=58.3 mean=31.90 med=249.05 gross/t=72.32 fee/t=40.42 slip/t=24.96 worst=-320.62 maxDD=-411.7 top5%=74.0 holdHrs=4.06 avg_dlt=-0.0807 avg_tv=1166.95 exits={'TARGET': 7, 'SL': 5}
+    C2 ALL n=170 win%=43.5 mean=-35.26 med=-302.27 gross=4.47 worst=-330.50 maxDD=-7198.2
+    C2 WEEKDAY n=142 win%=38.0 mean=-63.42 med=-302.72 gross=-23.92 worst=-330.50 maxDD=-9678.8
+    C2 WEEKEND n=28 win%=71.4 mean=107.54 med=258.35 gross=148.48 worst=-313.24 maxDD=-380.3
+    C3 ALL n=12 win%=58.3 mean=31.90 med=249.05 gross=72.32 worst=-320.62 maxDD=-411.7
+    C3 WEEKDAY n=10 win%=60.0 mean=43.23 med=249.05 gross=83.72 worst=-320.62 maxDD=-362.8
+    C3 WEEKEND n=2 win%=50.0 mean=-24.73 med=-24.73 gross=15.29 worst=-302.91 maxDD=-302.9
+  T=250|SL=250 C2mean=-56.20 (seeds=20) C3 n=13 sig/day=3.000 win%=53.8 mean=-24.29 med=201.23 gross/t=16.15 fee/t=40.44 slip/t=24.65 worst=-320.62 maxDD=-772.7 top5%=73.3 holdHrs=3.90 avg_dlt=-0.0742 avg_tv=1137.02 exits={'TARGET': 7, 'SL': 6}
+    C2 ALL n=188 win%=44.7 mean=-58.59 med=-302.13 gross=-18.65 worst=-330.50 maxDD=-11707.3
+    C2 WEEKDAY n=158 win%=38.0 mean=-92.80 med=-302.68 gross=-53.08 worst=-330.50 maxDD=-15140.5
+    C2 WEEKEND n=30 win%=80.0 mean=121.56 med=209.25 gross=162.67 worst=-306.97 maxDD=-468.1
+    C3 ALL n=13 win%=53.8 mean=-24.29 med=201.23 gross=16.15 worst=-320.62 maxDD=-772.7
+    C3 WEEKDAY n=11 win%=54.5 mean=-20.63 med=201.23 gross=19.88 worst=-320.62 maxDD=-697.4
+    C3 WEEKEND n=2 win%=50.0 mean=-44.45 med=-44.45 gross=-4.35 worst=-302.91 maxDD=-302.9
+PRIMARY day/hour tables:
+  day-of-week:
+    Mon n=4 win%=50.0 mean=-48.99
+    Tue n=2 win%=50.0 mean=-39.19
+    Wed n=4 win%=50.0 mean=25.49
+    Thu n=2 win%=50.0 mean=-25.42
+    Fri n=0
+    Sat n=0
+    Sun n=3 win%=66.7 mean=87.94
+  hour-of-day IST:
+    02 n=2 win%=50.0 mean=-48.89
+    05 n=3 win%=66.7 mean=73.28
+    06 n=1 win%=100.0 mean=406.94
+    07 n=1 win%=0.0 mean=-302.82
+    09 n=2 win%=50.0 mean=3.74
+    10 n=1 win%=100.0 mean=211.03
+    17 n=3 win%=66.7 mean=70.73
+    20 n=1 win%=0.0 mean=-310.82
+    21 n=1 win%=0.0 mean=-305.47
+CHOP (primary, informational):
+  NOTE: weekday/weekend and chop splits are informational; a split is only actionable if it holds in TRAIN and HOLDOUT.
+  mean net by touch_count_of_line:
+    1 n=14 mean=24.57
+    2 n=0
+    3-5 n=1 mean=-303.40
+    6+ n=0
+  mean net by weekday/weekend (entry IST):
+    WEEKDAY n=12 mean=-18.60
+    WEEKEND n=3 mean=87.94
+  field means: touch_count=1.20 line_age_min=267.5 |spot-VWAP|=175.1 n_active=19.53
+
+--- PRE-REGISTERED PASS (PRIMARY 2025 & 2026; n>=30 mean>0 >C2 top5<100) ---
+FAIL
+  2025 n=0 mean=nan c2=-56.197813566524815 top5=nan | 2026 n=0 mean=nan c2=-56.197813566524815 top5=nan

@@ -156,6 +156,25 @@ def session_vwap(ts: np.ndarray, h: np.ndarray, l: np.ndarray, c: np.ndarray, vo
     return out
 
 
+def chop_of(
+    hit_lines: list[SwingLine],
+    side: str,
+    i: int,
+    cl: float,
+    vw: float,
+    n_act: int,
+) -> dict[str, Any]:
+    want = "low" if side == "long" else "high"
+    cands = [ln for ln in hit_lines if ln.kind == want] or list(hit_lines)
+    ln = max(cands, key=lambda x: len(x.touches))
+    return {
+        "touch_count_of_line": int(len(ln.touches)),
+        "line_age_min": int(max(0, i - ln.active_from)),
+        "abs_spot_vwap": abs(float(cl) - float(vw)),
+        "n_active_lines": int(n_act),
+    }
+
+
 def detect_swings(
     ts: np.ndarray,
     o: np.ndarray,
@@ -198,9 +217,11 @@ def detect_swings(
         long_hit = False
         short_hit = False
         hit_lines: list[SwingLine] = []
+        n_act = 0
         for ln in lines:
             if ln.expire_i is not None or i < ln.active_from:
                 continue
+            n_act += 1
             if ln.kind == "low" and lo <= ln.level:
                 long_hit = True
                 ln.touches.append(i)
@@ -222,6 +243,7 @@ def detect_swings(
                     "l": lo,
                     "c": cl,
                     "lines": hit_lines,
+                    **chop_of(hit_lines, "long", i, cl, vw, n_act),
                 }
             )
         elif short_hit:
@@ -235,6 +257,7 @@ def detect_swings(
                     "l": lo,
                     "c": cl,
                     "lines": hit_lines,
+                    **chop_of(hit_lines, "short", i, cl, vw, n_act),
                 }
             )
         expire_at(i)
@@ -580,22 +603,165 @@ def stats_of(rows: list[dict[str, Any]], n_sig: int, n_days: float) -> dict[str,
     }
 
 
-def fmt_stats(s: dict[str, Any]) -> str:
-    def f(k: str, nd: int = 2) -> str:
-        v = s.get(k, float("nan"))
-        if isinstance(v, float) and not np.isfinite(v):
-            return "nan"
-        if isinstance(v, float):
-            return f"{v:.{nd}f}"
-        return str(v)
+def stats_ww(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    n = len(rows)
+    nets = [float(r["net"]) for r in rows]
+    return {
+        "n": n,
+        "win": 100.0 * sum(1 for x in nets if x > 0) / n if n else float("nan"),
+        "mean": float(np.mean(nets)) if nets else float("nan"),
+        "med": float(np.median(nets)) if nets else float("nan"),
+        "gross": float(np.mean([float(r["gross"]) for r in rows])) if rows else float("nan"),
+        "worst": min(nets) if nets else float("nan"),
+        "maxdd": max_dd(nets),
+    }
 
+
+def is_weekend_ist(entry_ts: int) -> bool:
+    dt = datetime.fromtimestamp(int(entry_ts), tz=s018.UTC).astimezone(s018.IST)
+    return int(dt.weekday()) >= 5
+
+
+def split_wd_we(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    wd = [r for r in rows if not is_weekend_ist(int(r["entry_ts"]))]
+    we = [r for r in rows if is_weekend_ist(int(r["entry_ts"]))]
+    return wd, we
+
+
+def _fnum(v: Any, nd: int) -> str:
+    if isinstance(v, float) and not np.isfinite(v):
+        return "nan"
+    if isinstance(v, float):
+        return f"{v:.{nd}f}"
+    return str(v)
+
+
+def fmt_stats(s: dict[str, Any]) -> str:
     return (
-        f"n={s['n']} sig/day={f('sig_day', 3)} win%={f('win', 1)} mean={f('mean')} "
-        f"med={f('med')} gross/t={f('gross')} fee/t={f('fee')} slip/t={f('slip')} "
-        f"worst={f('worst')} maxDD={f('maxdd', 1)} top5%={f('top5', 1)} "
-        f"holdHrs={f('hold')} avg_dlt={f('avg_dlt', 4)} avg_tv={f('avg_tv')} "
+        f"n={s['n']} sig/day={_fnum(s.get('sig_day', float('nan')), 3)} "
+        f"win%={_fnum(s.get('win', float('nan')), 1)} mean={_fnum(s.get('mean', float('nan')), 2)} "
+        f"med={_fnum(s.get('med', float('nan')), 2)} gross/t={_fnum(s.get('gross', float('nan')), 2)} "
+        f"fee/t={_fnum(s.get('fee', float('nan')), 2)} slip/t={_fnum(s.get('slip', float('nan')), 2)} "
+        f"worst={_fnum(s.get('worst', float('nan')), 2)} maxDD={_fnum(s.get('maxdd', float('nan')), 1)} "
+        f"top5%={_fnum(s.get('top5', float('nan')), 1)} holdHrs={_fnum(s.get('hold', float('nan')), 2)} "
+        f"avg_dlt={_fnum(s.get('avg_dlt', float('nan')), 4)} avg_tv={_fnum(s.get('avg_tv', float('nan')), 2)} "
         f"exits={s.get('exits', {})}"
     )
+
+
+def fmt_ww(s: dict[str, Any]) -> str:
+    return (
+        f"n={s.get('n', 0)} win%={_fnum(s.get('win', float('nan')), 1)} "
+        f"mean={_fnum(s.get('mean', float('nan')), 2)} med={_fnum(s.get('med', float('nan')), 2)} "
+        f"gross={_fnum(s.get('gross', float('nan')), 2)} worst={_fnum(s.get('worst', float('nan')), 2)} "
+        f"maxDD={_fnum(s.get('maxdd', float('nan')), 1)}"
+    )
+
+
+def ww_block(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    wd, we = split_wd_we(rows)
+    return stats_ww(wd), stats_ww(we)
+
+
+def touch_bucket(n: int) -> str:
+    if n <= 1:
+        return "1"
+    if n == 2:
+        return "2"
+    if n <= 5:
+        return "3-5"
+    return "6+"
+
+
+def chop_tables(rows: list[dict[str, Any]]) -> list[str]:
+    by_b: dict[str, list[float]] = {"1": [], "2": [], "3-5": [], "6+": []}
+    for r in rows:
+        b = touch_bucket(int(r.get("touch_count_of_line", 1)))
+        by_b[b].append(float(r["net"]))
+    out = [
+        "CHOP (primary, informational):",
+        "  NOTE: weekday/weekend and chop splits are informational; "
+        "a split is only actionable if it holds in TRAIN and HOLDOUT.",
+        "  mean net by touch_count_of_line:",
+    ]
+    for b in ("1", "2", "3-5", "6+"):
+        xs = by_b[b]
+        if not xs:
+            out.append(f"    {b} n=0")
+            continue
+        out.append(f"    {b} n={len(xs)} mean={float(np.mean(xs)):.2f}")
+    wd, we = split_wd_we(rows)
+    out.append("  mean net by weekday/weekend (entry IST):")
+    for name, xs_rows in (("WEEKDAY", wd), ("WEEKEND", we)):
+        xs = [float(r["net"]) for r in xs_rows]
+        if not xs:
+            out.append(f"    {name} n=0")
+            continue
+        out.append(f"    {name} n={len(xs)} mean={float(np.mean(xs)):.2f}")
+    if rows:
+        out.append(
+            "  field means: "
+            f"touch_count={float(np.mean([float(r.get('touch_count_of_line', float('nan'))) for r in rows])):.2f} "
+            f"line_age_min={float(np.mean([float(r.get('line_age_min', float('nan'))) for r in rows])):.1f} "
+            f"|spot-VWAP|={float(np.mean([float(r.get('abs_spot_vwap', float('nan'))) for r in rows])):.1f} "
+            f"n_active={float(np.mean([float(r.get('n_active_lines', float('nan'))) for r in rows])):.2f}"
+        )
+    return out
+
+
+def progress_every_2pct(
+    label: str,
+    done: int,
+    total: int,
+    built: int,
+    t0: float,
+    state: dict[str, int],
+) -> None:
+    if total <= 0:
+        return
+    pct = 100.0 * float(done) / float(total)
+    mark = int(pct // 2) * 2
+    if done >= total:
+        mark = 100
+    last = int(state.get("mark", -1))
+    if mark <= last and done < total:
+        return
+    if mark < 2 and done < total:
+        return
+    state["mark"] = mark
+    elapsed = time.perf_counter() - t0
+    eta = (elapsed / float(done)) * float(total - done) if done else 0.0
+    mem = rss_mb()
+    extra = f" RSS={mem:.0f}MB" if mem is not None else ""
+    print(
+        f"  {label} {done}/{total} ({mark}%) built={built} "
+        f"elapsed={elapsed:.0f}s ETA={eta:.0f}s{extra}",
+        flush=True,
+    )
+
+
+def ckpt_window_ok(
+    done: dict[str, dict[str, Any]],
+    start_ts: int,
+    cutoff: int,
+    max_days: int,
+) -> bool:
+    if not done:
+        return True
+    want = (int(start_ts), int(cutoff), int(max_days))
+    for rec in done.values():
+        got = (
+            rec.get("win_start"),
+            rec.get("win_cutoff"),
+            rec.get("max_days"),
+        )
+        try:
+            got_t = (int(got[0]), int(got[1]), int(got[2]))
+        except (TypeError, ValueError):
+            return False
+        if got_t != want:
+            return False
+    return True
 
 
 def entry_net_delta(legs: list[dict[str, Any]], side: str) -> float:
@@ -665,33 +831,47 @@ def dow_hod_tables(rows: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def random_c2(
-    real: list[dict[str, Any]],
+def build_hour_index(
     ts: np.ndarray,
     start_ts: int,
     cutoff: int,
     win_from: date,
     win_to: date,
-    seed: int,
-) -> list[tuple[int, str]]:
-    need = [(s018.hod_ist(int(r["entry_ts"])), str(r["side"])) for r in real]
-    by_h: dict[int, list[int]] = defaultdict(list)
+) -> dict[int, np.ndarray]:
+    buckets: dict[int, list[int]] = defaultdict(list)
     for i, t in enumerate(ts):
         tt = int(t)
         if tt < start_ts or tt >= cutoff:
             continue
         if not in_window(tt, win_from, win_to):
             continue
-        by_h[s018.hod_ist(tt)].append(i)
+        buckets[s018.hod_ist(tt)].append(i)
+    return {h: np.asarray(v, dtype=np.int64) for h, v in buckets.items()}
+
+
+def random_c2(
+    real: list[dict[str, Any]],
+    ts: np.ndarray,
+    hour_idx: dict[int, np.ndarray],
+    seed: int,
+) -> list[tuple[int, str]]:
+    need = [(s018.hod_ist(int(r["entry_ts"])), str(r["side"])) for r in real]
     rng = np.random.default_rng(seed)
-    used: set[int] = set()
+    shuffled: dict[int, np.ndarray] = {}
+    ptr: dict[int, int] = {}
+    for h, arr in hour_idx.items():
+        shuffled[h] = rng.permutation(arr)
+        ptr[h] = 0
     out: list[tuple[int, str]] = []
     for hod, side in need:
-        pool = [i for i in by_h.get(hod, []) if i not in used]
-        if not pool:
+        arr = shuffled.get(int(hod))
+        if arr is None:
             continue
-        i = int(rng.choice(pool))
-        used.add(i)
+        p = int(ptr.get(int(hod), 0))
+        if p >= int(arr.size):
+            continue
+        i = int(arr[p])
+        ptr[int(hod)] = p + 1
         out.append((int(ts[i]), side))
     out.sort(key=lambda x: x[0])
     return out
@@ -704,23 +884,23 @@ def get_or_build_path(
     side: str,
     tag: str,
     flipped: bool,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, bool]:
     exp = expiry_1dte(t)
     fp = cache_file(t, side, exp, tag)
     path = load_path(fp)
     if path is not None:
-        return path
+        return path, False
     sp = spot_c.get(t)
     if sp is None:
-        return None
+        return None, False
     legs = pick_touch_basket(store, side, t, float(sp), flipped)
     if legs is None:
-        return None
+        return None, False
     path = build_path(store, spot_c, legs, t, exp)
     if path is None:
-        return None
+        return None, False
     save_path(fp, path)
-    return path
+    return path, True
 
 
 def simulate_plan(
@@ -735,16 +915,26 @@ def simulate_plan(
     cutoff: int,
     win_from: date,
     win_to: date,
+    label: str = "",
+    chop_by: dict[tuple[int, str], dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     busy = -1
     rows: list[dict[str, Any]] = []
     n_stale = 0
-    for t, side in plan:
+    built = 0
+    t0 = time.perf_counter()
+    st_prog: dict[str, int] = {"mark": -1}
+    nplan = len(plan)
+    for j, (t, side) in enumerate(plan, start=1):
+        if label:
+            progress_every_2pct(label, j, nplan, built, t0, st_prog)
         if t < start_ts or t >= cutoff or t <= busy:
             continue
         if not in_window(t, win_from, win_to):
             continue
-        path = get_or_build_path(store, spot_c, t, side, tag, flipped)
+        path, newp = get_or_build_path(store, spot_c, t, side, tag, flipped)
+        if newp:
+            built += 1
         if path is None:
             n_stale += 1
             continue
@@ -752,6 +942,9 @@ def simulate_plan(
         if walked is None:
             continue
         hold = (int(walked["exit_ts"]) - int(t)) / 3600.0
+        extra: dict[str, Any] = {}
+        if chop_by is not None:
+            extra = dict(chop_by.get((int(t), str(side)), {}))
         rows.append(
             {
                 "entry_ts": t,
@@ -761,10 +954,13 @@ def simulate_plan(
                 "entry_dlt": entry_net_delta(list(path["legs"]), side),
                 "entry_tv": entry_tv(list(path["legs"]), float(spot_c.get(t, 0.0))),
                 "legs": path["legs"],
+                **extra,
                 **walked,
             }
         )
         busy = int(walked["exit_ts"])
+    if label and nplan == 0:
+        print(f"  {label} 0/0 (100%) built=0 elapsed=0s ETA=0s", flush=True)
     return rows, n_stale
 
 
@@ -849,17 +1045,24 @@ def main() -> None:
         tag = "train"
         start_ts = int(datetime(2024, 9, 1, tzinfo=timezone.utc).timestamp())
         cutoff = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
+    max_days = int(args.max_days or 0)
+    if max_days:
+        cutoff = start_ts + max_days * 86400
+    if not args.fresh:
+        preexisting = load_ckpt(CKPT)
+        if preexisting and not ckpt_window_ok(preexisting, start_ts, cutoff, max_days):
+            print("checkpoint window mismatch -> use --fresh", flush=True)
+            sys.exit(1)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     spot = s018.load_spot_1m(args.csv)
     ts, o, h, l, c, vol = bars_1m_vol(spot)
-    if args.max_days:
-        cutoff = start_ts + int(args.max_days) * 86400
+    if max_days:
         lo = start_ts - 2 * 86400
         hi = cutoff + 3 * 86400
         sel = (ts >= lo) & (ts < hi)
         ts, o, h, l, c, vol = ts[sel], o[sel], h[sel], l[sel], c[sel], vol[sel]
-        print(f"SMOKE max-days={args.max_days} cutoff_ts={cutoff} window={tag}", flush=True)
+        print(f"SMOKE max-days={max_days} cutoff_ts={cutoff} window={tag}", flush=True)
     spot_c = {int(t): float(x) for t, x in zip(ts, c)}
     vwap = session_vwap(ts, h, l, c, vol)
     lines, raw_sigs, both_skip = detect_swings(ts, o, h, l, c, vwap)
@@ -868,14 +1071,23 @@ def main() -> None:
         for s in raw_sigs
         if start_ts <= int(s["ts"]) < cutoff and in_window(int(s["ts"]), win_from, win_to)
     ]
-    n_days = cal_days(win_from, win_to) if not args.max_days else max(1.0, args.max_days)
+    n_days = cal_days(win_from, win_to) if not max_days else max(1.0, float(max_days))
     print(
         f"S020 {tag} lines={len(lines)} signals={len(sigs)} both_skip={both_skip} "
         f"cells={len(TGTS)*len(SLS)}",
         flush=True,
     )
-    if args.max_days:
+    if max_days:
         print_examples(ts, o, h, l, c, lines)
+
+    chop_by: dict[tuple[int, str], dict[str, Any]] = {}
+    for s in sigs:
+        chop_by[(int(s["ts"]), str(s["side"]))] = {
+            "touch_count_of_line": int(s.get("touch_count_of_line", 0)),
+            "line_age_min": int(s.get("line_age_min", 0)),
+            "abs_spot_vwap": float(s.get("abs_spot_vwap", float("nan"))),
+            "n_active_lines": int(s.get("n_active_lines", 0)),
+        }
 
     inner = MarksStore()
     store = GuardStore(inner, forbid_year=forbid)
@@ -884,6 +1096,7 @@ def main() -> None:
     t_run = time.perf_counter()
     cell_rows: dict[str, list[dict[str, Any]]] = {}
     n_stale_prim = 0
+    win_meta = {"win_start": int(start_ts), "win_cutoff": int(cutoff), "max_days": int(max_days)}
 
     for k, (tgt, slv) in enumerate(cells, start=1):
         key = f"T={tgt}|SL={slv}"
@@ -897,13 +1110,19 @@ def main() -> None:
         rows, n_stale = simulate_plan(
             store, spot_c, plan, float(tgt), float(slv), "PRIMARY", False,
             start_ts, cutoff, win_from, win_to,
+            label=f"grid {key}",
+            chop_by=chop_by,
         )
         if tgt == PRIMARY_T and slv == PRIMARY_SL:
             n_stale_prim = n_stale
         stt = stats_of(rows, len(sigs), n_days)
+        wd_s, we_s = ww_block(rows)
         stt["key"] = key
         stt["tgt"] = tgt
         stt["sl"] = slv
+        stt["wd"] = wd_s
+        stt["we"] = we_s
+        stt.update(win_meta)
         append_ckpt(CKPT, {kk: vv for kk, vv in stt.items() if kk != "exits"} | {"exits": stt["exits"]})
         done[key] = stt
         cell_rows[key] = rows
@@ -933,40 +1152,62 @@ def main() -> None:
     def ensure_rows(key: str, tgt: int, slv: int) -> list[dict[str, Any]]:
         if key in cell_rows:
             return cell_rows[key]
+        print(f"ensure_rows {key}", flush=True)
         plan = [(int(s["ts"]), str(s["side"])) for s in sigs]
         rows, _ = simulate_plan(
             store, spot_c, plan, float(tgt), float(slv), "PRIMARY", False,
             start_ts, cutoff, win_from, win_to,
+            label=f"ensure_rows {key}",
+            chop_by=chop_by,
         )
         cell_rows[key] = rows
         return rows
 
+    print("CONTROLS phase (C2 seeds + C3)", flush=True)
+    hour_idx = build_hour_index(ts, start_ts, cutoff, win_from, win_to)
     ctrl_lines: list[str] = []
     for key in special:
         parts = str(key).replace("T=", "").replace("SL=", "").split("|")
         tgt, slv = int(parts[0]), int(parts[1])
+        print(f"ensure_rows {key} (controls)", flush=True)
         rows = ensure_rows(key, tgt, slv)
         c2s: list[float] = []
-        for seed in RANDOM_SEEDS:
-            forced = random_c2(rows, ts, start_ts, cutoff, win_from, win_to, seed)
+        c2_pool: list[dict[str, Any]] = []
+        n_seeds = len(RANDOM_SEEDS)
+        for si, seed in enumerate(RANDOM_SEEDS, start=1):
+            print(f"C2 {key} seed {si}/{n_seeds}", flush=True)
+            forced = random_c2(rows, ts, hour_idx, seed)
             rr, _ = simulate_plan(
                 store, spot_c, forced, float(tgt), float(slv), "C2", False,
                 start_ts, cutoff, win_from, win_to,
+                label=f"C2 {key} seed={si}/{n_seeds}",
             )
+            c2_pool.extend(rr)
             if rr:
                 c2s.append(float(np.mean([x["net"] for x in rr])))
+        print(f"C3 {key}", flush=True)
         plan = [(int(r["entry_ts"]), str(r["side"])) for r in rows]
         c3, _ = simulate_plan(
             store, spot_c, plan, float(tgt), float(slv), "C3", True,
             start_ts, cutoff, win_from, win_to,
+            label=f"C3 {key}",
         )
         c2m = float(np.mean(c2s)) if c2s else float("nan")
         c3s = stats_of(c3, len(plan), n_days)
+        c2_wd, c2_we = ww_block(c2_pool)
+        c3_wd, c3_we = ww_block(c3)
+        c2_all_s = stats_ww(c2_pool)
         done[key]["c2"] = c2m
         done[key]["c3"] = c3s["mean"]
         ctrl_lines.append(f"  {key} C2mean={c2m:.2f} (seeds={len(c2s)}) C3 {fmt_stats(c3s)}")
+        ctrl_lines.append(f"    C2 ALL {fmt_ww(c2_all_s)}")
+        ctrl_lines.append(f"    C2 WEEKDAY {fmt_ww(c2_wd)}")
+        ctrl_lines.append(f"    C2 WEEKEND {fmt_ww(c2_we)}")
+        ctrl_lines.append(f"    C3 ALL {fmt_ww(stats_ww(c3))}")
+        ctrl_lines.append(f"    C3 WEEKDAY {fmt_ww(c3_wd)}")
+        ctrl_lines.append(f"    C3 WEEKEND {fmt_ww(c3_we)}")
 
-    if args.max_days:
+    if max_days:
         prow = ensure_rows(prim_key, PRIMARY_T, PRIMARY_SL)
         print("=== FIRST 3 TRADES (all legs) ===", flush=True)
         for tr in prow[:3]:
@@ -993,17 +1234,33 @@ def main() -> None:
         "expiry=next IST day 17:30 (1DTE); LONG put~1000+call~500+call~300; "
         "SHORT call~1000+put~500+put~300; qty=1000",
         "fees=estimate_option_fee*1.18; slip=slip_pct; stale>5m skip",
+        "NOTE: weekday/weekend and chop splits are informational; "
+        "a split is only actionable if it holds in TRAIN and HOLDOUT.",
         f"PRIMARY T={PRIMARY_T} SL={PRIMARY_SL}",
-        f"PRIMARY {fmt_stats(done.get(prim_key, {'n': 0, 'exits': {}}))}",
-        "GRID (all T x SL):",
+        f"PRIMARY ALL {fmt_stats(done.get(prim_key, {'n': 0, 'exits': {}}))}",
     ]
+    prim_st = done.get(prim_key, {})
+    if "wd" in prim_st:
+        report.append(f"PRIMARY WEEKDAY {fmt_ww(prim_st['wd'])}")
+        report.append(f"PRIMARY WEEKEND {fmt_ww(prim_st['we'])}")
+    report.append("GRID (all T x SL):")
     for s in ranked:
-        report.append(f"  {s.get('key')} {fmt_stats(s)}")
+        report.append(f"  {s.get('key')} ALL {fmt_stats(s)}")
+        wd = s.get("wd")
+        we = s.get("we")
+        if isinstance(wd, dict) and isinstance(we, dict):
+            report.append(f"    WEEKDAY {fmt_ww(wd)}")
+            report.append(f"    WEEKEND {fmt_ww(we)}")
+        elif str(s.get("key")) in cell_rows:
+            wdx, wex = ww_block(cell_rows[str(s.get("key"))])
+            report.append(f"    WEEKDAY {fmt_ww(wdx)}")
+            report.append(f"    WEEKEND {fmt_ww(wex)}")
     report.append("CONTROLS (primary + best-train cell):")
     report.extend(ctrl_lines)
     prow = ensure_rows(prim_key, PRIMARY_T, PRIMARY_SL)
     report.append("PRIMARY day/hour tables:")
     report.extend(dow_hod_tables(prow))
+    report.extend(chop_tables(prow))
     report.append("")
     report.append("--- PRE-REGISTERED PASS (PRIMARY 2025 & 2026; n>=30 mean>0 >C2 top5<100) ---")
     by_year: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -1038,7 +1295,8 @@ def main() -> None:
             f,
             fieldnames=[
                 "side", "entry_ts_ist", "exit_ts_ist", "reason", "gross", "fees", "net",
-                "hold_hrs",
+                "hold_hrs", "touch_count_of_line", "line_age_min", "abs_spot_vwap",
+                "n_active_lines",
             ],
         )
         w.writeheader()
@@ -1053,6 +1311,10 @@ def main() -> None:
                     "fees": r["fees"],
                     "net": r["net"],
                     "hold_hrs": r["hold_hrs"],
+                    "touch_count_of_line": r.get("touch_count_of_line"),
+                    "line_age_min": r.get("line_age_min"),
+                    "abs_spot_vwap": r.get("abs_spot_vwap"),
+                    "n_active_lines": r.get("n_active_lines"),
                 }
             )
     print("\n".join(report))
