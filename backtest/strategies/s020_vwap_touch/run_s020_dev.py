@@ -122,8 +122,14 @@ ARM_A4: dict[str, Any] = {
     "sl": PRIMARY_SL,
     "basket": "a4",
     "prem_pct": 0.0,
+    "strangle_exit": False,
 }
-# Long strangle (buy call≈X + put≈X); TP/SL = 100% of debit USD.
+# Long strangle (buy call≈X + put≈X). Exits vs P = fill-sum USD:
+# SL -0.50P, trail arm +0.30P give 0.20P, cap +1.00P.
+SG_SL_FRAC = 0.50
+SG_TRAIL_ARM_FRAC = 0.30
+SG_TRAIL_GIVE_FRAC = 0.20
+SG_CAP_FRAC = 1.00
 STRANGLE_ARMS: tuple[dict[str, Any], ...] = (
     {
         "id": "B1",
@@ -135,7 +141,8 @@ STRANGLE_ARMS: tuple[dict[str, Any], ...] = (
         "tgt": PRIMARY_T,
         "sl": PRIMARY_SL,
         "basket": "sg150",
-        "prem_pct": 100.0,
+        "prem_pct": 0.0,
+        "strangle_exit": True,
         "sx": 150.0,
     },
     {
@@ -148,7 +155,8 @@ STRANGLE_ARMS: tuple[dict[str, Any], ...] = (
         "tgt": PRIMARY_T,
         "sl": PRIMARY_SL,
         "basket": "sg300",
-        "prem_pct": 100.0,
+        "prem_pct": 0.0,
+        "strangle_exit": True,
         "sx": 300.0,
     },
 )
@@ -338,7 +346,7 @@ def cell_key(
     if bid == "A4" or bsk == "a4":
         key += "|A4"
     if bid.startswith("B") or bsk.startswith("sg"):
-        key += f"|{bid or bsk}"
+        key += f"|{bid or bsk}|sgx"
     return key
 
 
@@ -376,6 +384,7 @@ def work_fields_from_arm(arm: dict[str, Any]) -> dict[str, Any]:
         "arm_id": str(arm["id"]),
         "basket": str(arm.get("basket", "std")),
         "prem_pct": float(arm.get("prem_pct", 0.0)),
+        "strangle_exit": bool(arm.get("strangle_exit", False)),
     }
 
 
@@ -843,6 +852,14 @@ def _expiry_exit_nlegs(
     }
 
 
+def basket_entry_prem(path: dict[str, Any], nlegs: int) -> float:
+    nuse = 2 if int(nlegs) == 2 else len(list(path["legs"]))
+    tot = 0.0
+    for lg in list(path["legs"])[:nuse]:
+        tot += float(lg["fill"]) * s018.QTY * OPTIONS_CONTRACT_VALUE
+    return tot
+
+
 def scan_path_dev(
     path: dict[str, Any],
     tgt: float,
@@ -853,16 +870,17 @@ def scan_path_dev(
     trail_arm: float = 0.0,
     trail_give: float = 0.0,
     prem_pct: float = 0.0,
+    strangle_exit: bool = False,
 ) -> dict[str, Any] | None:
     trail_on = float(trail_arm) > 0.0
-    if float(prem_pct) > 0.0:
-        nuse = 2 if int(nlegs) == 2 else len(list(path["legs"]))
-        debit = 0.0
-        for lg in list(path["legs"])[:nuse]:
-            debit += float(lg["fill"]) * s018.QTY * OPTIONS_CONTRACT_VALUE
-        tgt = debit * (float(prem_pct) / 100.0)
-        sl = debit * (float(prem_pct) / 100.0)
-    custom = trail_on or int(nlegs) == 2 or float(prem_pct) > 0.0
+    if strangle_exit:
+        p = basket_entry_prem(path, nlegs)
+        sl = float(SG_SL_FRAC) * p
+        tgt = float(SG_CAP_FRAC) * p
+        trail_arm = float(SG_TRAIL_ARM_FRAC) * p
+        trail_give = float(SG_TRAIL_GIVE_FRAC) * p
+        trail_on = True
+    custom = trail_on or int(nlegs) == 2 or strangle_exit
     if not custom and time_stop_sec is None:
         return s020.scan_path(path, tgt, sl, spot_c)
     if not custom:
@@ -1016,6 +1034,7 @@ def simulate_plan(
     trail_cap: float = DEFAULT_TRAIL_CAP,
     basket: str = "std",
     prem_pct: float = 0.0,
+    strangle_exit: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     busy = -1
     rows: list[dict[str, Any]] = []
@@ -1051,7 +1070,7 @@ def simulate_plan(
         walked = scan_path_dev(
             path, scan_tgt, sl, spot_c, time_stop_sec,
             nlegs=nlegs, trail_arm=trail_arm, trail_give=trail_give,
-            prem_pct=prem_pct,
+            prem_pct=prem_pct, strangle_exit=strangle_exit,
         )
         if walked is None:
             continue
@@ -1090,6 +1109,7 @@ def simulate_plan(
                 "leg_deltas": [float(lg.get("delta", float("nan"))) for lg in sel],
                 "leg_roles": [str(lg.get("role", "")) for lg in sel],
                 "net_delta": net_d,
+                "entry_prem": basket_entry_prem(path, nlegs),
                 **extra,
                 **walked,
             }
@@ -1109,6 +1129,9 @@ def stats_dev(rows: list[dict[str, Any]]) -> dict[str, Any]:
     nds = [float(r.get("net_delta", float("nan"))) for r in rows]
     nds = [x for x in nds if np.isfinite(x)]
     base["avg_net_delta"] = float(np.mean(nds)) if nds else float("nan")
+    ps = [float(r.get("entry_prem", float("nan"))) for r in rows]
+    ps = [x for x in ps if np.isfinite(x)]
+    base["avg_p"] = float(np.mean(ps)) if ps else float("nan")
     return base
 
 
@@ -1237,6 +1260,7 @@ def run_combo(
     arm_id: str = "",
     basket: str = "std",
     prem_pct: float = 0.0,
+    strangle_exit: bool = False,
     do_c2: bool = True,
     do_c3: bool = True,
     c2_seeds: tuple[int, ...] | None = None,
@@ -1258,6 +1282,7 @@ def run_combo(
         "trail_cap": trail_cap,
         "basket": basket,
         "prem_pct": prem_pct,
+        "strangle_exit": strangle_exit,
     }
     if int(dte_mode) >= 2:
         cov_x, cov_y = dte2_coverage(store, spot_c, plan_all, False)
@@ -1460,10 +1485,11 @@ def exit_grid_table(done: dict[str, dict[str, Any]], month: str) -> list[str]:
 
 def strangle_grid_table(done: dict[str, dict[str, Any]], month: str) -> list[str]:
     lines = [
-        "STRANGLE-GRID (TP/SL=100% of debit):",
+        "STRANGLE-GRID (prereg: SL 50%P, trail 30/20, cap 100%P):",
         f"{'sig':<16} {'arm':<4} {'n':>5} {'mean':>9} {'gross':>9} "
         f"{'broker':>8} {'slip':>8} {'win%':>7} {'C2':>9} {'C3':>9}",
     ]
+    extra: list[str] = ["P / brokerage/trade / slippage/trade:"]
     for tf, var, band, mode in EXIT_GRID_SIGS:
         sig = f"{tf}/{var}/b{band}/{mode}"
         for arm in STRANGLE_ARMS:
@@ -1486,6 +1512,13 @@ def strangle_grid_table(done: dict[str, dict[str, Any]], month: str) -> list[str
                 f"{s020._fnum(s.get('c2', float('nan')), 2):>9} "
                 f"{s020._fnum(s.get('c3', float('nan')), 2):>9}"
             )
+            extra.append(
+                f"  {sig} {str(arm['id'])}  "
+                f"P={s020._fnum(s.get('avg_p', float('nan')), 2)}  "
+                f"brokerage/trade={s020._fnum(s.get('fee', float('nan')), 2)}  "
+                f"slippage/trade={s020._fnum(s.get('slip', float('nan')), 2)}"
+            )
+    lines.extend(extra)
     return lines
 
 
@@ -1654,7 +1687,7 @@ def main() -> None:
                     "tf": tf, "variant": var, "band": band, "band_mode": mode,
                     "legs": 3, "dte": 1, "trail_arm": 0.0, "trail_give": 0.0,
                     "trail_cap": DEFAULT_TRAIL_CAP, "arm_id": "",
-                    "basket": "std", "prem_pct": 0.0,
+                    "basket": "std", "prem_pct": 0.0, "strangle_exit": False,
                 }
             )
     else:
@@ -1672,7 +1705,7 @@ def main() -> None:
                     "trail_give": float(args.trail_give),
                     "trail_cap": float(args.trail_cap),
                     "arm_id": "",
-                    "basket": "std", "prem_pct": 0.0,
+                    "basket": "std", "prem_pct": 0.0, "strangle_exit": False,
                 }
             )
     arm_n = max(1, len(work))
@@ -1694,6 +1727,7 @@ def main() -> None:
         arm_id = str(w["arm_id"])
         basket = str(w.get("basket", "std"))
         prem_pct = float(w.get("prem_pct", 0.0))
+        strangle_exit = bool(w.get("strangle_exit", False))
         do_c2 = bool(w.get("do_c2", True))
         do_c3 = bool(w.get("do_c3", True))
         c2_seeds = w.get("c2_seeds")
@@ -1763,7 +1797,7 @@ def main() -> None:
             band, band_mode, n_raw, vwap_1m, c,
             nlegs=nlegs, dte_mode=dte_mode, trail_arm=trail_arm,
             trail_give=trail_give, trail_cap=trail_cap, arm_id=arm_id,
-            basket=basket, prem_pct=prem_pct,
+            basket=basket, prem_pct=prem_pct, strangle_exit=strangle_exit,
             do_c2=do_c2, do_c3=do_c3,
             c2_seeds=tuple(c2_seeds) if c2_seeds is not None else None,
         )
