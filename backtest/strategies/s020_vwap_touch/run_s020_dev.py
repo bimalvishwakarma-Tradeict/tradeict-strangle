@@ -55,9 +55,11 @@ TGTS = (100, 150, 200, 250, 300)
 SLS = (100, 150, 200, 250, 300)
 PRIMARY_T, PRIMARY_SL = 250, 250
 RANDOM_SEEDS = tuple(range(10))
+RANDOM_SEEDS_20 = tuple(range(20))
 TFS = ("1m", "3m", "5m", "15m")
 VARIANTS = ("V0", "V1", "V2", "V3", "V4", "V5")
-TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900}
+TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800}
+LINE_TF = dict(TF_SEC)
 TIME_STOP_SEC = 4 * 3600
 FRESH_AGE_SEC = 12 * 3600
 DEFAULT_TRAIL_CAP = 400.0
@@ -109,6 +111,51 @@ EXIT_GRID_SIGS: tuple[tuple[str, str, int, str], ...] = (
     ("1m", "V0", 0, "near"),
     ("15m", "V5", 300, "far"),
 )
+ARM_A4: dict[str, Any] = {
+    "id": "A4",
+    "legs": 2,
+    "trail_arm": 80.0,
+    "trail_give": 60.0,
+    "trail_cap": DEFAULT_TRAIL_CAP,
+    "dte": 1,
+    "tgt": PRIMARY_T,
+    "sl": PRIMARY_SL,
+    "basket": "a4",
+    "prem_pct": 0.0,
+}
+# Long strangle (buy call≈X + put≈X); TP/SL = 100% of debit USD.
+STRANGLE_ARMS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "B1",
+        "legs": 2,
+        "trail_arm": 0.0,
+        "trail_give": 0.0,
+        "trail_cap": DEFAULT_TRAIL_CAP,
+        "dte": 1,
+        "tgt": PRIMARY_T,
+        "sl": PRIMARY_SL,
+        "basket": "sg150",
+        "prem_pct": 100.0,
+        "sx": 150.0,
+    },
+    {
+        "id": "B2",
+        "legs": 2,
+        "trail_arm": 0.0,
+        "trail_give": 0.0,
+        "trail_cap": DEFAULT_TRAIL_CAP,
+        "dte": 1,
+        "tgt": PRIMARY_T,
+        "sl": PRIMARY_SL,
+        "basket": "sg300",
+        "prem_pct": 100.0,
+        "sx": 300.0,
+    },
+)
+TFBAND_TFS = ("5m", "15m", "30m")
+TFBAND_VARS = ("V0", "V5")
+TFBAND_BANDS = (0, 100, 200, 300, 400, 500, 600, 700, 800)
+TFBAND_ARM_IDS = ("A0", "A1", "A2", "A4")
 
 
 class MonthGuardStore:
@@ -276,6 +323,8 @@ def cell_key(
     trail_arm: float = 0.0,
     trail_give: float = 0.0,
     trail_cap: float = DEFAULT_TRAIL_CAP,
+    arm_id: str = "",
+    basket: str = "std",
 ) -> str:
     key = f"{month}|{tf}|{variant}|T={tgt}|SL={slv}|band={int(band)}|{str(mode)}"
     if int(legs) != 3:
@@ -284,13 +333,50 @@ def cell_key(
         key += f"|D={int(dte)}"
     if float(trail_arm) > 0:
         key += f"|tr={int(trail_arm)}/{int(trail_give)}/{int(trail_cap)}"
+    bid = str(arm_id)
+    bsk = str(basket)
+    if bid == "A4" or bsk == "a4":
+        key += "|A4"
+    if bid.startswith("B") or bsk.startswith("sg"):
+        key += f"|{bid or bsk}"
     return key
 
 
-def path_tag(base: str, dte: int) -> str:
-    if int(dte) == 1:
-        return base
-    return f"{base}_L3_D{int(dte)}"
+def path_tag(base: str, dte: int, basket: str = "std") -> str:
+    tag = str(base)
+    bsk = str(basket)
+    if bsk == "a4":
+        tag = f"{tag}_A4"
+    elif bsk.startswith("sg"):
+        tag = f"{tag}_{bsk}"
+    if int(dte) != 1:
+        tag = f"{tag}_D{int(dte)}"
+    return tag
+
+
+def arm_by_id(aid: str) -> dict[str, Any]:
+    if aid == "A4":
+        return dict(ARM_A4)
+    for a in EXIT_ARMS:
+        if str(a["id"]) == aid:
+            return dict(a)
+    for a in STRANGLE_ARMS:
+        if str(a["id"]) == aid:
+            return dict(a)
+    raise KeyError(aid)
+
+
+def work_fields_from_arm(arm: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "legs": int(arm["legs"]),
+        "dte": int(arm.get("dte", 1)),
+        "trail_arm": float(arm.get("trail_arm", 0.0)),
+        "trail_give": float(arm.get("trail_give", 0.0)),
+        "trail_cap": float(arm.get("trail_cap", DEFAULT_TRAIL_CAP)),
+        "arm_id": str(arm["id"]),
+        "basket": str(arm.get("basket", "std")),
+        "prem_pct": float(arm.get("prem_pct", 0.0)),
+    }
 
 
 def hour_idx_band(
@@ -522,30 +608,35 @@ def cache_file(entry_ts: int, side: str, exp: date, tag: str) -> Path:
     return CACHE_DIR / f"{entry_ts}_{side}_{exp.isoformat()}_{tag}_{PATH_VER}.npz"
 
 
-def pick_basket_dev(
-    store: Any, side: str, t: int, spot: float, flipped: bool, dte_mode: int = 1
-) -> list[s018.Leg] | None:
-    want = side
-    if flipped:
-        want = "short" if side == "long" else "long"
-    exp = expiry_for_dte(t, dte_mode)
-    packed = s018.load_chain(store, exp, t)
-    if packed is None:
+def _strikes_sorted(rows: list[dict[str, Any]]) -> list[float]:
+    return sorted({float(r["strike"]) for r in rows})
+
+
+def atm_strike_of(rows: list[dict[str, Any]], spot: float) -> float | None:
+    ks = _strikes_sorted(rows)
+    if not ks:
         return None
-    rows, _ = packed
-    exp_ts = s018.expiry_unix(exp)
-    t_yr = t_years(t, exp_ts)
-    dte = max(0, (exp - ist_date(t)).days)
-    if want == "long":
-        specs = [(False, 1000.0, "p1000"), (True, 500.0, "c500"), (True, 300.0, "c300")]
-    else:
-        specs = [(True, 1000.0, "c1000"), (False, 500.0, "p500"), (False, 300.0, "p300")]
-    chosen: list[tuple[dict[str, Any], str]] = []
-    for is_call, tgt, role in specs:
-        r = s018.nearest(rows, is_call, tgt)
-        if r is None:
-            return None
-        chosen.append((r, role))
+    return min(ks, key=lambda k: (abs(k - float(spot)), k))
+
+
+def row_strike(rows: list[dict[str, Any]], is_call: bool, strike: float) -> dict[str, Any] | None:
+    cand = [
+        r
+        for r in rows
+        if bool(r["is_call"]) == is_call and abs(float(r["strike"]) - float(strike)) < 1e-6
+    ]
+    return cand[0] if cand else None
+
+
+def _legs_from_chosen(
+    store: Any,
+    exp: date,
+    t: int,
+    spot: float,
+    t_yr: float,
+    dte: int,
+    chosen: list[tuple[dict[str, Any], str]],
+) -> list[s018.Leg] | None:
     legs: list[s018.Leg] = []
     for r, role in chosen:
         q = s018.mark_le(store, exp, str(r["symbol"]), t)
@@ -569,6 +660,72 @@ def pick_basket_dev(
     return legs
 
 
+def pick_basket_dev(
+    store: Any,
+    side: str,
+    t: int,
+    spot: float,
+    flipped: bool,
+    dte_mode: int = 1,
+    basket: str = "std",
+) -> list[s018.Leg] | None:
+    want = side
+    if flipped:
+        want = "short" if side == "long" else "long"
+    exp = expiry_for_dte(t, dte_mode)
+    packed = s018.load_chain(store, exp, t)
+    if packed is None:
+        return None
+    rows, _ = packed
+    exp_ts = s018.expiry_unix(exp)
+    t_yr = t_years(t, exp_ts)
+    dte = max(0, (exp - ist_date(t)).days)
+    bsk = str(basket)
+    chosen: list[tuple[dict[str, Any], str]] = []
+    if bsk.startswith("sg"):
+        try:
+            px = float(bsk.replace("sg", ""))
+        except ValueError:
+            px = 150.0
+        c_row = s018.nearest(rows, True, px)
+        p_row = s018.nearest(rows, False, px)
+        if c_row is None or p_row is None:
+            return None
+        chosen = [(c_row, f"c{int(px)}"), (p_row, f"p{int(px)}")]
+    elif bsk == "a4":
+        atm = atm_strike_of(rows, spot)
+        if atm is None:
+            return None
+        ks = _strikes_sorted(rows)
+        if want == "long":
+            below = [k for k in ks if k < atm]
+            itm_k = below[-1] if below else None
+            p_row = s018.nearest(rows, False, 1000.0)
+            c_row = row_strike(rows, True, float(itm_k)) if itm_k is not None else None
+            if p_row is None or c_row is None:
+                return None
+            chosen = [(p_row, "p1000"), (c_row, "c_itm")]
+        else:
+            above = [k for k in ks if k > atm]
+            itm_k = above[0] if above else None
+            c_row = s018.nearest(rows, True, 1000.0)
+            p_row = row_strike(rows, False, float(itm_k)) if itm_k is not None else None
+            if c_row is None or p_row is None:
+                return None
+            chosen = [(c_row, "c1000"), (p_row, "p_itm")]
+    else:
+        if want == "long":
+            specs = [(False, 1000.0, "p1000"), (True, 500.0, "c500"), (True, 300.0, "c300")]
+        else:
+            specs = [(True, 1000.0, "c1000"), (False, 500.0, "p500"), (False, 300.0, "p300")]
+        for is_call, tgt, role in specs:
+            r = s018.nearest(rows, is_call, tgt)
+            if r is None:
+                return None
+            chosen.append((r, role))
+    return _legs_from_chosen(store, exp, t, spot, t_yr, dte, chosen)
+
+
 def get_or_build_path(
     store: Any,
     spot_c: dict[int, float],
@@ -577,21 +734,30 @@ def get_or_build_path(
     tag: str,
     flipped: bool,
     dte_mode: int = 1,
+    basket: str = "std",
 ) -> tuple[dict[str, Any] | None, bool]:
     exp = expiry_for_dte(t, dte_mode)
-    fp = cache_file(t, side, exp, path_tag(tag, dte_mode))
+    fp = cache_file(t, side, exp, path_tag(tag, dte_mode, basket=basket))
     path = s020.load_path(fp)
     if path is not None:
         return path, False
     sp = spot_c.get(t)
     if sp is None:
         return None, False
-    legs = pick_basket_dev(store, side, t, float(sp), flipped, dte_mode=dte_mode)
+    legs = pick_basket_dev(
+        store, side, t, float(sp), flipped, dte_mode=dte_mode, basket=basket
+    )
     if legs is None:
         return None, False
     path = s020.build_path(store, spot_c, legs, t, exp)
     if path is None:
         return None, False
+    if str(basket) == "a4":
+        packed = s018.load_chain(store, exp, t)
+        atm = atm_strike_of(packed[0], float(sp)) if packed else None
+        for lg in path["legs"]:
+            lg["atm_strike"] = atm
+            lg["entry_spot"] = float(sp)
     s020.save_path(fp, path)
     return path, True
 
@@ -686,9 +852,17 @@ def scan_path_dev(
     nlegs: int = 3,
     trail_arm: float = 0.0,
     trail_give: float = 0.0,
+    prem_pct: float = 0.0,
 ) -> dict[str, Any] | None:
     trail_on = float(trail_arm) > 0.0
-    custom = trail_on or int(nlegs) == 2
+    if float(prem_pct) > 0.0:
+        nuse = 2 if int(nlegs) == 2 else len(list(path["legs"]))
+        debit = 0.0
+        for lg in list(path["legs"])[:nuse]:
+            debit += float(lg["fill"]) * s018.QTY * OPTIONS_CONTRACT_VALUE
+        tgt = debit * (float(prem_pct) / 100.0)
+        sl = debit * (float(prem_pct) / 100.0)
+    custom = trail_on or int(nlegs) == 2 or float(prem_pct) > 0.0
     if not custom and time_stop_sec is None:
         return s020.scan_path(path, tgt, sl, spot_c)
     if not custom:
@@ -840,6 +1014,8 @@ def simulate_plan(
     trail_arm: float = 0.0,
     trail_give: float = 0.0,
     trail_cap: float = DEFAULT_TRAIL_CAP,
+    basket: str = "std",
+    prem_pct: float = 0.0,
 ) -> tuple[list[dict[str, Any]], int]:
     busy = -1
     rows: list[dict[str, Any]] = []
@@ -863,7 +1039,9 @@ def simulate_plan(
                 continue
         elif not entry_allowed(t):
             continue
-        path, newp = get_or_build_path(store, spot_c, t, side, tag, flipped, dte_mode=dte_mode)
+        path, newp = get_or_build_path(
+            store, spot_c, t, side, tag, flipped, dte_mode=dte_mode, basket=basket
+        )
         if newp:
             built += 1
         if path is None:
@@ -873,6 +1051,7 @@ def simulate_plan(
         walked = scan_path_dev(
             path, scan_tgt, sl, spot_c, time_stop_sec,
             nlegs=nlegs, trail_arm=trail_arm, trail_give=trail_give,
+            prem_pct=prem_pct,
         )
         if walked is None:
             continue
@@ -881,6 +1060,15 @@ def simulate_plan(
         hrs_exp = (s018.expiry_unix(exp) - int(t)) / 3600.0
         mf, ma = mfe_mae(path, nlegs, int(walked["exit_ts"]))
         eiv = entry_iv_avg(path, float(spot_c.get(t, 0.0)), t)
+        sel = list(path["legs"])[: 2 if int(nlegs) == 2 else len(list(path["legs"]))]
+        nd = 0.0
+        nfin = 0
+        for lg in sel:
+            dv = float(lg.get("delta", float("nan")))
+            if np.isfinite(dv):
+                nd += dv
+                nfin += 1
+        net_d = nd if nfin else float("nan")
         rows.append(
             {
                 "entry_ts": t,
@@ -896,6 +1084,12 @@ def simulate_plan(
                 "mfe": mf,
                 "mae": ma,
                 "exit_reason": walked.get("reason"),
+                "spot": float(spot_c.get(t, 0.0)),
+                "atm_strike": sel[0].get("atm_strike") if sel else None,
+                "leg_strikes": [float(lg["strike"]) for lg in sel],
+                "leg_deltas": [float(lg.get("delta", float("nan"))) for lg in sel],
+                "leg_roles": [str(lg.get("role", "")) for lg in sel],
+                "net_delta": net_d,
                 **extra,
                 **walked,
             }
@@ -912,6 +1106,9 @@ def stats_dev(rows: list[dict[str, Any]]) -> dict[str, Any]:
     wd, we = s020.ww_block(rows)
     base["wd"] = wd
     base["we"] = we
+    nds = [float(r.get("net_delta", float("nan"))) for r in rows]
+    nds = [x for x in nds if np.isfinite(x)]
+    base["avg_net_delta"] = float(np.mean(nds)) if nds else float("nan")
     return base
 
 
@@ -1038,6 +1235,11 @@ def run_combo(
     trail_give: float = 0.0,
     trail_cap: float = DEFAULT_TRAIL_CAP,
     arm_id: str = "",
+    basket: str = "std",
+    prem_pct: float = 0.0,
+    do_c2: bool = True,
+    do_c3: bool = True,
+    c2_seeds: tuple[int, ...] | None = None,
 ) -> None:
     time_stop = TIME_STOP_SEC if variant == "V5" else None
     extra_by = {(int(s["ts"]), str(s["side"])): s for s in sigs}
@@ -1054,6 +1256,8 @@ def run_combo(
         "trail_arm": trail_arm,
         "trail_give": trail_give,
         "trail_cap": trail_cap,
+        "basket": basket,
+        "prem_pct": prem_pct,
     }
     if int(dte_mode) >= 2:
         cov_x, cov_y = dte2_coverage(store, spot_c, plan_all, False)
@@ -1063,6 +1267,7 @@ def run_combo(
             month, tf, variant, tgt, slv, band, band_mode,
             legs=nlegs, dte=dte_mode, trail_arm=trail_arm,
             trail_give=trail_give, trail_cap=trail_cap,
+            arm_id=arm_id, basket=basket,
         )
         if key in done:
             print(f"done SKIP {key}", flush=True)
@@ -1102,43 +1307,51 @@ def run_combo(
                 "trail_give": float(trail_give),
                 "trail_cap": float(trail_cap),
                 "arm_id": str(arm_id),
+                "basket": str(basket),
             }
         )
         c2m = float("nan")
         c3m = float("nan")
+        seeds = RANDOM_SEEDS if c2_seeds is None else c2_seeds
         if tgt == PRIMARY_T and slv == PRIMARY_SL:
-            c2s: list[float] = []
-            c2_pool: list[dict[str, Any]] = []
-            for si, seed in enumerate(RANDOM_SEEDS, start=1):
-                print(f"C2 {key} seed {si}/{len(RANDOM_SEEDS)}", flush=True)
-                forced = s020.random_c2(rows, ts, hour_idx, seed)
-                rr, _ = simulate_plan(
-                    store, spot_c, forced, float(tgt), float(slv), f"C2{tag_p}", False,
+            if do_c2:
+                c2s: list[float] = []
+                c2_pool: list[dict[str, Any]] = []
+                for si, seed in enumerate(seeds, start=1):
+                    print(f"C2 {key} seed {si}/{len(seeds)}", flush=True)
+                    forced = s020.random_c2(rows, ts, hour_idx, seed)
+                    rr, _ = simulate_plan(
+                        store, spot_c, forced, float(tgt), float(slv), f"C2{tag_p}", False,
+                        start_ts, cutoff, win_from, win_to, time_stop,
+                        label=f"C2 {key} seed={si}",
+                        **sim_kw,
+                    )
+                    c2_pool.extend(rr)
+                    if rr:
+                        c2s.append(float(np.mean([x["net"] for x in rr])))
+                c2m = float(np.mean(c2s)) if c2s else float("nan")
+                stt["c2"] = c2m
+                stt["c2_wd"] = s020.stats_ww(s020.split_wd_we(c2_pool)[0])
+                stt["c2_we"] = s020.stats_ww(s020.split_wd_we(c2_pool)[1])
+            if do_c3:
+                print(f"C3 {key}", flush=True)
+                plan_c3 = [(int(r["entry_ts"]), str(r["side"])) for r in rows]
+                c3, _ = simulate_plan(
+                    store, spot_c, plan_c3, float(tgt), float(slv), f"C3{tag_p}", True,
                     start_ts, cutoff, win_from, win_to, time_stop,
-                    label=f"C2 {key} seed={si}",
+                    label=f"C3 {key}",
                     **sim_kw,
                 )
-                c2_pool.extend(rr)
-                if rr:
-                    c2s.append(float(np.mean([x["net"] for x in rr])))
-            print(f"C3 {key}", flush=True)
-            plan_c3 = [(int(r["entry_ts"]), str(r["side"])) for r in rows]
-            c3, _ = simulate_plan(
-                store, spot_c, plan_c3, float(tgt), float(slv), f"C3{tag_p}", True,
-                start_ts, cutoff, win_from, win_to, time_stop,
-                label=f"C3 {key}",
-                **sim_kw,
-            )
-            c2m = float(np.mean(c2s)) if c2s else float("nan")
-            c3s = stats_dev(c3)
-            c3m = float(c3s["mean"])
-            stt["c2"] = c2m
-            stt["c3"] = c3m
-            stt["c2_wd"] = s020.stats_ww(s020.split_wd_we(c2_pool)[0])
-            stt["c2_we"] = s020.stats_ww(s020.split_wd_we(c2_pool)[1])
-            stt["c3_wd"] = c3s["wd"]
-            stt["c3_we"] = c3s["we"]
-            stt["c3_full"] = {k: v for k, v in c3s.items() if k not in ("wd", "we")}
+                c3s = stats_dev(c3)
+                c3m = float(c3s["mean"])
+                stt["c3"] = c3m
+                stt["c3_wd"] = c3s["wd"]
+                stt["c3_we"] = c3s["we"]
+                stt["c3_full"] = {k: v for k, v in c3s.items() if k not in ("wd", "we")}
+            if do_c2:
+                stt["c2"] = c2m
+            if do_c3:
+                stt["c3"] = c3m
         rec = {k: v for k, v in stt.items() if k != "exits"}
         rec["exits"] = stt.get("exits", {})
         s020.append_ckpt(CKPT, rec)
@@ -1245,11 +1458,92 @@ def exit_grid_table(done: dict[str, dict[str, Any]], month: str) -> list[str]:
     return lines
 
 
+def strangle_grid_table(done: dict[str, dict[str, Any]], month: str) -> list[str]:
+    lines = [
+        "STRANGLE-GRID (TP/SL=100% of debit):",
+        f"{'sig':<16} {'arm':<4} {'n':>5} {'mean':>9} {'gross':>9} "
+        f"{'broker':>8} {'slip':>8} {'win%':>7} {'C2':>9} {'C3':>9}",
+    ]
+    for tf, var, band, mode in EXIT_GRID_SIGS:
+        sig = f"{tf}/{var}/b{band}/{mode}"
+        for arm in STRANGLE_ARMS:
+            key = cell_key(
+                month, tf, var, PRIMARY_T, PRIMARY_SL, band, mode,
+                legs=int(arm["legs"]), dte=int(arm["dte"]),
+                trail_arm=0.0, trail_give=0.0, trail_cap=DEFAULT_TRAIL_CAP,
+                arm_id=str(arm["id"]), basket=str(arm["basket"]),
+            )
+            s = done.get(key)
+            if s is None:
+                continue
+            lines.append(
+                f"{sig:<16} {str(arm['id']):<4} {int(s.get('n', 0)):5d} "
+                f"{s020._fnum(s.get('mean', float('nan')), 2):>9} "
+                f"{s020._fnum(s.get('gross', float('nan')), 2):>9} "
+                f"{s020._fnum(s.get('fee', float('nan')), 2):>8} "
+                f"{s020._fnum(s.get('slip', float('nan')), 2):>8} "
+                f"{s020._fnum(s.get('win', float('nan')), 1):>7} "
+                f"{s020._fnum(s.get('c2', float('nan')), 2):>9} "
+                f"{s020._fnum(s.get('c3', float('nan')), 2):>9}"
+            )
+    return lines
+
+
+def print_a4_leg_details(rows: list[dict[str, Any]], n: int = 2) -> None:
+    print("=== A4 LEG DETAIL ===", flush=True)
+    shown = 0
+    for r in rows:
+        roles = list(r.get("leg_roles") or [])
+        strikes = list(r.get("leg_strikes") or [])
+        deltas = list(r.get("leg_deltas") or [])
+        itm_call = float("nan")
+        itm_put = float("nan")
+        for role, k in zip(roles, strikes):
+            if role == "c_itm":
+                itm_call = float(k)
+            if role == "p_itm":
+                itm_put = float(k)
+        print(
+            f"  {r['side']} entry={s018.ist_str(int(r['entry_ts']))} "
+            f"spot={float(r.get('spot', float('nan'))):.1f} "
+            f"ATM={r.get('atm_strike')} ITM_call={itm_call} ITM_put={itm_put} "
+            f"strikes={strikes} deltas={deltas} net_delta={r.get('net_delta')}",
+            flush=True,
+        )
+        shown += 1
+        if shown >= n:
+            break
+    if shown == 0:
+        print("  (no A4 trades)", flush=True)
+
+
+def tf_band_work() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for tf in TFBAND_TFS:
+        for var in TFBAND_VARS:
+            for band in TFBAND_BANDS:
+                mode = "near" if int(band) == 0 else "far"
+                for aid in TFBAND_ARM_IDS:
+                    arm = arm_by_id(aid)
+                    rec = {
+                        "tf": tf,
+                        "variant": var,
+                        "band": int(band),
+                        "band_mode": mode,
+                    }
+                    rec.update(work_fields_from_arm(arm))
+                    rec["do_c2"] = int(band) in (0, 300)
+                    rec["do_c3"] = aid == "A0"
+                    rec["c2_seeds"] = RANDOM_SEEDS_20 if rec["do_c2"] else ()
+                    out.append(rec)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default=s018.SPOT_CSV)
     ap.add_argument("--month", default="2025-06")
-    ap.add_argument("--tf", default="1m", choices=list(TFS))
+    ap.add_argument("--tf", default="1m", choices=list(TF_SEC))
     ap.add_argument("--variant", default="V0", choices=list(VARIANTS))
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--band", type=int, default=0)
@@ -1261,6 +1555,8 @@ def main() -> None:
     ap.add_argument("--trail-cap", type=float, default=DEFAULT_TRAIL_CAP)
     ap.add_argument("--dte", type=int, default=1, choices=(1, 2))
     ap.add_argument("--exit-grid", action="store_true")
+    ap.add_argument("--strangle-grid", action="store_true")
+    ap.add_argument("--tf-band-grid", action="store_true")
     ap.add_argument("--max-days", type=int, default=0)
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--cache-gb", type=float, default=1.0)
@@ -1293,6 +1589,8 @@ def main() -> None:
     spot = s018.load_spot_1m(args.csv)
     ts, o, h, l, c, vol = s020.bars_1m_vol(spot)
     exit_grid = bool(args.exit_grid)
+    strangle_grid = bool(args.strangle_grid)
+    tf_band = bool(args.tf_band_grid)
     need_d2 = exit_grid or int(args.dte) >= 2
     pad_d = 5 if need_d2 else 3
     lo = start_ts - 3 * 86400
@@ -1318,27 +1616,32 @@ def main() -> None:
     grid = bool(args.band_grid)
     jobs: list[tuple[str, str, int, str]]
     work: list[dict[str, Any]] = []
-    if exit_grid:
+    if tf_band:
+        band0, mode0 = 0, "near"
+        work = tf_band_work()
+        tfs = sorted({str(w["tf"]) for w in work})
+        variants = sorted({str(w["variant"]) for w in work})
+        jobs = [(str(w["tf"]), str(w["variant"]), int(w["band"]), str(w["band_mode"])) for w in work]
+    elif strangle_grid:
+        band0, mode0 = 0, "near"
+        tfs = sorted({s[0] for s in EXIT_GRID_SIGS})
+        variants = sorted({s[1] for s in EXIT_GRID_SIGS})
+        jobs = list(EXIT_GRID_SIGS)
+        for tf, var, band, mode in EXIT_GRID_SIGS:
+            for arm in STRANGLE_ARMS:
+                rec = {"tf": tf, "variant": var, "band": band, "band_mode": mode}
+                rec.update(work_fields_from_arm(arm))
+                work.append(rec)
+    elif exit_grid:
         band0, mode0 = 0, "near"
         tfs = sorted({s[0] for s in EXIT_GRID_SIGS})
         variants = sorted({s[1] for s in EXIT_GRID_SIGS})
         jobs = list(EXIT_GRID_SIGS)
         for tf, var, band, mode in EXIT_GRID_SIGS:
             for arm in EXIT_ARMS:
-                work.append(
-                    {
-                        "tf": tf,
-                        "variant": var,
-                        "band": band,
-                        "band_mode": mode,
-                        "legs": int(arm["legs"]),
-                        "dte": int(arm["dte"]),
-                        "trail_arm": float(arm["trail_arm"]),
-                        "trail_give": float(arm["trail_give"]),
-                        "trail_cap": float(arm["trail_cap"]),
-                        "arm_id": str(arm["id"]),
-                    }
-                )
+                rec = {"tf": tf, "variant": var, "band": band, "band_mode": mode}
+                rec.update(work_fields_from_arm(arm))
+                work.append(rec)
     elif grid:
         jobs = band_grid_jobs()
         tfs = sorted({j[0] for j in jobs})
@@ -1351,6 +1654,7 @@ def main() -> None:
                     "tf": tf, "variant": var, "band": band, "band_mode": mode,
                     "legs": 3, "dte": 1, "trail_arm": 0.0, "trail_give": 0.0,
                     "trail_cap": DEFAULT_TRAIL_CAP, "arm_id": "",
+                    "basket": "std", "prem_pct": 0.0,
                 }
             )
     else:
@@ -1368,6 +1672,7 @@ def main() -> None:
                     "trail_give": float(args.trail_give),
                     "trail_cap": float(args.trail_cap),
                     "arm_id": "",
+                    "basket": "std", "prem_pct": 0.0,
                 }
             )
     arm_n = max(1, len(work))
@@ -1387,9 +1692,14 @@ def main() -> None:
         trail_give = float(w["trail_give"])
         trail_cap = float(w["trail_cap"])
         arm_id = str(w["arm_id"])
+        basket = str(w.get("basket", "std"))
+        prem_pct = float(w.get("prem_pct", 0.0))
+        do_c2 = bool(w.get("do_c2", True))
+        do_c3 = bool(w.get("do_c3", True))
+        c2_seeds = w.get("c2_seeds")
         ck = (tf, variant)
         if ck not in sig_cache:
-            tf_sec = TF_SEC[tf]
+            tf_sec = LINE_TF[tf]
             tts, to_, th, tl, tc, tv = resample_tf(ts, o, h, l, c, vol, tf_sec)
             vwap_tf = s020.session_vwap(tts, th, tl, tc, tv)
             raw_lines, _, _ = s020.detect_swings(tts, to_, th, tl, tc, vwap_tf)
@@ -1419,29 +1729,28 @@ def main() -> None:
         n_raw = len(win_sigs)
         sigs = [s for s in win_sigs if keep_signal(s, band, band_mode)]
         kept_pct = (100.0 * len(sigs) / n_raw) if n_raw else 0.0
-        print(
-            f"S020-DEV {month} tf={tf} {variant} band={band} mode={band_mode} "
-            f"lines={len(dlines)} kept {len(sigs)} of {n_raw} signals ({kept_pct:.1f}%) "
-            f"both_skip={both_skip}",
-            flush=True,
-        )
-        # Y in "kept X of Y" is n_raw = len(win_sigs): month/window signals,
-        # not time-allowed. Time skips are applied later in keep_signal.
-        bd = signal_breakdown(win_sigs, band)
-        print(
-            f"signals total={bd['total']} | time_skip_lunch={bd['lunch']} | "
-            f"time_skip_thusat={bd['thusat']} | vwap_nan={bd['vwap_nan']} | "
-            f"near(<={band})={bd['near']} | far(>{band})={bd['far']} | "
-            f"other={bd['other']} | sum={bd['sum']} "
-            f"(kept Y=window_raw not time-allowed)",
-            flush=True,
-        )
-        if bd["other"]:
-            print(f"other examples: {bd['other_ex']}", flush=True)
+        if not tf_band:
+            print(
+                f"S020-DEV {month} tf={tf} {variant} band={band} mode={band_mode} "
+                f"lines={len(dlines)} kept {len(sigs)} of {n_raw} signals ({kept_pct:.1f}%) "
+                f"both_skip={both_skip}",
+                flush=True,
+            )
+            bd = signal_breakdown(win_sigs, band)
+            print(
+                f"signals total={bd['total']} | time_skip_lunch={bd['lunch']} | "
+                f"time_skip_thusat={bd['thusat']} | vwap_nan={bd['vwap_nan']} | "
+                f"near(<={band})={bd['near']} | far(>{band})={bd['far']} | "
+                f"other={bd['other']} | sum={bd['sum']} "
+                f"(kept Y=window_raw not time-allowed)",
+                flush=True,
+            )
+            if bd["other"]:
+                print(f"other examples: {bd['other_ex']}", flush=True)
         if max_days and variant == "V3":
             smoke_sigs = sigs
             print_v3_examples(sigs, ts)
-        if grid or exit_grid:
+        if grid or exit_grid or strangle_grid or tf_band:
             cells = [(PRIMARY_T, PRIMARY_SL)]
         else:
             v0_best = best_v0_cell(done, month, tf)
@@ -1454,14 +1763,25 @@ def main() -> None:
             band, band_mode, n_raw, vwap_1m, c,
             nlegs=nlegs, dte_mode=dte_mode, trail_arm=trail_arm,
             trail_give=trail_give, trail_cap=trail_cap, arm_id=arm_id,
+            basket=basket, prem_pct=prem_pct,
+            do_c2=do_c2, do_c3=do_c3,
+            c2_seeds=tuple(c2_seeds) if c2_seeds is not None else None,
         )
         pk = cell_key(
             month, tf, variant, PRIMARY_T, PRIMARY_SL, band, band_mode,
             legs=nlegs, dte=dte_mode, trail_arm=trail_arm,
             trail_give=trail_give, trail_cap=trail_cap,
+            arm_id=arm_id, basket=basket,
         )
         st = done.get(pk, {})
-        if grid or exit_grid:
+        if tf_band:
+            print(
+                f"[{arm_i}/{arm_n}] {tf} {variant} band={band} {arm_id or '-'} "
+                f"n={int(st.get('n', 0))} mean={s020._fnum(st.get('mean', float('nan')), 2)} "
+                f"elapsed={time.perf_counter()-t_all:.0f}s",
+                flush=True,
+            )
+        elif grid or exit_grid or strangle_grid:
             print(
                 f"[{arm_i}/{arm_n}] {tf} {variant} {arm_id or '-'} L{nlegs} D{dte_mode} "
                 f"band={band} {band_mode} n={int(st.get('n', 0))} "
@@ -1470,6 +1790,8 @@ def main() -> None:
                 f"elapsed={time.perf_counter()-t_all:.0f}s",
                 flush=True,
             )
+        if max_days and arm_id == "A4" and arm_i == 4:
+            print_a4_leg_details(cell_rows.get(pk, []), 2)
         if max_days and variant == "V3":
             print("=== 2 V3 FILLED ENTRIES ===", flush=True)
             shown = 0
@@ -1501,6 +1823,7 @@ def main() -> None:
             legs=int(wh["legs"]), dte=int(wh["dte"]),
             trail_arm=float(wh["trail_arm"]), trail_give=float(wh["trail_give"]),
             trail_cap=float(wh["trail_cap"]),
+            arm_id=str(wh.get("arm_id", "")), basket=str(wh.get("basket", "std")),
         ),
         next(iter(done.values()), {}),
     )
@@ -1523,7 +1846,7 @@ def main() -> None:
         band_mode = str(w["band_mode"])
         cell_list = (
             [(PRIMARY_T, PRIMARY_SL)]
-            if grid or exit_grid
+            if grid or exit_grid or strangle_grid or tf_band
             else cells_for(variant, best_v0_cell(done, month, tf) if variant != "V0" else None)
         )
         for tgt, slv in cell_list:
@@ -1532,6 +1855,7 @@ def main() -> None:
                 legs=int(w["legs"]), dte=int(w["dte"]),
                 trail_arm=float(w["trail_arm"]), trail_give=float(w["trail_give"]),
                 trail_cap=float(w["trail_cap"]),
+                arm_id=str(w.get("arm_id", "")), basket=str(w.get("basket", "std")),
             )
             if key in seen_keys:
                 continue
@@ -1539,27 +1863,43 @@ def main() -> None:
             st = done.get(key)
             if st is None:
                 continue
-            report.append(
-                f"{key} kept {int(st.get('n_sig', 0))} of {int(st.get('n_sig_raw', 0))} "
-                f"({s020._fnum(st.get('kept_pct', float('nan')), 1)}%) ALL {fmt_dev(st)}"
-            )
-            if isinstance(st.get("wd"), dict):
-                report.append(f"  WEEKDAY {s020.fmt_ww(st['wd'])}")
-                report.append(f"  WEEKEND {s020.fmt_ww(st['we'])}")
-            report.extend(iv_tercile_lines(cell_rows.get(key, [])))
-            if tgt == PRIMARY_T and slv == PRIMARY_SL:
+            if not tf_band:
                 report.append(
-                    f"  C2mean={s020._fnum(st.get('c2', float('nan')), 2)} "
-                    f"C3mean={s020._fnum(st.get('c3', float('nan')), 2)}"
+                    f"{key} kept {int(st.get('n_sig', 0))} of {int(st.get('n_sig_raw', 0))} "
+                    f"({s020._fnum(st.get('kept_pct', float('nan')), 1)}%) ALL {fmt_dev(st)}"
                 )
-                if isinstance(st.get("c2_wd"), dict):
-                    report.append(f"  C2 WEEKDAY {s020.fmt_ww(st['c2_wd'])}")
-                    report.append(f"  C2 WEEKEND {s020.fmt_ww(st['c2_we'])}")
-                if isinstance(st.get("c3_wd"), dict):
-                    report.append(f"  C3 WEEKDAY {s020.fmt_ww(st['c3_wd'])}")
-                    report.append(f"  C3 WEEKEND {s020.fmt_ww(st['c3_we'])}")
+                if isinstance(st.get("wd"), dict):
+                    report.append(f"  WEEKDAY {s020.fmt_ww(st['wd'])}")
+                    report.append(f"  WEEKEND {s020.fmt_ww(st['we'])}")
+                report.extend(iv_tercile_lines(cell_rows.get(key, [])))
+                if tgt == PRIMARY_T and slv == PRIMARY_SL:
+                    report.append(
+                        f"  C2mean={s020._fnum(st.get('c2', float('nan')), 2)} "
+                        f"C3mean={s020._fnum(st.get('c3', float('nan')), 2)}"
+                    )
+                    if isinstance(st.get("c2_wd"), dict):
+                        report.append(f"  C2 WEEKDAY {s020.fmt_ww(st['c2_wd'])}")
+                        report.append(f"  C2 WEEKEND {s020.fmt_ww(st['c2_we'])}")
+                    if isinstance(st.get("c3_wd"), dict):
+                        report.append(f"  C3 WEEKDAY {s020.fmt_ww(st['c3_wd'])}")
+                        report.append(f"  C3 WEEKEND {s020.fmt_ww(st['c3_we'])}")
+                if str(w.get("arm_id", "")) in ("A2", "A4"):
+                    report.append(
+                        f"  avg_net_delta={s020._fnum(st.get('avg_net_delta', float('nan')), 4)}"
+                    )
     if exit_grid:
         report.extend(exit_grid_table(done, month))
+    elif strangle_grid:
+        report.extend(strangle_grid_table(done, month))
+    elif tf_band:
+        d2 = [float(s.get("avg_net_delta", float("nan"))) for s in done.values() if str(s.get("arm_id")) == "A2"]
+        d4 = [float(s.get("avg_net_delta", float("nan"))) for s in done.values() if str(s.get("arm_id")) == "A4"]
+        d2 = [x for x in d2 if np.isfinite(x)]
+        d4 = [x for x in d4 if np.isfinite(x)]
+        report.append(
+            f"avg_net_delta A2={s020._fnum(float(np.mean(d2)) if d2 else float('nan'), 4)} "
+            f"A4={s020._fnum(float(np.mean(d4)) if d4 else float('nan'), 4)}"
+        )
     elif grid:
         report.extend(band_grid_table(done, month))
     else:
@@ -1572,6 +1912,7 @@ def main() -> None:
         legs=int(wh["legs"]), dte=int(wh["dte"]),
         trail_arm=float(wh["trail_arm"]), trail_give=float(wh["trail_give"]),
         trail_cap=float(wh["trail_cap"]),
+        arm_id=str(wh.get("arm_id", "")), basket=str(wh.get("basket", "std")),
     )
     prow = cell_rows.get(prim_key, [])
     csvp = OUT_DIR / f"s020_dev_{month}_{stamp}_trades.csv"
@@ -1606,9 +1947,52 @@ def main() -> None:
                     "exit_reason": r.get("exit_reason", r.get("reason")),
                 }
             )
+    if tf_band:
+        tbcsv = OUT_DIR / f"s020_tfband_{month}_{stamp}.csv"
+        with tbcsv.open("w", newline="", encoding="utf-8") as f:
+            tw = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "month", "tf", "variant", "band", "arm", "n", "mean", "gross",
+                    "brokerage", "slippage", "win", "C2", "C3", "avg_net_delta",
+                ],
+            )
+            tw.writeheader()
+            for wj in work:
+                k = cell_key(
+                    month, str(wj["tf"]), str(wj["variant"]), PRIMARY_T, PRIMARY_SL,
+                    int(wj["band"]), str(wj["band_mode"]),
+                    legs=int(wj["legs"]), dte=int(wj["dte"]),
+                    trail_arm=float(wj["trail_arm"]), trail_give=float(wj["trail_give"]),
+                    trail_cap=float(wj["trail_cap"]),
+                    arm_id=str(wj.get("arm_id", "")), basket=str(wj.get("basket", "std")),
+                )
+                s = done.get(k, {})
+                c2v = s.get("c2", float("nan"))
+                c3v = s.get("c3", float("nan"))
+                tw.writerow(
+                    {
+                        "month": month,
+                        "tf": wj["tf"],
+                        "variant": wj["variant"],
+                        "band": wj["band"],
+                        "arm": wj.get("arm_id", ""),
+                        "n": s.get("n", 0),
+                        "mean": s.get("mean", float("nan")),
+                        "gross": s.get("gross", float("nan")),
+                        "brokerage": s.get("fee", float("nan")),
+                        "slippage": s.get("slip", float("nan")),
+                        "win": s.get("win", float("nan")),
+                        "C2": "-" if not np.isfinite(c2v) else c2v,
+                        "C3": "-" if not np.isfinite(c3v) else c3v,
+                        "avg_net_delta": s.get("avg_net_delta", float("nan")),
+                    }
+                )
+        print(f"wrote {tbcsv}", flush=True)
     print("\n".join(report))
     print(f"wrote {txtp}")
     print(f"wrote {csvp}")
+    print(f"TOTAL elapsed={time.perf_counter()-t_all:.0f}s", flush=True)
     store.close()
 
 
