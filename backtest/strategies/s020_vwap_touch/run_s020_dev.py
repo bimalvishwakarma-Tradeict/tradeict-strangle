@@ -33,6 +33,7 @@ for _p in (str(_ROOT), str(_BACKTEST)):
 from backtest.fees_sim import OPTIONS_CONTRACT_VALUE  # noqa: E402
 from backtest.harness.data import MarksStore, ist_dt, to_unix  # noqa: E402
 from backtest.harness.mark_cache import reset_mark_cache  # noqa: E402
+from backtest.s004_gate import implied_vol_bisection  # noqa: E402
 from backtest.slippage_model import load_slip_table  # noqa: E402
 from backtest.strategies.s012_trend_follow.engine import (  # noqa: E402
     intrinsic,
@@ -59,6 +60,55 @@ VARIANTS = ("V0", "V1", "V2", "V3", "V4", "V5")
 TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900}
 TIME_STOP_SEC = 4 * 3600
 FRESH_AGE_SEC = 12 * 3600
+DEFAULT_TRAIL_CAP = 400.0
+
+# Pre-registered --exit-grid arms; values are locked.
+EXIT_ARMS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "A0",
+        "legs": 3,
+        "trail_arm": 0.0,
+        "trail_give": 0.0,
+        "trail_cap": DEFAULT_TRAIL_CAP,
+        "dte": 1,
+        "tgt": PRIMARY_T,
+        "sl": PRIMARY_SL,
+    },
+    {
+        "id": "A1",
+        "legs": 3,
+        "trail_arm": 100.0,
+        "trail_give": 75.0,
+        "trail_cap": DEFAULT_TRAIL_CAP,
+        "dte": 1,
+        "tgt": PRIMARY_T,
+        "sl": PRIMARY_SL,
+    },
+    {
+        "id": "A2",
+        "legs": 2,
+        "trail_arm": 80.0,
+        "trail_give": 60.0,
+        "trail_cap": DEFAULT_TRAIL_CAP,
+        "dte": 1,
+        "tgt": PRIMARY_T,
+        "sl": PRIMARY_SL,
+    },
+    {
+        "id": "A3",
+        "legs": 2,
+        "trail_arm": 80.0,
+        "trail_give": 60.0,
+        "trail_cap": DEFAULT_TRAIL_CAP,
+        "dte": 2,
+        "tgt": PRIMARY_T,
+        "sl": PRIMARY_SL,
+    },
+)
+EXIT_GRID_SIGS: tuple[tuple[str, str, int, str], ...] = (
+    ("1m", "V0", 0, "near"),
+    ("15m", "V5", 300, "far"),
+)
 
 
 class MonthGuardStore:
@@ -105,6 +155,22 @@ def expiry_1dte_bimal(t: int) -> date:
     if dt < cut:
         return d + timedelta(days=1)
     return d + timedelta(days=2)
+
+
+def expiry_2dte_bimal(t: int) -> date:
+    """<17:30 IST -> parso 17:30; >=17:30 -> +3 days 17:30."""
+    dt = datetime.fromtimestamp(int(t), tz=s018.UTC).astimezone(s018.IST)
+    d = dt.date()
+    cut = dt.replace(hour=17, minute=30, second=0, microsecond=0)
+    if dt < cut:
+        return d + timedelta(days=2)
+    return d + timedelta(days=3)
+
+
+def expiry_for_dte(t: int, dte: int) -> date:
+    if int(dte) >= 2:
+        return expiry_2dte_bimal(t)
+    return expiry_1dte_bimal(t)
 
 
 def skip_lunch_ist(t: int) -> bool:
@@ -197,8 +263,34 @@ def signal_breakdown(sigs: list[dict[str, Any]], band: int) -> dict[str, Any]:
     }
 
 
-def cell_key(month: str, tf: str, variant: str, tgt: int, slv: int, band: int, mode: str) -> str:
-    return f"{month}|{tf}|{variant}|T={tgt}|SL={slv}|band={int(band)}|{str(mode)}"
+def cell_key(
+    month: str,
+    tf: str,
+    variant: str,
+    tgt: int,
+    slv: int,
+    band: int,
+    mode: str,
+    legs: int = 3,
+    dte: int = 1,
+    trail_arm: float = 0.0,
+    trail_give: float = 0.0,
+    trail_cap: float = DEFAULT_TRAIL_CAP,
+) -> str:
+    key = f"{month}|{tf}|{variant}|T={tgt}|SL={slv}|band={int(band)}|{str(mode)}"
+    if int(legs) != 3:
+        key += f"|L={int(legs)}"
+    if int(dte) != 1:
+        key += f"|D={int(dte)}"
+    if float(trail_arm) > 0:
+        key += f"|tr={int(trail_arm)}/{int(trail_give)}/{int(trail_cap)}"
+    return key
+
+
+def path_tag(base: str, dte: int) -> str:
+    if int(dte) == 1:
+        return base
+    return f"{base}_L3_D{int(dte)}"
 
 
 def hour_idx_band(
@@ -431,12 +523,12 @@ def cache_file(entry_ts: int, side: str, exp: date, tag: str) -> Path:
 
 
 def pick_basket_dev(
-    store: Any, side: str, t: int, spot: float, flipped: bool
+    store: Any, side: str, t: int, spot: float, flipped: bool, dte_mode: int = 1
 ) -> list[s018.Leg] | None:
     want = side
     if flipped:
         want = "short" if side == "long" else "long"
-    exp = expiry_1dte_bimal(t)
+    exp = expiry_for_dte(t, dte_mode)
     packed = s018.load_chain(store, exp, t)
     if packed is None:
         return None
@@ -484,16 +576,17 @@ def get_or_build_path(
     side: str,
     tag: str,
     flipped: bool,
+    dte_mode: int = 1,
 ) -> tuple[dict[str, Any] | None, bool]:
-    exp = expiry_1dte_bimal(t)
-    fp = cache_file(t, side, exp, tag)
+    exp = expiry_for_dte(t, dte_mode)
+    fp = cache_file(t, side, exp, path_tag(tag, dte_mode))
     path = s020.load_path(fp)
     if path is not None:
         return path, False
     sp = spot_c.get(t)
     if sp is None:
         return None, False
-    legs = pick_basket_dev(store, side, t, float(sp), flipped)
+    legs = pick_basket_dev(store, side, t, float(sp), flipped, dte_mode=dte_mode)
     if legs is None:
         return None, False
     path = s020.build_path(store, spot_c, legs, t, exp)
@@ -503,35 +596,226 @@ def get_or_build_path(
     return path, True
 
 
+def gp_at(path: dict[str, Any], i: int, nlegs: int) -> float:
+    if int(nlegs) != 2:
+        return float(path["pnl"][i])
+    legs = list(path["legs"])
+    pxs = [float(path["px0"][i]), float(path["px1"][i]), float(path["px2"][i])]
+    total = 0.0
+    for k, lg in enumerate(legs[:2]):
+        total += (pxs[k] - float(lg["fill"])) * s018.QTY * OPTIONS_CONTRACT_VALUE
+    return total
+
+
+def _exit_idx_nlegs(
+    path: dict[str, Any],
+    i: int,
+    reason: str,
+    spot_c: dict[int, float],
+    nlegs: int,
+) -> dict[str, Any]:
+    if int(nlegs) != 2:
+        return s020._exit_idx(path, i, reason, spot_c)
+    t = int(path["ts"][i])
+    legs = list(path["legs"])[:2]
+    dte = int(path["dte"])
+    idx = float(path["spot"][i]) or float(spot_c.get(t, 0.0))
+    pxs = [float(path["px0"][i]), float(path["px1"][i])]
+    srcs_m = [int(path["src0"][i]), int(path["src1"][i])]
+    gross = 0.0
+    fees = sum(float(lg["fee"]) for lg in legs)
+    slip = sum(float(lg["slip"]) for lg in legs)
+    srcs = [str(lg["src"]) for lg in legs]
+    for lg, mark, src_i in zip(legs, pxs, srcs_m):
+        xf, _ = s018.sell_fill(mark, dte)
+        gross += (xf - float(lg["fill"])) * s018.QTY * OPTIONS_CONTRACT_VALUE
+        fees += s018.fee_gst(mark, idx if idx else 1.0)
+        slip += (mark - xf) * s018.QTY * OPTIONS_CONTRACT_VALUE
+        srcs.append(s020.SRC_NAME.get(src_i, "real"))
+    return {
+        "exit_ts": t,
+        "reason": reason,
+        "gross": gross,
+        "fees": fees,
+        "slip": slip,
+        "net": gross - fees,
+        "srcs": srcs,
+    }
+
+
+def _expiry_exit_nlegs(
+    path: dict[str, Any],
+    i: int,
+    spot_c: dict[int, float],
+    nlegs: int,
+) -> dict[str, Any] | None:
+    if int(nlegs) != 2:
+        return s020.scan_path(path, 1e18, 1e18, spot_c)
+    t = int(path["ts"][i])
+    sp = float(path["spot"][i]) if float(path["spot"][i]) > 0 else float(spot_c.get(t, 0.0))
+    if sp <= 0:
+        return None
+    legs = list(path["legs"])[:2]
+    gross = 0.0
+    fees = sum(float(lg["fee"]) for lg in legs)
+    slip = sum(float(lg["slip"]) for lg in legs)
+    srcs = [str(lg["src"]) for lg in legs]
+    for lg in legs:
+        px = intrinsic(bool(lg["is_call"]), float(lg["strike"]), sp)
+        gross += (px - float(lg["fill"])) * s018.QTY * OPTIONS_CONTRACT_VALUE
+        if px > 0:
+            fees += s018.fee_gst(px, sp)
+        srcs.append("settle")
+    return {
+        "exit_ts": t,
+        "reason": "EXPIRY",
+        "gross": gross,
+        "fees": fees,
+        "slip": slip,
+        "net": gross - fees,
+        "srcs": srcs,
+    }
+
+
 def scan_path_dev(
     path: dict[str, Any],
     tgt: float,
     sl: float,
     spot_c: dict[int, float],
     time_stop_sec: int | None,
+    nlegs: int = 3,
+    trail_arm: float = 0.0,
+    trail_give: float = 0.0,
 ) -> dict[str, Any] | None:
-    if time_stop_sec is None:
+    trail_on = float(trail_arm) > 0.0
+    custom = trail_on or int(nlegs) == 2
+    if not custom and time_stop_sec is None:
         return s020.scan_path(path, tgt, sl, spot_c)
+    if not custom:
+        ts = path["ts"]
+        ok = path["ok"]
+        pnl_a = path["pnl"]
+        exp_ts = int(path["exp_ts"])
+        entry = int(path["entry_ts"])
+        n = int(ts.size)
+        stop_at = int(entry) + int(time_stop_sec)
+        for i in range(n):
+            t = int(ts[i])
+            if bool(ok[i]) and np.isfinite(pnl_a[i]):
+                gp = float(pnl_a[i])
+                if gp >= tgt:
+                    return s020._exit_idx(path, i, "TARGET", spot_c)
+                if gp <= -sl:
+                    return s020._exit_idx(path, i, "SL", spot_c)
+                if t >= stop_at:
+                    return s020._exit_idx(path, i, "TIME", spot_c)
+            if t == exp_ts:
+                return s020.scan_path(path, tgt, sl, spot_c)
+        return None
     ts = path["ts"]
     ok = path["ok"]
-    pnl_a = path["pnl"]
     exp_ts = int(path["exp_ts"])
     entry = int(path["entry_ts"])
     n = int(ts.size)
-    stop_at = int(entry) + int(time_stop_sec)
+    stop_at = int(entry) + int(time_stop_sec) if time_stop_sec is not None else None
+    armed = False
+    peak = float("-inf")
     for i in range(n):
         t = int(ts[i])
-        if bool(ok[i]) and np.isfinite(pnl_a[i]):
-            gp = float(pnl_a[i])
-            if gp >= tgt:
-                return s020._exit_idx(path, i, "TARGET", spot_c)
-            if gp <= -sl:
-                return s020._exit_idx(path, i, "SL", spot_c)
-            if t >= stop_at:
-                return s020._exit_idx(path, i, "TIME", spot_c)
+        if bool(ok[i]):
+            gp = gp_at(path, i, nlegs)
+            if np.isfinite(gp):
+                if gp <= -sl:
+                    return _exit_idx_nlegs(path, i, "SL", spot_c, nlegs)
+                if gp >= tgt:
+                    return _exit_idx_nlegs(path, i, "TARGET", spot_c, nlegs)
+                if trail_on:
+                    if gp >= float(trail_arm):
+                        armed = True
+                    if armed:
+                        peak = max(peak, gp)
+                        if gp <= peak - float(trail_give):
+                            return _exit_idx_nlegs(path, i, "TRAIL", spot_c, nlegs)
+                if stop_at is not None and t >= stop_at:
+                    return _exit_idx_nlegs(path, i, "TIME", spot_c, nlegs)
         if t == exp_ts:
+            if int(nlegs) == 2:
+                return _expiry_exit_nlegs(path, i, spot_c, nlegs)
             return s020.scan_path(path, tgt, sl, spot_c)
     return None
+
+
+def entry_iv_avg(path: dict[str, Any], spot: float, t: int) -> float:
+    exp_ts = int(path["exp_ts"])
+    t_yr = t_years(t, exp_ts)
+    ivs: list[float] = []
+    for lg in list(path["legs"])[:3]:
+        iv = implied_vol_bisection(
+            float(lg["mark"]), float(spot), float(lg["strike"]), t_yr, bool(lg["is_call"])
+        )
+        if iv is not None and np.isfinite(iv):
+            ivs.append(float(iv))
+    return float(np.mean(ivs)) if ivs else float("nan")
+
+
+def mfe_mae(path: dict[str, Any], nlegs: int, exit_ts: int) -> tuple[float, float]:
+    mfe = float("-inf")
+    mae = float("inf")
+    ts = path["ts"]
+    ok = path["ok"]
+    n = 0
+    for i in range(int(ts.size)):
+        t = int(ts[i])
+        if t > int(exit_ts):
+            break
+        if not bool(ok[i]):
+            continue
+        gp = gp_at(path, i, nlegs)
+        if not np.isfinite(gp):
+            continue
+        mfe = max(mfe, gp)
+        mae = min(mae, gp)
+        n += 1
+    if n == 0:
+        return float("nan"), float("nan")
+    return float(mfe), float(mae)
+
+
+def iv_tercile_lines(rows: list[dict[str, Any]]) -> list[str]:
+    pts = [
+        (float(r["entry_iv"]), float(r["net"]))
+        for r in rows
+        if np.isfinite(r.get("entry_iv", float("nan"))) and np.isfinite(r.get("net", float("nan")))
+    ]
+    if len(pts) < 3:
+        return [f"  entry_iv tercile (info): n_iv={len(pts)} (need >=3)"]
+    pts.sort(key=lambda x: x[0])
+    n = len(pts)
+    i1, i2 = n // 3, (2 * n) // 3
+    groups = [("low", pts[:i1]), ("mid", pts[i1:i2]), ("high", pts[i2:])]
+    lines = ["  entry_iv tercile (info):"]
+    for name, g in groups:
+        if not g:
+            lines.append(f"    {name} n=0")
+            continue
+        lines.append(
+            f"    {name} n={len(g)} iv={float(np.mean([x[0] for x in g])):.3f} "
+            f"mean_net={float(np.mean([x[1] for x in g])):.2f}"
+        )
+    return lines
+
+
+def dte2_coverage(
+    store: Any, spot_c: dict[int, float], plan: list[tuple[int, str]], flipped: bool = False
+) -> tuple[int, int]:
+    ok_n = 0
+    for t, side in plan:
+        sp = spot_c.get(int(t))
+        if sp is None:
+            continue
+        if pick_basket_dev(store, str(side), int(t), float(sp), flipped, dte_mode=2) is not None:
+            ok_n += 1
+    return ok_n, len(plan)
 
 
 def simulate_plan(
@@ -551,6 +835,11 @@ def simulate_plan(
     extra_by: dict[tuple[int, str], dict[str, Any]] | None = None,
     band: int = 0,
     band_mode: str = "near",
+    nlegs: int = 3,
+    dte_mode: int = 1,
+    trail_arm: float = 0.0,
+    trail_give: float = 0.0,
+    trail_cap: float = DEFAULT_TRAIL_CAP,
 ) -> tuple[list[dict[str, Any]], int]:
     busy = -1
     rows: list[dict[str, Any]] = []
@@ -574,18 +863,24 @@ def simulate_plan(
                 continue
         elif not entry_allowed(t):
             continue
-        path, newp = get_or_build_path(store, spot_c, t, side, tag, flipped)
+        path, newp = get_or_build_path(store, spot_c, t, side, tag, flipped, dte_mode=dte_mode)
         if newp:
             built += 1
         if path is None:
             n_stale += 1
             continue
-        walked = scan_path_dev(path, tgt, sl, spot_c, time_stop_sec)
+        scan_tgt = float(trail_cap) if float(trail_arm) > 0.0 else float(tgt)
+        walked = scan_path_dev(
+            path, scan_tgt, sl, spot_c, time_stop_sec,
+            nlegs=nlegs, trail_arm=trail_arm, trail_give=trail_give,
+        )
         if walked is None:
             continue
         hold = (int(walked["exit_ts"]) - int(t)) / 3600.0
-        exp = expiry_1dte_bimal(t)
+        exp = date.fromisoformat(str(path["exp"]))
         hrs_exp = (s018.expiry_unix(exp) - int(t)) / 3600.0
+        mf, ma = mfe_mae(path, nlegs, int(walked["exit_ts"]))
+        eiv = entry_iv_avg(path, float(spot_c.get(t, 0.0)), t)
         rows.append(
             {
                 "entry_ts": t,
@@ -597,6 +892,10 @@ def simulate_plan(
                 "entry_tv": s020.entry_tv(list(path["legs"]), float(spot_c.get(t, 0.0))),
                 "legs": path["legs"],
                 "exp": exp.isoformat(),
+                "entry_iv": eiv,
+                "mfe": mf,
+                "mae": ma,
+                "exit_reason": walked.get("reason"),
                 **extra,
                 **walked,
             }
@@ -700,9 +999,10 @@ def print_expiry_check() -> None:
     monday = date(2025, 6, 2)
     t = to_unix(ist_dt(monday, 18, 0))
     exp = expiry_1dte_bimal(t)
+    exp2 = expiry_2dte_bimal(t)
     print(
         f"expiry check: Monday {monday.isoformat()} 18:00 IST -> {exp.isoformat()} 17:30 IST "
-        f"(expect 2025-06-04 Wednesday)",
+        f"(expect 2025-06-04 Wednesday); 2DTE -> {exp2.isoformat()} (expect 2025-06-05)",
         flush=True,
     )
 
@@ -732,6 +1032,12 @@ def run_combo(
     n_sig_raw: int,
     vwap_1m: np.ndarray,
     c: np.ndarray,
+    nlegs: int = 3,
+    dte_mode: int = 1,
+    trail_arm: float = 0.0,
+    trail_give: float = 0.0,
+    trail_cap: float = DEFAULT_TRAIL_CAP,
+    arm_id: str = "",
 ) -> None:
     time_stop = TIME_STOP_SEC if variant == "V5" else None
     extra_by = {(int(s["ts"]), str(s["side"])): s for s in sigs}
@@ -740,8 +1046,24 @@ def run_combo(
         ts, c, vwap_1m, start_ts, cutoff, win_from, win_to, band, band_mode
     )
     tag_p = f"DEV_{variant}_{tf}"
+    sim_kw: dict[str, Any] = {
+        "band": band,
+        "band_mode": band_mode,
+        "nlegs": nlegs,
+        "dte_mode": dte_mode,
+        "trail_arm": trail_arm,
+        "trail_give": trail_give,
+        "trail_cap": trail_cap,
+    }
+    if int(dte_mode) >= 2:
+        cov_x, cov_y = dte2_coverage(store, spot_c, plan_all, False)
+        print(f"2DTE coverage {cov_x}/{cov_y}", flush=True)
     for tgt, slv in cells:
-        key = cell_key(month, tf, variant, tgt, slv, band, band_mode)
+        key = cell_key(
+            month, tf, variant, tgt, slv, band, band_mode,
+            legs=nlegs, dte=dte_mode, trail_arm=trail_arm,
+            trail_give=trail_give, trail_cap=trail_cap,
+        )
         if key in done:
             print(f"done SKIP {key}", flush=True)
             continue
@@ -755,8 +1077,7 @@ def run_combo(
             start_ts, cutoff, win_from, win_to, time_stop,
             label=f"{tf} {variant} T={tgt}|SL={slv}",
             extra_by=extra_by,
-            band=band,
-            band_mode=band_mode,
+            **sim_kw,
         )
         stt = stats_dev(rows)
         stt.update(
@@ -775,6 +1096,12 @@ def run_combo(
                 "n_days": n_days,
                 "band": int(band),
                 "band_mode": str(band_mode),
+                "legs": int(nlegs),
+                "dte": int(dte_mode),
+                "trail_arm": float(trail_arm),
+                "trail_give": float(trail_give),
+                "trail_cap": float(trail_cap),
+                "arm_id": str(arm_id),
             }
         )
         c2m = float("nan")
@@ -789,6 +1116,7 @@ def run_combo(
                     store, spot_c, forced, float(tgt), float(slv), f"C2{tag_p}", False,
                     start_ts, cutoff, win_from, win_to, time_stop,
                     label=f"C2 {key} seed={si}",
+                    **sim_kw,
                 )
                 c2_pool.extend(rr)
                 if rr:
@@ -799,6 +1127,7 @@ def run_combo(
                 store, spot_c, plan_c3, float(tgt), float(slv), f"C3{tag_p}", True,
                 start_ts, cutoff, win_from, win_to, time_stop,
                 label=f"C3 {key}",
+                **sim_kw,
             )
             c2m = float(np.mean(c2s)) if c2s else float("nan")
             c3s = stats_dev(c3)
@@ -884,6 +1213,38 @@ def band_grid_table(done: dict[str, dict[str, Any]], month: str) -> list[str]:
     return lines
 
 
+def exit_grid_table(done: dict[str, dict[str, Any]], month: str) -> list[str]:
+    lines = [
+        "EXIT-GRID:",
+        f"{'sig':<16} {'arm':<4} {'n':>5} {'mean':>9} {'gross':>9} "
+        f"{'broker':>8} {'slip':>8} {'win%':>7} {'C2':>9} {'C3':>9}",
+    ]
+    for tf, var, band, mode in EXIT_GRID_SIGS:
+        sig = f"{tf}/{var}/b{band}/{mode}"
+        for arm in EXIT_ARMS:
+            key = cell_key(
+                month, tf, var, PRIMARY_T, PRIMARY_SL, band, mode,
+                legs=int(arm["legs"]), dte=int(arm["dte"]),
+                trail_arm=float(arm["trail_arm"]),
+                trail_give=float(arm["trail_give"]),
+                trail_cap=float(arm["trail_cap"]),
+            )
+            s = done.get(key)
+            if s is None:
+                continue
+            lines.append(
+                f"{sig:<16} {str(arm['id']):<4} {int(s.get('n', 0)):5d} "
+                f"{s020._fnum(s.get('mean', float('nan')), 2):>9} "
+                f"{s020._fnum(s.get('gross', float('nan')), 2):>9} "
+                f"{s020._fnum(s.get('fee', float('nan')), 2):>8} "
+                f"{s020._fnum(s.get('slip', float('nan')), 2):>8} "
+                f"{s020._fnum(s.get('win', float('nan')), 1):>7} "
+                f"{s020._fnum(s.get('c2', float('nan')), 2):>9} "
+                f"{s020._fnum(s.get('c3', float('nan')), 2):>9}"
+            )
+    return lines
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default=s018.SPOT_CSV)
@@ -894,6 +1255,12 @@ def main() -> None:
     ap.add_argument("--band", type=int, default=0)
     ap.add_argument("--band-mode", default="near", choices=("near", "far"))
     ap.add_argument("--band-grid", action="store_true")
+    ap.add_argument("--legs", type=int, default=3, choices=(2, 3))
+    ap.add_argument("--trail-arm", type=float, default=0.0)
+    ap.add_argument("--trail-give", type=float, default=0.0)
+    ap.add_argument("--trail-cap", type=float, default=DEFAULT_TRAIL_CAP)
+    ap.add_argument("--dte", type=int, default=1, choices=(1, 2))
+    ap.add_argument("--exit-grid", action="store_true")
     ap.add_argument("--max-days", type=int, default=0)
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--cache-gb", type=float, default=1.0)
@@ -925,8 +1292,11 @@ def main() -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     spot = s018.load_spot_1m(args.csv)
     ts, o, h, l, c, vol = s020.bars_1m_vol(spot)
+    exit_grid = bool(args.exit_grid)
+    need_d2 = exit_grid or int(args.dte) >= 2
+    pad_d = 5 if need_d2 else 3
     lo = start_ts - 3 * 86400
-    hi = cutoff + 3 * 86400
+    hi = cutoff + pad_d * 86400
     sel = (ts >= lo) & (ts < hi)
     ts, o, h, l, c, vol = ts[sel], o[sel], h[sel], l[sel], c[sel], vol[sel]
     if max_days:
@@ -941,30 +1311,82 @@ def main() -> None:
     n_days = float(max_days) if max_days else float((win_to - win_from).days + 1)
 
     inner = MarksStore()
-    store = MonthGuardStore(inner, win_from - timedelta(days=1), win_to + timedelta(days=3))
+    store = MonthGuardStore(inner, win_from - timedelta(days=1), win_to + timedelta(days=pad_d))
     done: dict[str, dict[str, Any]] = {} if args.fresh else s020.load_ckpt(CKPT)
     cell_rows: dict[str, list[dict[str, Any]]] = {}
 
     grid = bool(args.band_grid)
-    if grid:
+    jobs: list[tuple[str, str, int, str]]
+    work: list[dict[str, Any]] = []
+    if exit_grid:
+        band0, mode0 = 0, "near"
+        tfs = sorted({s[0] for s in EXIT_GRID_SIGS})
+        variants = sorted({s[1] for s in EXIT_GRID_SIGS})
+        jobs = list(EXIT_GRID_SIGS)
+        for tf, var, band, mode in EXIT_GRID_SIGS:
+            for arm in EXIT_ARMS:
+                work.append(
+                    {
+                        "tf": tf,
+                        "variant": var,
+                        "band": band,
+                        "band_mode": mode,
+                        "legs": int(arm["legs"]),
+                        "dte": int(arm["dte"]),
+                        "trail_arm": float(arm["trail_arm"]),
+                        "trail_give": float(arm["trail_give"]),
+                        "trail_cap": float(arm["trail_cap"]),
+                        "arm_id": str(arm["id"]),
+                    }
+                )
+    elif grid:
         jobs = band_grid_jobs()
         tfs = sorted({j[0] for j in jobs})
         variants = sorted({j[1] for j in jobs})
         band0 = 0
         mode0 = "near"
+        for tf, var, band, mode in jobs:
+            work.append(
+                {
+                    "tf": tf, "variant": var, "band": band, "band_mode": mode,
+                    "legs": 3, "dte": 1, "trail_arm": 0.0, "trail_give": 0.0,
+                    "trail_cap": DEFAULT_TRAIL_CAP, "arm_id": "",
+                }
+            )
     else:
         tfs = list(TFS) if args.all else [str(args.tf)]
         variants = list(VARIANTS) if args.all else [str(args.variant)]
         band0 = int(args.band)
         mode0 = str(args.band_mode)
         jobs = [(tf, var, band0, mode0) for tf in tfs for var in variants]
-    arm_n = max(1, len(jobs))
+        for tf, var, band, mode in jobs:
+            work.append(
+                {
+                    "tf": tf, "variant": var, "band": band, "band_mode": mode,
+                    "legs": int(args.legs), "dte": int(args.dte),
+                    "trail_arm": float(args.trail_arm),
+                    "trail_give": float(args.trail_give),
+                    "trail_cap": float(args.trail_cap),
+                    "arm_id": "",
+                }
+            )
+    arm_n = max(1, len(work))
     arm_i = 0
     t_all = time.perf_counter()
 
     smoke_sigs: list[dict[str, Any]] = []
     sig_cache: dict[tuple[str, str], tuple[list[DevLine], list[dict[str, Any]], int]] = {}
-    for tf, variant, band, band_mode in jobs:
+    for w in work:
+        tf = str(w["tf"])
+        variant = str(w["variant"])
+        band = int(w["band"])
+        band_mode = str(w["band_mode"])
+        nlegs = int(w["legs"])
+        dte_mode = int(w["dte"])
+        trail_arm = float(w["trail_arm"])
+        trail_give = float(w["trail_give"])
+        trail_cap = float(w["trail_cap"])
+        arm_id = str(w["arm_id"])
         ck = (tf, variant)
         if ck not in sig_cache:
             tf_sec = TF_SEC[tf]
@@ -1019,7 +1441,7 @@ def main() -> None:
         if max_days and variant == "V3":
             smoke_sigs = sigs
             print_v3_examples(sigs, ts)
-        if grid:
+        if grid or exit_grid:
             cells = [(PRIMARY_T, PRIMARY_SL)]
         else:
             v0_best = best_v0_cell(done, month, tf)
@@ -1030,13 +1452,20 @@ def main() -> None:
             start_ts, cutoff, win_from, win_to, n_days,
             done, cell_rows, t_all, arm_i, arm_n, max_days,
             band, band_mode, n_raw, vwap_1m, c,
+            nlegs=nlegs, dte_mode=dte_mode, trail_arm=trail_arm,
+            trail_give=trail_give, trail_cap=trail_cap, arm_id=arm_id,
         )
-        pk = cell_key(month, tf, variant, PRIMARY_T, PRIMARY_SL, band, band_mode)
+        pk = cell_key(
+            month, tf, variant, PRIMARY_T, PRIMARY_SL, band, band_mode,
+            legs=nlegs, dte=dte_mode, trail_arm=trail_arm,
+            trail_give=trail_give, trail_cap=trail_cap,
+        )
         st = done.get(pk, {})
-        if grid:
+        if grid or exit_grid:
             print(
-                f"[{arm_i}/{arm_n}] {tf} {variant} band={band} {band_mode} "
-                f"n={int(st.get('n', 0))} mean={s020._fnum(st.get('mean', float('nan')), 2)} "
+                f"[{arm_i}/{arm_n}] {tf} {variant} {arm_id or '-'} L{nlegs} D{dte_mode} "
+                f"band={band} {band_mode} n={int(st.get('n', 0))} "
+                f"mean={s020._fnum(st.get('mean', float('nan')), 2)} "
                 f"gross={s020._fnum(st.get('gross', float('nan')), 2)} "
                 f"elapsed={time.perf_counter()-t_all:.0f}s",
                 flush=True,
@@ -1064,9 +1493,15 @@ def main() -> None:
             if shown == 0:
                 print("  (no filled V3 trades)", flush=True)
 
-    jh = jobs[0]
+    wh = work[0]
     hdr_st = done.get(
-        cell_key(month, jh[0], jh[1], PRIMARY_T, PRIMARY_SL, jh[2], jh[3]),
+        cell_key(
+            month, str(wh["tf"]), str(wh["variant"]), PRIMARY_T, PRIMARY_SL,
+            int(wh["band"]), str(wh["band_mode"]),
+            legs=int(wh["legs"]), dte=int(wh["dte"]),
+            trail_arm=float(wh["trail_arm"]), trail_give=float(wh["trail_give"]),
+            trail_cap=float(wh["trail_cap"]),
+        ),
         next(iter(done.values()), {}),
     )
     report = [
@@ -1081,14 +1516,23 @@ def main() -> None:
         "if it holds in TRAIN and HOLDOUT.",
     ]
     seen_keys: set[str] = set()
-    for tf, variant, band, band_mode in jobs:
+    for w in work:
+        tf = str(w["tf"])
+        variant = str(w["variant"])
+        band = int(w["band"])
+        band_mode = str(w["band_mode"])
         cell_list = (
             [(PRIMARY_T, PRIMARY_SL)]
-            if grid
+            if grid or exit_grid
             else cells_for(variant, best_v0_cell(done, month, tf) if variant != "V0" else None)
         )
         for tgt, slv in cell_list:
-            key = cell_key(month, tf, variant, tgt, slv, band, band_mode)
+            key = cell_key(
+                month, tf, variant, tgt, slv, band, band_mode,
+                legs=int(w["legs"]), dte=int(w["dte"]),
+                trail_arm=float(w["trail_arm"]), trail_give=float(w["trail_give"]),
+                trail_cap=float(w["trail_cap"]),
+            )
             if key in seen_keys:
                 continue
             seen_keys.add(key)
@@ -1102,6 +1546,7 @@ def main() -> None:
             if isinstance(st.get("wd"), dict):
                 report.append(f"  WEEKDAY {s020.fmt_ww(st['wd'])}")
                 report.append(f"  WEEKEND {s020.fmt_ww(st['we'])}")
+            report.extend(iv_tercile_lines(cell_rows.get(key, [])))
             if tgt == PRIMARY_T and slv == PRIMARY_SL:
                 report.append(
                     f"  C2mean={s020._fnum(st.get('c2', float('nan')), 2)} "
@@ -1113,14 +1558,21 @@ def main() -> None:
                 if isinstance(st.get("c3_wd"), dict):
                     report.append(f"  C3 WEEKDAY {s020.fmt_ww(st['c3_wd'])}")
                     report.append(f"  C3 WEEKEND {s020.fmt_ww(st['c3_we'])}")
-    if grid:
+    if exit_grid:
+        report.extend(exit_grid_table(done, month))
+    elif grid:
         report.extend(band_grid_table(done, month))
     else:
         report.extend(summary_table(done, month, band0, mode0))
     txtp = OUT_DIR / f"s020_dev_{month}_{stamp}.txt"
     txtp.write_text("\n".join(report) + "\n", encoding="utf-8")
-    j0 = jobs[0]
-    prim_key = cell_key(month, j0[0], j0[1], PRIMARY_T, PRIMARY_SL, j0[2], j0[3])
+    prim_key = cell_key(
+        month, str(wh["tf"]), str(wh["variant"]), PRIMARY_T, PRIMARY_SL,
+        int(wh["band"]), str(wh["band_mode"]),
+        legs=int(wh["legs"]), dte=int(wh["dte"]),
+        trail_arm=float(wh["trail_arm"]), trail_give=float(wh["trail_give"]),
+        trail_cap=float(wh["trail_cap"]),
+    )
     prow = cell_rows.get(prim_key, [])
     csvp = OUT_DIR / f"s020_dev_{month}_{stamp}_trades.csv"
     with csvp.open("w", newline="", encoding="utf-8") as f:
@@ -1129,6 +1581,7 @@ def main() -> None:
             fieldnames=[
                 "side", "entry_ts_ist", "exit_ts_ist", "reason", "gross", "fees", "net",
                 "hold_hrs", "hrs_to_exp", "exp", "vwap_dist",
+                "entry_iv", "mfe", "mae", "exit_reason",
             ],
         )
         w.writeheader()
@@ -1147,6 +1600,10 @@ def main() -> None:
                     "hrs_to_exp": r.get("hrs_to_exp"),
                     "exp": r.get("exp"),
                     "vwap_dist": vd,
+                    "entry_iv": r.get("entry_iv"),
+                    "mfe": r.get("mfe"),
+                    "mae": r.get("mae"),
+                    "exit_reason": r.get("exit_reason", r.get("reason")),
                 }
             )
     print("\n".join(report))
