@@ -155,6 +155,48 @@ def attach_vwap_dist(sigs: list[dict[str, Any]], vwap_by_ts: dict[int, float]) -
         s["vwap_dist"] = abs(lvl - vw) if np.isfinite(lvl) and np.isfinite(vw) else float("nan")
 
 
+def signal_breakdown(sigs: list[dict[str, Any]], band: int) -> dict[str, Any]:
+    """Exclusive buckets in order: lunch, thusat, vwap_nan, near, far, other."""
+    a = b = c = d = e = f = 0
+    other_ex: list[str] = []
+    bnd = float(band)
+    for s in sigs:
+        t = int(s["ts"])
+        dist = float(s.get("vwap_dist", float("nan")))
+        if skip_lunch_ist(t):
+            a += 1
+            continue
+        if skip_thu_sat_window(t):
+            b += 1
+            continue
+        if not np.isfinite(dist):
+            c += 1
+            continue
+        if dist <= bnd:
+            d += 1
+            continue
+        if dist > bnd:
+            e += 1
+            continue
+        f += 1
+        if len(other_ex) < 8:
+            other_ex.append(
+                f"ts={s018.ist_str(t)} dist={dist!r} level={s.get('level')!r} vwap={s.get('vwap')!r}"
+            )
+    n = len(sigs)
+    return {
+        "total": n,
+        "lunch": a,
+        "thusat": b,
+        "vwap_nan": c,
+        "near": d,
+        "far": e,
+        "other": f,
+        "sum": a + b + c + d + e + f,
+        "other_ex": other_ex,
+    }
+
+
 def cell_key(month: str, tf: str, variant: str, tgt: int, slv: int, band: int, mode: str) -> str:
     return f"{month}|{tf}|{variant}|T={tgt}|SL={slv}|band={int(band)}|{str(mode)}"
 
@@ -961,6 +1003,19 @@ def main() -> None:
             f"both_skip={both_skip}",
             flush=True,
         )
+        # Y in "kept X of Y" is n_raw = len(win_sigs): month/window signals,
+        # not time-allowed. Time skips are applied later in keep_signal.
+        bd = signal_breakdown(win_sigs, band)
+        print(
+            f"signals total={bd['total']} | time_skip_lunch={bd['lunch']} | "
+            f"time_skip_thusat={bd['thusat']} | vwap_nan={bd['vwap_nan']} | "
+            f"near(<={band})={bd['near']} | far(>{band})={bd['far']} | "
+            f"other={bd['other']} | sum={bd['sum']} "
+            f"(kept Y=window_raw not time-allowed)",
+            flush=True,
+        )
+        if bd["other"]:
+            print(f"other examples: {bd['other_ex']}", flush=True)
         if max_days and variant == "V3":
             smoke_sigs = sigs
             print_v3_examples(sigs, ts)
