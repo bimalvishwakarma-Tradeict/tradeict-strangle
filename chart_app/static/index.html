@@ -58,9 +58,9 @@
       <div class="row">
         <label>Line TF
           <select id="lineTf">
-            <option value="1m">1m</option>
+            <option value="1m" selected>1m</option>
             <option value="3m">3m</option>
-            <option value="5m" selected>5m</option>
+            <option value="5m">5m</option>
             <option value="15m">15m</option>
           </select>
         </label>
@@ -79,6 +79,12 @@
         <label><input type="checkbox" id="togActive" checked /> Active lines</label>
         <label><input type="checkbox" id="togExpired" checked /> Expired lines</label>
         <label><input type="checkbox" id="togMarks" checked /> Markers</label>
+        <label>Marker mode
+          <select id="markerMode">
+            <option value="raw">Raw touches</option>
+            <option value="backtest">Backtest entries</option>
+          </select>
+        </label>
       </div>
       <button id="btnOverlay">Reload overlay</button>
       <h2>Backtest trades</h2>
@@ -89,9 +95,10 @@
     <footer>
       <div id="dot"></div>
       <div class="ohlc" id="ohlc">OHLC —</div>
+      <div id="markTip"></div>
     </footer>
   </div>
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/app.js?v=fwd4"></script>
+  <script src="/static/app.js?v=tv1"></script>
 </body>
 </html>

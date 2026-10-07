@@ -189,7 +189,7 @@ async def api_overlay(
     now = int(time.time())
     to_u = int(to_ts) if to_ts is not None else now
     from_u = int(from_ts) if from_ts is not None else to_u - int(hours * 3600)
-    warmup = 3 * 86400
+    warmup = 10 * 86400
     bars = await _candles("1m", from_u - warmup, to_u)
     bars = [b for b in bars if from_u - warmup <= int(b["time"]) <= to_u]
     data = compute(
@@ -216,7 +216,12 @@ async def api_trade_files() -> dict[str, Any]:
     root = _runs_root()
     files: list[str] = []
     if root.is_dir():
-        for p in sorted(root.glob("*/runs/*_trades.csv")):
+        found: list[Path] = []
+        found.extend(root.glob("*/runs/*_trades.csv"))
+        found.extend(root.glob("s020_vwap_touch/runs/s020_dev_*_trades.csv"))
+        uniq = sorted({p.resolve() for p in found if p.is_file()})
+        uniq.sort(key=lambda p: (0 if "s020" in p.name else 1, str(p)))
+        for p in uniq:
             files.append(str(p.relative_to(ROOT)).replace("\\", "/"))
     return {"files": files}
 

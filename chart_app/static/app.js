@@ -33,6 +33,7 @@
   let historyMode = false;
   let overlayPayload = { lines: [], markers: [] };
   let tradeMarks = [];
+  let loadedTrades = [];
   let overlayTimer = null;
   let ws = null;
   let wsTimer = null;
@@ -151,6 +152,9 @@
     historyEnd = false;
     loadingLeft = true;
     loadingRight = true;
+    clearExtra();
+    vwapSeries.setData([]);
+    series.setMarkers([]);
     updateHistStatus();
     const barSec = RES_SEC[tf] || 60;
     try {
@@ -231,23 +235,55 @@
     }
   });
 
+  function markerTooltip(time) {
+    const t = Number(time);
+    const bits = [];
+    (overlayPayload.markers || []).forEach((m) => {
+      if (Number(m.time) !== t) return;
+      bits.push(
+        (m.side || "") +
+          " level=" + (m.level != null ? Number(m.level).toFixed(1) : "—") +
+          " created=" + (m.create_ts ? fmtIst(m.create_ts) : "—") +
+          " entry_allowed=" + (m.entry_allowed ? "true" : "false")
+      );
+    });
+    loadedTrades.forEach((tr) => {
+      if (Number(tr.entry_ts) === t) {
+        const ov = (overlayPayload.markers || []).find((m) => Number(m.time) === t);
+        bits.push(
+          "ENTRY " + (tr.side || "") +
+            " level=" + (ov && ov.level != null ? Number(ov.level).toFixed(1) : "—") +
+            " created=" + (ov && ov.create_ts ? fmtIst(ov.create_ts) : "—") +
+            " entry_allowed=true"
+        );
+      }
+      if (tr.exit_ts && Number(tr.exit_ts) === t) {
+        bits.push("EXIT " + (tr.reason || "") + " net=" + (tr.net != null ? Number(tr.net).toFixed(1) : "—"));
+      }
+    });
+    return bits.join(" | ");
+  }
+
   chart.subscribeCrosshairMove((param) => {
     const box = el("ohlc");
+    const tip = el("markTip");
     if (!param || !param.time || !param.seriesData) {
       box.textContent = "OHLC —";
+      if (tip) tip.textContent = "";
       return;
     }
     const d = param.seriesData.get(series);
     if (!d) {
       box.textContent = fmtIst(param.time);
-      return;
+    } else {
+      box.innerHTML =
+        "<span>" + fmtIst(param.time) + "</span>" +
+        "<span>O " + d.open.toFixed(1) + "</span>" +
+        "<span>H " + d.high.toFixed(1) + "</span>" +
+        "<span>L " + d.low.toFixed(1) + "</span>" +
+        "<span>C " + d.close.toFixed(1) + "</span>";
     }
-    box.innerHTML =
-      "<span>" + fmtIst(param.time) + "</span>" +
-      "<span>O " + d.open.toFixed(1) + "</span>" +
-      "<span>H " + d.high.toFixed(1) + "</span>" +
-      "<span>L " + d.low.toFixed(1) + "</span>" +
-      "<span>C " + d.close.toFixed(1) + "</span>";
+    if (tip) tip.textContent = markerTooltip(param.time);
   });
 
   function clearExtra() {
@@ -332,8 +368,8 @@
       const pts = oldest != null ? clipLinePoints(ln, oldest, newest) : (ln.points || []);
       if (pts.length < 2) return;
       const color = ln.kind === "high"
-        ? (ln.active ? "#f85149" : "rgba(248,81,73,0.35)")
-        : (ln.active ? "#3fb950" : "rgba(63,185,80,0.35)");
+        ? (ln.active ? "#ef4444" : "rgba(239,68,68,0.5)")
+        : (ln.active ? "#22c55e" : "rgba(34,197,94,0.5)");
       const s = chart.addLineSeries({
         color,
         lineWidth: ln.active ? 2 : 1,
@@ -345,19 +381,22 @@
     });
     const inRange = (t) =>
       (oldest == null || Number(t) >= oldest) && (newest == null || Number(t) <= newest);
-    const marks = showMarks
-      ? (j.markers || [])
-          .filter((m) => inRange(m.time))
-          .map((m) => ({
-            time: m.time,
-            position: m.side === "long" ? "belowBar" : "aboveBar",
-            color: m.side === "long" ? "#3fb950" : "#f85149",
-            shape: m.side === "long" ? "arrowUp" : "arrowDown",
-            text: m.text || "",
-          }))
-      : [];
-    const tmarks = tradeMarks.filter((m) => inRange(m.time));
-    series.setMarkers(marks.concat(tmarks));
+    const mode = el("markerMode") ? el("markerMode").value : "raw";
+    let marks = [];
+    if (showMarks && mode === "backtest") {
+      marks = tradeMarks.filter((m) => inRange(m.time));
+    } else if (showMarks) {
+      marks = (j.markers || [])
+        .filter((m) => inRange(m.time))
+        .map((m) => ({
+          time: m.time,
+          position: m.side === "long" ? "belowBar" : "aboveBar",
+          color: m.side === "long" ? "#22c55e" : "#ef4444",
+          shape: m.side === "long" ? "arrowUp" : "arrowDown",
+          text: m.text || "",
+        }));
+    }
+    series.setMarkers(marks);
   }
 
   ["togVwap", "togActive", "togExpired", "togMarks"].forEach((id) => {
@@ -367,6 +406,9 @@
   el("lineTf").addEventListener("change", () => reloadOverlay());
   el("variant").addEventListener("change", () => reloadOverlay());
   el("hours").addEventListener("change", () => reloadOverlay());
+  if (el("markerMode")) {
+    el("markerMode").addEventListener("change", () => paintOverlay(overlayPayload));
+  }
 
   function wsCandleTime(raw) {
     let t = Number(raw.candle_start_time != null ? raw.candle_start_time : raw.time);
@@ -516,6 +558,8 @@
     const ul = el("trades");
     ul.innerHTML = "";
     tradeMarks = [];
+    loadedTrades = j.trades || [];
+    if (el("markerMode")) el("markerMode").value = "backtest";
     (j.trades || []).forEach((t) => {
       const li = document.createElement("li");
       li.className = t.side;
@@ -530,9 +574,9 @@
       tradeMarks.push({
         time: t.entry_ts,
         position: t.side === "long" ? "belowBar" : "aboveBar",
-        color: t.side === "long" ? "#3fb950" : "#f85149",
-        shape: "circle",
-        text: "E " + (t.net != null ? Number(t.net).toFixed(0) : ""),
+        color: t.side === "long" ? "#22c55e" : "#ef4444",
+        shape: t.side === "long" ? "arrowUp" : "arrowDown",
+        text: t.side === "long" ? "▲" : "▼",
       });
       if (t.exit_ts) {
         tradeMarks.push({
@@ -540,7 +584,7 @@
           position: "inBar",
           color: "#d29922",
           shape: "square",
-          text: (t.reason || "X").slice(0, 3),
+          text: (t.reason || "X").toUpperCase().slice(0, 8),
         });
       }
     });
