@@ -28,7 +28,9 @@
   let tf = "1m";
   let candleMap = new Map();
   let loadingLeft = false;
+  let loadingRight = false;
   let historyEnd = false;
+  let historyMode = false;
   let overlayPayload = { lines: [], markers: [] };
   let tradeMarks = [];
   let overlayTimer = null;
@@ -87,44 +89,89 @@
     if (candleMap.size === 0) return null;
     return Math.min(...candleMap.keys());
   }
+  function newestCandleTime() {
+    if (candleMap.size === 0) return null;
+    return Math.max(...candleMap.keys());
+  }
+
+  function mergeRows(rows) {
+    let n = 0;
+    (rows || []).forEach((c) => {
+      const t = Number(c && c.time);
+      if (!Number.isFinite(t) || t < 1e9) return;
+      if (!candleMap.has(t)) n += 1;
+      candleMap.set(t, c);
+    });
+    return n;
+  }
 
   function updateHistStatus() {
     const box = el("histStatus");
     if (!box) return;
     const n = candleMap.size;
     const oldest = oldestCandleTime();
+    const newest = newestCandleTime();
     const fromTxt = oldest != null ? fmtIst(oldest) : "—";
-    let phase = "idle";
-    if (loadingLeft) phase = "loading…";
-    else if (historyEnd) phase = "no more history";
-    box.textContent = "Candles: " + n + " | from " + fromTxt + " | " + phase;
+    const toTxt = newest != null ? fmtIst(newest) : "—";
+    const mode = historyMode ? "HISTORY" : "LIVE";
+    const phase = loadingLeft || loadingRight ? "loading…" : "idle";
+    box.textContent =
+      "Candles: " + n + " | from " + fromTxt + " | to " + toTxt + " | " + mode + " | " + phase;
   }
 
-  async function fetchCandles(end, limit) {
-    const q = new URLSearchParams({ tf, limit: String(limit || 1500) });
-    if (end) q.set("end", String(end));
+  async function fetchCandles(opts) {
+    const q = new URLSearchParams({ tf, limit: String((opts && opts.limit) || 1500) });
+    if (opts && opts.start != null) q.set("start", String(opts.start));
+    if (opts && opts.end != null) q.set("end", String(opts.end));
     const r = await fetch("/api/candles?" + q.toString());
-    const j = await r.json();
-    return j.candles || [];
+    return r.json();
   }
 
-  async function loadInitial(end) {
+  async function loadInitial() {
     candleMap = new Map();
     historyEnd = false;
+    historyMode = false;
     loadingLeft = true;
     updateHistStatus();
     try {
-      const rows = await fetchCandles(end, 1500);
-      rows.forEach((c) => {
-        if (c && Number(c.time) >= 1e9) candleMap.set(c.time, c);
-      });
+      const j = await fetchCandles({ limit: 1500 });
+      mergeRows(j.candles || []);
       applyCandles();
-      if (rows.length) chart.timeScale().scrollToRealTime();
+      if (candleMap.size) chart.timeScale().scrollToRealTime();
+      await new Promise((r) => requestAnimationFrame(r));
+      await reloadOverlay();
     } finally {
       loadingLeft = false;
       updateHistStatus();
     }
-    await reloadOverlay();
+  }
+
+  async function loadAround(centerTs) {
+    candleMap = new Map();
+    historyEnd = false;
+    loadingLeft = true;
+    loadingRight = true;
+    updateHistStatus();
+    const barSec = RES_SEC[tf] || 60;
+    try {
+      const [back, fwd] = await Promise.all([
+        fetchCandles({ end: centerTs, limit: 750 }),
+        fetchCandles({ start: centerTs, limit: 750 }),
+      ]);
+      mergeRows(back.candles || []);
+      mergeRows(fwd.candles || []);
+      applyCandles();
+      chart.timeScale().setVisibleRange({
+        from: centerTs - 150 * barSec,
+        to: centerTs + 150 * barSec,
+      });
+      if (fwd.reached_now) historyMode = false;
+      await reloadOverlay();
+    } finally {
+      loadingLeft = false;
+      loadingRight = false;
+      updateHistStatus();
+    }
   }
 
   async function loadOlder() {
@@ -134,16 +181,8 @@
     loadingLeft = true;
     updateHistStatus();
     try {
-      const rows = await fetchCandles(oldest - 1, 1500);
-      let n = 0;
-      rows.forEach((c) => {
-        const t = Number(c && c.time);
-        if (!Number.isFinite(t) || t < 1e9) return;
-        if (!candleMap.has(t)) {
-          candleMap.set(t, c);
-          n += 1;
-        }
-      });
+      const j = await fetchCandles({ end: oldest - 1, limit: 1500 });
+      const n = mergeRows(j.candles || []);
       if (n === 0) {
         historyEnd = true;
       } else {
@@ -156,12 +195,40 @@
     }
   }
 
-  chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-    if (!range || loadingLeft || historyEnd) return;
-    const oldest = oldestCandleTime();
-    if (oldest == null) return;
+  async function loadNewer() {
+    if (!historyMode || loadingRight || candleMap.size === 0) return;
+    const newest = newestCandleTime();
+    if (newest == null) return;
     const barSec = RES_SEC[tf] || 60;
-    if (range.from <= oldest + 20 * barSec) loadOlder();
+    loadingRight = true;
+    updateHistStatus();
+    try {
+      const j = await fetchCandles({ start: newest + barSec, limit: 1500 });
+      mergeRows(j.candles || []);
+      applyCandles();
+      await reloadOverlay();
+      if (j.reached_now) {
+        historyMode = false;
+        updateHistStatus();
+        connectWs();
+      }
+    } finally {
+      loadingRight = false;
+      updateHistStatus();
+    }
+  }
+
+  chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
+    if (!range || loadingLeft || loadingRight) return;
+    const barSec = RES_SEC[tf] || 60;
+    const oldest = oldestCandleTime();
+    const newest = newestCandleTime();
+    if (!historyEnd && oldest != null && range.from <= oldest + 20 * barSec) {
+      loadOlder();
+    }
+    if (historyMode && newest != null && range.to >= newest - 20 * barSec) {
+      loadNewer();
+    }
   });
 
   chart.subscribeCrosshairMove((param) => {
@@ -211,12 +278,14 @@
     paintOverlay(j);
   }
 
-  function clipPts(pts, oldest) {
+  function clipPts(pts, oldest, newest) {
     const src = (pts || [])
-      .filter((p) => Number(p.time) >= oldest)
+      .filter((p) => Number(p.time) >= oldest && (newest == null || Number(p.time) <= newest))
       .sort((a, b) => Number(a.time) - Number(b.time));
     if (!src.length) return [];
-    const times = sortedCandles().map((c) => c.time).filter((t) => t >= oldest);
+    const times = sortedCandles()
+      .map((c) => c.time)
+      .filter((t) => t >= oldest && (newest == null || t <= newest));
     if (!times.length) return src;
     const out = [];
     let i = 0;
@@ -227,36 +296,40 @@
     return out;
   }
 
-  function clipLinePoints(ln, oldest) {
+  function clipLinePoints(ln, oldest, newest) {
     const pts = ln.points || [];
     if (!pts.length) return [];
-    if (ln.kind === "vwap") return clipPts(pts, oldest);
+    if (ln.kind === "vwap") return clipPts(pts, oldest, newest);
     const a = pts[0];
     const b = pts[pts.length - 1];
     if (Number(b.time) < oldest) return [];
+    if (newest != null && Number(a.time) > newest) return [];
     const t0 = Math.max(Number(a.time), oldest);
+    const t1 = newest != null ? Math.min(Number(b.time), newest) : Number(b.time);
+    if (t1 <= t0) return [];
     return [
       { time: t0, value: a.value },
-      { time: Number(b.time), value: b.value },
+      { time: t1, value: b.value },
     ];
   }
 
   function paintOverlay(j) {
     const oldest = oldestCandleTime();
+    const newest = newestCandleTime();
     const showVwap = el("togVwap").checked;
     const showActive = el("togActive").checked;
     const showExpired = el("togExpired").checked;
     const showMarks = el("togMarks").checked;
     const vwap = (j.lines || []).find((x) => x.kind === "vwap");
     vwapSeries.applyOptions({ visible: showVwap });
-    const vwapPts = showVwap && vwap && oldest != null ? clipLinePoints(vwap, oldest) : [];
+    const vwapPts = showVwap && vwap && oldest != null ? clipLinePoints(vwap, oldest, newest) : [];
     vwapSeries.setData(vwapPts);
     clearExtra();
     (j.lines || []).forEach((ln) => {
       if (ln.kind === "vwap") return;
       if (ln.active && !showActive) return;
       if (!ln.active && !showExpired) return;
-      const pts = oldest != null ? clipLinePoints(ln, oldest) : (ln.points || []);
+      const pts = oldest != null ? clipLinePoints(ln, oldest, newest) : (ln.points || []);
       if (pts.length < 2) return;
       const color = ln.kind === "high"
         ? (ln.active ? "#f85149" : "rgba(248,81,73,0.35)")
@@ -270,9 +343,11 @@
       s.setData(pts);
       extraSeries.push(s);
     });
+    const inRange = (t) =>
+      (oldest == null || Number(t) >= oldest) && (newest == null || Number(t) <= newest);
     const marks = showMarks
       ? (j.markers || [])
-          .filter((m) => oldest == null || Number(m.time) >= oldest)
+          .filter((m) => inRange(m.time))
           .map((m) => ({
             time: m.time,
             position: m.side === "long" ? "belowBar" : "aboveBar",
@@ -281,7 +356,7 @@
             text: m.text || "",
           }))
       : [];
-    const tmarks = tradeMarks.filter((m) => oldest == null || Number(m.time) >= oldest);
+    const tmarks = tradeMarks.filter((m) => inRange(m.time));
     series.setMarkers(marks.concat(tmarks));
   }
 
@@ -303,6 +378,7 @@
   }
 
   function applyLiveBar(raw) {
+    if (historyMode) return;
     const t = wsCandleTime(raw);
     if (t == null) return;
     const bar = {
@@ -326,7 +402,25 @@
     void res;
   }
 
+  function disconnectWs() {
+    if (wsTimer) {
+      clearTimeout(wsTimer);
+      wsTimer = null;
+    }
+    try {
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+    } catch (e) {}
+    ws = null;
+    const lab = el("statusLabel");
+    if (lab) lab.textContent = "history";
+    el("dot").className = "";
+  }
+
   function connectWs() {
+    if (historyMode) return;
     setStatus("reconnecting");
     try {
       if (ws) ws.close();
@@ -346,6 +440,7 @@
       if (typ.startsWith("candlestick_")) applyLiveBar(msg);
     };
     ws.onclose = () => {
+      if (historyMode) return;
       setStatus("reconnecting");
       scheduleReconnect();
     };
@@ -355,15 +450,33 @@
   }
 
   function scheduleReconnect() {
+    if (historyMode) return;
     if (wsTimer) clearTimeout(wsTimer);
     wsTimer = setTimeout(connectWs, backoff);
     backoff = Math.min(backoff * 2, 15000);
   }
 
+  function jumpCenterTime() {
+    const vis = chart.timeScale().getVisibleRange();
+    if (vis && vis.from != null && vis.to != null) {
+      return Math.floor((Number(vis.from) + Number(vis.to)) / 2);
+    }
+    const newest = newestCandleTime();
+    const oldest = oldestCandleTime();
+    if (newest != null && oldest != null) return Math.floor((oldest + newest) / 2);
+    return Math.floor(Date.now() / 1000);
+  }
+
   el("tf").addEventListener("change", async () => {
     tf = el("tf").value;
-    await loadInitial();
-    connectWs();
+    if (historyMode) {
+      const center = jumpCenterTime();
+      disconnectWs();
+      await loadAround(center);
+    } else {
+      await loadInitial();
+      connectWs();
+    }
   });
 
   el("btnJump").addEventListener("click", async () => {
@@ -371,8 +484,15 @@
     if (!v) return;
     const ms = new Date(v + "+05:30").getTime();
     if (!Number.isFinite(ms)) return;
-    const end = Math.floor(ms / 1000);
-    await loadInitial(end);
+    historyMode = true;
+    disconnectWs();
+    await loadAround(Math.floor(ms / 1000));
+  });
+
+  el("btnLive").addEventListener("click", async () => {
+    historyMode = false;
+    await loadInitial();
+    connectWs();
   });
 
   async function loadFileList() {

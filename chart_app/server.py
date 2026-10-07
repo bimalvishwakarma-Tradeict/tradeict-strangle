@@ -142,18 +142,27 @@ async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
 async def api_candles(
     tf: str = Query("1m"),
     end: int | None = None,
+    start: int | None = None,
     limit: int = Query(MAX_BARS),
 ) -> dict[str, Any]:
     limit = max(50, min(int(limit), 4000))
     res = RES_SEC[tf] if tf in RES_SEC else 60
     now = int(time.time())
-    end_ts = int(end) if end is not None else now
-    start_ts = end_ts - limit * res
-    rows = await _candles(tf, start_ts, end_ts)
-    if len(rows) > limit:
-        rows = rows[-limit:]
+    if start is not None:
+        start_ts = int(start)
+        end_ts = min(start_ts + limit * res, now)
+        rows = await _candles(tf, start_ts, end_ts)
+        if len(rows) > limit:
+            rows = rows[:limit]
+    else:
+        end_ts = int(end) if end is not None else now
+        start_ts = end_ts - limit * res
+        rows = await _candles(tf, start_ts, end_ts)
+        if len(rows) > limit:
+            rows = rows[-limit:]
     first = int(rows[0]["time"]) if rows else None
     last = int(rows[-1]["time"]) if rows else None
+    reached_now = bool(rows) and int(rows[-1]["time"]) >= now - 2 * res
     return {
         "symbol": SYMBOL,
         "tf": tf,
@@ -161,6 +170,7 @@ async def api_candles(
         "count": len(rows),
         "first": first,
         "last": last,
+        "reached_now": reached_now,
     }
 
 
