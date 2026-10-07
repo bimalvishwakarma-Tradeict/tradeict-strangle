@@ -28,6 +28,7 @@
   let tf = "1m";
   let candleMap = new Map();
   let loadingLeft = false;
+  let historyEnd = false;
   let overlayPayload = { lines: [], markers: [] };
   let tradeMarks = [];
   let overlayTimer = null;
@@ -44,6 +45,7 @@
       borderColor: "#30363d",
       timeVisible: true,
       secondsVisible: false,
+      shiftVisibleRangeOnNewBar: false,
       tickMarkFormatter: (t) => {
         const d = new Date(t * 1000);
         return d.toLocaleString("en-IN", { timeZone: IST, hour12: false, hour: "2-digit", minute: "2-digit" });
@@ -81,6 +83,23 @@
     }
   }
 
+  function oldestCandleTime() {
+    if (candleMap.size === 0) return null;
+    return Math.min(...candleMap.keys());
+  }
+
+  function updateHistStatus() {
+    const box = el("histStatus");
+    if (!box) return;
+    const n = candleMap.size;
+    const oldest = oldestCandleTime();
+    const fromTxt = oldest != null ? fmtIst(oldest) : "—";
+    let phase = "idle";
+    if (loadingLeft) phase = "loading…";
+    else if (historyEnd) phase = "no more history";
+    box.textContent = "Candles: " + n + " | from " + fromTxt + " | " + phase;
+  }
+
   async function fetchCandles(end, limit) {
     const q = new URLSearchParams({ tf, limit: String(limit || 1500) });
     if (end) q.set("end", String(end));
@@ -91,35 +110,58 @@
 
   async function loadInitial(end) {
     candleMap = new Map();
-    const rows = await fetchCandles(end, 1500);
-    rows.forEach((c) => candleMap.set(c.time, c));
-    applyCandles();
-    if (rows.length) chart.timeScale().scrollToRealTime();
+    historyEnd = false;
+    loadingLeft = true;
+    updateHistStatus();
+    try {
+      const rows = await fetchCandles(end, 1500);
+      rows.forEach((c) => {
+        if (c && Number(c.time) >= 1e9) candleMap.set(c.time, c);
+      });
+      applyCandles();
+      if (rows.length) chart.timeScale().scrollToRealTime();
+    } finally {
+      loadingLeft = false;
+      updateHistStatus();
+    }
     await reloadOverlay();
   }
 
   async function loadOlder() {
-    if (loadingLeft || candleMap.size === 0) return;
-    const oldest = Math.min(...candleMap.keys());
+    if (loadingLeft || historyEnd || candleMap.size === 0) return;
+    const oldest = oldestCandleTime();
+    if (oldest == null) return;
     loadingLeft = true;
+    updateHistStatus();
     try {
       const rows = await fetchCandles(oldest - 1, 1500);
       let n = 0;
       rows.forEach((c) => {
-        if (!candleMap.has(c.time)) {
-          candleMap.set(c.time, c);
+        const t = Number(c && c.time);
+        if (!Number.isFinite(t) || t < 1e9) return;
+        if (!candleMap.has(t)) {
+          candleMap.set(t, c);
           n += 1;
         }
       });
-      if (n) applyCandles();
+      if (n === 0) {
+        historyEnd = true;
+      } else {
+        applyCandles();
+        await reloadOverlay();
+      }
     } finally {
       loadingLeft = false;
+      updateHistStatus();
     }
   }
 
-  chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-    if (!range || loadingLeft) return;
-    if (range.from < 8) loadOlder();
+  chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
+    if (!range || loadingLeft || historyEnd) return;
+    const oldest = oldestCandleTime();
+    if (oldest == null) return;
+    const barSec = RES_SEC[tf] || 60;
+    if (range.from <= oldest + 20 * barSec) loadOlder();
   });
 
   chart.subscribeCrosshairMove((param) => {
@@ -169,19 +211,53 @@
     paintOverlay(j);
   }
 
+  function clipPts(pts, oldest) {
+    const src = (pts || [])
+      .filter((p) => Number(p.time) >= oldest)
+      .sort((a, b) => Number(a.time) - Number(b.time));
+    if (!src.length) return [];
+    const times = sortedCandles().map((c) => c.time).filter((t) => t >= oldest);
+    if (!times.length) return src;
+    const out = [];
+    let i = 0;
+    for (const t of times) {
+      while (i + 1 < src.length && Number(src[i + 1].time) <= t) i += 1;
+      if (Number(src[i].time) <= t) out.push({ time: t, value: src[i].value });
+    }
+    return out;
+  }
+
+  function clipLinePoints(ln, oldest) {
+    const pts = ln.points || [];
+    if (!pts.length) return [];
+    if (ln.kind === "vwap") return clipPts(pts, oldest);
+    const a = pts[0];
+    const b = pts[pts.length - 1];
+    if (Number(b.time) < oldest) return [];
+    const t0 = Math.max(Number(a.time), oldest);
+    return [
+      { time: t0, value: a.value },
+      { time: Number(b.time), value: b.value },
+    ];
+  }
+
   function paintOverlay(j) {
+    const oldest = oldestCandleTime();
     const showVwap = el("togVwap").checked;
     const showActive = el("togActive").checked;
     const showExpired = el("togExpired").checked;
     const showMarks = el("togMarks").checked;
     const vwap = (j.lines || []).find((x) => x.kind === "vwap");
     vwapSeries.applyOptions({ visible: showVwap });
-    vwapSeries.setData(showVwap && vwap ? vwap.points : []);
+    const vwapPts = showVwap && vwap && oldest != null ? clipLinePoints(vwap, oldest) : [];
+    vwapSeries.setData(vwapPts);
     clearExtra();
     (j.lines || []).forEach((ln) => {
       if (ln.kind === "vwap") return;
       if (ln.active && !showActive) return;
       if (!ln.active && !showExpired) return;
+      const pts = oldest != null ? clipLinePoints(ln, oldest) : (ln.points || []);
+      if (pts.length < 2) return;
       const color = ln.kind === "high"
         ? (ln.active ? "#f85149" : "rgba(248,81,73,0.35)")
         : (ln.active ? "#3fb950" : "rgba(63,185,80,0.35)");
@@ -191,19 +267,22 @@
         priceLineVisible: false,
         lastValueVisible: false,
       });
-      s.setData(ln.points || []);
+      s.setData(pts);
       extraSeries.push(s);
     });
     const marks = showMarks
-      ? (j.markers || []).map((m) => ({
-          time: m.time,
-          position: m.side === "long" ? "belowBar" : "aboveBar",
-          color: m.side === "long" ? "#3fb950" : "#f85149",
-          shape: m.side === "long" ? "arrowUp" : "arrowDown",
-          text: m.text || "",
-        }))
+      ? (j.markers || [])
+          .filter((m) => oldest == null || Number(m.time) >= oldest)
+          .map((m) => ({
+            time: m.time,
+            position: m.side === "long" ? "belowBar" : "aboveBar",
+            color: m.side === "long" ? "#3fb950" : "#f85149",
+            shape: m.side === "long" ? "arrowUp" : "arrowDown",
+            text: m.text || "",
+          }))
       : [];
-    series.setMarkers(marks.concat(tradeMarks));
+    const tmarks = tradeMarks.filter((m) => oldest == null || Number(m.time) >= oldest);
+    series.setMarkers(marks.concat(tmarks));
   }
 
   ["togVwap", "togActive", "togExpired", "togMarks"].forEach((id) => {
@@ -217,7 +296,9 @@
   function wsCandleTime(raw) {
     let t = Number(raw.candle_start_time != null ? raw.candle_start_time : raw.time);
     if (!Number.isFinite(t)) return null;
-    if (t > 1e12) t = Math.floor(t / 1e9);
+    if (t > 1e15) t = Math.floor(t / 1e9);
+    else if (t > 1e12) t = Math.floor(t / 1000);
+    if (t < 1e9) return null;
     return t;
   }
 
@@ -234,8 +315,8 @@
     };
     const prev = candleMap.get(t);
     candleMap.set(t, bar);
-    if (prev) series.update(bar);
-    else series.update(bar);
+    series.update(bar);
+    updateHistStatus();
     const res = RES_SEC[tf] || 60;
     if (lastBarClose && t > lastBarClose) {
       if (overlayTimer) clearTimeout(overlayTimer);

@@ -33,7 +33,10 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
         variant = "V0"
     hours = float(params.get("hours") or 24)
     to_ts = int(params.get("to") or bars[-1]["time"])
-    cutoff = to_ts - int(hours * 3600)
+    if params.get("from") is not None:
+        cutoff = int(params.get("from"))
+    else:
+        cutoff = to_ts - int(hours * 3600)
 
     ts, o, h, l, c, vol = _arrays(bars)
     vwap_1m = s020.session_vwap(ts, h, l, c, vol)

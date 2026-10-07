@@ -6,6 +6,7 @@ python chart_app\\server.py
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import logging
 import sys
@@ -32,6 +33,9 @@ from strategies import PLUGINS, compute, load_plugins  # noqa: E402
 IST = ZoneInfo("Asia/Kolkata")
 SYMBOL = "BTCUSD"
 MAX_BARS = 1500
+# STEP 1: 1000/2000/3000 returned in full; 6000-min window returned 4000 from the newest end.
+DELTA_PAGE_CAP = 4000
+_CANDLE_CACHE: dict[tuple[str, int], list[dict[str, Any]]] = {}
 RES_SEC = {
     "1m": 60,
     "3m": 180,
@@ -53,33 +57,85 @@ async def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
 
 
+def _norm_row(raw: dict[str, Any]) -> dict[str, Any] | None:
+    if "time" not in raw:
+        return None
+    return {
+        "time": int(raw["time"]),
+        "open": float(raw["open"]),
+        "high": float(raw["high"]),
+        "low": float(raw["low"]),
+        "close": float(raw["close"]),
+        "volume": float(raw.get("volume") or 0.0),
+    }
+
+
 async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
     if tf not in RES_SEC:
         raise HTTPException(400, f"bad tf {tf}")
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Tradeict-chart-app/1.0",
-    }
+    res = RES_SEC[tf]
+    want_start = int(start)
+    page_end = int(end)
+    if page_end <= want_start:
+        logger.info("tf=%s range=%s..%s pages=0 rows=0", tf, want_start, page_end)
+        return []
+    now = int(time.time())
+    closed_before = now - res
     by_ts: dict[int, dict[str, Any]] = {}
+    pages = 0
+    empty_streak = 0
+    span = DELTA_PAGE_CAP * res
     async with httpx.AsyncClient() as client:
-        # reuse download_candles page fetch (same URL, params, retries)
-        raw = await _fetch_page(
-            client, symbol=SYMBOL, resolution=tf, start=int(start), end=int(end)
-        )
-    for r in raw:
-        if "time" not in r:
-            continue
-        ts = int(r["time"])
-        by_ts[ts] = {
-            "time": ts,
-            "open": float(r["open"]),
-            "high": float(r["high"]),
-            "low": float(r["low"]),
-            "close": float(r["close"]),
-            "volume": float(r.get("volume") or 0.0),
-        }
-    return [by_ts[k] for k in sorted(by_ts)]
+        while page_end > want_start:
+            page_start = max(want_start, page_end - span)
+            pages += 1
+            cache_key = (tf, int(page_start))
+            chunk_closed = page_end < closed_before
+            rows_chunk: list[dict[str, Any]] = []
+            if chunk_closed and cache_key in _CANDLE_CACHE:
+                rows_chunk = _CANDLE_CACHE[cache_key]
+            else:
+                raw = await _fetch_page(
+                    client,
+                    symbol=SYMBOL,
+                    resolution=tf,
+                    start=int(page_start),
+                    end=int(page_end),
+                )
+                for item in raw:
+                    row = _norm_row(item) if isinstance(item, dict) else None
+                    if row is not None:
+                        rows_chunk.append(row)
+                closed_rows = [r for r in rows_chunk if int(r["time"]) < closed_before]
+                if chunk_closed:
+                    _CANDLE_CACHE[cache_key] = closed_rows
+            got = 0
+            for row in rows_chunk:
+                ts = int(row["time"])
+                if ts < want_start or ts > int(end):
+                    continue
+                by_ts[ts] = row
+                got += 1
+            if got == 0:
+                empty_streak += 1
+            else:
+                empty_streak = 0
+            if empty_streak >= 3:
+                break
+            if page_start <= want_start:
+                break
+            page_end = page_start
+            await asyncio.sleep(0.15)
+    rows = [by_ts[k] for k in sorted(by_ts)]
+    logger.info(
+        "tf=%s range=%s..%s pages=%s rows=%s",
+        tf,
+        want_start,
+        int(end),
+        pages,
+        len(rows),
+    )
+    return rows
 
 
 @app.get("/api/candles")
@@ -96,7 +152,16 @@ async def api_candles(
     rows = await _candles(tf, start_ts, end_ts)
     if len(rows) > limit:
         rows = rows[-limit:]
-    return {"symbol": SYMBOL, "tf": tf, "candles": rows}
+    first = int(rows[0]["time"]) if rows else None
+    last = int(rows[-1]["time"]) if rows else None
+    return {
+        "symbol": SYMBOL,
+        "tf": tf,
+        "candles": rows,
+        "count": len(rows),
+        "first": first,
+        "last": last,
+    }
 
 
 @app.get("/api/overlay")
@@ -120,9 +185,16 @@ async def api_overlay(
     data = compute(
         strategy,
         bars,
-        {"line_tf": line_tf, "hours": hours, "to": to_u, "chart_tf": tf, "variant": variant},
+        {
+            "line_tf": line_tf,
+            "hours": hours,
+            "from": from_u,
+            "to": to_u,
+            "chart_tf": tf,
+            "variant": variant,
+        },
     )
-    return {"strategy": strategy, **data}
+    return {"strategy": strategy, "bars_used": len(bars), **data}
 
 
 def _runs_root() -> Path:
