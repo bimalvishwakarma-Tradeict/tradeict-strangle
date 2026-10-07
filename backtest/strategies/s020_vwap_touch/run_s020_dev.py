@@ -132,6 +132,72 @@ def entry_allowed(t: int) -> bool:
     return (not skip_lunch_ist(t)) and (not skip_thu_sat_window(t))
 
 
+def band_ok(dist: float, band: int, mode: str) -> bool:
+    if int(band) <= 0:
+        return True
+    if not np.isfinite(dist):
+        return False
+    if str(mode) == "far":
+        return float(dist) > float(band)
+    return float(dist) <= float(band)
+
+
+def keep_signal(s: dict[str, Any], band: int, mode: str) -> bool:
+    return entry_allowed(int(s["ts"])) and band_ok(float(s.get("vwap_dist", float("nan"))), band, mode)
+
+
+def attach_vwap_dist(sigs: list[dict[str, Any]], vwap_by_ts: dict[int, float]) -> None:
+    for s in sigs:
+        t = int(s["ts"])
+        lvl = float(s.get("level", float("nan")))
+        vw = float(vwap_by_ts.get(t, float("nan")))
+        s["vwap"] = vw
+        s["vwap_dist"] = abs(lvl - vw) if np.isfinite(lvl) and np.isfinite(vw) else float("nan")
+
+
+def cell_key(month: str, tf: str, variant: str, tgt: int, slv: int, band: int, mode: str) -> str:
+    return f"{month}|{tf}|{variant}|T={tgt}|SL={slv}|band={int(band)}|{str(mode)}"
+
+
+def hour_idx_band(
+    ts: np.ndarray,
+    c: np.ndarray,
+    vwap_1m: np.ndarray,
+    start_ts: int,
+    cutoff: int,
+    win_from: date,
+    win_to: date,
+    band: int,
+    mode: str,
+) -> dict[int, np.ndarray]:
+    buckets: dict[int, list[int]] = defaultdict(list)
+    for i, t in enumerate(ts):
+        tu = int(t)
+        if tu < start_ts or tu >= cutoff:
+            continue
+        if not s020.in_window(tu, win_from, win_to):
+            continue
+        if not entry_allowed(tu):
+            continue
+        vw = float(vwap_1m[i])
+        dist = abs(float(c[i]) - vw) if np.isfinite(vw) else float("nan")
+        if not band_ok(dist, band, mode):
+            continue
+        buckets[s018.hod_ist(tu)].append(i)
+    return {h: np.asarray(v, dtype=np.int64) for h, v in buckets.items()}
+
+
+def band_grid_jobs() -> list[tuple[str, str, int, str]]:
+    jobs: list[tuple[str, str, int, str]] = []
+    for tf in ("1m", "15m"):
+        for var in ("V0", "V5"):
+            jobs.append((tf, var, 0, "near"))
+            for band in (100, 200, 300):
+                for mode in ("near", "far"):
+                    jobs.append((tf, var, band, mode))
+    return jobs
+
+
 def line_fresh(ln: DevLine, t: int) -> bool:
     if int(t) // 86400 == int(ln.session_utc):
         return True
@@ -441,6 +507,8 @@ def simulate_plan(
     time_stop_sec: int | None,
     label: str = "",
     extra_by: dict[tuple[int, str], dict[str, Any]] | None = None,
+    band: int = 0,
+    band_mode: str = "near",
 ) -> tuple[list[dict[str, Any]], int]:
     busy = -1
     rows: list[dict[str, Any]] = []
@@ -456,7 +524,13 @@ def simulate_plan(
             continue
         if not s020.in_window(t, win_from, win_to):
             continue
-        if not entry_allowed(t):
+        extra: dict[str, Any] = {}
+        if extra_by is not None:
+            extra = dict(extra_by.get((int(t), str(side)), {}))
+        if extra:
+            if not keep_signal(extra, band, band_mode):
+                continue
+        elif not entry_allowed(t):
             continue
         path, newp = get_or_build_path(store, spot_c, t, side, tag, flipped)
         if newp:
@@ -470,9 +544,6 @@ def simulate_plan(
         hold = (int(walked["exit_ts"]) - int(t)) / 3600.0
         exp = expiry_1dte_bimal(t)
         hrs_exp = (s018.expiry_unix(exp) - int(t)) / 3600.0
-        extra: dict[str, Any] = {}
-        if extra_by is not None:
-            extra = dict(extra_by.get((int(t), str(side)), {}))
         rows.append(
             {
                 "entry_ts": t,
@@ -610,18 +681,25 @@ def run_combo(
     n_days: float,
     done: dict[str, dict[str, Any]],
     cell_rows: dict[str, list[dict[str, Any]]],
-    hour_idx: dict[int, np.ndarray],
     t_all: float,
     arm_i: int,
     arm_n: int,
     max_days: int,
+    band: int,
+    band_mode: str,
+    n_sig_raw: int,
+    vwap_1m: np.ndarray,
+    c: np.ndarray,
 ) -> None:
     time_stop = TIME_STOP_SEC if variant == "V5" else None
     extra_by = {(int(s["ts"]), str(s["side"])): s for s in sigs}
-    plan_all = [(int(s["ts"]), str(s["side"])) for s in sigs if entry_allowed(int(s["ts"]))]
+    plan_all = [(int(s["ts"]), str(s["side"])) for s in sigs if keep_signal(s, band, band_mode)]
+    hour_idx = hour_idx_band(
+        ts, c, vwap_1m, start_ts, cutoff, win_from, win_to, band, band_mode
+    )
     tag_p = f"DEV_{variant}_{tf}"
     for tgt, slv in cells:
-        key = f"{month}|{tf}|{variant}|T={tgt}|SL={slv}"
+        key = cell_key(month, tf, variant, tgt, slv, band, band_mode)
         if key in done:
             print(f"done SKIP {key}", flush=True)
             continue
@@ -635,6 +713,8 @@ def run_combo(
             start_ts, cutoff, win_from, win_to, time_stop,
             label=f"{tf} {variant} T={tgt}|SL={slv}",
             extra_by=extra_by,
+            band=band,
+            band_mode=band_mode,
         )
         stt = stats_dev(rows)
         stt.update(
@@ -648,7 +728,11 @@ def run_combo(
                 "max_days": int(max_days),
                 "n_stale": n_stale,
                 "n_sig": len(plan_all),
+                "n_sig_raw": int(n_sig_raw),
+                "kept_pct": (100.0 * len(plan_all) / n_sig_raw) if n_sig_raw else 0.0,
                 "n_days": n_days,
+                "band": int(band),
+                "band_mode": str(band_mode),
             }
         )
         c2m = float("nan")
@@ -709,14 +793,16 @@ def best_v0_cell(done: dict[str, dict[str, Any]], month: str, tf: str) -> tuple[
     return int(ranked[0]["tgt"]), int(ranked[0]["sl"])
 
 
-def summary_table(done: dict[str, dict[str, Any]], month: str) -> list[str]:
+def summary_table(
+    done: dict[str, dict[str, Any]], month: str, band: int, mode: str
+) -> list[str]:
     lines = [
         "SUMMARY tf x variant @ T250/SL250:",
         f"{'tf':<5} {'var':<4} {'n':>5} {'mean':>9} {'gross':>9} {'broker':>8} {'slip':>8} {'C2':>9} {'C3':>9}",
     ]
     for tf in TFS:
         for var in VARIANTS:
-            key = f"{month}|{tf}|{var}|T={PRIMARY_T}|SL={PRIMARY_SL}"
+            key = cell_key(month, tf, var, PRIMARY_T, PRIMARY_SL, band, mode)
             s = done.get(key)
             if s is None:
                 continue
@@ -732,6 +818,30 @@ def summary_table(done: dict[str, dict[str, Any]], month: str) -> list[str]:
     return lines
 
 
+def band_grid_table(done: dict[str, dict[str, Any]], month: str) -> list[str]:
+    lines = [
+        "BAND-GRID T250/SL250:",
+        f"{'tf':<5} {'var':<4} {'band':>5} {'mode':<5} {'n':>5} {'kept%':>7} "
+        f"{'mean':>9} {'gross':>9} {'broker':>8} {'slip':>8} {'C2':>9} {'C3':>9}",
+    ]
+    for tf, var, band, mode in band_grid_jobs():
+        key = cell_key(month, tf, var, PRIMARY_T, PRIMARY_SL, band, mode)
+        s = done.get(key)
+        if s is None:
+            continue
+        lines.append(
+            f"{tf:<5} {var:<4} {int(band):5d} {str(mode):<5} {int(s.get('n', 0)):5d} "
+            f"{s020._fnum(s.get('kept_pct', float('nan')), 1):>7} "
+            f"{s020._fnum(s.get('mean', float('nan')), 2):>9} "
+            f"{s020._fnum(s.get('gross', float('nan')), 2):>9} "
+            f"{s020._fnum(s.get('fee', float('nan')), 2):>8} "
+            f"{s020._fnum(s.get('slip', float('nan')), 2):>8} "
+            f"{s020._fnum(s.get('c2', float('nan')), 2):>9} "
+            f"{s020._fnum(s.get('c3', float('nan')), 2):>9}"
+        )
+    return lines
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default=s018.SPOT_CSV)
@@ -739,6 +849,9 @@ def main() -> None:
     ap.add_argument("--tf", default="1m", choices=list(TFS))
     ap.add_argument("--variant", default="V0", choices=list(VARIANTS))
     ap.add_argument("--all", action="store_true")
+    ap.add_argument("--band", type=int, default=0)
+    ap.add_argument("--band-mode", default="near", choices=("near", "far"))
+    ap.add_argument("--band-grid", action="store_true")
     ap.add_argument("--max-days", type=int, default=0)
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--cache-gb", type=float, default=1.0)
@@ -777,6 +890,12 @@ def main() -> None:
     if max_days:
         print(f"SMOKE max-days={max_days} month={month} cutoff_ts={cutoff}", flush=True)
     spot_c = {int(t): float(x) for t, x in zip(ts, c)}
+    vwap_1m = s020.session_vwap(ts, h, l, c, vol)
+    vwap_by_ts = {
+        int(t): float(vwap_1m[i])
+        for i, t in enumerate(ts)
+        if np.isfinite(vwap_1m[i])
+    }
     n_days = float(max_days) if max_days else float((win_to - win_from).days + 1)
 
     inner = MarksStore()
@@ -784,39 +903,33 @@ def main() -> None:
     done: dict[str, dict[str, Any]] = {} if args.fresh else s020.load_ckpt(CKPT)
     cell_rows: dict[str, list[dict[str, Any]]] = {}
 
-    tfs = list(TFS) if args.all else [str(args.tf)]
-    variants = list(VARIANTS) if args.all else [str(args.variant)]
-    arm_n = max(1, len(tfs) * 30)
+    grid = bool(args.band_grid)
+    if grid:
+        jobs = band_grid_jobs()
+        tfs = sorted({j[0] for j in jobs})
+        variants = sorted({j[1] for j in jobs})
+        band0 = 0
+        mode0 = "near"
+    else:
+        tfs = list(TFS) if args.all else [str(args.tf)]
+        variants = list(VARIANTS) if args.all else [str(args.variant)]
+        band0 = int(args.band)
+        mode0 = str(args.band_mode)
+        jobs = [(tf, var, band0, mode0) for tf in tfs for var in variants]
+    arm_n = max(1, len(jobs))
     arm_i = 0
     t_all = time.perf_counter()
 
-    eligible = [
-        i
-        for i, t in enumerate(ts)
-        if start_ts <= int(t) < cutoff
-        and s020.in_window(int(t), win_from, win_to)
-        and entry_allowed(int(t))
-    ]
-    hour_idx: dict[int, np.ndarray] = defaultdict(list)  # type: ignore[assignment]
-    buckets: dict[int, list[int]] = defaultdict(list)
-    for i in eligible:
-        buckets[s018.hod_ist(int(ts[i]))].append(i)
-    hour_idx = {h: np.asarray(v, dtype=np.int64) for h, v in buckets.items()}
-
     smoke_sigs: list[dict[str, Any]] = []
-    for tf in tfs:
-        tf_sec = TF_SEC[tf]
-        tts, to_, th, tl, tc, tv = resample_tf(ts, o, h, l, c, vol, tf_sec)
-        vwap = s020.session_vwap(tts, th, tl, tc, tv)
-        raw_lines, _, _ = s020.detect_swings(tts, to_, th, tl, tc, vwap)
-        dlines = tf_lines_to_dev(tts, raw_lines, tf_sec)
-        v0_best = best_v0_cell(done, month, tf)
-        seq = list(variants)
-        if args.all and "V0" in seq:
-            seq = ["V0"] + [v for v in seq if v != "V0"]
-        for variant in seq:
-            if variant != "V0":
-                v0_best = best_v0_cell(done, month, tf)
+    sig_cache: dict[tuple[str, str], tuple[list[DevLine], list[dict[str, Any]], int]] = {}
+    for tf, variant, band, band_mode in jobs:
+        ck = (tf, variant)
+        if ck not in sig_cache:
+            tf_sec = TF_SEC[tf]
+            tts, to_, th, tl, tc, tv = resample_tf(ts, o, h, l, c, vol, tf_sec)
+            vwap_tf = s020.session_vwap(tts, th, tl, tc, tv)
+            raw_lines, _, _ = s020.detect_swings(tts, to_, th, tl, tc, vwap_tf)
+            dlines = tf_lines_to_dev(tts, raw_lines, tf_sec)
             lines_copy = [
                 DevLine(
                     kind=x.kind,
@@ -829,87 +942,130 @@ def main() -> None:
                 )
                 for x in dlines
             ]
-            sigs, both_skip = collect_signals(ts, o, h, l, c, lines_copy, variant)
-            sigs = [
+            raw_sigs, both_skip = collect_signals(ts, o, h, l, c, lines_copy, variant)
+            win_sigs = [
                 s
-                for s in sigs
+                for s in raw_sigs
                 if start_ts <= int(s["ts"]) < cutoff
                 and s020.in_window(int(s["ts"]), win_from, win_to)
-                and entry_allowed(int(s["ts"]))
             ]
+            attach_vwap_dist(win_sigs, vwap_by_ts)
+            sig_cache[ck] = (dlines, win_sigs, both_skip)
+        dlines, win_sigs, both_skip = sig_cache[ck]
+        n_raw = len(win_sigs)
+        sigs = [s for s in win_sigs if keep_signal(s, band, band_mode)]
+        kept_pct = (100.0 * len(sigs) / n_raw) if n_raw else 0.0
+        print(
+            f"S020-DEV {month} tf={tf} {variant} band={band} mode={band_mode} "
+            f"lines={len(dlines)} kept {len(sigs)} of {n_raw} signals ({kept_pct:.1f}%) "
+            f"both_skip={both_skip}",
+            flush=True,
+        )
+        if max_days and variant == "V3":
+            smoke_sigs = sigs
+            print_v3_examples(sigs, ts)
+        if grid:
+            cells = [(PRIMARY_T, PRIMARY_SL)]
+        else:
+            v0_best = best_v0_cell(done, month, tf)
+            cells = cells_for(variant, v0_best if variant != "V0" else None)
+        arm_i += 1
+        run_combo(
+            store, spot_c, ts, win_sigs, variant, tf, month, cells,
+            start_ts, cutoff, win_from, win_to, n_days,
+            done, cell_rows, t_all, arm_i, arm_n, max_days,
+            band, band_mode, n_raw, vwap_1m, c,
+        )
+        pk = cell_key(month, tf, variant, PRIMARY_T, PRIMARY_SL, band, band_mode)
+        st = done.get(pk, {})
+        if grid:
             print(
-                f"S020-DEV {month} tf={tf} {variant} lines={len(dlines)} "
-                f"signals={len(sigs)} both_skip={both_skip}",
+                f"[{arm_i}/{arm_n}] {tf} {variant} band={band} {band_mode} "
+                f"n={int(st.get('n', 0))} mean={s020._fnum(st.get('mean', float('nan')), 2)} "
+                f"gross={s020._fnum(st.get('gross', float('nan')), 2)} "
+                f"elapsed={time.perf_counter()-t_all:.0f}s",
                 flush=True,
             )
-            if max_days and variant == "V3":
-                smoke_sigs = sigs
-                print_v3_examples(sigs, ts)
-            cells = cells_for(variant, v0_best if variant != "V0" else None)
-            arm_i += 1
-            run_combo(
-                store, spot_c, ts, sigs, variant, tf, month, cells,
-                start_ts, cutoff, win_from, win_to, n_days,
-                done, cell_rows, hour_idx, t_all, arm_i, arm_n, max_days,
-            )
-            if max_days and variant == "V3":
-                pk = f"{month}|{tf}|{variant}|T={PRIMARY_T}|SL={PRIMARY_SL}"
-                print("=== 2 V3 FILLED ENTRIES ===", flush=True)
-                shown = 0
-                for tr in cell_rows.get(pk, []):
-                    print(
-                        f"  {tr['side']} level={float(tr.get('level', float('nan'))):.1f} "
-                        f"entry={s018.ist_str(int(tr['entry_ts']))} expiry={tr.get('exp')} 17:30 IST "
-                        f"net={float(tr['net']):.2f} reason={tr['reason']}",
-                        flush=True,
-                    )
-                    print(
-                        f"    sweep OHLC={tr.get('sweep_o')}/{tr.get('sweep_h')}/"
-                        f"{tr.get('sweep_l')}/{tr.get('sweep_c')} "
-                        f"reclaim OHLC={tr.get('reclaim_o')}/{tr.get('reclaim_h')}/"
-                        f"{tr.get('reclaim_l')}/{tr.get('reclaim_c')}",
-                        flush=True,
-                    )
-                    shown += 1
-                    if shown >= 2:
-                        break
-                if shown == 0:
-                    print("  (no filled V3 trades)", flush=True)
+        if max_days and variant == "V3":
+            print("=== 2 V3 FILLED ENTRIES ===", flush=True)
+            shown = 0
+            for tr in cell_rows.get(pk, []):
+                print(
+                    f"  {tr['side']} level={float(tr.get('level', float('nan'))):.1f} "
+                    f"entry={s018.ist_str(int(tr['entry_ts']))} expiry={tr.get('exp')} 17:30 IST "
+                    f"net={float(tr['net']):.2f} reason={tr['reason']}",
+                    flush=True,
+                )
+                print(
+                    f"    sweep OHLC={tr.get('sweep_o')}/{tr.get('sweep_h')}/"
+                    f"{tr.get('sweep_l')}/{tr.get('sweep_c')} "
+                    f"reclaim OHLC={tr.get('reclaim_o')}/{tr.get('reclaim_h')}/"
+                    f"{tr.get('reclaim_l')}/{tr.get('reclaim_c')}",
+                    flush=True,
+                )
+                shown += 1
+                if shown >= 2:
+                    break
+            if shown == 0:
+                print("  (no filled V3 trades)", flush=True)
 
+    jh = jobs[0]
+    hdr_st = done.get(
+        cell_key(month, jh[0], jh[1], PRIMARY_T, PRIMARY_SL, jh[2], jh[3]),
+        next(iter(done.values()), {}),
+    )
     report = [
         f"S020 DEV month={month} {win_from}..{win_to} stamp={stamp}",
+        f"band={band0} mode={mode0} kept {int(hdr_st.get('n_sig', 0))} of "
+        f"{int(hdr_st.get('n_sig_raw', 0))} signals "
+        f"({s020._fnum(hdr_st.get('kept_pct', float('nan')), 1)}%)",
         "1DTE=Bimal (<17:30 IST next day; >=17:30 day-after-next); skip 05:30-08:30 IST; "
         "skip Thu 17:30-Sat 17:30 IST; TRAIN ckpt/cache untouched",
         "fees=estimate_option_fee*1.18; slip=slip_pct; stale>5m skip",
         "NOTE: weekday/weekend splits are informational; a split is only actionable "
         "if it holds in TRAIN and HOLDOUT.",
     ]
-    for tf in tfs:
-        for variant in variants:
-            for tgt, slv in cells_for(variant, best_v0_cell(done, month, tf) if variant != "V0" else None):
-                key = f"{month}|{tf}|{variant}|T={tgt}|SL={slv}"
-                st = done.get(key)
-                if st is None:
-                    continue
-                report.append(f"{key} ALL {fmt_dev(st)}")
-                if isinstance(st.get("wd"), dict):
-                    report.append(f"  WEEKDAY {s020.fmt_ww(st['wd'])}")
-                    report.append(f"  WEEKEND {s020.fmt_ww(st['we'])}")
-                if tgt == PRIMARY_T and slv == PRIMARY_SL:
-                    report.append(
-                        f"  C2mean={s020._fnum(st.get('c2', float('nan')), 2)} "
-                        f"C3mean={s020._fnum(st.get('c3', float('nan')), 2)}"
-                    )
-                    if isinstance(st.get("c2_wd"), dict):
-                        report.append(f"  C2 WEEKDAY {s020.fmt_ww(st['c2_wd'])}")
-                        report.append(f"  C2 WEEKEND {s020.fmt_ww(st['c2_we'])}")
-                    if isinstance(st.get("c3_wd"), dict):
-                        report.append(f"  C3 WEEKDAY {s020.fmt_ww(st['c3_wd'])}")
-                        report.append(f"  C3 WEEKEND {s020.fmt_ww(st['c3_we'])}")
-    report.extend(summary_table(done, month))
+    seen_keys: set[str] = set()
+    for tf, variant, band, band_mode in jobs:
+        cell_list = (
+            [(PRIMARY_T, PRIMARY_SL)]
+            if grid
+            else cells_for(variant, best_v0_cell(done, month, tf) if variant != "V0" else None)
+        )
+        for tgt, slv in cell_list:
+            key = cell_key(month, tf, variant, tgt, slv, band, band_mode)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            st = done.get(key)
+            if st is None:
+                continue
+            report.append(
+                f"{key} kept {int(st.get('n_sig', 0))} of {int(st.get('n_sig_raw', 0))} "
+                f"({s020._fnum(st.get('kept_pct', float('nan')), 1)}%) ALL {fmt_dev(st)}"
+            )
+            if isinstance(st.get("wd"), dict):
+                report.append(f"  WEEKDAY {s020.fmt_ww(st['wd'])}")
+                report.append(f"  WEEKEND {s020.fmt_ww(st['we'])}")
+            if tgt == PRIMARY_T and slv == PRIMARY_SL:
+                report.append(
+                    f"  C2mean={s020._fnum(st.get('c2', float('nan')), 2)} "
+                    f"C3mean={s020._fnum(st.get('c3', float('nan')), 2)}"
+                )
+                if isinstance(st.get("c2_wd"), dict):
+                    report.append(f"  C2 WEEKDAY {s020.fmt_ww(st['c2_wd'])}")
+                    report.append(f"  C2 WEEKEND {s020.fmt_ww(st['c2_we'])}")
+                if isinstance(st.get("c3_wd"), dict):
+                    report.append(f"  C3 WEEKDAY {s020.fmt_ww(st['c3_wd'])}")
+                    report.append(f"  C3 WEEKEND {s020.fmt_ww(st['c3_we'])}")
+    if grid:
+        report.extend(band_grid_table(done, month))
+    else:
+        report.extend(summary_table(done, month, band0, mode0))
     txtp = OUT_DIR / f"s020_dev_{month}_{stamp}.txt"
     txtp.write_text("\n".join(report) + "\n", encoding="utf-8")
-    prim_key = f"{month}|{tfs[0]}|{variants[0]}|T={PRIMARY_T}|SL={PRIMARY_SL}"
+    j0 = jobs[0]
+    prim_key = cell_key(month, j0[0], j0[1], PRIMARY_T, PRIMARY_SL, j0[2], j0[3])
     prow = cell_rows.get(prim_key, [])
     csvp = OUT_DIR / f"s020_dev_{month}_{stamp}_trades.csv"
     with csvp.open("w", newline="", encoding="utf-8") as f:
@@ -917,11 +1073,12 @@ def main() -> None:
             f,
             fieldnames=[
                 "side", "entry_ts_ist", "exit_ts_ist", "reason", "gross", "fees", "net",
-                "hold_hrs", "hrs_to_exp", "exp",
+                "hold_hrs", "hrs_to_exp", "exp", "vwap_dist",
             ],
         )
         w.writeheader()
         for r in prow:
+            vd = r.get("vwap_dist")
             w.writerow(
                 {
                     "side": r["side"],
@@ -934,6 +1091,7 @@ def main() -> None:
                     "hold_hrs": r["hold_hrs"],
                     "hrs_to_exp": r.get("hrs_to_exp"),
                     "exp": r.get("exp"),
+                    "vwap_dist": vd,
                 }
             )
     print("\n".join(report))
