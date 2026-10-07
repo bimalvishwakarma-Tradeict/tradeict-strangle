@@ -51,6 +51,8 @@ backtest/strategies/**/runs/s018_pathcache/
 backtest/strategies/**/runs/s018_pathcache/**
 backtest/strategies/**/runs/s020_pathcache/
 backtest/strategies/**/runs/s020_pathcache/**
+backtest/strategies/**/runs/s020_dev_pathcache/
+backtest/strategies/**/runs/s020_dev_pathcache/**
 deploy/gdrive_credentials.json
 
 

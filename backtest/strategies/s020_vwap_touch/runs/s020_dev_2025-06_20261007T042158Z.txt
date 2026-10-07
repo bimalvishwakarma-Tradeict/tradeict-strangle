@@ -1,0 +1,15 @@
+S020 DEV month=2025-06 2025-06-01..2025-06-03 stamp=20261007T042158Z
+1DTE=Bimal (<17:30 IST next day; >=17:30 day-after-next); skip 05:30-08:30 IST; skip Thu 17:30-Sat 17:30 IST; TRAIN ckpt/cache untouched
+fees=estimate_option_fee*1.18; slip=slip_pct; stale>5m skip
+NOTE: weekday/weekend splits are informational; a split is only actionable if it holds in TRAIN and HOLDOUT.
+2025-06|5m|V3|T=250|SL=250 ALL n=6 win%=16.7 mean=-253.39 med=-338.18 gross=-183.17 BROKERAGE/t=70.23 SLIPPAGE/t=24.56 worst=-347.29 maxDD=-1520.4 holdHrs=5.68 hrsToExp=38.78 exits={'SL': 5, 'TARGET': 1}
+  WEEKDAY n=5 win%=20.0 mean=-236.61 med=-339.03 gross=-166.58 worst=-347.29 maxDD=-1183.0
+  WEEKEND n=1 win%=0.0 mean=-337.33 med=-337.33 gross=-266.11 worst=-337.33 maxDD=-337.3
+  C2mean=-212.25 C3mean=-232.79
+  C2 WEEKDAY n=29 win%=20.7 mean=-229.07 med=-335.09 gross=-158.07 worst=-354.63 maxDD=-6818.7
+  C2 WEEKEND n=10 win%=30.0 mean=-176.14 med=-331.66 gross=-109.66 worst=-334.89 maxDD=-1761.4
+  C3 WEEKDAY n=4 win%=25.0 mean=-207.03 med=-331.52 gross=-138.76 worst=-337.10 maxDD=-828.1
+  C3 WEEKEND n=1 win%=0.0 mean=-335.84 med=-335.84 gross=-265.13 worst=-335.84 maxDD=-335.8
+SUMMARY tf x variant @ T250/SL250:
+tf    var      n      mean     gross   broker     slip        C2        C3
+5m    V3       6   -253.39   -183.17    70.23    24.56   -212.25   -232.79
