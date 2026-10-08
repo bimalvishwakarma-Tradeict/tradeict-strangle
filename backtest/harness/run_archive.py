@@ -32,7 +32,8 @@ TRADE_COLS: tuple[str, ...] = (
     "trade_id", "month", "tf", "variant", "band", "band_mode", "arm", "n_legs", "dte",
     "side", "entry_ist", "exit_ist", "exit_reason", "hold_hrs", "hrs_to_exp",
     "spot_entry", "spot_exit", "line_level", "vwap_dist",
-    "gross", "brokerage", "slippage", "net", "mfe", "mfe_time", "mae", "mae_time",
+    "gross", "brokerage", "slippage", "net", "long_pnl", "short_pnl",
+    "mfe", "mfe_time", "mae", "mae_time",
 )
 LEG_COLS: tuple[str, ...] = (
     "trade_id", "symbol", "strike", "type", "expiry", "qty", "long_short",
@@ -45,6 +46,7 @@ GREEK_COLS: tuple[str, ...] = (
     "trade_id", "ts_ist", "kind", "spot",
     "leg1_mark", "leg1_iv", "leg2_mark", "leg2_iv", "leg3_mark", "leg3_iv",
     "basket_delta", "basket_gamma", "basket_theta", "basket_vega", "basket_mark_pnl",
+    "long_delta", "long_gamma", "long_theta", "long_vega", "long_mark_pnl",
 )
 
 

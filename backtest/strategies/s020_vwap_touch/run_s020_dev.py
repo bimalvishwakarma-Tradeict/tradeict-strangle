@@ -31,8 +31,8 @@ for _p in (str(_ROOT), str(_BACKTEST)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from backtest.fees_sim import OPTIONS_CONTRACT_VALUE  # noqa: E402
-from backtest.harness.data import MarksStore, ist_dt, to_unix  # noqa: E402
+from backtest.fees_sim import OPTIONS_CONTRACT_VALUE, estimate_option_fee  # noqa: E402
+from backtest.harness.data import MarksStore, ist_dt, load_symbol_series, to_unix  # noqa: E402
 from backtest.harness.mark_cache import reset_mark_cache  # noqa: E402
 from backtest.harness.run_archive import (  # noqa: E402
     SNAPSHOT_SEC,
@@ -118,6 +118,16 @@ EXIT_GRID_SIGS: tuple[tuple[str, str, int, str], ...] = (
     ("1m", "V0", 0, "near"),
     ("15m", "V5", 300, "far"),
 )
+HEDGE_LONG = ("L2", "L3")
+HEDGE_E = (0, 1)
+HEDGE_OFF = (0, 300, 600)
+HEDGE_W = (500, 1000)
+HEDGE_Q = (0.25, 0.5)
+HEDGE_TRAIL_ARM = 80.0
+HEDGE_TRAIL_GIVE = 60.0
+HEDGE_TRAIL_CAP = 400.0
+HEDGE_LONG_SL = 250.0
+HEDGE_N_COMBOS = 100
 ARM_A4: dict[str, Any] = {
     "id": "A4",
     "legs": 2,
@@ -364,6 +374,8 @@ def cell_key(
         key += "|A4"
     if bid.startswith("B") or bsk.startswith("sg"):
         key += f"|{bid or bsk}|sgx"
+    if bid.startswith("L2") or bid.startswith("L3"):
+        key += f"|{bid}"
     return key
 
 
@@ -373,6 +385,8 @@ def path_tag(base: str, dte: int, basket: str = "std") -> str:
     if bsk == "a4":
         tag = f"{tag}_A4"
     elif bsk.startswith("sg"):
+        tag = f"{tag}_{bsk}"
+    elif bsk.startswith("hdg"):
         tag = f"{tag}_{bsk}"
     if int(dte) != 1:
         tag = f"{tag}_D{int(dte)}"
@@ -402,6 +416,12 @@ def work_fields_from_arm(arm: dict[str, Any]) -> dict[str, Any]:
         "basket": str(arm.get("basket", "std")),
         "prem_pct": float(arm.get("prem_pct", 0.0)),
         "strangle_exit": bool(arm.get("strangle_exit", False)),
+        "hedge": bool(arm.get("hedge", False)),
+        "hedge_e": int(arm.get("hedge_e", -1)),
+        "hedge_off": float(arm.get("hedge_off", 0.0)),
+        "hedge_w": float(arm.get("hedge_w", 0.0)),
+        "hedge_q": float(arm.get("hedge_q", 0.0)),
+        "long_kind": str(arm.get("long_kind", "")),
     }
 
 
@@ -788,7 +808,439 @@ def get_or_build_path(
     return path, True
 
 
+def expiry_0dte_bimal(t: int) -> date:
+    """<17:30 IST -> aaj 17:30; >=17:30 -> kal 17:30."""
+    dt = datetime.fromtimestamp(int(t), tz=s018.UTC).astimezone(s018.IST)
+    d = dt.date()
+    cut = dt.replace(hour=17, minute=30, second=0, microsecond=0)
+    if dt < cut:
+        return d
+    return d + timedelta(days=1)
+
+
+def fee_gst_qty(prem: float, index: float, qty: int) -> float:
+    if int(qty) <= 0:
+        return 0.0
+    return float(estimate_option_fee(premium=prem, qty_lots=int(qty), btc_index=index)) * s018.GST
+
+
+def nearest_listed(ks: list[float], target: float) -> float | None:
+    if not ks:
+        return None
+    return min(ks, key=lambda k: (abs(float(k) - float(target)), float(k)))
+
+
+def pick_short_hedge_rows(
+    store: Any, t: int, spot: float, e: int, off: float, wing: float
+) -> tuple[list[tuple[dict[str, Any], str]], date] | None:
+    exp = expiry_0dte_bimal(t) if int(e) == 0 else expiry_1dte_bimal(t)
+    packed = s018.load_chain(store, exp, t)
+    if packed is None:
+        return None
+    rows, _ = packed
+    ks = _strikes_sorted(rows)
+    atm = atm_strike_of(rows, spot)
+    if atm is None:
+        return None
+    sc = nearest_listed(ks, float(atm) + float(off))
+    spu = nearest_listed(ks, float(atm) - float(off))
+    if sc is None or spu is None:
+        return None
+    wc = nearest_listed(ks, float(sc) + float(wing))
+    wp = nearest_listed(ks, float(spu) - float(wing))
+    if wc is None or wp is None:
+        return None
+    specs = [
+        (True, float(sc), "scall"),
+        (False, float(spu), "sput"),
+        (True, float(wc), "wcall"),
+        (False, float(wp), "wput"),
+    ]
+    chosen: list[tuple[dict[str, Any], str]] = []
+    for is_call, k, role in specs:
+        r = row_strike(rows, is_call, k)
+        if r is None:
+            return None
+        chosen.append((r, role))
+    return chosen, exp
+
+
+def _leg_dict(
+    r: dict[str, Any],
+    q: Any,
+    fill: float,
+    dlt: float,
+    role: str,
+    long_short: str,
+    qty: int,
+    exp: date,
+    fee: float,
+    slip: float,
+) -> dict[str, Any]:
+    return {
+        "symbol": str(r["symbol"]),
+        "strike": float(r["strike"]),
+        "is_call": bool(r["is_call"]),
+        "role": role,
+        "mark": float(q.px),
+        "fill": float(fill),
+        "src": q.src,
+        "delta": dlt,
+        "ts": q.ts,
+        "fee": float(fee),
+        "slip": float(slip),
+        "qty": int(qty),
+        "long_short": long_short,
+        "expiry": exp.isoformat(),
+        "exp_ts": s018.expiry_unix(exp),
+    }
+
+
+def save_path_hedge(p: Path, obj: dict[str, Any]) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    meta = json.dumps(
+        {
+            "exp": obj["exp"],
+            "legs": obj["legs"],
+            "hedge": True,
+            "nlong": int(obj["nlong"]),
+            "short_exp": obj.get("short_exp", ""),
+            "short_settle_fee": float(obj.get("short_settle_fee", 0.0)),
+            "short_settle_slip": float(obj.get("short_settle_slip", 0.0)),
+            "short_settle_gross": float(obj.get("short_settle_gross", 0.0)),
+        }
+    )
+    np.savez_compressed(
+        p,
+        ts=obj["ts"],
+        ok=obj["ok"],
+        pnl=obj["pnl"],
+        pnl_long=obj["pnl_long"],
+        pnl_short=obj["pnl_short"],
+        spot=obj["spot"],
+        px=np.stack(obj["pxs"]),
+        src=np.stack(obj["srcs"]),
+        entry_ts=np.array([obj["entry_ts"]], dtype=np.int64),
+        exp_ts=np.array([obj["exp_ts"]], dtype=np.int64),
+        short_exp_ts=np.array([int(obj.get("short_exp_ts") or 0)], dtype=np.int64),
+        dte=np.array([obj["dte"]], dtype=np.int32),
+        meta_json=np.array([meta.encode("utf-8")]),
+    )
+
+
+def load_path_hedge(p: Path) -> dict[str, Any] | None:
+    if not p.exists():
+        return None
+    z = np.load(p, allow_pickle=False)
+    raw = z["meta_json"][0]
+    meta = json.loads(bytes(raw).decode("utf-8") if isinstance(raw, (bytes, np.bytes_)) else str(raw))
+    px = z["px"]
+    src = z["src"]
+    pxs = [np.array(px[k]) for k in range(int(px.shape[0]))]
+    srcs = [np.array(src[k]) for k in range(int(src.shape[0]))]
+    return {
+        "entry_ts": int(z["entry_ts"][0]),
+        "exp": str(meta["exp"]),
+        "exp_ts": int(z["exp_ts"][0]),
+        "dte": int(z["dte"][0]),
+        "legs": meta["legs"],
+        "hedge": True,
+        "nlong": int(meta.get("nlong", 0)),
+        "short_exp": str(meta.get("short_exp", "")),
+        "short_settle_fee": float(meta.get("short_settle_fee", 0.0)),
+        "short_settle_slip": float(meta.get("short_settle_slip", 0.0)),
+        "short_settle_gross": float(meta.get("short_settle_gross", 0.0)),
+        "ts": z["ts"],
+        "ok": z["ok"],
+        "pnl": z["pnl"],
+        "pnl_long": z["pnl_long"],
+        "pnl_short": z["pnl_short"],
+        "spot": z["spot"],
+        "pxs": pxs,
+        "srcs": srcs,
+        "short_exp_ts": int(z["short_exp_ts"][0]),
+    }
+
+
+def build_path_hedge(
+    store: Any,
+    spot_c: dict[int, float],
+    legs: list[dict[str, Any]],
+    entry_ts: int,
+    long_exp: date,
+    nlong: int,
+) -> dict[str, Any] | None:
+    long_exp_ts = s018.expiry_unix(long_exp)
+    shorts = [lg for lg in legs if str(lg["long_short"]) == "short"]
+    short_exp_ts = int(shorts[0]["exp_ts"]) if shorts else 0
+    short_exp = date.fromisoformat(str(shorts[0]["expiry"])) if shorts else long_exp
+    series = [load_symbol_series(store, str(lg["symbol"]), entry_ts, int(lg["exp_ts"])) for lg in legs]
+    ts = np.arange(int(entry_ts) + 60, int(long_exp_ts) + 1, 60, dtype=np.int64)
+    n = int(ts.size)
+    if n <= 0:
+        return None
+    nleg = len(legs)
+    ok = np.zeros(n, dtype=np.bool_)
+    pnl = np.full(n, np.nan, dtype=np.float32)
+    pnl_l = np.full(n, np.nan, dtype=np.float32)
+    pnl_s = np.full(n, np.nan, dtype=np.float32)
+    spot = np.zeros(n, dtype=np.float32)
+    pxs = [np.full(n, np.nan, dtype=np.float32) for _ in range(nleg)]
+    srcs = [np.zeros(n, dtype=np.int8) for _ in range(nleg)]
+    settled = False
+    settle_gp = 0.0
+    settle_fee = 0.0
+    settle_slip = 0.0
+    settle_gross = 0.0
+    for i in range(n):
+        t = int(ts[i])
+        sp = float(spot_c.get(t, 0.0))
+        spot[i] = sp
+        qs: list[Any] = []
+        missing = False
+        for k, lg in enumerate(legs):
+            is_short = str(lg["long_short"]) == "short"
+            if is_short and short_exp_ts and t >= short_exp_ts:
+                qs.append(None)
+                continue
+            q = s018.series_le(series[k], t)
+            if q is None:
+                missing = True
+                break
+            qs.append(q)
+        if missing:
+            continue
+        long_gp = 0.0
+        short_gp = 0.0
+        for k, lg in enumerate(legs):
+            qty = int(lg["qty"])
+            is_short = str(lg["long_short"]) == "short"
+            if is_short and short_exp_ts and t >= short_exp_ts:
+                if not settled:
+                    inn = intrinsic(bool(lg["is_call"]), float(lg["strike"]), sp)
+                    pxs[k][i] = np.float32(inn)
+                    srcs[k][i] = np.int8(3)
+                    gp = (float(lg["fill"]) - inn) * qty * OPTIONS_CONTRACT_VALUE
+                    settle_gp += gp
+                    settle_gross += gp
+                    if inn > 0:
+                        settle_fee += fee_gst_qty(inn, sp if sp else 1.0, qty)
+                else:
+                    pxs[k][i] = pxs[k][i - 1] if i else np.float32(np.nan)
+                continue
+            q = qs[k]
+            pxs[k][i] = np.float32(q.px)
+            srcs[k][i] = np.int8(s020.SRC_CODE.get(q.src, 0))
+            gp = (float(q.px) - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+            if is_short:
+                short_gp += -gp
+            else:
+                long_gp += gp
+        if shorts and short_exp_ts and t >= short_exp_ts:
+            if not settled:
+                settled = True
+            short_gp = settle_gp
+        ok[i] = True
+        pnl_l[i] = np.float32(long_gp)
+        pnl_s[i] = np.float32(short_gp)
+        pnl[i] = np.float32(long_gp + short_gp)
+    dte = max(0, (long_exp - ist_date(entry_ts)).days)
+    return {
+        "entry_ts": int(entry_ts),
+        "exp": long_exp.isoformat(),
+        "exp_ts": long_exp_ts,
+        "dte": dte,
+        "legs": legs,
+        "hedge": True,
+        "nlong": int(nlong),
+        "ts": ts,
+        "ok": ok,
+        "pnl": pnl,
+        "pnl_long": pnl_l,
+        "pnl_short": pnl_s,
+        "spot": spot,
+        "pxs": pxs,
+        "srcs": srcs,
+        "short_exp_ts": int(short_exp_ts),
+        "short_exp": short_exp.isoformat() if shorts else "",
+        "short_settle_fee": float(settle_fee),
+        "short_settle_slip": float(settle_slip),
+        "short_settle_gross": float(settle_gross),
+    }
+
+
+def get_or_build_hedge_path(
+    store: Any,
+    spot_c: dict[int, float],
+    t: int,
+    side: str,
+    tag: str,
+    long_kind: str,
+    hedge_e: int,
+    hedge_off: float,
+    hedge_w: float,
+    hedge_q: float,
+) -> tuple[dict[str, Any] | None, bool]:
+    nlong = 2 if str(long_kind) == "L2" else 3
+    bsk = f"hdg_{long_kind}_REF" if float(hedge_q) <= 0 else (
+        f"hdg_{long_kind}_E{int(hedge_e)}_o{int(hedge_off)}_W{int(hedge_w)}_q{int(round(float(hedge_q)*100))}"
+    )
+    long_exp = expiry_2dte_bimal(t)
+    fp = cache_file(t, side, long_exp, path_tag(tag, 2, basket=bsk))
+    path = load_path_hedge(fp)
+    if path is not None:
+        return path, False
+    sp = spot_c.get(t)
+    if sp is None:
+        return None, False
+    long_obj = pick_basket_dev(store, side, t, float(sp), False, dte_mode=2, basket="std")
+    if long_obj is None:
+        return None, False
+    t_yr_l = t_years(t, s018.expiry_unix(long_exp))
+    dte_l = max(0, (long_exp - ist_date(t)).days)
+    qty_l = int(s018.QTY)
+    legs: list[dict[str, Any]] = []
+    for lg in long_obj[:nlong]:
+        fee = fee_gst_qty(float(lg.mark), float(sp), qty_l)
+        slip = (float(lg.fill) - float(lg.mark)) * qty_l * OPTIONS_CONTRACT_VALUE
+        legs.append(
+            {
+                "symbol": lg.symbol,
+                "strike": lg.strike,
+                "is_call": lg.is_call,
+                "role": lg.role,
+                "mark": lg.mark,
+                "fill": lg.fill,
+                "src": lg.src,
+                "delta": lg.delta,
+                "ts": lg.ts,
+                "fee": fee,
+                "slip": slip,
+                "qty": qty_l,
+                "long_short": "long",
+                "expiry": long_exp.isoformat(),
+                "exp_ts": s018.expiry_unix(long_exp),
+            }
+        )
+    if float(hedge_q) > 0:
+        packed = pick_short_hedge_rows(store, t, float(sp), int(hedge_e), float(hedge_off), float(hedge_w))
+        if packed is None:
+            return None, False
+        chosen, sexp = packed
+        qty_s = int(round(float(hedge_q) * float(s018.QTY)))
+        dte_s = max(0, (sexp - ist_date(t)).days)
+        t_yr_s = t_years(t, s018.expiry_unix(sexp))
+        for r, role in chosen:
+            q = s018.mark_le(store, sexp, str(r["symbol"]), t)
+            if q is None:
+                return None, False
+            fill, _ = s018.sell_fill(q.px, dte_s)
+            dlt = s018.signed_delta(q.px, float(sp), float(r["strike"]), t_yr_s, bool(r["is_call"]))
+            fee = fee_gst_qty(float(q.px), float(sp), qty_s)
+            slip = (float(fill) - float(q.px)) * qty_s * OPTIONS_CONTRACT_VALUE
+            legs.append(_leg_dict(r, q, fill, dlt, role, "short", qty_s, sexp, fee, slip))
+    path = build_path_hedge(store, spot_c, legs, t, long_exp, nlong)
+    if path is None:
+        return None, False
+    save_path_hedge(fp, path)
+    return path, True
+
+
+def scan_hedge_path(path: dict[str, Any], spot_c: dict[int, float]) -> dict[str, Any] | None:
+    ts = path["ts"]
+    ok = path["ok"]
+    exp_ts = int(path["exp_ts"])
+    armed = False
+    peak = float("-inf")
+    n = int(ts.size)
+    for i in range(n):
+        t = int(ts[i])
+        if bool(ok[i]) and np.isfinite(path["pnl"][i]):
+            long_gp = float(path["pnl_long"][i])
+            comb = float(path["pnl"][i])
+            if long_gp <= -float(HEDGE_LONG_SL):
+                return _hedge_exit(path, i, "LOSS", spot_c)
+            if comb >= float(HEDGE_TRAIL_CAP):
+                return _hedge_exit(path, i, "TARGET", spot_c)
+            if comb >= float(HEDGE_TRAIL_ARM):
+                armed = True
+            if armed:
+                peak = max(peak, comb)
+                if comb <= peak - float(HEDGE_TRAIL_GIVE):
+                    return _hedge_exit(path, i, "TRAIL", spot_c)
+        if t == exp_ts:
+            return _hedge_exit(path, i, "EXPIRY", spot_c)
+    return None
+
+
+def _hedge_exit(
+    path: dict[str, Any], i: int, reason: str, spot_c: dict[int, float]
+) -> dict[str, Any]:
+    t = int(path["ts"][i])
+    sp = float(path["spot"][i]) or float(spot_c.get(t, 0.0))
+    short_exp_ts = int(path.get("short_exp_ts") or 0)
+    fees = sum(float(lg["fee"]) for lg in path["legs"])
+    slip = sum(float(lg["slip"]) for lg in path["legs"])
+    fees += float(path.get("short_settle_fee", 0.0))
+    slip += float(path.get("short_settle_slip", 0.0))
+    gross_l = 0.0
+    gross_s = float(path.get("short_settle_gross", 0.0)) if short_exp_ts and t >= short_exp_ts else 0.0
+    for k, lg in enumerate(path["legs"]):
+        qty = int(lg["qty"])
+        is_short = str(lg["long_short"]) == "short"
+        if is_short and short_exp_ts and t >= short_exp_ts:
+            continue
+        mark = float(path["pxs"][k][i])
+        dte = max(0, (date.fromisoformat(str(lg["expiry"])) - ist_date(t)).days)
+        if is_short:
+            xf, _ = s018.buy_fill(mark, dte)
+            gp = (float(lg["fill"]) - xf) * qty * OPTIONS_CONTRACT_VALUE
+            fees += fee_gst_qty(mark, sp if sp else 1.0, qty)
+            slip += (xf - mark) * qty * OPTIONS_CONTRACT_VALUE
+            gross_s += gp
+        elif reason == "EXPIRY":
+            xf = intrinsic(bool(lg["is_call"]), float(lg["strike"]), sp)
+            gp = (xf - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+            if xf > 0:
+                fees += fee_gst_qty(xf, sp if sp else 1.0, qty)
+            gross_l += gp
+        else:
+            xf, _ = s018.sell_fill(mark, dte)
+            gp = (xf - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+            fees += fee_gst_qty(mark, sp if sp else 1.0, qty)
+            slip += (mark - xf) * qty * OPTIONS_CONTRACT_VALUE
+            gross_l += gp
+    gross = gross_l + gross_s
+    return {
+        "exit_ts": t,
+        "reason": reason,
+        "gross": gross,
+        "fees": fees,
+        "slip": slip,
+        "net": gross - fees,
+        "long_pnl": gross_l,
+        "short_pnl": gross_s,
+        "spot_exit": sp,
+        "srcs": [],
+    }
+
+
+def short_hedge_coverage(
+    store: Any, spot_c: dict[int, float], plan: list[tuple[int, str]], e: int
+) -> tuple[int, int]:
+    ok_n = 0
+    for t, _side in plan:
+        sp = spot_c.get(int(t))
+        if sp is None:
+            continue
+        if pick_short_hedge_rows(store, int(t), float(sp), int(e), 0.0, 500.0) is not None:
+            ok_n += 1
+    return ok_n, len(plan)
+
+
 def gp_at(path: dict[str, Any], i: int, nlegs: int) -> float:
+    if path.get("hedge"):
+        return float(path["pnl"][i])
     if int(nlegs) != 2:
         return float(path["pnl"][i])
     legs = list(path["legs"])
@@ -1190,6 +1642,101 @@ def simulate_plan(
     return rows, n_stale
 
 
+def simulate_hedge_plan(
+    store: Any,
+    spot_c: dict[int, float],
+    plan: list[tuple[int, str]],
+    tag: str,
+    start_ts: int,
+    cutoff: int,
+    win_from: date,
+    win_to: date,
+    extra_by: dict[tuple[int, str], dict[str, Any]] | None,
+    band: int,
+    band_mode: str,
+    long_kind: str,
+    hedge_e: int,
+    hedge_off: float,
+    hedge_w: float,
+    hedge_q: float,
+    label: str = "",
+    on_trade: Any | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    busy = -1
+    rows: list[dict[str, Any]] = []
+    n_stale = 0
+    built = 0
+    t0 = time.perf_counter()
+    st_prog: dict[str, int] = {"mark": -1}
+    nplan = len(plan)
+    nlong = 2 if str(long_kind) == "L2" else 3
+    for j, (t, side) in enumerate(plan, start=1):
+        if label:
+            s020.progress_every_2pct(label, j, nplan, built, t0, st_prog)
+        if t < start_ts or t >= cutoff or t <= busy:
+            continue
+        if not s020.in_window(t, win_from, win_to):
+            continue
+        extra: dict[str, Any] = {}
+        if extra_by is not None:
+            extra = dict(extra_by.get((int(t), str(side)), {}))
+        if extra:
+            if not keep_signal(extra, band, band_mode):
+                continue
+        elif not entry_allowed(t):
+            continue
+        path, newp = get_or_build_hedge_path(
+            store, spot_c, t, side, tag, long_kind, hedge_e, hedge_off, hedge_w, hedge_q
+        )
+        if newp:
+            built += 1
+        if path is None:
+            n_stale += 1
+            continue
+        walked = scan_hedge_path(path, spot_c)
+        if walked is None:
+            continue
+        hold = (int(walked["exit_ts"]) - int(t)) / 3600.0
+        exp = date.fromisoformat(str(path["exp"]))
+        hrs_exp = (s018.expiry_unix(exp) - int(t)) / 3600.0
+        mf, ma, mfe_ts, mae_ts = mfe_mae_with_ts(path, nlong, int(walked["exit_ts"]))
+        sel = list(path["legs"])
+        nd = 0.0
+        nfin = 0
+        for lg in sel:
+            dv = float(lg.get("delta", float("nan")))
+            pos = 1.0 if str(lg.get("long_short")) == "long" else -1.0
+            if np.isfinite(dv):
+                nd += pos * dv
+                nfin += 1
+        rows.append(
+            {
+                "entry_ts": t,
+                "side": side,
+                "hod": s018.hod_ist(t),
+                "hold_hrs": hold,
+                "hrs_to_exp": hrs_exp,
+                "legs": sel,
+                "exp": exp.isoformat(),
+                "mfe": mf,
+                "mfe_ts": mfe_ts,
+                "mae": ma,
+                "mae_ts": mae_ts,
+                "exit_reason": walked.get("reason"),
+                "spot": float(spot_c.get(t, 0.0)),
+                "net_delta": nd if nfin else float("nan"),
+                "long_pnl": walked.get("long_pnl"),
+                "short_pnl": walked.get("short_pnl"),
+                **extra,
+                **walked,
+            }
+        )
+        if on_trade is not None:
+            on_trade(rows[-1], path)
+        busy = int(walked["exit_ts"])
+    return rows, n_stale
+
+
 def stats_dev(rows: list[dict[str, Any]]) -> dict[str, Any]:
     base = s020.stats_of(rows, len(rows), max(1.0, 1.0))
     hrs = [float(r.get("hrs_to_exp", float("nan"))) for r in rows]
@@ -1315,7 +1862,8 @@ def emit_archive_trade(
     tid = (
         f"{cfg.get('key','')}|{int(r['entry_ts'])}|{r['side']}"
     )
-    nuse = 2 if int(nlegs) == 2 else len(list(path["legs"]))
+    hedge = bool(path.get("hedge"))
+    nuse = len(list(path["legs"])) if hedge else (2 if int(nlegs) == 2 else len(list(path["legs"])))
     sel = list(path["legs"])[:nuse]
     exp = str(path.get("exp", r.get("exp", "")))
     exp_ts = int(path["exp_ts"])
@@ -1354,6 +1902,8 @@ def emit_archive_trade(
         "brokerage": r.get("fees"),
         "slippage": r.get("slip"),
         "net": r.get("net"),
+        "long_pnl": r.get("long_pnl", ""),
+        "short_pnl": r.get("short_pnl", ""),
         "mfe": r.get("mfe"),
         "mfe_time": s018.ist_str(int(r["mfe_ts"])) if int(r.get("mfe_ts") or 0) else "",
         "mae": r.get("mae"),
@@ -1365,11 +1915,36 @@ def emit_archive_trade(
         ef = float(lg["fill"])
         fee_e = float(lg.get("fee", 0.0))
         slip_e = float(lg.get("slip", 0.0))
+        qlg = int(lg.get("qty", qty))
+        ls_lg = str(lg.get("long_short", long_short))
+        exp_lg = str(lg.get("expiry", exp))
+        exp_ts_lg = int(lg.get("exp_ts", exp_ts))
+        t_e_lg = t_years(entry_ts, exp_ts_lg)
+        t_x_lg = t_years(exit_ts, exp_ts_lg)
         if xi is None:
             xm = float("nan")
             xf = float("nan")
             fee_x = 0.0
             slip_x = 0.0
+        elif hedge and "pxs" in path:
+            xm = float(path["pxs"][k][xi])
+            if ls_lg == "short" and int(path.get("short_exp_ts") or 0) and exit_ts >= int(path["short_exp_ts"]):
+                xf = xm
+                fee_x = fee_gst_qty(xm, spot_x, qlg) if xm > 0 else 0.0
+                slip_x = 0.0
+            elif ls_lg == "short":
+                xf, _ = s018.buy_fill(xm, dte)
+                fee_x = fee_gst_qty(xm, spot_x if spot_x else 1.0, qlg)
+                slip_x = (xf - xm) * qlg * OPTIONS_CONTRACT_VALUE
+            elif reason == "EXPIRY":
+                xf = intrinsic(bool(lg["is_call"]), float(lg["strike"]), spot_x)
+                xm = xf
+                fee_x = fee_gst_qty(xf, spot_x, qlg) if xf > 0 else 0.0
+                slip_x = 0.0
+            else:
+                xf, _ = s018.sell_fill(xm, dte)
+                fee_x = fee_gst_qty(xm, spot_x if spot_x else 1.0, qlg)
+                slip_x = (xm - xf) * qlg * OPTIONS_CONTRACT_VALUE
         elif reason == "EXPIRY":
             xm = intrinsic(bool(lg["is_call"]), float(lg["strike"]), spot_x)
             xf = xm
@@ -1380,17 +1955,17 @@ def emit_archive_trade(
             xf, _ = s018.sell_fill(xm, dte)
             fee_x = s018.fee_gst(xm, spot_x if spot_x else 1.0)
             slip_x = (xm - xf) * qty * OPTIONS_CONTRACT_VALUE
-        ge = greeks_from_mark(em, spot_e, float(lg["strike"]), t_e, bool(lg["is_call"]))
-        gx = greeks_from_mark(xm, spot_x, float(lg["strike"]), t_x, bool(lg["is_call"]))
+        ge = greeks_from_mark(em, spot_e, float(lg["strike"]), t_e_lg, bool(lg["is_call"]))
+        gx = greeks_from_mark(xm, spot_x, float(lg["strike"]), t_x_lg, bool(lg["is_call"]))
         d_ent = float(lg.get("delta", ge["delta"]))
         legs_out.append(
             {
                 "symbol": str(lg.get("symbol", "")),
                 "strike": float(lg["strike"]),
                 "type": "call" if bool(lg["is_call"]) else "put",
-                "expiry": exp,
-                "qty": qty,
-                "long_short": long_short,
+                "expiry": exp_lg,
+                "qty": qlg,
+                "long_short": ls_lg,
                 "entry_mark": em,
                 "entry_fill": ef,
                 "exit_mark": xm,
@@ -1416,19 +1991,39 @@ def emit_archive_trade(
         if ts_i == entry_ts:
             sp = spot_e
             marks = [float(lg["mark"]) for lg in sel]
-            pnl = 0.0
-            for lg in sel:
-                pnl += (float(lg["mark"]) - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+            pnl = float("nan")
+            long_pnl_m = 0.0
+            if hedge:
+                pnl = 0.0
+                for lg in sel:
+                    qlg = int(lg.get("qty", qty))
+                    gp = (float(lg["mark"]) - float(lg["fill"])) * qlg * OPTIONS_CONTRACT_VALUE
+                    if str(lg.get("long_short")) == "short":
+                        pnl -= gp
+                    else:
+                        pnl += gp
+                        long_pnl_m += gp
+            else:
+                pnl = 0.0
+                for lg in sel:
+                    pnl += (float(lg["mark"]) - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+                long_pnl_m = pnl
         else:
             pi = _path_i_at(path, ts_i)
             if pi is None or not bool(path["ok"][pi]):
                 continue
             sp = float(path["spot"][pi]) or float(r.get("spot_exit", 0.0))
-            marks = [float(path[f"px{k}"][pi]) for k in range(len(sel))]
-            pnl = gp_at(path, pi, nlegs)
+            if hedge and "pxs" in path:
+                marks = [float(path["pxs"][k][pi]) for k in range(len(sel))]
+                pnl = float(path["pnl"][pi])
+                long_pnl_m = float(path["pnl_long"][pi])
+            else:
+                marks = [float(path[f"px{k}"][pi]) for k in range(len(sel))]
+                pnl = gp_at(path, pi, nlegs)
+                long_pnl_m = pnl
         t_yr = t_years(ts_i, exp_ts)
         bd = bg = bt = bv = 0.0
-        ivs: list[float] = []
+        ld = lgk = lt = lv = 0.0
         row: dict[str, Any] = {
             "ts_ist": s018.ist_str(ts_i),
             "kind": kind,
@@ -1438,23 +2033,42 @@ def emit_archive_trade(
             "leg3_mark": "", "leg3_iv": "",
         }
         nfin = 0
+        nlong_g = 0
         for k, lg in enumerate(sel):
             mk = float(marks[k]) if k < len(marks) else float("nan")
-            g = greeks_from_mark(mk, sp, float(lg["strike"]), t_yr, bool(lg["is_call"]))
-            row[f"leg{k+1}_mark"] = mk
-            row[f"leg{k+1}_iv"] = g["iv"]
-            ivs.append(g["iv"])
+            exp_ts_lg = int(lg.get("exp_ts", exp_ts))
+            g = greeks_from_mark(
+                mk, sp, float(lg["strike"]), t_years(ts_i, exp_ts_lg), bool(lg["is_call"])
+            )
+            if k < 3:
+                row[f"leg{k+1}_mark"] = mk
+                row[f"leg{k+1}_iv"] = g["iv"]
+            ls_lg = str(lg.get("long_short", long_short))
+            psign = 1.0 if ls_lg == "long" else -1.0
+            if (not hedge):
+                psign = pos
             if np.isfinite(g["delta"]):
-                bd += pos * float(g["delta"])
-                bg += pos * float(g["gamma"])
-                bt += pos * float(g["theta"])
-                bv += pos * float(g["vega"])
+                bd += psign * float(g["delta"])
+                bg += psign * float(g["gamma"])
+                bt += psign * float(g["theta"])
+                bv += psign * float(g["vega"])
                 nfin += 1
+                if ls_lg == "long" or not hedge:
+                    ld += psign * float(g["delta"])
+                    lgk += psign * float(g["gamma"])
+                    lt += psign * float(g["theta"])
+                    lv += psign * float(g["vega"])
+                    nlong_g += 1
         row["basket_delta"] = bd if nfin else float("nan")
         row["basket_gamma"] = bg if nfin else float("nan")
         row["basket_theta"] = bt if nfin else float("nan")
         row["basket_vega"] = bv if nfin else float("nan")
         row["basket_mark_pnl"] = pnl
+        row["long_delta"] = ld if nlong_g else float("nan")
+        row["long_gamma"] = lgk if nlong_g else float("nan")
+        row["long_theta"] = lt if nlong_g else float("nan")
+        row["long_vega"] = lv if nlong_g else float("nan")
+        row["long_mark_pnl"] = long_pnl_m
         snaps.append(row)
     archive.add_trade(trade, legs_out, snaps)
 
@@ -1561,6 +2175,12 @@ def run_combo(
     skip_done: bool = True,
     write_ckpt: bool = True,
     archive: RunArchive | None = None,
+    hedge: bool = False,
+    hedge_e: int = -1,
+    hedge_off: float = 0.0,
+    hedge_w: float = 0.0,
+    hedge_q: float = 0.0,
+    long_kind: str = "",
 ) -> None:
     time_stop = TIME_STOP_SEC if variant == "V5" else None
     extra_by = {(int(s["ts"]), str(s["side"])): s for s in sigs}
@@ -1581,7 +2201,7 @@ def run_combo(
         "prem_pct": prem_pct,
         "strangle_exit": strangle_exit,
     }
-    if int(dte_mode) >= 2:
+    if int(dte_mode) >= 2 and not hedge:
         cov_x, cov_y = dte2_coverage(store, spot_c, plan_all, False)
         print(f"2DTE coverage {cov_x}/{cov_y}", flush=True)
     for tgt, slv in cells:
@@ -1603,20 +2223,29 @@ def run_combo(
             "month": month, "tf": tf, "variant": variant, "key": key,
             "band": band, "band_mode": band_mode, "arm_id": arm_id, "dte": dte_mode,
         }
-        ls = "long" if strangle_exit else "short"
+        ls = "long" if (strangle_exit or hedge) else "short"
         on_tr = None
         if archive is not None:
             on_tr = lambda r, p, _c=cfg_now, _n=nlegs, _ls=ls: emit_archive_trade(
                 archive, _c, r, p, _n, _ls
             )
-        rows, n_stale = simulate_plan(
-            store, spot_c, plan_all, float(tgt), float(slv), tag_p, False,
-            start_ts, cutoff, win_from, win_to, time_stop,
-            label=f"{tf} {variant} T={tgt}|SL={slv}",
-            extra_by=extra_by,
-            on_trade=on_tr,
-            **sim_kw,
-        )
+        if hedge:
+            rows, n_stale = simulate_hedge_plan(
+                store, spot_c, plan_all, tag_p,
+                start_ts, cutoff, win_from, win_to, extra_by, band, band_mode,
+                long_kind, hedge_e, hedge_off, hedge_w, hedge_q,
+                label=f"{tf} {variant} {arm_id}",
+                on_trade=on_tr,
+            )
+        else:
+            rows, n_stale = simulate_plan(
+                store, spot_c, plan_all, float(tgt), float(slv), tag_p, False,
+                start_ts, cutoff, win_from, win_to, time_stop,
+                label=f"{tf} {variant} T={tgt}|SL={slv}",
+                extra_by=extra_by,
+                on_trade=on_tr,
+                **sim_kw,
+            )
         stt = stats_dev(rows)
         stt.update(
             {
@@ -1653,12 +2282,20 @@ def run_combo(
                 for si, seed in enumerate(seeds, start=1):
                     print(f"C2 {key} seed {si}/{len(seeds)}", flush=True)
                     forced = s020.random_c2(rows, ts, hour_idx, seed)
-                    rr, _ = simulate_plan(
-                        store, spot_c, forced, float(tgt), float(slv), f"C2{tag_p}", False,
-                        start_ts, cutoff, win_from, win_to, time_stop,
-                        label=f"C2 {key} seed={si}",
-                        **sim_kw,
-                    )
+                    if hedge:
+                        rr, _ = simulate_hedge_plan(
+                            store, spot_c, forced, f"C2{tag_p}",
+                            start_ts, cutoff, win_from, win_to, None, band, band_mode,
+                            long_kind, hedge_e, hedge_off, hedge_w, hedge_q,
+                            label=f"C2 {key} seed={si}",
+                        )
+                    else:
+                        rr, _ = simulate_plan(
+                            store, spot_c, forced, float(tgt), float(slv), f"C2{tag_p}", False,
+                            start_ts, cutoff, win_from, win_to, time_stop,
+                            label=f"C2 {key} seed={si}",
+                            **sim_kw,
+                        )
                     c2_pool.extend(rr)
                     if rr:
                         c2s.append(float(np.mean([x["net"] for x in rr])))
@@ -1916,6 +2553,61 @@ def dump_trades_work() -> list[dict[str, Any]]:
     return out
 
 
+def hedge_grid_work() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for tf, var, band, mode in EXIT_GRID_SIGS:
+        for lk in HEDGE_LONG:
+            nlong = 2 if lk == "L2" else 3
+            variants: list[tuple[int, float, float, float, bool]] = [(-1, 0.0, 0.0, 0.0, True)]
+            for e in HEDGE_E:
+                for off in HEDGE_OFF:
+                    for wing in HEDGE_W:
+                        for q in HEDGE_Q:
+                            do_c2 = int(e) == 0 and int(off) == 600 and int(wing) == 1000 and abs(float(q) - 0.5) < 1e-9
+                            variants.append((int(e), float(off), float(wing), float(q), do_c2))
+            for e, off, wing, q, do_c2 in variants:
+                if e < 0:
+                    aid = f"{lk}_REF"
+                    bsk = f"hdg_{lk}_REF"
+                else:
+                    aid = f"{lk}_E{e}_o{int(off)}_W{int(wing)}_q{int(round(q*100))}"
+                    bsk = f"hdg_{lk}_E{e}_o{int(off)}_W{int(wing)}_q{int(round(q*100))}"
+                rec = {
+                    "tf": tf, "variant": var, "band": band, "band_mode": mode,
+                    "legs": nlong, "dte": 2,
+                    "trail_arm": HEDGE_TRAIL_ARM, "trail_give": HEDGE_TRAIL_GIVE,
+                    "trail_cap": HEDGE_TRAIL_CAP, "arm_id": aid, "basket": bsk,
+                    "prem_pct": 0.0, "strangle_exit": False,
+                    "hedge": True, "hedge_e": int(e), "hedge_off": float(off),
+                    "hedge_w": float(wing), "hedge_q": float(q), "long_kind": lk,
+                    "do_c2": bool(do_c2), "do_c3": False,
+                    "c2_seeds": RANDOM_SEEDS_20 if do_c2 else (),
+                }
+                out.append(rec)
+    return out
+
+
+def print_hedge_leg_details(rows: list[dict[str, Any]], e_label: str) -> None:
+    print(f"=== HEDGE LEG DETAIL E={e_label} ===", flush=True)
+    if not rows:
+        print("  (no trades)", flush=True)
+        return
+    r = rows[0]
+    print(
+        f"  {r.get('side')} entry={s018.ist_str(int(r['entry_ts']))} "
+        f"spot={r.get('spot')} reason={r.get('reason')} net={float(r.get('net', float('nan'))):.2f}",
+        flush=True,
+    )
+    for lg in list(r.get("legs") or []):
+        print(
+            f"    {lg.get('long_short')} {lg.get('role')} {lg.get('symbol')} "
+            f"k={lg.get('strike')} exp={lg.get('expiry')} qty={lg.get('qty')} "
+            f"mark={float(lg.get('mark', float('nan'))):.4f} fill={float(lg.get('fill', float('nan'))):.4f} "
+            f"fee={float(lg.get('fee', float('nan'))):.4f}",
+            flush=True,
+        )
+
+
 def _dump_leg_fields(lg: dict[str, Any] | None, exit_px: float) -> dict[str, Any]:
     if lg is None:
         return {
@@ -2097,7 +2789,8 @@ def main() -> None:
     exit_grid = bool(args.exit_grid)
     strangle_grid = bool(args.strangle_grid)
     tf_band = bool(args.tf_band_grid)
-    need_d2 = dump_trades or exit_grid or int(args.dte) >= 2
+    hedge_grid = bool(args.hedge_grid)
+    need_d2 = dump_trades or exit_grid or hedge_grid or int(args.dte) >= 2
     pad_d = 5 if need_d2 else 3
     lo = start_ts - 3 * 86400
     hi = cutoff + pad_d * 86400
@@ -2130,6 +2823,13 @@ def main() -> None:
         variants = sorted({str(w["variant"]) for w in work})
         jobs = [(str(w["tf"]), str(w["variant"]), int(w["band"]), str(w["band_mode"])) for w in work]
         print(f"DUMP-TRADES combos={len(work)} (expect {DUMP_N_COMBOS}); C2/C3 off; ckpt/cache untouched", flush=True)
+    elif hedge_grid:
+        band0, mode0 = 0, "near"
+        work = hedge_grid_work()
+        tfs = sorted({str(w["tf"]) for w in work})
+        variants = sorted({str(w["variant"]) for w in work})
+        jobs = list(EXIT_GRID_SIGS)
+        print(f"HEDGE-GRID combos={len(work)} (expect {HEDGE_N_COMBOS})", flush=True)
     elif tf_band:
         band0, mode0 = 0, "near"
         work = tf_band_work()
@@ -2195,6 +2895,35 @@ def main() -> None:
 
     smoke_sigs: list[dict[str, Any]] = []
     sig_cache: dict[tuple[str, str], tuple[list[DevLine], list[dict[str, Any]], int]] = {}
+    if hedge_grid:
+        for tf0, var0, band0s, mode0s in EXIT_GRID_SIGS:
+            tf_sec = LINE_TF[tf0]
+            tts, to_, th, tl, tc, tv = resample_tf(ts, o, h, l, c, vol, tf_sec)
+            vwap_tf = s020.session_vwap(tts, th, tl, tc, tv)
+            raw_lines, _, _ = s020.detect_swings(tts, to_, th, tl, tc, vwap_tf)
+            dlines = tf_lines_to_dev(tts, raw_lines, tf_sec)
+            raw_sigs, both_skip = collect_signals(ts, o, h, l, c, dlines, var0)
+            win_sigs = [
+                s
+                for s in raw_sigs
+                if start_ts <= int(s["ts"]) < cutoff
+                and s020.in_window(int(s["ts"]), win_from, win_to)
+            ]
+            attach_vwap_dist(win_sigs, vwap_by_ts)
+            sig_cache[(tf0, var0)] = (dlines, win_sigs, both_skip)
+        plans_h: list[tuple[int, str]] = []
+        seen_p: set[tuple[int, str]] = set()
+        for tf0, var0, band0s, mode0s in EXIT_GRID_SIGS:
+            _, win_sigs, _ = sig_cache[(tf0, var0)]
+            for s in win_sigs:
+                if keep_signal(s, int(band0s), str(mode0s)):
+                    kp = (int(s["ts"]), str(s["side"]))
+                    if kp not in seen_p:
+                        seen_p.add(kp)
+                        plans_h.append(kp)
+        for e in (0, 1):
+            cx, cy = short_hedge_coverage(store, spot_c, plans_h, e)
+            print(f"short chain coverage {'0DTE' if e == 0 else '1DTE'} {cx}/{cy}", flush=True)
     for w in work:
         tf = str(w["tf"])
         variant = str(w["variant"])
@@ -2209,6 +2938,12 @@ def main() -> None:
         basket = str(w.get("basket", "std"))
         prem_pct = float(w.get("prem_pct", 0.0))
         strangle_exit = bool(w.get("strangle_exit", False))
+        hedge = bool(w.get("hedge", False))
+        hedge_e = int(w.get("hedge_e", -1))
+        hedge_off = float(w.get("hedge_off", 0.0))
+        hedge_w = float(w.get("hedge_w", 0.0))
+        hedge_q = float(w.get("hedge_q", 0.0))
+        long_kind = str(w.get("long_kind", ""))
         do_c2 = bool(w.get("do_c2", True))
         do_c3 = bool(w.get("do_c3", True))
         c2_seeds = w.get("c2_seeds")
@@ -2244,7 +2979,7 @@ def main() -> None:
         n_raw = len(win_sigs)
         sigs = [s for s in win_sigs if keep_signal(s, band, band_mode)]
         kept_pct = (100.0 * len(sigs) / n_raw) if n_raw else 0.0
-        if not tf_band:
+        if (not tf_band) and (not hedge_grid):
             print(
                 f"S020-DEV {month} tf={tf} {variant} band={band} mode={band_mode} "
                 f"lines={len(dlines)} kept {len(sigs)} of {n_raw} signals ({kept_pct:.1f}%) "
@@ -2265,7 +3000,7 @@ def main() -> None:
         if max_days and variant == "V3":
             smoke_sigs = sigs
             print_v3_examples(sigs, ts)
-        if grid or exit_grid or strangle_grid or tf_band or dump_trades:
+        if grid or exit_grid or strangle_grid or tf_band or dump_trades or hedge_grid:
             cells = [(PRIMARY_T, PRIMARY_SL)]
         else:
             v0_best = best_v0_cell(done, month, tf)
@@ -2284,6 +3019,8 @@ def main() -> None:
             skip_done=not dump_trades,
             write_ckpt=not dump_trades,
             archive=archive,
+            hedge=hedge, hedge_e=hedge_e, hedge_off=hedge_off,
+            hedge_w=hedge_w, hedge_q=hedge_q, long_kind=long_kind,
         )
         pk = cell_key(
             month, tf, variant, PRIMARY_T, PRIMARY_SL, band, band_mode,
@@ -2292,7 +3029,25 @@ def main() -> None:
             arm_id=arm_id, basket=basket,
         )
         st = done.get(pk, {})
-        if dump_trades:
+        if hedge_grid:
+            e_s = "ref" if hedge_e < 0 else str(hedge_e)
+            off_s = "-" if hedge_e < 0 else str(int(hedge_off))
+            w_s = "-" if hedge_e < 0 else str(int(hedge_w))
+            q_s = "-" if hedge_e < 0 else str(hedge_q)
+            print(
+                f"[{arm_i}/{arm_n}] {tf}/{variant} {long_kind} E={e_s} off={off_s} "
+                f"W={w_s} q={q_s} n={int(st.get('n', 0))} "
+                f"mean={s020._fnum(st.get('mean', float('nan')), 2)} "
+                f"elapsed={time.perf_counter()-t_all:.0f}s",
+                flush=True,
+            )
+            if max_days and hedge_e in (0, 1) and int(st.get("n", 0)) > 0:
+                shown_e = getattr(print_hedge_leg_details, "_shown", set())
+                if hedge_e not in shown_e:
+                    print_hedge_leg_details(cell_rows.get(pk, []), f"{hedge_e}DTE")
+                    shown_e.add(hedge_e)
+                    print_hedge_leg_details._shown = shown_e  # type: ignore[attr-defined]
+        elif dump_trades:
             for tr in cell_rows.get(pk, []):
                 dump_items.append((w, tr))
             if arm_i % 10 == 0 or arm_i == arm_n:
@@ -2372,7 +3127,7 @@ def main() -> None:
         band_mode = str(w["band_mode"])
         cell_list = (
             [(PRIMARY_T, PRIMARY_SL)]
-            if grid or exit_grid or strangle_grid or tf_band or dump_trades
+            if grid or exit_grid or strangle_grid or tf_band or dump_trades or hedge_grid
             else cells_for(variant, best_v0_cell(done, month, tf) if variant != "V0" else None)
         )
         for tgt, slv in cell_list:
@@ -2426,6 +3181,8 @@ def main() -> None:
             f"avg_net_delta A2={s020._fnum(float(np.mean(d2)) if d2 else float('nan'), 4)} "
             f"A4={s020._fnum(float(np.mean(d4)) if d4 else float('nan'), 4)}"
         )
+    elif hedge_grid:
+        report.append(f"HEDGE-GRID combos={len(work)} (C2 on REF and E0/off600/W1000/q0.5 only)")
     elif grid:
         report.extend(band_grid_table(done, month))
     else:
