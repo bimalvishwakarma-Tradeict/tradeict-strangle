@@ -33,9 +33,14 @@ from backtest.harness.run_archive import (  # noqa: E402
     LEG_COLS,
     TRADE_COLS,
     RunArchive,
+    greeks_from_mark,
 )
 from backtest.slippage_model import load_slip_table  # noqa: E402
-from backtest.strategies.s012_trend_follow.engine import ist_date, t_years  # noqa: E402
+from backtest.strategies.s012_trend_follow.engine import (  # noqa: E402
+    intrinsic,
+    ist_date,
+    t_years,
+)
 from backtest.strategies.s018_4h_trend import run_s018 as s018  # noqa: E402
 from backtest.strategies.s020_vwap_touch import run_s020 as s020  # noqa: E402
 from backtest.strategies.s020_vwap_touch import run_s020_dev as d  # noqa: E402
@@ -47,11 +52,14 @@ OUT_DIR = Path("backtest/strategies/s020_vwap_touch/runs")
 CKPT = OUT_DIR / "s020_rsi_ckpt.jsonl"
 ARCHIVE_PTR = OUT_DIR / "s020_rsi_archive_ptr.json"
 SIGNAL_NAME = "RSI Div Signal"
+CODE_VER = "rsi_v1"
 RSI_TFS = ("1m", "3m", "5m", "15m", "30m")
 A0_T = (100, 150, 200, 250, 300, 350)
 A0_SL = (100, 150, 200, 250, 300, 350)
-RSI_LEG_COLS = tuple(list(LEG_COLS) + ["add_no"])
+RSI_LEG_COLS = tuple(list(LEG_COLS) + ["add_no", "entry_ts"])
+RSI_TRADE_COLS = tuple(list(TRADE_COLS) + ["qty", "avg_entry"])
 WING_NONE = -1.0
+_SCALE_SAMPLE_PRINTED = False
 
 
 class RsiArchive(RunArchive):
@@ -62,7 +70,7 @@ class RsiArchive(RunArchive):
 
         for name, cols in (
             ("configs.csv", CONFIG_COLS),
-            ("trades.csv", TRADE_COLS),
+            ("trades.csv", RSI_TRADE_COLS),
             ("legs.csv", RSI_LEG_COLS),
             ("greeks.csv", GREEK_COLS),
         ):
@@ -82,12 +90,14 @@ class RsiArchive(RunArchive):
         if not tid or tid in self._seen_trades:
             return
         self._seen_trades.add(tid)
-        self._append("trades.csv", TRADE_COLS, trade_dict)
+        self._append("trades.csv", RSI_TRADE_COLS, trade_dict)
         for lg in legs:
             lg2 = dict(lg)
             lg2["trade_id"] = tid
             if "add_no" not in lg2:
                 lg2["add_no"] = 0
+            if "entry_ts" not in lg2:
+                lg2["entry_ts"] = ""
             self._append("legs.csv", RSI_LEG_COLS, lg2)
         for sn in snapshots:
             sn2 = dict(sn)
@@ -98,6 +108,257 @@ class RsiArchive(RunArchive):
 
 def rsi_tag(tf: str) -> str:
     return f"RSI_{tf}"
+
+
+def rsi_cell_key(
+    month: str,
+    w: dict[str, Any],
+    max_days: int,
+    start_ts: int,
+    cutoff: int,
+) -> str:
+    base = d.cell_key(
+        month, str(w["tf"]), "RSI", int(w["tgt"]), int(w["sl"]), 0, "near",
+        legs=int(w["legs"]), dte=int(w["dte"]), trail_arm=float(w["trail_arm"]),
+        trail_give=float(w["trail_give"]), trail_cap=float(w["trail_cap"]),
+        arm_id=str(w["arm_id"]), basket=str(w["basket"]),
+    )
+    return (
+        f"{base}|{CODE_VER}|md={int(max_days)}|{int(start_ts)}|{int(cutoff)}"
+    )
+
+
+def ckpt_window_ok(
+    done: dict[str, dict[str, Any]],
+    month: str,
+    max_days: int,
+    start_ts: int,
+    cutoff: int,
+) -> bool:
+    if not done:
+        return True
+    for rec in done.values():
+        if str(rec.get("month", "")) != month:
+            return False
+        if str(rec.get("code_ver", "")) != CODE_VER:
+            return False
+        try:
+            if int(rec.get("max_days", -1)) != int(max_days):
+                return False
+            if int(rec.get("win_start", -1)) != int(start_ts):
+                return False
+            if int(rec.get("win_cutoff", -1)) != int(cutoff):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _px_idx_for_symbol(path: dict[str, Any], symbol: str, fallback: int) -> int:
+    for i, lg in enumerate(list(path.get("legs") or [])[:3]):
+        if str(lg.get("symbol", "")) == str(symbol):
+            return i
+    return min(max(int(fallback), 0), 2)
+
+
+def emit_archive_trade_scale(
+    archive: RsiArchive,
+    cfg: dict[str, Any],
+    r: dict[str, Any],
+    path: dict[str, Any],
+) -> None:
+    """SCALE archive rows: each add uses its own path px{base-leg-index}."""
+    tid = f"{cfg.get('key','')}|{int(r['entry_ts'])}|{r['side']}"
+    tranches = list(path.get("scale_tranches") or [])
+    qty_base = int(s018.QTY)
+    pos = -1.0
+    exit_ts = int(r["exit_ts"])
+    entry_ts = int(r["entry_ts"])
+    reason = str(r.get("reason", r.get("exit_reason", "")))
+    spot_e = float(r.get("spot", 0.0))
+    spot_x = float(r.get("spot_exit", 0.0))
+    if spot_x <= 0:
+        p0 = tranches[0]["path"] if tranches else path
+        xi0 = d._path_i_at(p0, exit_ts)
+        if xi0 is not None:
+            spot_x = float(p0["spot"][xi0])
+    dte = int(path.get("dte", cfg.get("dte", 1)))
+    exp = str(path.get("exp", r.get("exp", "")))
+    exp_ts = int(path.get("exp_ts") or s018.expiry_unix(date.fromisoformat(exp))) if exp else 0
+    legs_out: list[dict[str, Any]] = []
+    fee_e_tot = 0.0
+    slip_e_tot = 0.0
+    fee_x_tot = 0.0
+    slip_x_tot = 0.0
+    qty_tot = 0
+    fill_w = 0.0
+    if not tranches:
+        tranches = [{"path": path, "qty": 1.0, "entry": entry_ts, "add_no": 0}]
+    tr_by = {int(tr.get("add_no", 0)): tr for tr in tranches}
+    legs_src = list(r.get("legs") or path.get("legs") or [])
+    for k, lg in enumerate(legs_src):
+        add_no = int(lg.get("add_no", 0))
+        tr = tr_by.get(add_no, tranches[min(add_no, len(tranches) - 1)])
+        tr_path = tr["path"]
+        add_entry = int(tr.get("entry", entry_ts))
+        qf = float(tr.get("qty", 0.25))
+        xi = d._path_i_at(tr_path, exit_ts)
+        exp_tr = str(tr_path.get("exp", exp))
+        exp_ts_tr = int(tr_path.get("exp_ts") or exp_ts)
+        dte_tr = max(0, (date.fromisoformat(str(exp_tr)) - ist_date(exit_ts)).days) if exp_tr else dte
+        qlg = int(lg.get("qty") or int(round(qf * float(qty_base))))
+        em = float(lg["mark"])
+        ef = float(lg["fill"])
+        fee_e = float(lg.get("fee", 0.0))
+        slip_e = float(lg.get("slip", 0.0))
+        idx = _px_idx_for_symbol(tr_path, str(lg.get("symbol", "")), k % 3)
+        if xi is None:
+            xm = float("nan")
+            xf = float("nan")
+            fee_x = 0.0
+            slip_x = 0.0
+        elif reason == "EXPIRY":
+            xm = intrinsic(bool(lg["is_call"]), float(lg["strike"]), spot_x)
+            xf = xm
+            fee_x = d.fee_gst_qty(xm, spot_x, qlg) if xm > 0 else 0.0
+            slip_x = 0.0
+        else:
+            xm = float(tr_path[f"px{idx}"][xi])
+            xf, _ = s018.buy_fill(xm, dte_tr)
+            fee_x = d.fee_gst_qty(xm, spot_x if spot_x else 1.0, qlg)
+            slip_x = (xf - xm) * qlg * OPTIONS_CONTRACT_VALUE
+        t_e_lg = t_years(add_entry, exp_ts_tr)
+        t_x_lg = t_years(exit_ts, exp_ts_tr)
+        ge = greeks_from_mark(em, spot_e, float(lg["strike"]), t_e_lg, bool(lg["is_call"]))
+        gx = greeks_from_mark(xm, spot_x, float(lg["strike"]), t_x_lg, bool(lg["is_call"]))
+        d_ent = float(lg.get("delta", ge["delta"]))
+        legs_out.append(
+            {
+                "symbol": str(lg.get("symbol", "")),
+                "strike": float(lg["strike"]),
+                "type": "call" if bool(lg["is_call"]) else "put",
+                "expiry": exp_tr,
+                "qty": qlg,
+                "long_short": str(lg.get("long_short", "short")),
+                "entry_mark": em,
+                "entry_fill": ef,
+                "exit_mark": xm,
+                "exit_fill": xf,
+                "fee_entry": fee_e,
+                "fee_exit": fee_x,
+                "slip_entry": slip_e,
+                "slip_exit": slip_x,
+                "iv_entry": ge["iv"],
+                "delta_entry": d_ent,
+                "gamma_entry": ge["gamma"],
+                "theta_entry": ge["theta"],
+                "vega_entry": ge["vega"],
+                "iv_exit": gx["iv"],
+                "delta_exit": gx["delta"],
+                "gamma_exit": gx["gamma"],
+                "theta_exit": gx["theta"],
+                "vega_exit": gx["vega"],
+                "add_no": add_no,
+                "entry_ts": add_entry,
+            }
+        )
+        fee_e_tot += fee_e
+        slip_e_tot += slip_e
+        fee_x_tot += fee_x
+        slip_x_tot += slip_x
+        qty_tot += qlg
+        fill_w += ef * qlg
+    avg_entry = (fill_w / qty_tot) if qty_tot else float("nan")
+    brokerage = fee_e_tot + fee_x_tot
+    slippage = slip_e_tot + slip_x_tot
+    trade = {
+        "trade_id": tid,
+        "month": cfg.get("month"),
+        "tf": cfg.get("tf"),
+        "variant": cfg.get("variant"),
+        "band": cfg.get("band"),
+        "band_mode": cfg.get("band_mode"),
+        "arm": cfg.get("arm_id"),
+        "n_legs": len(legs_out),
+        "dte": dte,
+        "side": r["side"],
+        "entry_ist": s018.ist_str(entry_ts),
+        "exit_ist": s018.ist_str(exit_ts),
+        "exit_reason": r.get("exit_reason", reason),
+        "hold_hrs": r.get("hold_hrs"),
+        "hrs_to_exp": r.get("hrs_to_exp"),
+        "spot_entry": spot_e,
+        "spot_exit": spot_x,
+        "line_level": r.get("level"),
+        "vwap_dist": r.get("vwap_dist"),
+        "gross": r.get("gross"),
+        "brokerage": brokerage,
+        "slippage": slippage,
+        "net": r.get("net"),
+        "long_pnl": r.get("long_pnl", ""),
+        "short_pnl": r.get("short_pnl", ""),
+        "mfe": r.get("mfe"),
+        "mfe_time": s018.ist_str(int(r["mfe_ts"])) if int(r.get("mfe_ts") or 0) else "",
+        "mae": r.get("mae"),
+        "mae_time": s018.ist_str(int(r["mae_ts"])) if int(r.get("mae_ts") or 0) else "",
+        "qty": qty_tot,
+        "avg_entry": avg_entry,
+    }
+    snaps: list[dict[str, Any]] = []
+    p0 = tranches[0]["path"] if tranches else path
+    for ts_i, kind in d._snap_times(
+        entry_ts, exit_ts, int(r.get("mfe_ts") or 0), int(r.get("mae_ts") or 0)
+    ):
+        if ts_i == entry_ts:
+            sp = spot_e
+            marks = [float(lg["mark"]) for lg in list(p0.get("legs") or [])[:3]]
+            pnl = 0.0
+        else:
+            pi = d._path_i_at(p0, ts_i)
+            if pi is None or not bool(p0["ok"][pi]):
+                continue
+            sp = float(p0["spot"][pi]) or spot_x
+            marks = [float(p0[f"px{k}"][pi]) for k in range(min(3, len(list(p0.get("legs") or []))))]
+            pnl = 0.0
+            for tr in tranches:
+                tpi = d._path_i_at(tr["path"], ts_i)
+                if tpi is None or not bool(tr["path"]["ok"][tpi]):
+                    continue
+                pnl += float(tr["path"]["pnl"][tpi]) * float(tr.get("qty", 0.25))
+        t_yr = t_years(ts_i, int(p0.get("exp_ts") or exp_ts))
+        row: dict[str, Any] = {
+            "ts_ist": s018.ist_str(ts_i),
+            "kind": kind,
+            "spot": sp,
+            "leg1_mark": "", "leg1_iv": "",
+            "leg2_mark": "", "leg2_iv": "",
+            "leg3_mark": "", "leg3_iv": "",
+        }
+        bd = bg = bt = bv = 0.0
+        nfin = 0
+        for k, lg in enumerate(list(p0.get("legs") or [])[:3]):
+            mk = float(marks[k]) if k < len(marks) else float("nan")
+            g = greeks_from_mark(mk, sp, float(lg["strike"]), t_yr, bool(lg["is_call"]))
+            row[f"leg{k+1}_mark"] = mk
+            row[f"leg{k+1}_iv"] = g["iv"]
+            if np.isfinite(g["delta"]):
+                bd += pos * float(g["delta"])
+                bg += pos * float(g["gamma"])
+                bt += pos * float(g["theta"])
+                bv += pos * float(g["vega"])
+                nfin += 1
+        row["basket_delta"] = bd if nfin else float("nan")
+        row["basket_gamma"] = bg if nfin else float("nan")
+        row["basket_theta"] = bt if nfin else float("nan")
+        row["basket_vega"] = bv if nfin else float("nan")
+        row["basket_mark_pnl"] = pnl
+        row["long_delta"] = row["basket_delta"]
+        row["long_gamma"] = row["basket_gamma"]
+        row["long_theta"] = row["basket_theta"]
+        row["long_vega"] = row["basket_vega"]
+        row["long_mark_pnl"] = pnl
+        snaps.append(row)
+    archive.add_trade(trade, legs_out, snaps)
 
 
 def rsi_grid_work() -> list[dict[str, Any]]:
@@ -412,6 +673,7 @@ def simulate_scale(
     label: str = "",
     on_trade: Any | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
+    global _SCALE_SAMPLE_PRINTED
     busy = -1
     rows: list[dict[str, Any]] = []
     n_stale = 0
@@ -521,9 +783,25 @@ def simulate_scale(
             "net_delta": float("nan"), **extra, **walked,
         }
         rows.append(rec)
+        if not _SCALE_SAMPLE_PRINTED:
+            _SCALE_SAMPLE_PRINTED = True
+            print(
+                f"SCALE sample trade entry={s018.ist_str(int(t))} side={side} "
+                f"n_adds={len(tranches)} n_leg_rows={len(all_legs)} "
+                f"qty={qty} reason={walked.get('reason')}",
+                flush=True,
+            )
+            for lg in all_legs:
+                print(
+                    f"  add_no={lg.get('add_no')} qty={lg.get('qty')} "
+                    f"sym={lg.get('symbol')} fill={lg.get('fill')} "
+                    f"fee={lg.get('fee')} slip={lg.get('slip')}",
+                    flush=True,
+                )
         if on_trade is not None:
             p_emit = dict(p0)
             p_emit["legs"] = all_legs
+            p_emit["scale_tranches"] = tranches
             on_trade(rec, p_emit)
         busy = int(walked["exit_ts"])
     return rows, n_stale
@@ -568,11 +846,7 @@ def run_one(
     hedge = bool(w.get("hedge", False))
     extra_by = {(int(s["ts"]), str(s["side"])): s for s in sigs}
     plan_all = [(int(s["ts"]), str(s["side"])) for s in sigs if d.keep_signal(s, 0, "near")]
-    key = d.cell_key(
-        month, tf, variant, tgt, slv, band, band_mode,
-        legs=nlegs, dte=dte_mode, trail_arm=trail_arm, trail_give=trail_give,
-        trail_cap=trail_cap, arm_id=arm_id, basket=basket,
-    )
+    key = rsi_cell_key(month, w, max_days, start_ts, cutoff)
     if key in done:
         print(f"done SKIP {key}", flush=True)
         return
@@ -589,9 +863,14 @@ def run_one(
     ls = "long" if (strangle_exit or hedge) else "short"
     on_tr = None
     if archive is not None:
-        on_tr = lambda r, p, _c=cfg_now, _n=nlegs, _ls=ls: d.emit_archive_trade(
-            archive, _c, r, p, _n, _ls
-        )
+        if bool(w.get("scale")):
+            on_tr = lambda r, p, _c=cfg_now: emit_archive_trade_scale(
+                archive, _c, r, p
+            )
+        else:
+            on_tr = lambda r, p, _c=cfg_now, _n=nlegs, _ls=ls: d.emit_archive_trade(
+                archive, _c, r, p, _n, _ls
+            )
     if bool(w.get("scale")):
         rows, n_stale = simulate_scale(
             store, spot_c, plan_all, tag, start_ts, cutoff, win_from, win_to,
@@ -623,7 +902,8 @@ def run_one(
             "n_sig_raw": int(n_raw), "n_days": n_days, "band": 0, "band_mode": "near",
             "legs": nlegs, "dte": dte_mode, "trail_arm": trail_arm, "trail_give": trail_give,
             "trail_cap": trail_cap, "arm_id": arm_id, "basket": basket,
-            "signal": SIGNAL_NAME,
+            "signal": SIGNAL_NAME, "code_ver": CODE_VER,
+            "win_start": int(start_ts), "win_cutoff": int(cutoff),
         }
     )
     if hedge and float(w.get("hedge_w", 0.0)) < 0:
@@ -731,8 +1011,6 @@ def main() -> None:
     if args.fresh and CKPT.exists():
         CKPT.unlink()
         print(f"fresh: dropped {CKPT.name} (DEV/TRAIN ckpt untouched)", flush=True)
-    if args.fresh and ARCHIVE_PTR.exists():
-        ARCHIVE_PTR.unlink()
 
     month = str(args.month)
     win_from, win_to = d.month_bounds(month)
@@ -744,11 +1022,11 @@ def main() -> None:
         win_to = min(win_to, ist_date(cutoff - 1))
     if not args.fresh:
         preexisting = s020.load_ckpt(CKPT)
-        if preexisting:
-            for rec in preexisting.values():
-                if str(rec.get("month", "")) != month:
-                    print("checkpoint window mismatch -> use --fresh", flush=True)
-                    sys.exit(1)
+        if preexisting and not ckpt_window_ok(
+            preexisting, month, max_days, start_ts, cutoff
+        ):
+            print("checkpoint window mismatch -> use --fresh", flush=True)
+            sys.exit(1)
 
     hedge_grid = bool(args.rsi_hedge_grid)
     tfs = [x.strip() for x in str(args.tfs).split(",") if x.strip()]
@@ -822,15 +1100,7 @@ def main() -> None:
             n_days, n_raw, done, cell_rows, t_all, arm_i, arm_n, max_days,
             archive, vwap_1m, c,
         )
-        st = done.get(
-            d.cell_key(
-                month, tf, "RSI", int(w["tgt"]), int(w["sl"]), 0, "near",
-                legs=int(w["legs"]), dte=int(w["dte"]), trail_arm=float(w["trail_arm"]),
-                trail_give=float(w["trail_give"]), trail_cap=float(w["trail_cap"]),
-                arm_id=str(w["arm_id"]), basket=str(w["basket"]),
-            ),
-            {},
-        )
+        st = done.get(rsi_cell_key(month, w, max_days, start_ts, cutoff), {})
         extra = ""
         if hedge_grid and "Wnone" in str(w.get("arm_id", "")):
             extra = (
@@ -861,12 +1131,7 @@ def main() -> None:
             f"{d.HEDGE_SANITY['violations']} violations"
         )
     for w in work:
-        k = d.cell_key(
-            month, str(w["tf"]), "RSI", int(w["tgt"]), int(w["sl"]), 0, "near",
-            legs=int(w["legs"]), dte=int(w["dte"]), trail_arm=float(w["trail_arm"]),
-            trail_give=float(w["trail_give"]), trail_cap=float(w["trail_cap"]),
-            arm_id=str(w["arm_id"]), basket=str(w["basket"]),
-        )
+        k = rsi_cell_key(month, w, max_days, start_ts, cutoff)
         st = done.get(k)
         if st is None:
             continue
