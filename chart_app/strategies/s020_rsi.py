@@ -13,6 +13,22 @@ from strategies import register
 LINE_TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800}
 
 
+def _snap_bar_start(t: int, sec: int) -> int:
+    """First chart-bar open >= t (unix aligned)."""
+    t = int(t)
+    sec = int(sec)
+    if sec <= 1:
+        return t
+    rem = t % sec
+    return t if rem == 0 else t + (sec - rem)
+
+
+def _marker_rank(text: str) -> int:
+    if text in ("OBH", "OBL"):
+        return 0
+    return 1
+
+
 def _arrays(bars: list[dict[str, Any]]) -> tuple[np.ndarray, ...]:
     ts = np.array([int(b["time"]) for b in bars], dtype=np.int64)
     o = np.array([float(b["open"]) for b in bars], dtype=np.float64)
@@ -44,6 +60,8 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
 
     ts, o, h, l, c, vol = _arrays(bars)
     tf_sec = LINE_TF_SEC.get(sig_tf, 900)
+    chart_tf = str(params.get("chart_tf") or params.get("tf") or "1m")
+    chart_sec = LINE_TF_SEC.get(chart_tf, 60)
     tts, to_, th, tl, tc, tv = s020_dev.resample_tf(ts, o, h, l, c, vol, tf_sec)
     if len(tts) == 0:
         return {"lines": [], "markers": [], "series": [], "rsi": []}
@@ -89,7 +107,7 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
                 continue
             if kind == "OBL" and not show_obl:
                 continue
-            t = int(z.get("ob_candle_ts") or 0)
+            t = _snap_bar_start(int(z.get("ob_candle_ts") or 0), chart_sec)
             if t < cutoff or t > to_ts or t in seen:
                 continue
             seen.add(t)
@@ -102,19 +120,24 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
                     "level": float(z["level"]),
                     "entry_allowed": True,
                     "reason": "",
+                    "ob_rsi": float(z.get("rsi") or 0.0),
+                    "sig_rsi": "",
                 }
             )
     if show_sigs:
         for s in sigs:
-            t = int(s["ts"])
+            close_ts = int(s["ts"])
+            open_ts = close_ts - int(tf_sec)
+            t = _snap_bar_start(open_ts, chart_sec)
             if t < cutoff or t > to_ts:
                 continue
-            allowed = bool(s020_dev.entry_allowed(t + 60))
+            entry_ts = close_ts + 60
             reason = ""
-            if s020_dev.skip_lunch_ist(t + 60):
+            if s020_dev.skip_lunch_ist(entry_ts):
                 reason = "skip_lunch"
-            elif s020_dev.skip_thu_sat_window(t + 60):
+            elif s020_dev.skip_thu_sat_window(entry_ts):
                 reason = "skip_thu_sat"
+            allowed = reason == ""
             markers.append(
                 {
                     "time": t,
@@ -124,8 +147,12 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
                     "level": float(s.get("ob_level") or 0.0),
                     "entry_allowed": allowed,
                     "reason": reason,
+                    "ob_rsi": float(s.get("ob_rsi") or 0.0),
+                    "sig_rsi": float(s.get("sig_rsi") or 0.0),
+                    "signal_close_ts": close_ts,
                 }
             )
+    markers.sort(key=lambda m: (int(m["time"]), _marker_rank(str(m.get("text") or ""))))
     return {
         "lines": lines,
         "markers": markers,

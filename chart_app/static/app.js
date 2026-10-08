@@ -265,9 +265,9 @@
     (overlayPayload.markers || []).forEach((m) => {
       if (Number(m.time) !== t) return;
       bits.push(
-        (m.side || "") +
+        (m.text || m.side || "") +
           " level=" + (m.level != null ? Number(m.level).toFixed(1) : "—") +
-          " created=" + (m.create_ts ? fmtIst(m.create_ts) : "—") +
+          (m.reason ? " " + m.reason : "") +
           " entry_allowed=" + (m.entry_allowed ? "true" : "false")
       );
     });
@@ -419,21 +419,39 @@
     if (showMarks && mode === "backtest") {
       marks = tradeMarks.filter((m) => inRange(m.time));
     } else if (showMarks) {
+      const candleTimes = sortedCandles().map((c) => Number(c.time)).sort((a, b) => a - b);
+      const snap = (t) => {
+        const n = Number(t);
+        if (!candleTimes.length) return n;
+        for (let i = 0; i < candleTimes.length; i += 1) {
+          if (candleTimes[i] >= n) return candleTimes[i];
+        }
+        return candleTimes[candleTimes.length - 1];
+      };
       marks = (j.markers || [])
           .filter((m) => inRange(m.time))
           .map((m) => {
           const large = m.size === "large" || m.text === "SHORT" || m.text === "LONG";
+          const skipped = Boolean(m.reason) || m.entry_allowed === false;
+          const longish = m.text === "OBL" || m.text === "LONG" || m.side === "long";
+          const hot = longish ? "#22c55e" : "#ef4444";
+          const faded = longish ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)";
           return {
-            time: m.time,
-            position: m.side === "long" ? "belowBar" : "aboveBar",
-            color: m.side === "long" ? "#22c55e" : "#ef4444",
-            shape: m.side === "long" ? "arrowUp" : "arrowDown",
+            time: snap(m.time),
+            position: longish ? "belowBar" : "aboveBar",
+            color: skipped ? faded : hot,
+            shape: longish ? "arrowUp" : "arrowDown",
             text: m.text || "",
             size: large ? 2 : 0,
           };
         });
     }
-    series.setMarkers(marks);
+    marks.sort((a, b) => Number(a.time) - Number(b.time) || String(a.text).length - String(b.text).length);
+    try {
+      series.setMarkers(marks);
+    } catch (err) {
+      console.warn("setMarkers failed", err, marks.slice(0, 8));
+    }
     const useRsi = el("strategy") && el("strategy").value === "S020_RSI" && el("togRsiPane") && el("togRsiPane").checked;
     if (rsiHost) {
       rsiHost.classList.toggle("hidden", !useRsi);
