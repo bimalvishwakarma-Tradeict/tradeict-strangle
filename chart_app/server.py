@@ -183,6 +183,14 @@ async def api_overlay(
     from_ts: int | None = Query(None, alias="from"),
     to_ts: int | None = Query(None, alias="to"),
     hours: float = Query(24),
+    signal_tf: str = Query("15m"),
+    rsi_len: int = Query(14),
+    ob: float = Query(70),
+    os: float = Query(30),
+    show_obh: bool = Query(True),
+    show_obl: bool = Query(True),
+    show_levels: bool = Query(True),
+    show_signals: bool = Query(True),
 ) -> dict[str, Any]:
     if strategy not in PLUGINS:
         raise HTTPException(404, f"unknown strategy {strategy}")
@@ -202,6 +210,14 @@ async def api_overlay(
             "to": to_u,
             "chart_tf": tf,
             "variant": variant,
+            "signal_tf": signal_tf,
+            "rsi_len": rsi_len,
+            "ob": ob,
+            "os": os,
+            "show_obh": show_obh,
+            "show_obl": show_obl,
+            "show_levels": show_levels,
+            "show_signals": show_signals,
         },
     )
     return {"strategy": strategy, "bars_used": len(bars), **data}

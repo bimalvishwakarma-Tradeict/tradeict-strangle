@@ -7,14 +7,16 @@
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; font-family: Segoe UI, sans-serif; background: #0e1117; color: #d8dee9; }
-    #layout { display: grid; grid-template-columns: 1fr 280px; grid-template-rows: 48px 1fr 28px; height: 100%; }
+    #layout { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: 48px 1fr 132px 28px; height: 100%; }
     header { grid-column: 1 / 3; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: #161b22; border-bottom: 1px solid #30363d; }
     header h1 { font-size: 14px; margin: 0; font-weight: 600; }
     select, input, button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-size: 12px; }
     button { cursor: pointer; }
     button:hover { background: #30363d; }
     #chart { grid-row: 2; min-width: 0; }
-    aside { grid-row: 2; border-left: 1px solid #30363d; background: #161b22; overflow: auto; padding: 10px; font-size: 12px; }
+    #rsiChart { grid-row: 3; min-width: 0; border-top: 1px solid #30363d; }
+    #rsiChart.hidden { display: none; }
+    aside { grid-row: 2 / 4; border-left: 1px solid #30363d; background: #161b22; overflow: auto; padding: 10px; font-size: 12px; }
     aside h2 { font-size: 12px; margin: 12px 0 6px; color: #8b949e; text-transform: uppercase; }
     .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
     label { display: flex; align-items: center; gap: 4px; }
@@ -53,7 +55,17 @@
       <span id="histStatus">Candles: 0 | idle</span>
     </header>
     <div id="chart"></div>
+    <div id="rsiChart"></div>
     <aside>
+      <h2>Strategy</h2>
+      <div class="row">
+        <label>Signal
+          <select id="strategy">
+            <option value="S020" selected>VWAP Signal</option>
+            <option value="S020_RSI">RSI Div Signal</option>
+          </select>
+        </label>
+      </div>
       <h2>S020 VWAP Swing</h2>
       <div class="row">
         <label>Line TF
@@ -87,6 +99,28 @@
         </label>
       </div>
       <button id="btnOverlay">Reload overlay</button>
+      <h2>RSI Div</h2>
+      <div class="row">
+        <label>Signal TF
+          <select id="signalTf">
+            <option value="1m">1m</option>
+            <option value="3m">3m</option>
+            <option value="5m">5m</option>
+            <option value="15m" selected>15m</option>
+            <option value="30m">30m</option>
+          </select>
+        </label>
+        <label>RSI Length <input id="rsiLen" type="number" value="14" min="2" max="50" style="width:48px" /></label>
+        <label>OB <input id="rsiOb" type="number" value="70" min="50" max="90" style="width:48px" /></label>
+        <label>OS <input id="rsiOs" type="number" value="30" min="10" max="50" style="width:48px" /></label>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="togObh" checked /> Show OBH</label>
+        <label><input type="checkbox" id="togObl" checked /> Show OBL</label>
+        <label><input type="checkbox" id="togLevels" checked /> Show OBH/OBL Levels</label>
+        <label><input type="checkbox" id="togSigs" checked /> Show Signals</label>
+        <label><input type="checkbox" id="togRsiPane" checked /> RSI pane (70/30)</label>
+      </div>
       <h2>Backtest trades</h2>
       <select id="tradeFile" style="width:100%"></select>
       <button id="btnTrades">Load trades</button>
@@ -99,6 +133,6 @@
     </footer>
   </div>
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/app.js?v=tv1"></script>
+  <script src="/static/app.js?v=rsi1"></script>
 </body>
 </html>

@@ -66,6 +66,30 @@
   });
   const vwapSeries = chart.addLineSeries({ color: "#58a6ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
   const extraSeries = [];
+  const rsiHost = el("rsiChart");
+  const rsiChart = rsiHost
+    ? LightweightCharts.createChart(rsiHost, {
+        layout: { background: { color: "#0e1117" }, textColor: "#8b949e" },
+        grid: { vertLines: { color: "#21262d" }, horzLines: { color: "#21262d" } },
+        rightPriceScale: { borderColor: "#30363d" },
+        timeScale: { visible: false },
+        height: 130,
+      })
+    : null;
+  const rsiLine = rsiChart
+    ? rsiChart.addLineSeries({ color: "#d2a8ff", lineWidth: 1, priceLineVisible: false, lastValueVisible: false })
+    : null;
+  const rsiObLine = rsiChart
+    ? rsiChart.addLineSeries({ color: "#f85149", lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false })
+    : null;
+  const rsiOsLine = rsiChart
+    ? rsiChart.addLineSeries({ color: "#3fb950", lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false })
+    : null;
+  if (chart && rsiChart && chart.timeScale && rsiChart.timeScale) {
+    chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (range) rsiChart.timeScale().setVisibleLogicalRange(range);
+    });
+  }
 
   function sortedCandles() {
     return [...candleMap.values()].sort((a, b) => a.time - b.time);
@@ -299,14 +323,23 @@
     const hours = el("hours").value || "24";
     const lineTf = el("lineTf").value;
     const variant = el("variant").value;
+    const strategy = el("strategy") ? el("strategy").value : "S020";
     const q = new URLSearchParams({
-      strategy: "S020",
+      strategy,
       tf,
       line_tf: lineTf,
       variant,
       from: String(from),
       to: String(to),
       hours: String(hours),
+      signal_tf: el("signalTf") ? el("signalTf").value : "15m",
+      rsi_len: el("rsiLen") ? el("rsiLen").value : "14",
+      ob: el("rsiOb") ? el("rsiOb").value : "70",
+      os: el("rsiOs") ? el("rsiOs").value : "30",
+      show_obh: el("togObh") && el("togObh").checked ? "true" : "false",
+      show_obl: el("togObl") && el("togObl").checked ? "true" : "false",
+      show_levels: el("togLevels") && el("togLevels").checked ? "true" : "false",
+      show_signals: el("togSigs") && el("togSigs").checked ? "true" : "false",
     });
     const r = await fetch("/api/overlay?" + q.toString());
     const j = await r.json();
@@ -387,25 +420,49 @@
       marks = tradeMarks.filter((m) => inRange(m.time));
     } else if (showMarks) {
       marks = (j.markers || [])
-        .filter((m) => inRange(m.time))
-        .map((m) => ({
-          time: m.time,
-          position: m.side === "long" ? "belowBar" : "aboveBar",
-          color: m.side === "long" ? "#22c55e" : "#ef4444",
-          shape: m.side === "long" ? "arrowUp" : "arrowDown",
-          text: m.text || "",
-        }));
+          .filter((m) => inRange(m.time))
+          .map((m) => {
+          const large = m.size === "large" || m.text === "SHORT" || m.text === "LONG";
+          return {
+            time: m.time,
+            position: m.side === "long" ? "belowBar" : "aboveBar",
+            color: m.side === "long" ? "#22c55e" : "#ef4444",
+            shape: m.side === "long" ? "arrowUp" : "arrowDown",
+            text: m.text || "",
+            size: large ? 2 : 0,
+          };
+        });
     }
     series.setMarkers(marks);
+    const useRsi = el("strategy") && el("strategy").value === "S020_RSI" && el("togRsiPane") && el("togRsiPane").checked;
+    if (rsiHost) {
+      rsiHost.classList.toggle("hidden", !useRsi);
+      document.getElementById("layout").style.gridTemplateRows = useRsi
+        ? "48px 1fr 132px 28px"
+        : "48px 1fr 0px 28px";
+    }
+    if (rsiLine && rsiObLine && rsiOsLine) {
+      const rsiPts = useRsi ? (j.rsi || []) : [];
+      rsiLine.setData(rsiPts);
+      const ob = Number(j.rsi_ob != null ? j.rsi_ob : 70);
+      const os = Number(j.rsi_os != null ? j.rsi_os : 30);
+      const times = rsiPts.map((p) => p.time);
+      rsiObLine.setData(times.length ? times.map((t) => ({ time: t, value: ob })) : []);
+      rsiOsLine.setData(times.length ? times.map((t) => ({ time: t, value: os })) : []);
+    }
   }
 
-  ["togVwap", "togActive", "togExpired", "togMarks"].forEach((id) => {
-    el(id).addEventListener("change", () => reloadOverlay());
+  ["togVwap", "togActive", "togExpired", "togMarks", "togObh", "togObl", "togLevels", "togSigs", "togRsiPane"].forEach((id) => {
+    if (el(id)) el(id).addEventListener("change", () => reloadOverlay());
   });
   el("btnOverlay").addEventListener("click", () => reloadOverlay());
   el("lineTf").addEventListener("change", () => reloadOverlay());
   el("variant").addEventListener("change", () => reloadOverlay());
   el("hours").addEventListener("change", () => reloadOverlay());
+  if (el("strategy")) el("strategy").addEventListener("change", () => reloadOverlay());
+  ["signalTf", "rsiLen", "rsiOb", "rsiOs"].forEach((id) => {
+    if (el(id)) el(id).addEventListener("change", () => reloadOverlay());
+  });
   if (el("markerMode")) {
     el("markerMode").addEventListener("change", () => paintOverlay(overlayPayload));
   }

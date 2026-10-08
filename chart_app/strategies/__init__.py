@@ -26,6 +26,8 @@ def compute(name: str, bars: list[dict[str, Any]], params: dict[str, Any]) -> di
 
 
 def load_plugins() -> None:
+    from strategies import s020_rsi  # noqa: F401
     from strategies import s020_vwap  # noqa: F401
 
     s020_vwap.register_plugin()
+    s020_rsi.register_plugin()

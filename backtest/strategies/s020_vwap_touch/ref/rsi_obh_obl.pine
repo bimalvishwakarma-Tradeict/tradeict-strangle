@@ -1,0 +1,7 @@
+// Pine source was not pasted by Bimal.
+// Implementation follows Bimal confirmed RULES in the task prompt (final).
+// If a TradingView Pine script is added later, compare vs rsi_div.py and note diffs.
+//
+//@version=5
+indicator("RSI OBH/OBL (placeholder — rules in rsi_div.py)", overlay=true)
+// Intentionally empty of strategy logic.
