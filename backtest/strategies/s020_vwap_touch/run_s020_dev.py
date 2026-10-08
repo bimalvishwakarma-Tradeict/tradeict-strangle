@@ -13,6 +13,7 @@ import argparse
 import calendar
 import csv
 import gc
+import json
 import logging
 import sys
 import time
@@ -33,6 +34,11 @@ for _p in (str(_ROOT), str(_BACKTEST)):
 from backtest.fees_sim import OPTIONS_CONTRACT_VALUE  # noqa: E402
 from backtest.harness.data import MarksStore, ist_dt, to_unix  # noqa: E402
 from backtest.harness.mark_cache import reset_mark_cache  # noqa: E402
+from backtest.harness.run_archive import (  # noqa: E402
+    SNAPSHOT_SEC,
+    RunArchive,
+    greeks_from_mark,
+)
 from backtest.s004_gate import implied_vol_bisection  # noqa: E402
 from backtest.slippage_model import load_slip_table  # noqa: E402
 from backtest.strategies.s012_trend_follow.engine import (  # noqa: E402
@@ -50,6 +56,7 @@ CACHE_DIR = OUT_DIR / "s020_dev_pathcache"
 CKPT = OUT_DIR / "s020_dev_ckpt.jsonl"
 PATH_VER = "vdev1"
 TRAIN_CKPT = OUT_DIR / "s020_ckpt.jsonl"
+ARCHIVE_PTR = OUT_DIR / "s020_dev_archive_ptr.json"
 
 TGTS = (100, 150, 200, 250, 300)
 SLS = (100, 150, 200, 250, 300)
@@ -961,8 +968,17 @@ def entry_iv_avg(path: dict[str, Any], spot: float, t: int) -> float:
 
 
 def mfe_mae(path: dict[str, Any], nlegs: int, exit_ts: int) -> tuple[float, float]:
+    mf, ma, _, _ = mfe_mae_with_ts(path, nlegs, exit_ts)
+    return mf, ma
+
+
+def mfe_mae_with_ts(
+    path: dict[str, Any], nlegs: int, exit_ts: int
+) -> tuple[float, float, int, int]:
     mfe = float("-inf")
     mae = float("inf")
+    mfe_ts = 0
+    mae_ts = 0
     ts = path["ts"]
     ok = path["ok"]
     n = 0
@@ -975,12 +991,16 @@ def mfe_mae(path: dict[str, Any], nlegs: int, exit_ts: int) -> tuple[float, floa
         gp = gp_at(path, i, nlegs)
         if not np.isfinite(gp):
             continue
-        mfe = max(mfe, gp)
-        mae = min(mae, gp)
+        if gp > mfe:
+            mfe = gp
+            mfe_ts = t
+        if gp < mae:
+            mae = gp
+            mae_ts = t
         n += 1
     if n == 0:
-        return float("nan"), float("nan")
-    return float(mfe), float(mae)
+        return float("nan"), float("nan"), 0, 0
+    return float(mfe), float(mae), int(mfe_ts), int(mae_ts)
 
 
 def iv_tercile_lines(rows: list[dict[str, Any]]) -> list[str]:
@@ -1077,6 +1097,7 @@ def simulate_plan(
     basket: str = "std",
     prem_pct: float = 0.0,
     strangle_exit: bool = False,
+    on_trade: Any | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     busy = -1
     rows: list[dict[str, Any]] = []
@@ -1119,7 +1140,7 @@ def simulate_plan(
         hold = (int(walked["exit_ts"]) - int(t)) / 3600.0
         exp = date.fromisoformat(str(path["exp"]))
         hrs_exp = (s018.expiry_unix(exp) - int(t)) / 3600.0
-        mf, ma = mfe_mae(path, nlegs, int(walked["exit_ts"]))
+        mf, ma, mfe_ts, mae_ts = mfe_mae_with_ts(path, nlegs, int(walked["exit_ts"]))
         eiv = entry_iv_avg(path, float(spot_c.get(t, 0.0)), t)
         sel = list(path["legs"])[: 2 if int(nlegs) == 2 else len(list(path["legs"]))]
         nd = 0.0
@@ -1146,7 +1167,9 @@ def simulate_plan(
                 "exp": exp.isoformat(),
                 "entry_iv": eiv,
                 "mfe": mf,
+                "mfe_ts": mfe_ts,
                 "mae": ma,
+                "mae_ts": mae_ts,
                 "exit_reason": walked.get("reason"),
                 "spot": float(spot_c.get(t, 0.0)),
                 "atm_strike": sel[0].get("atm_strike") if sel else None,
@@ -1161,6 +1184,8 @@ def simulate_plan(
                 **walked,
             }
         )
+        if on_trade is not None:
+            on_trade(rows[-1], path)
         busy = int(walked["exit_ts"])
     return rows, n_stale
 
@@ -1198,18 +1223,240 @@ def fmt_dev(s: dict[str, Any]) -> str:
     )
 
 
+def path_cache_n() -> int:
+    if not CACHE_DIR.exists():
+        return 0
+    return len(list(CACHE_DIR.glob(f"*_{PATH_VER}.npz")))
+
+
 def drop_dev_fresh() -> None:
     if TRAIN_CKPT.exists():
         print(f"fresh DEV: leaving TRAIN {TRAIN_CKPT.name} untouched", flush=True)
     if CKPT.exists():
         CKPT.unlink()
-        print(f"fresh: dropped {CKPT.name}", flush=True)
+        print(f"fresh: dropped {CKPT.name} (path cache kept)", flush=True)
+    else:
+        print("fresh: no DEV checkpoint; path cache kept", flush=True)
+    if ARCHIVE_PTR.exists():
+        ARCHIVE_PTR.unlink()
+        print(f"fresh: dropped {ARCHIVE_PTR.name}", flush=True)
+
+
+def drop_dev_cache() -> None:
     n = 0
     if CACHE_DIR.exists():
         for p in CACHE_DIR.glob(f"*_{PATH_VER}.npz"):
             p.unlink(missing_ok=True)
             n += 1
-    print(f"fresh: dropped {n} S020 DEV path-cache files", flush=True)
+    print(f"purge-cache: dropped {n} S020 DEV path-cache files", flush=True)
+
+
+def archive_mode_name(args: argparse.Namespace) -> str:
+    if bool(getattr(args, "dump_trades", False)):
+        return "dump-trades"
+    if bool(getattr(args, "tf_band_grid", False)):
+        return "tf-band-grid"
+    if bool(getattr(args, "strangle_grid", False)):
+        return "strangle-grid"
+    if bool(getattr(args, "exit_grid", False)):
+        return "exit-grid"
+    if bool(getattr(args, "hedge_grid", False)):
+        return "hedge-grid"
+    if bool(getattr(args, "band_grid", False)):
+        return "band-grid"
+    if bool(getattr(args, "all", False)):
+        return "all"
+    return f"{args.tf}-{args.variant}"
+
+
+def _path_i_at(path: dict[str, Any], t: int) -> int | None:
+    ts_a = path["ts"]
+    last: int | None = None
+    tgt = int(t)
+    for i in range(int(ts_a.size)):
+        ti = int(ts_a[i])
+        if ti == tgt:
+            return i
+        if ti <= tgt:
+            last = i
+        else:
+            break
+    return last
+
+
+def _snap_times(entry_ts: int, exit_ts: int, mfe_ts: int, mae_ts: int) -> list[tuple[int, str]]:
+    ranked: dict[int, str] = {}
+    pri = {"entry": 5, "exit": 4, "mfe": 3, "mae": 2, "15m": 1}
+    def put(t: int, kind: str) -> None:
+        if t <= 0:
+            return
+        old = ranked.get(int(t))
+        if old is None or pri[kind] > pri[old]:
+            ranked[int(t)] = kind
+    put(int(entry_ts), "entry")
+    t = int(entry_ts) + int(SNAPSHOT_SEC)
+    while t < int(exit_ts):
+        put(t, "15m")
+        t += int(SNAPSHOT_SEC)
+    put(int(mfe_ts), "mfe")
+    put(int(mae_ts), "mae")
+    put(int(exit_ts), "exit")
+    return sorted(ranked.items(), key=lambda x: x[0])
+
+
+def emit_archive_trade(
+    archive: RunArchive,
+    cfg: dict[str, Any],
+    r: dict[str, Any],
+    path: dict[str, Any],
+    nlegs: int,
+    long_short: str,
+) -> None:
+    tid = (
+        f"{cfg.get('key','')}|{int(r['entry_ts'])}|{r['side']}"
+    )
+    nuse = 2 if int(nlegs) == 2 else len(list(path["legs"]))
+    sel = list(path["legs"])[:nuse]
+    exp = str(path.get("exp", r.get("exp", "")))
+    exp_ts = int(path["exp_ts"])
+    dte = int(path.get("dte", cfg.get("dte", 1)))
+    qty = int(s018.QTY)
+    pos = -1.0 if long_short == "short" else 1.0
+    exit_ts = int(r["exit_ts"])
+    entry_ts = int(r["entry_ts"])
+    reason = str(r.get("reason", ""))
+    xi = _path_i_at(path, exit_ts)
+    spot_e = float(r.get("spot", 0.0))
+    spot_x = float(r.get("spot_exit", 0.0))
+    t_e = t_years(entry_ts, exp_ts)
+    t_x = t_years(exit_ts, exp_ts)
+    trade = {
+        "trade_id": tid,
+        "month": cfg.get("month"),
+        "tf": cfg.get("tf"),
+        "variant": cfg.get("variant"),
+        "band": cfg.get("band"),
+        "band_mode": cfg.get("band_mode"),
+        "arm": cfg.get("arm_id"),
+        "n_legs": nuse,
+        "dte": dte,
+        "side": r["side"],
+        "entry_ist": s018.ist_str(entry_ts),
+        "exit_ist": s018.ist_str(exit_ts),
+        "exit_reason": r.get("exit_reason", reason),
+        "hold_hrs": r.get("hold_hrs"),
+        "hrs_to_exp": r.get("hrs_to_exp"),
+        "spot_entry": spot_e,
+        "spot_exit": spot_x,
+        "line_level": r.get("level"),
+        "vwap_dist": r.get("vwap_dist"),
+        "gross": r.get("gross"),
+        "brokerage": r.get("fees"),
+        "slippage": r.get("slip"),
+        "net": r.get("net"),
+        "mfe": r.get("mfe"),
+        "mfe_time": s018.ist_str(int(r["mfe_ts"])) if int(r.get("mfe_ts") or 0) else "",
+        "mae": r.get("mae"),
+        "mae_time": s018.ist_str(int(r["mae_ts"])) if int(r.get("mae_ts") or 0) else "",
+    }
+    legs_out: list[dict[str, Any]] = []
+    for k, lg in enumerate(sel):
+        em = float(lg["mark"])
+        ef = float(lg["fill"])
+        fee_e = float(lg.get("fee", 0.0))
+        slip_e = float(lg.get("slip", 0.0))
+        if xi is None:
+            xm = float("nan")
+            xf = float("nan")
+            fee_x = 0.0
+            slip_x = 0.0
+        elif reason == "EXPIRY":
+            xm = intrinsic(bool(lg["is_call"]), float(lg["strike"]), spot_x)
+            xf = xm
+            fee_x = s018.fee_gst(xm, spot_x) if xm > 0 else 0.0
+            slip_x = 0.0
+        else:
+            xm = float(path[f"px{k}"][xi])
+            xf, _ = s018.sell_fill(xm, dte)
+            fee_x = s018.fee_gst(xm, spot_x if spot_x else 1.0)
+            slip_x = (xm - xf) * qty * OPTIONS_CONTRACT_VALUE
+        ge = greeks_from_mark(em, spot_e, float(lg["strike"]), t_e, bool(lg["is_call"]))
+        gx = greeks_from_mark(xm, spot_x, float(lg["strike"]), t_x, bool(lg["is_call"]))
+        d_ent = float(lg.get("delta", ge["delta"]))
+        legs_out.append(
+            {
+                "symbol": str(lg.get("symbol", "")),
+                "strike": float(lg["strike"]),
+                "type": "call" if bool(lg["is_call"]) else "put",
+                "expiry": exp,
+                "qty": qty,
+                "long_short": long_short,
+                "entry_mark": em,
+                "entry_fill": ef,
+                "exit_mark": xm,
+                "exit_fill": xf,
+                "fee_entry": fee_e,
+                "fee_exit": fee_x,
+                "slip_entry": slip_e,
+                "slip_exit": slip_x,
+                "iv_entry": ge["iv"],
+                "delta_entry": d_ent,
+                "gamma_entry": ge["gamma"],
+                "theta_entry": ge["theta"],
+                "vega_entry": ge["vega"],
+                "iv_exit": gx["iv"],
+                "delta_exit": gx["delta"],
+                "gamma_exit": gx["gamma"],
+                "theta_exit": gx["theta"],
+                "vega_exit": gx["vega"],
+            }
+        )
+    snaps: list[dict[str, Any]] = []
+    for ts_i, kind in _snap_times(entry_ts, exit_ts, int(r.get("mfe_ts") or 0), int(r.get("mae_ts") or 0)):
+        if ts_i == entry_ts:
+            sp = spot_e
+            marks = [float(lg["mark"]) for lg in sel]
+            pnl = 0.0
+            for lg in sel:
+                pnl += (float(lg["mark"]) - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+        else:
+            pi = _path_i_at(path, ts_i)
+            if pi is None or not bool(path["ok"][pi]):
+                continue
+            sp = float(path["spot"][pi]) or float(r.get("spot_exit", 0.0))
+            marks = [float(path[f"px{k}"][pi]) for k in range(len(sel))]
+            pnl = gp_at(path, pi, nlegs)
+        t_yr = t_years(ts_i, exp_ts)
+        bd = bg = bt = bv = 0.0
+        ivs: list[float] = []
+        row: dict[str, Any] = {
+            "ts_ist": s018.ist_str(ts_i),
+            "kind": kind,
+            "spot": sp,
+            "leg1_mark": "", "leg1_iv": "",
+            "leg2_mark": "", "leg2_iv": "",
+            "leg3_mark": "", "leg3_iv": "",
+        }
+        nfin = 0
+        for k, lg in enumerate(sel):
+            mk = float(marks[k]) if k < len(marks) else float("nan")
+            g = greeks_from_mark(mk, sp, float(lg["strike"]), t_yr, bool(lg["is_call"]))
+            row[f"leg{k+1}_mark"] = mk
+            row[f"leg{k+1}_iv"] = g["iv"]
+            ivs.append(g["iv"])
+            if np.isfinite(g["delta"]):
+                bd += pos * float(g["delta"])
+                bg += pos * float(g["gamma"])
+                bt += pos * float(g["theta"])
+                bv += pos * float(g["vega"])
+                nfin += 1
+        row["basket_delta"] = bd if nfin else float("nan")
+        row["basket_gamma"] = bg if nfin else float("nan")
+        row["basket_theta"] = bt if nfin else float("nan")
+        row["basket_vega"] = bv if nfin else float("nan")
+        row["basket_mark_pnl"] = pnl
+        snaps.append(row)
+    archive.add_trade(trade, legs_out, snaps)
 
 
 def ckpt_window_ok(done: dict[str, dict[str, Any]], month: str, max_days: int) -> bool:
@@ -1313,6 +1560,7 @@ def run_combo(
     c2_seeds: tuple[int, ...] | None = None,
     skip_done: bool = True,
     write_ckpt: bool = True,
+    archive: RunArchive | None = None,
 ) -> None:
     time_stop = TIME_STOP_SEC if variant == "V5" else None
     extra_by = {(int(s["ts"]), str(s["side"])): s for s in sigs}
@@ -1351,11 +1599,22 @@ def run_combo(
             f"elapsed={time.perf_counter()-t_all:.0f}s",
             flush=True,
         )
+        cfg_now = {
+            "month": month, "tf": tf, "variant": variant, "key": key,
+            "band": band, "band_mode": band_mode, "arm_id": arm_id, "dte": dte_mode,
+        }
+        ls = "long" if strangle_exit else "short"
+        on_tr = None
+        if archive is not None:
+            on_tr = lambda r, p, _c=cfg_now, _n=nlegs, _ls=ls: emit_archive_trade(
+                archive, _c, r, p, _n, _ls
+            )
         rows, n_stale = simulate_plan(
             store, spot_c, plan_all, float(tgt), float(slv), tag_p, False,
             start_ts, cutoff, win_from, win_to, time_stop,
             label=f"{tf} {variant} T={tgt}|SL={slv}",
             extra_by=extra_by,
+            on_trade=on_tr,
             **sim_kw,
         )
         stt = stats_dev(rows)
@@ -1428,6 +1687,23 @@ def run_combo(
                 stt["c3"] = c3m
         rec = {k: v for k, v in stt.items() if k != "exits"}
         rec["exits"] = stt.get("exits", {})
+        if archive is not None:
+            c2v = stt.get("c2", float("nan"))
+            c3v = stt.get("c3", float("nan"))
+            archive.add_config_result(
+                {
+                    "month": month, "tf": tf, "variant": variant,
+                    "band": band, "band_mode": band_mode, "arm": arm_id,
+                    "n_legs": nlegs, "dte": dte_mode, "tgt": tgt, "sl": slv,
+                    "n" : stt.get("n", 0), "mean": stt.get("mean"),
+                    "gross": stt.get("gross"), "brokerage": stt.get("fee"),
+                    "slippage": stt.get("slip"), "win": stt.get("win"),
+                    "C2": "-" if not np.isfinite(c2v) else c2v,
+                    "C3": "-" if not np.isfinite(c3v) else c3v,
+                    "n_sig": stt.get("n_sig"), "n_stale": n_stale,
+                    "avg_net_delta": stt.get("avg_net_delta"), "key": key,
+                }
+            )
         if write_ckpt:
             s020.append_ckpt(CKPT, rec)
         done[key] = stt
@@ -1737,8 +2013,11 @@ def main() -> None:
     ap.add_argument("--strangle-grid", action="store_true")
     ap.add_argument("--tf-band-grid", action="store_true")
     ap.add_argument("--dump-trades", action="store_true")
+    ap.add_argument("--hedge-grid", action="store_true")
     ap.add_argument("--max-days", type=int, default=0)
     ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--purge-cache", action="store_true")
+    ap.add_argument("--prereg-note", default="")
     ap.add_argument("--cache-gb", type=float, default=1.0)
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1748,8 +2027,18 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     dump_trades = bool(args.dump_trades)
-    if args.fresh and not dump_trades:
+    n_cache0 = path_cache_n()
+    print(f"path-cache files={n_cache0}", flush=True)
+    if args.purge_cache:
+        print("This deletes S020 DEV path-cache npz. Type YES to confirm:", flush=True)
+        ans = sys.stdin.readline().strip()
+        if ans != "YES":
+            print("purge-cache aborted", flush=True)
+            sys.exit(1)
+        drop_dev_cache()
+    if args.fresh:
         drop_dev_fresh()
+    print(f"path-cache files after flags={path_cache_n()}", flush=True)
 
     month = str(args.month)
     win_from, win_to = month_bounds(month)
@@ -1765,6 +2054,42 @@ def main() -> None:
             print("checkpoint window mismatch -> use --fresh", flush=True)
             sys.exit(1)
 
+    mode_n = archive_mode_name(args)
+    arch_folder: Path | None = None
+    if (not args.fresh) and (not dump_trades) and ARCHIVE_PTR.exists():
+        try:
+            ptr = json.loads(ARCHIVE_PTR.read_text(encoding="utf-8"))
+            if (
+                str(ptr.get("month", "")) == month
+                and int(ptr.get("max_days", -1)) == int(max_days)
+                and str(ptr.get("mode", "")) == mode_n
+            ):
+                cand = Path(str(ptr.get("folder", "")))
+                if cand.is_dir():
+                    arch_folder = cand
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            arch_folder = None
+    archive = RunArchive(
+        "s020",
+        mode_n,
+        args,
+        month=month,
+        prereg_note=str(args.prereg_note or ""),
+        folder=arch_folder,
+    )
+    ARCHIVE_PTR.write_text(
+        json.dumps(
+            {
+                "month": month,
+                "max_days": int(max_days),
+                "mode": mode_n,
+                "folder": str(archive.folder),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"archive folder={archive.folder}", flush=True)
     print_expiry_check()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     spot = s018.load_spot_1m(args.csv)
@@ -1958,6 +2283,7 @@ def main() -> None:
             c2_seeds=tuple(c2_seeds) if c2_seeds is not None else None,
             skip_done=not dump_trades,
             write_ckpt=not dump_trades,
+            archive=archive,
         )
         pk = cell_key(
             month, tf, variant, PRIMARY_T, PRIMARY_SL, band, band_mode,
@@ -2200,6 +2526,8 @@ def main() -> None:
     if dump_csv is not None:
         print(f"wrote {dump_csv}")
     print(f"TOTAL elapsed={time.perf_counter()-t_all:.0f}s", flush=True)
+    print(f"path-cache files end={path_cache_n()} (start={n_cache0})", flush=True)
+    archive.finalize()
     store.close()
 
 

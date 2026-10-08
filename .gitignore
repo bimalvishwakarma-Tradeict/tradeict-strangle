@@ -47,12 +47,17 @@ backtest/results/
 backtest/strategies/**/runs/*_trades.csv
 backtest/strategies/**/runs/*_events.csv
 backtest/strategies/**/runs/*.jsonl
+backtest/strategies/**/runs/*archive_ptr.json
 backtest/strategies/**/runs/s018_pathcache/
 backtest/strategies/**/runs/s018_pathcache/**
 backtest/strategies/**/runs/s020_pathcache/
 backtest/strategies/**/runs/s020_pathcache/**
 backtest/strategies/**/runs/s020_dev_pathcache/
 backtest/strategies/**/runs/s020_dev_pathcache/**
+backtest/archive/
+backtest/archive/**
+Claude outputs/runs/
+Claude outputs/runs/**
 deploy/gdrive_credentials.json
 
 
