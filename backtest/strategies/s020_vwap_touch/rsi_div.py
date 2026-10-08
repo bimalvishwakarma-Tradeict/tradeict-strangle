@@ -54,7 +54,12 @@ def detect_from_rsi(
     ob: float = RSI_OB,
     os: float = RSI_OS,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """State machine on already-closed TF bars. Signal ts = bar close (ts + tf_sec)."""
+    """State machine on already-closed TF bars. Signal ts = bar close (ts + tf_sec).
+
+    Rev3: divergence vs confirmed OBH/OBL is checked first (even if RSI is
+    still >70 / <30). A new forming extreme does not replace the confirmed
+    one until RSI leaves the band and the new zone confirms.
+    """
     n = int(len(ts))
     signals: list[dict[str, Any]] = []
     zones: list[dict[str, Any]] = []
@@ -68,6 +73,30 @@ def detect_from_rsi(
     def close_ts(i: int) -> int:
         return int(ts[i]) + tf_sec
 
+    def _new_obh(i: int, r: float, hi: float, cts: int) -> dict[str, Any]:
+        return {
+            "kind": "OBH",
+            "start_ts": cts,
+            "confirm_ts": 0,
+            "level": hi,
+            "rsi": r,
+            "end_ts": 0,
+            "end_reason": "",
+            "ob_candle_ts": int(ts[i]),
+        }
+
+    def _new_obl(i: int, r: float, lo: float, cts: int) -> dict[str, Any]:
+        return {
+            "kind": "OBL",
+            "start_ts": cts,
+            "confirm_ts": 0,
+            "level": lo,
+            "rsi": r,
+            "end_ts": 0,
+            "end_reason": "",
+            "ob_candle_ts": int(ts[i]),
+        }
+
     for i in range(n):
         r = float(rsi[i])
         if not np.isfinite(r):
@@ -77,112 +106,67 @@ def detect_from_rsi(
         cl = float(c[i])
         cts = close_ts(i)
 
-        # --- OBH (short) ---
-        if conf_h is not None:
-            if r < os:
-                _close_zone(conf_h, cts, "opposite_extreme", zones)
-                conf_h = None
-            elif r > ob:
-                _close_zone(conf_h, cts, "replaced", zones)
-                conf_h = None
-                forming_h = {
-                    "kind": "OBH",
-                    "start_ts": cts,
-                    "confirm_ts": 0,
-                    "level": hi,
-                    "rsi": r,
-                    "end_ts": 0,
-                    "end_reason": "",
-                    "ob_candle_ts": int(ts[i]),
+        # --- OBH (short). Rev3: divergence first, even if RSI > 70. ---
+        if conf_h is not None and cl > float(conf_h["level"]) and r < float(conf_h["rsi"]):
+            signals.append(
+                {
+                    "ts": cts,
+                    "side": "short",
+                    "ob_level": float(conf_h["level"]),
+                    "ob_rsi": float(conf_h["rsi"]),
+                    "sig_rsi": r,
+                    "ob_candle_ts": int(conf_h["ob_candle_ts"]),
                 }
-            elif cl > float(conf_h["level"]) and r < float(conf_h["rsi"]):
-                signals.append(
-                    {
-                        "ts": cts,
-                        "side": "short",
-                        "ob_level": float(conf_h["level"]),
-                        "ob_rsi": float(conf_h["rsi"]),
-                        "sig_rsi": r,
-                        "ob_candle_ts": int(conf_h["ob_candle_ts"]),
-                    }
-                )
-                _close_zone(conf_h, cts, "signal", zones)
-                conf_h = None
-            # High > OBH and close < OBH → unchanged (rule 5)
+            )
+            _close_zone(conf_h, cts, "signal", zones)
+            conf_h = None
+        if conf_h is not None and r < os:
+            _close_zone(conf_h, cts, "opposite_extreme", zones)
+            conf_h = None
+        if r > ob:
+            if forming_h is None:
+                forming_h = _new_obh(i, r, hi, cts)
+            elif hi >= float(forming_h["level"]):
+                forming_h["level"] = hi
+                forming_h["rsi"] = r
+                forming_h["ob_candle_ts"] = int(ts[i])
         elif forming_h is not None:
-            if r > ob:
-                if hi >= float(forming_h["level"]):
-                    forming_h["level"] = hi
-                    forming_h["rsi"] = r
-                    forming_h["ob_candle_ts"] = int(ts[i])
-            else:
-                forming_h["confirm_ts"] = cts
-                conf_h = forming_h
-                forming_h = None
-        elif r > ob:
-            forming_h = {
-                "kind": "OBH",
-                "start_ts": cts,
-                "confirm_ts": 0,
-                "level": hi,
-                "rsi": r,
-                "end_ts": 0,
-                "end_reason": "",
-                "ob_candle_ts": int(ts[i]),
-            }
+            if conf_h is not None:
+                _close_zone(conf_h, cts, "replaced", zones)
+            forming_h["confirm_ts"] = cts
+            conf_h = forming_h
+            forming_h = None
 
-        # --- OBL (long) ---
-        if conf_l is not None:
-            if r > ob:
-                _close_zone(conf_l, cts, "opposite_extreme", zones)
-                conf_l = None
-            elif r < os:
-                _close_zone(conf_l, cts, "replaced", zones)
-                conf_l = None
-                forming_l = {
-                    "kind": "OBL",
-                    "start_ts": cts,
-                    "confirm_ts": 0,
-                    "level": lo,
-                    "rsi": r,
-                    "end_ts": 0,
-                    "end_reason": "",
-                    "ob_candle_ts": int(ts[i]),
+        # --- OBL (long). Mirror: divergence first, even if RSI < 30. ---
+        if conf_l is not None and cl < float(conf_l["level"]) and r > float(conf_l["rsi"]):
+            signals.append(
+                {
+                    "ts": cts,
+                    "side": "long",
+                    "ob_level": float(conf_l["level"]),
+                    "ob_rsi": float(conf_l["rsi"]),
+                    "sig_rsi": r,
+                    "ob_candle_ts": int(conf_l["ob_candle_ts"]),
                 }
-            elif cl < float(conf_l["level"]) and r > float(conf_l["rsi"]):
-                signals.append(
-                    {
-                        "ts": cts,
-                        "side": "long",
-                        "ob_level": float(conf_l["level"]),
-                        "ob_rsi": float(conf_l["rsi"]),
-                        "sig_rsi": r,
-                        "ob_candle_ts": int(conf_l["ob_candle_ts"]),
-                    }
-                )
-                _close_zone(conf_l, cts, "signal", zones)
-                conf_l = None
+            )
+            _close_zone(conf_l, cts, "signal", zones)
+            conf_l = None
+        if conf_l is not None and r > ob:
+            _close_zone(conf_l, cts, "opposite_extreme", zones)
+            conf_l = None
+        if r < os:
+            if forming_l is None:
+                forming_l = _new_obl(i, r, lo, cts)
+            elif lo <= float(forming_l["level"]):
+                forming_l["level"] = lo
+                forming_l["rsi"] = r
+                forming_l["ob_candle_ts"] = int(ts[i])
         elif forming_l is not None:
-            if r < os:
-                if lo <= float(forming_l["level"]):
-                    forming_l["level"] = lo
-                    forming_l["rsi"] = r
-                    forming_l["ob_candle_ts"] = int(ts[i])
-            else:
-                forming_l["confirm_ts"] = cts
-                conf_l = forming_l
-                forming_l = None
-        elif r < os:
-            forming_l = {
-                "kind": "OBL",
-                "start_ts": cts,
-                "confirm_ts": 0,
-                "level": lo,
-                "rsi": r,
-                "end_ts": 0,
-                "end_reason": "",
-                "ob_candle_ts": int(ts[i]),
-            }
+            if conf_l is not None:
+                _close_zone(conf_l, cts, "replaced", zones)
+            forming_l["confirm_ts"] = cts
+            conf_l = forming_l
+            forming_l = None
 
     return signals, zones
 

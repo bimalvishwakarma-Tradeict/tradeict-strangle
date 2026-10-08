@@ -101,6 +101,7 @@ def test_rule6_obh_expire_rsi_below_30() -> None:
 
 
 def test_rule7_new_obh_replaces_old() -> None:
+    """Rev3: RSI>70 starts forming; replace happens when new confirms (RSI<=70)."""
     rows = [
         (50.0, 10.0, 9.0, 9.5),
         (71.0, 20.0, 10.0, 19.0),
@@ -186,6 +187,7 @@ def test_long_rule6_expire_rsi_above_70() -> None:
 
 
 def test_long_rule7_replaced() -> None:
+    """Rev3: RSI<30 starts forming; replace happens when new confirms (RSI>=30)."""
     rows = [
         (50.0, 20.0, 19.0, 19.5),
         (20.0, 18.0, 10.0, 11.0),
@@ -198,6 +200,108 @@ def test_long_rule7_replaced() -> None:
     assert zones[0]["kind"] == "OBL"
     assert zones[0]["end_reason"] == "replaced"
     assert zones[0]["level"] == 10.0
+
+
+def test_rev3_div_rsi_above_70_still_short() -> None:
+    rows = [
+        (50.0, 10.0, 9.0, 9.5),
+        (80.0, 20.0, 10.0, 19.0),
+        (60.0, 18.0, 10.0, 12.0),
+        (71.0, 22.0, 10.0, 21.0),
+    ]
+    sigs, zones = _run(rows)
+    assert len(sigs) == 1
+    s = sigs[0]
+    assert s["side"] == "short"
+    assert s["ob_level"] == 20.0
+    assert s["ob_rsi"] == 80.0
+    assert s["sig_rsi"] == 71.0
+    assert zones[0]["end_reason"] == "signal"
+
+
+def test_rev3_div_rsi_below_30_still_long() -> None:
+    rows = [
+        (50.0, 20.0, 19.0, 19.5),
+        (20.0, 18.0, 10.0, 11.0),
+        (40.0, 16.0, 12.0, 13.0),
+        (25.0, 12.0, 8.0, 9.0),
+    ]
+    sigs, zones = _run(rows)
+    assert len(sigs) == 1
+    s = sigs[0]
+    assert s["side"] == "long"
+    assert s["ob_level"] == 10.0
+    assert s["ob_rsi"] == 20.0
+    assert s["sig_rsi"] == 25.0
+    assert zones[0]["end_reason"] == "signal"
+
+
+def test_rev3_old_obh_active_while_new_forming() -> None:
+    rows = [
+        (50.0, 10.0, 9.0, 9.5),
+        (80.0, 20.0, 10.0, 19.0),
+        (60.0, 18.0, 10.0, 12.0),
+        (75.0, 16.0, 10.0, 15.0),
+    ]
+    sigs, zones = _run(rows)
+    assert sigs == []
+    assert zones == []
+    rows2 = rows + [(55.0, 22.0, 10.0, 21.0)]
+    sigs, zones = _run(rows2)
+    assert len(sigs) == 1
+    assert sigs[0]["side"] == "short"
+    assert sigs[0]["ob_level"] == 20.0
+    assert zones[0]["end_reason"] == "signal"
+
+
+def test_rev3_new_obh_confirm_replaces_old() -> None:
+    rows = [
+        (50.0, 10.0, 9.0, 9.5),
+        (80.0, 20.0, 10.0, 19.0),
+        (60.0, 18.0, 10.0, 12.0),
+        (75.0, 16.0, 10.0, 15.0),
+        (55.0, 14.0, 9.0, 10.0),
+    ]
+    sigs, zones = _run(rows)
+    assert sigs == []
+    assert len(zones) == 1
+    assert zones[0]["kind"] == "OBH"
+    assert zones[0]["level"] == 20.0
+    assert zones[0]["end_reason"] == "replaced"
+
+
+def test_rev3_old_obl_active_while_new_forming() -> None:
+    rows = [
+        (50.0, 20.0, 19.0, 19.5),
+        (20.0, 18.0, 10.0, 11.0),
+        (40.0, 16.0, 12.0, 13.0),
+        (25.0, 15.0, 11.0, 12.0),
+    ]
+    sigs, zones = _run(rows)
+    assert sigs == []
+    assert zones == []
+    rows2 = rows + [(45.0, 12.0, 8.0, 9.0)]
+    sigs, zones = _run(rows2)
+    assert len(sigs) == 1
+    assert sigs[0]["side"] == "long"
+    assert sigs[0]["ob_level"] == 10.0
+    assert zones[0]["end_reason"] == "signal"
+
+
+def test_rev3_new_obl_confirm_replaces_old() -> None:
+    rows = [
+        (50.0, 20.0, 19.0, 19.5),
+        (20.0, 18.0, 10.0, 11.0),
+        (40.0, 16.0, 12.0, 13.0),
+        (25.0, 15.0, 11.0, 12.0),
+        (40.0, 16.0, 12.0, 13.0),
+    ]
+    sigs, zones = _run(rows)
+    assert sigs == []
+    assert len(zones) == 1
+    assert zones[0]["kind"] == "OBL"
+    assert zones[0]["level"] == 10.0
+    assert zones[0]["end_reason"] == "replaced"
 
 
 def test_long_rule8_one_signal() -> None:
