@@ -164,6 +164,16 @@ TFBAND_TFS = ("5m", "15m", "30m")
 TFBAND_VARS = ("V0", "V5")
 TFBAND_BANDS = (0, 100, 200, 300, 400, 500, 600, 700, 800)
 TFBAND_ARM_IDS = ("A0", "A1", "A2", "A4")
+DUMP_N_COMBOS = 224
+DUMP_TRADE_COLS: tuple[str, ...] = (
+    "month", "tf", "variant", "band", "band_mode", "arm", "n_legs", "dte",
+    "side", "entry_ist", "exit_ist", "exit_reason", "hold_hrs", "hrs_to_exp", "expiry",
+    "spot_entry", "spot_exit", "line_level", "vwap_at_entry", "vwap_dist", "entry_iv",
+    "leg1_symbol", "leg1_strike", "leg1_type", "leg1_entry_fill", "leg1_exit_px", "leg1_delta",
+    "leg2_symbol", "leg2_strike", "leg2_type", "leg2_entry_fill", "leg2_exit_px", "leg2_delta",
+    "leg3_symbol", "leg3_strike", "leg3_type", "leg3_entry_fill", "leg3_exit_px", "leg3_delta",
+    "basket_net_delta", "gross", "brokerage", "slippage", "net", "mfe", "mae",
+)
 
 
 class MonthGuardStore:
@@ -1010,6 +1020,38 @@ def dte2_coverage(
     return ok_n, len(plan)
 
 
+def path_exit_leg_pxs(
+    path: dict[str, Any],
+    exit_ts: int,
+    reason: str,
+    nlegs: int,
+    spot_c: dict[int, float],
+) -> tuple[float, list[float]]:
+    ts_a = path["ts"]
+    xi: int | None = None
+    for i in range(int(ts_a.size)):
+        if int(ts_a[i]) == int(exit_ts):
+            xi = i
+            break
+    spot_x = float(spot_c.get(int(exit_ts), 0.0))
+    nuse = int(nlegs)
+    pxs = [float("nan")] * nuse
+    if xi is None:
+        return spot_x, pxs
+    sp = float(path["spot"][xi])
+    if sp > 0:
+        spot_x = sp
+    legs = list(path["legs"])[:nuse]
+    for k, lg in enumerate(legs):
+        if str(reason) == "EXPIRY":
+            pxs[k] = intrinsic(bool(lg["is_call"]), float(lg["strike"]), spot_x)
+            continue
+        mark = float(path[f"px{k}"][xi])
+        xf, _ = s018.sell_fill(mark, int(path["dte"]))
+        pxs[k] = float(xf)
+    return spot_x, pxs
+
+
 def simulate_plan(
     store: Any,
     spot_c: dict[int, float],
@@ -1088,6 +1130,9 @@ def simulate_plan(
                 nd += dv
                 nfin += 1
         net_d = nd if nfin else float("nan")
+        spot_exit, exit_pxs = path_exit_leg_pxs(
+            path, int(walked["exit_ts"]), str(walked.get("reason", "")), nlegs, spot_c
+        )
         rows.append(
             {
                 "entry_ts": t,
@@ -1110,6 +1155,8 @@ def simulate_plan(
                 "leg_roles": [str(lg.get("role", "")) for lg in sel],
                 "net_delta": net_d,
                 "entry_prem": basket_entry_prem(path, nlegs),
+                "spot_exit": spot_exit,
+                "exit_pxs": exit_pxs,
                 **extra,
                 **walked,
             }
@@ -1264,6 +1311,8 @@ def run_combo(
     do_c2: bool = True,
     do_c3: bool = True,
     c2_seeds: tuple[int, ...] | None = None,
+    skip_done: bool = True,
+    write_ckpt: bool = True,
 ) -> None:
     time_stop = TIME_STOP_SEC if variant == "V5" else None
     extra_by = {(int(s["ts"]), str(s["side"])): s for s in sigs}
@@ -1294,7 +1343,7 @@ def run_combo(
             trail_give=trail_give, trail_cap=trail_cap,
             arm_id=arm_id, basket=basket,
         )
-        if key in done:
+        if skip_done and key in done:
             print(f"done SKIP {key}", flush=True)
             continue
         print(
@@ -1379,7 +1428,8 @@ def run_combo(
                 stt["c3"] = c3m
         rec = {k: v for k, v in stt.items() if k != "exits"}
         rec["exits"] = stt.get("exits", {})
-        s020.append_ckpt(CKPT, rec)
+        if write_ckpt:
+            s020.append_ckpt(CKPT, rec)
         done[key] = stt
         cell_rows[key] = rows
         s018._CHAIN.clear()
@@ -1572,6 +1622,102 @@ def tf_band_work() -> list[dict[str, Any]]:
     return out
 
 
+def dump_trades_work() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for rec in tf_band_work():
+        rec["do_c2"] = False
+        rec["do_c3"] = False
+        rec["c2_seeds"] = ()
+        out.append(rec)
+    for tf, var, band, mode in EXIT_GRID_SIGS:
+        for arm in EXIT_ARMS:
+            rec = {"tf": tf, "variant": var, "band": band, "band_mode": mode}
+            rec.update(work_fields_from_arm(arm))
+            rec["do_c2"] = False
+            rec["do_c3"] = False
+            rec["c2_seeds"] = ()
+            out.append(rec)
+    return out
+
+
+def _dump_leg_fields(lg: dict[str, Any] | None, exit_px: float) -> dict[str, Any]:
+    if lg is None:
+        return {
+            "symbol": "",
+            "strike": "",
+            "type": "",
+            "entry_fill": "",
+            "exit_px": "",
+            "delta": "",
+        }
+    return {
+        "symbol": str(lg.get("symbol", "")),
+        "strike": float(lg["strike"]),
+        "type": "call" if bool(lg["is_call"]) else "put",
+        "entry_fill": float(lg["fill"]),
+        "exit_px": exit_px if np.isfinite(exit_px) else "",
+        "delta": float(lg.get("delta", float("nan"))),
+    }
+
+
+def dump_trade_row(month: str, w: dict[str, Any], r: dict[str, Any]) -> dict[str, Any]:
+    nlegs = int(w["legs"])
+    sel = list(r.get("legs") or [])[:nlegs]
+    pxs = list(r.get("exit_pxs") or [])
+    row: dict[str, Any] = {
+        "month": month,
+        "tf": w["tf"],
+        "variant": w["variant"],
+        "band": int(w["band"]),
+        "band_mode": str(w["band_mode"]),
+        "arm": str(w.get("arm_id", "")),
+        "n_legs": nlegs,
+        "dte": int(w["dte"]),
+        "side": r["side"],
+        "entry_ist": s018.ist_str(int(r["entry_ts"])),
+        "exit_ist": s018.ist_str(int(r["exit_ts"])),
+        "exit_reason": r.get("exit_reason", r.get("reason")),
+        "hold_hrs": r.get("hold_hrs"),
+        "hrs_to_exp": r.get("hrs_to_exp"),
+        "expiry": r.get("exp"),
+        "spot_entry": r.get("spot"),
+        "spot_exit": r.get("spot_exit"),
+        "line_level": r.get("level"),
+        "vwap_at_entry": r.get("vwap"),
+        "vwap_dist": r.get("vwap_dist"),
+        "entry_iv": r.get("entry_iv"),
+        "basket_net_delta": r.get("net_delta"),
+        "gross": r.get("gross"),
+        "brokerage": r.get("fees"),
+        "slippage": r.get("slip"),
+        "net": r.get("net"),
+        "mfe": r.get("mfe"),
+        "mae": r.get("mae"),
+    }
+    for i in range(3):
+        lg = sel[i] if i < len(sel) else None
+        px = float(pxs[i]) if i < len(pxs) else float("nan")
+        fld = _dump_leg_fields(lg, px)
+        pfx = f"leg{i + 1}_"
+        row[f"{pfx}symbol"] = fld["symbol"]
+        row[f"{pfx}strike"] = fld["strike"]
+        row[f"{pfx}type"] = fld["type"]
+        row[f"{pfx}entry_fill"] = fld["entry_fill"]
+        row[f"{pfx}exit_px"] = fld["exit_px"]
+        row[f"{pfx}delta"] = fld["delta"]
+    return row
+
+
+def write_dump_trades_csv(
+    path: Path, month: str, items: list[tuple[dict[str, Any], dict[str, Any]]]
+) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        wcsv = csv.DictWriter(f, fieldnames=list(DUMP_TRADE_COLS))
+        wcsv.writeheader()
+        for w, r in items:
+            wcsv.writerow(dump_trade_row(month, w, r))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default=s018.SPOT_CSV)
@@ -1590,6 +1736,7 @@ def main() -> None:
     ap.add_argument("--exit-grid", action="store_true")
     ap.add_argument("--strangle-grid", action="store_true")
     ap.add_argument("--tf-band-grid", action="store_true")
+    ap.add_argument("--dump-trades", action="store_true")
     ap.add_argument("--max-days", type=int, default=0)
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--cache-gb", type=float, default=1.0)
@@ -1600,7 +1747,8 @@ def main() -> None:
     reset_mark_cache(max_bytes=int(float(args.cache_gb) * 1024**3))
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    if args.fresh:
+    dump_trades = bool(args.dump_trades)
+    if args.fresh and not dump_trades:
         drop_dev_fresh()
 
     month = str(args.month)
@@ -1611,7 +1759,7 @@ def main() -> None:
     if max_days:
         cutoff = start_ts + max_days * 86400
         win_to = min(win_to, ist_date(cutoff - 1))
-    if not args.fresh:
+    if (not args.fresh) and (not dump_trades):
         preexisting = s020.load_ckpt(CKPT)
         if preexisting and not ckpt_window_ok(preexisting, month, max_days):
             print("checkpoint window mismatch -> use --fresh", flush=True)
@@ -1624,7 +1772,7 @@ def main() -> None:
     exit_grid = bool(args.exit_grid)
     strangle_grid = bool(args.strangle_grid)
     tf_band = bool(args.tf_band_grid)
-    need_d2 = exit_grid or int(args.dte) >= 2
+    need_d2 = dump_trades or exit_grid or int(args.dte) >= 2
     pad_d = 5 if need_d2 else 3
     lo = start_ts - 3 * 86400
     hi = cutoff + pad_d * 86400
@@ -1643,13 +1791,21 @@ def main() -> None:
 
     inner = MarksStore()
     store = MonthGuardStore(inner, win_from - timedelta(days=1), win_to + timedelta(days=pad_d))
-    done: dict[str, dict[str, Any]] = {} if args.fresh else s020.load_ckpt(CKPT)
+    done: dict[str, dict[str, Any]] = {} if (args.fresh or dump_trades) else s020.load_ckpt(CKPT)
     cell_rows: dict[str, list[dict[str, Any]]] = {}
+    dump_items: list[tuple[dict[str, Any], dict[str, Any]]] = []
 
     grid = bool(args.band_grid)
     jobs: list[tuple[str, str, int, str]]
     work: list[dict[str, Any]] = []
-    if tf_band:
+    if dump_trades:
+        band0, mode0 = 0, "near"
+        work = dump_trades_work()
+        tfs = sorted({str(w["tf"]) for w in work})
+        variants = sorted({str(w["variant"]) for w in work})
+        jobs = [(str(w["tf"]), str(w["variant"]), int(w["band"]), str(w["band_mode"])) for w in work]
+        print(f"DUMP-TRADES combos={len(work)} (expect {DUMP_N_COMBOS}); C2/C3 off; ckpt/cache untouched", flush=True)
+    elif tf_band:
         band0, mode0 = 0, "near"
         work = tf_band_work()
         tfs = sorted({str(w["tf"]) for w in work})
@@ -1784,7 +1940,7 @@ def main() -> None:
         if max_days and variant == "V3":
             smoke_sigs = sigs
             print_v3_examples(sigs, ts)
-        if grid or exit_grid or strangle_grid or tf_band:
+        if grid or exit_grid or strangle_grid or tf_band or dump_trades:
             cells = [(PRIMARY_T, PRIMARY_SL)]
         else:
             v0_best = best_v0_cell(done, month, tf)
@@ -1800,6 +1956,8 @@ def main() -> None:
             basket=basket, prem_pct=prem_pct, strangle_exit=strangle_exit,
             do_c2=do_c2, do_c3=do_c3,
             c2_seeds=tuple(c2_seeds) if c2_seeds is not None else None,
+            skip_done=not dump_trades,
+            write_ckpt=not dump_trades,
         )
         pk = cell_key(
             month, tf, variant, PRIMARY_T, PRIMARY_SL, band, band_mode,
@@ -1808,7 +1966,15 @@ def main() -> None:
             arm_id=arm_id, basket=basket,
         )
         st = done.get(pk, {})
-        if tf_band:
+        if dump_trades:
+            for tr in cell_rows.get(pk, []):
+                dump_items.append((w, tr))
+            if arm_i % 10 == 0 or arm_i == arm_n:
+                print(
+                    f"[{arm_i}/{arm_n}] elapsed={time.perf_counter()-t_all:.0f}s",
+                    flush=True,
+                )
+        elif tf_band:
             print(
                 f"[{arm_i}/{arm_n}] {tf} {variant} band={band} {arm_id or '-'} "
                 f"n={int(st.get('n', 0))} mean={s020._fnum(st.get('mean', float('nan')), 2)} "
@@ -1880,7 +2046,7 @@ def main() -> None:
         band_mode = str(w["band_mode"])
         cell_list = (
             [(PRIMARY_T, PRIMARY_SL)]
-            if grid or exit_grid or strangle_grid or tf_band
+            if grid or exit_grid or strangle_grid or tf_band or dump_trades
             else cells_for(variant, best_v0_cell(done, month, tf) if variant != "V0" else None)
         )
         for tgt, slv in cell_list:
@@ -1981,6 +2147,11 @@ def main() -> None:
                     "exit_reason": r.get("exit_reason", r.get("reason")),
                 }
             )
+    dump_csv: Path | None = None
+    if dump_trades:
+        dump_csv = OUT_DIR / f"s020_trades_all_{month}_{stamp}.csv"
+        write_dump_trades_csv(dump_csv, month, dump_items)
+        print(f"DUMP-TRADES rows={len(dump_items)} wrote {dump_csv}", flush=True)
     if tf_band:
         tbcsv = OUT_DIR / f"s020_tfband_{month}_{stamp}.csv"
         with tbcsv.open("w", newline="", encoding="utf-8") as f:
@@ -2026,6 +2197,8 @@ def main() -> None:
     print("\n".join(report))
     print(f"wrote {txtp}")
     print(f"wrote {csvp}")
+    if dump_csv is not None:
+        print(f"wrote {dump_csv}")
     print(f"TOTAL elapsed={time.perf_counter()-t_all:.0f}s", flush=True)
     store.close()
 
