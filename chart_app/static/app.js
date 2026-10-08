@@ -336,6 +336,8 @@
       rsi_len: el("rsiLen") ? el("rsiLen").value : "14",
       ob: el("rsiOb") ? el("rsiOb").value : "70",
       os: el("rsiOs") ? el("rsiOs").value : "30",
+      exp_obh: el("rsiExpObh") ? el("rsiExpObh").value : "40",
+      exp_obl: el("rsiExpObl") ? el("rsiExpObl").value : "60",
       show_obh: el("togObh") && el("togObh").checked ? "true" : "false",
       show_obl: el("togObl") && el("togObl").checked ? "true" : "false",
       show_levels: el("togLevels") && el("togLevels").checked ? "true" : "false",
@@ -478,7 +480,7 @@
   el("variant").addEventListener("change", () => reloadOverlay());
   el("hours").addEventListener("change", () => reloadOverlay());
   if (el("strategy")) el("strategy").addEventListener("change", () => reloadOverlay());
-  ["signalTf", "rsiLen", "rsiOb", "rsiOs"].forEach((id) => {
+  ["signalTf", "rsiLen", "rsiOb", "rsiOs", "rsiExpObh", "rsiExpObl"].forEach((id) => {
     if (el(id)) el(id).addEventListener("change", () => reloadOverlay());
   });
   if (el("markerMode")) {

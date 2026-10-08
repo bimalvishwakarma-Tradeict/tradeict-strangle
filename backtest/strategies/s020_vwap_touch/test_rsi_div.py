@@ -52,7 +52,7 @@ def test_rule1_2_3_obh_form_confirm() -> None:
     assert z["kind"] == "OBH"
     assert z["level"] == 15.0
     assert z["rsi"] == 75.0
-    assert z["end_reason"] == "opposite_extreme"
+    assert z["end_reason"] == "rsi_below_exp"
 
 
 def test_rule4_short_signal() -> None:
@@ -87,7 +87,8 @@ def test_rule5_wick_above_obh_unchanged() -> None:
     assert zones == []
 
 
-def test_rule6_obh_expire_rsi_below_30() -> None:
+def test_rule6_obh_expire_rsi_below_40() -> None:
+    """Rev4: confirmed OBH expires on RSI < 40 (was < 30 / opposite_extreme)."""
     rows = [
         (50.0, 10.0, 9.0, 9.5),
         (71.0, 20.0, 10.0, 19.0),
@@ -97,7 +98,7 @@ def test_rule6_obh_expire_rsi_below_30() -> None:
     sigs, zones = _run(rows)
     assert sigs == []
     assert len(zones) == 1
-    assert zones[0]["end_reason"] == "opposite_extreme"
+    assert zones[0]["end_reason"] == "rsi_below_exp"
 
 
 def test_rule7_new_obh_replaces_old() -> None:
@@ -144,7 +145,7 @@ def test_long_rules_1_3_obl_form_confirm() -> None:
     assert len(z) == 1
     assert z[0]["level"] == 12.0
     assert z[0]["rsi"] == 20.0
-    assert z[0]["end_reason"] == "opposite_extreme"
+    assert z[0]["end_reason"] == "rsi_above_exp"
 
 
 def test_long_rule4_signal() -> None:
@@ -175,7 +176,8 @@ def test_long_rule5_wick_below_unchanged() -> None:
     assert sigs == []
 
 
-def test_long_rule6_expire_rsi_above_70() -> None:
+def test_long_rule6_expire_rsi_above_60() -> None:
+    """Rev4: confirmed OBL expires on RSI > 60 (was > 70 / opposite_extreme)."""
     rows = [
         (50.0, 20.0, 19.0, 19.5),
         (20.0, 18.0, 10.0, 11.0),
@@ -183,7 +185,7 @@ def test_long_rule6_expire_rsi_above_70() -> None:
         (75.0, 18.0, 12.0, 17.0),
     ]
     _sigs, zones = _run(rows)
-    assert any(z["kind"] == "OBL" and z["end_reason"] == "opposite_extreme" for z in zones)
+    assert any(z["kind"] == "OBL" and z["end_reason"] == "rsi_above_exp" for z in zones)
 
 
 def test_long_rule7_replaced() -> None:
@@ -302,6 +304,68 @@ def test_rev3_new_obl_confirm_replaces_old() -> None:
     assert zones[0]["kind"] == "OBL"
     assert zones[0]["level"] == 10.0
     assert zones[0]["end_reason"] == "replaced"
+
+
+def test_rev4_obh_expires_when_rsi_below_40_before_signal() -> None:
+    rows = [
+        (50.0, 10.0, 9.0, 9.5),
+        (80.0, 20.0, 10.0, 19.0),
+        (60.0, 18.0, 10.0, 12.0),
+        (39.0, 16.0, 10.0, 11.0),
+        (50.0, 22.0, 12.0, 21.0),
+    ]
+    sigs, zones = _run(rows)
+    assert sigs == []
+    assert zones[0]["kind"] == "OBH"
+    assert zones[0]["end_reason"] == "rsi_below_exp"
+    assert zones[0]["end_rsi"] == 39.0
+
+
+def test_rev4_obl_expires_when_rsi_above_60_before_signal() -> None:
+    rows = [
+        (50.0, 20.0, 19.0, 19.5),
+        (20.0, 18.0, 10.0, 11.0),
+        (40.0, 16.0, 12.0, 13.0),
+        (61.0, 16.0, 12.0, 14.0),
+        (45.0, 12.0, 8.0, 9.0),
+    ]
+    sigs, zones = _run(rows)
+    assert sigs == []
+    assert zones[0]["kind"] == "OBL"
+    assert zones[0]["end_reason"] == "rsi_above_exp"
+    assert zones[0]["end_rsi"] == 61.0
+
+
+def test_rev4_rsi_35_between_30_40_expires_obh() -> None:
+    """Rev3 kept OBH at RSI 35; rev4 expires (35 < 40)."""
+    rows = [
+        (50.0, 10.0, 9.0, 9.5),
+        (80.0, 20.0, 10.0, 19.0),
+        (60.0, 18.0, 10.0, 12.0),
+        (35.0, 16.0, 10.0, 11.0),
+    ]
+    sigs, zones = _run(rows)
+    assert sigs == []
+    assert len(zones) == 1
+    assert zones[0]["kind"] == "OBH"
+    assert zones[0]["end_reason"] == "rsi_below_exp"
+    assert zones[0]["end_rsi"] == 35.0
+
+
+def test_rev4_rsi_45_obh_stays_then_short() -> None:
+    rows = [
+        (50.0, 10.0, 9.0, 9.5),
+        (80.0, 20.0, 10.0, 19.0),
+        (60.0, 18.0, 10.0, 12.0),
+        (45.0, 16.0, 10.0, 11.0),
+        (50.0, 22.0, 12.0, 21.0),
+    ]
+    sigs, zones = _run(rows)
+    assert len(sigs) == 1
+    assert sigs[0]["side"] == "short"
+    assert sigs[0]["ob_level"] == 20.0
+    assert sigs[0]["sig_rsi"] == 50.0
+    assert zones[0]["end_reason"] == "signal"
 
 
 def test_long_rule8_one_signal() -> None:

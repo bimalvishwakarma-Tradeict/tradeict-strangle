@@ -44,7 +44,11 @@ from backtest.strategies.s012_trend_follow.engine import (  # noqa: E402
 from backtest.strategies.s018_4h_trend import run_s018 as s018  # noqa: E402
 from backtest.strategies.s020_vwap_touch import run_s020 as s020  # noqa: E402
 from backtest.strategies.s020_vwap_touch import run_s020_dev as d  # noqa: E402
-from backtest.strategies.s020_vwap_touch.rsi_div import detect_rsi_div  # noqa: E402
+from backtest.strategies.s020_vwap_touch.rsi_div import (  # noqa: E402
+    RSI_EXP_OBH,
+    RSI_EXP_OBL,
+    detect_rsi_div,
+)
 
 logger = logging.getLogger("s020_rsi")
 
@@ -52,7 +56,7 @@ OUT_DIR = Path("backtest/strategies/s020_vwap_touch/runs")
 CKPT = OUT_DIR / "s020_rsi_ckpt.jsonl"
 ARCHIVE_PTR = OUT_DIR / "s020_rsi_archive_ptr.json"
 SIGNAL_NAME = "RSI Div Signal"
-CODE_VER = "rsi_v3"
+CODE_VER = "rsi_v4"
 RSI_TFS = ("1m", "3m", "5m", "15m", "30m")
 A0_T = (100, 150, 200, 250, 300, 350)
 A0_SL = (100, 150, 200, 250, 300, 350)
@@ -829,6 +833,8 @@ def run_one(
     archive: RsiArchive | None,
     vwap_1m: np.ndarray,
     c: np.ndarray,
+    exp_obh: float = RSI_EXP_OBH,
+    exp_obl: float = RSI_EXP_OBL,
 ) -> None:
     tf = str(w["tf"])
     variant = "RSI"
@@ -904,6 +910,7 @@ def run_one(
             "trail_cap": trail_cap, "arm_id": arm_id, "basket": basket,
             "signal": SIGNAL_NAME, "code_ver": CODE_VER,
             "win_start": int(start_ts), "win_cutoff": int(cutoff),
+            "exp_obh": float(exp_obh), "exp_obl": float(exp_obl),
         }
     )
     if hedge and float(w.get("hedge_w", 0.0)) < 0:
@@ -972,10 +979,14 @@ def collect_rsi_tf(
     cutoff: int,
     win_from: date,
     win_to: date,
+    exp_obh: float = RSI_EXP_OBH,
+    exp_obl: float = RSI_EXP_OBL,
 ) -> tuple[list[dict[str, Any]], int, int, int]:
     tf_sec = int(d.LINE_TF[tf])
     tts, to_, th, tl, tc, tv = d.resample_tf(ts, o, h, l, c, vol, tf_sec)
-    raw, _zones = detect_rsi_div(tts, to_, th, tl, tc, tf_sec)
+    raw, _zones = detect_rsi_div(
+        tts, to_, th, tl, tc, tf_sec, exp_obh=float(exp_obh), exp_obl=float(exp_obl)
+    )
     n_raw = len(raw)
     entered = sigs_to_entry(raw)
     win_sigs = [
@@ -1000,10 +1011,13 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--prereg-note", default="")
     ap.add_argument("--cache-gb", type=float, default=1.0)
+    ap.add_argument("--exp-obh", type=float, default=RSI_EXP_OBH)
+    ap.add_argument("--exp-obl", type=float, default=RSI_EXP_OBL)
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     print("Disable PC sleep")
     print(f"signal={SIGNAL_NAME} (old=VWAP Signal)", flush=True)
+    print(f"exp_obh={float(args.exp_obh)} exp_obl={float(args.exp_obl)} code_ver={CODE_VER}", flush=True)
     load_slip_table()
     reset_mark_cache(max_bytes=int(float(args.cache_gb) * 1024**3))
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1064,7 +1078,10 @@ def main() -> None:
         mode,
         args,
         month=month,
-        prereg_note=f"signal={SIGNAL_NAME}; {args.prereg_note}".strip(),
+        prereg_note=(
+            f"signal={SIGNAL_NAME}; exp_obh={float(args.exp_obh)} "
+            f"exp_obl={float(args.exp_obl)}; {args.prereg_note}"
+        ).strip(),
     )
     ARCHIVE_PTR.write_text(str(archive.folder), encoding="utf-8")
     print(f"archive folder={archive.folder}", flush=True)
@@ -1073,7 +1090,8 @@ def main() -> None:
     sig_cache: dict[str, tuple[list[dict[str, Any]], int, int, int]] = {}
     for tf in need_tfs:
         kept, n_raw, n_long, n_short = collect_rsi_tf(
-            ts, o, h, l, c, vol, tf, start_ts, cutoff, win_from, win_to
+            ts, o, h, l, c, vol, tf, start_ts, cutoff, win_from, win_to,
+            exp_obh=float(args.exp_obh), exp_obl=float(args.exp_obl),
         )
         sig_cache[tf] = (kept, n_raw, n_long, n_short)
         print(
@@ -1099,6 +1117,7 @@ def main() -> None:
             store, spot_c, ts, kept, w, month, start_ts, cutoff, win_from, win_to,
             n_days, n_raw, done, cell_rows, t_all, arm_i, arm_n, max_days,
             archive, vwap_1m, c,
+            exp_obh=float(args.exp_obh), exp_obl=float(args.exp_obl),
         )
         st = done.get(rsi_cell_key(month, w, max_days, start_ts, cutoff), {})
         extra = ""
@@ -1117,6 +1136,7 @@ def main() -> None:
     report = [
         f"S020 RSI month={month} {win_from}..{win_to} stamp={stamp}",
         f"signal={SIGNAL_NAME}",
+        f"code_ver={CODE_VER} exp_obh={float(args.exp_obh)} exp_obl={float(args.exp_obl)}",
         f"mode={mode} combos={len(work)}",
     ]
     for tf in need_tfs:

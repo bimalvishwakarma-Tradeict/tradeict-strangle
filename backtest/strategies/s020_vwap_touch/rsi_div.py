@@ -9,6 +9,8 @@ import numpy as np
 RSI_LEN = 14
 RSI_OB = 70.0
 RSI_OS = 30.0
+RSI_EXP_OBH = 40.0
+RSI_EXP_OBL = 60.0
 
 
 def rsi_wilder(close: np.ndarray, n: int = RSI_LEN) -> np.ndarray:
@@ -37,9 +39,17 @@ def rsi_wilder(close: np.ndarray, n: int = RSI_LEN) -> np.ndarray:
     return out
 
 
-def _close_zone(z: dict[str, Any], end_ts: int, reason: str, zones: list[dict[str, Any]]) -> None:
+def _close_zone(
+    z: dict[str, Any],
+    end_ts: int,
+    reason: str,
+    zones: list[dict[str, Any]],
+    end_rsi: float | None = None,
+) -> None:
     z["end_ts"] = int(end_ts)
     z["end_reason"] = str(reason)
+    if end_rsi is not None:
+        z["end_rsi"] = float(end_rsi)
     zones.append(dict(z))
 
 
@@ -53,12 +63,14 @@ def detect_from_rsi(
     tf_sec: int,
     ob: float = RSI_OB,
     os: float = RSI_OS,
+    exp_obh: float = RSI_EXP_OBH,
+    exp_obl: float = RSI_EXP_OBL,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """State machine on already-closed TF bars. Signal ts = bar close (ts + tf_sec).
 
-    Rev3: divergence vs confirmed OBH/OBL is checked first (even if RSI is
-    still >70 / <30). A new forming extreme does not replace the confirmed
-    one until RSI leaves the band and the new zone confirms.
+    Rev4: divergence first (rev3), then confirmed-OBH expires if RSI < exp_obh
+    (default 40, reason rsi_below_exp) / confirmed-OBL if RSI > exp_obl
+    (default 60, reason rsi_above_exp). Forming zones are not expired this way.
     """
     n = int(len(ts))
     signals: list[dict[str, Any]] = []
@@ -118,10 +130,10 @@ def detect_from_rsi(
                     "ob_candle_ts": int(conf_h["ob_candle_ts"]),
                 }
             )
-            _close_zone(conf_h, cts, "signal", zones)
+            _close_zone(conf_h, cts, "signal", zones, r)
             conf_h = None
-        if conf_h is not None and r < os:
-            _close_zone(conf_h, cts, "opposite_extreme", zones)
+        if conf_h is not None and r < float(exp_obh):
+            _close_zone(conf_h, cts, "rsi_below_exp", zones, r)
             conf_h = None
         if r > ob:
             if forming_h is None:
@@ -132,7 +144,7 @@ def detect_from_rsi(
                 forming_h["ob_candle_ts"] = int(ts[i])
         elif forming_h is not None:
             if conf_h is not None:
-                _close_zone(conf_h, cts, "replaced", zones)
+                _close_zone(conf_h, cts, "replaced", zones, r)
             forming_h["confirm_ts"] = cts
             conf_h = forming_h
             forming_h = None
@@ -149,10 +161,10 @@ def detect_from_rsi(
                     "ob_candle_ts": int(conf_l["ob_candle_ts"]),
                 }
             )
-            _close_zone(conf_l, cts, "signal", zones)
+            _close_zone(conf_l, cts, "signal", zones, r)
             conf_l = None
-        if conf_l is not None and r > ob:
-            _close_zone(conf_l, cts, "opposite_extreme", zones)
+        if conf_l is not None and r > float(exp_obl):
+            _close_zone(conf_l, cts, "rsi_above_exp", zones, r)
             conf_l = None
         if r < os:
             if forming_l is None:
@@ -163,7 +175,7 @@ def detect_from_rsi(
                 forming_l["ob_candle_ts"] = int(ts[i])
         elif forming_l is not None:
             if conf_l is not None:
-                _close_zone(conf_l, cts, "replaced", zones)
+                _close_zone(conf_l, cts, "replaced", zones, r)
             forming_l["confirm_ts"] = cts
             conf_l = forming_l
             forming_l = None
@@ -181,6 +193,11 @@ def detect_rsi_div(
     n: int = RSI_LEN,
     ob: float = RSI_OB,
     os: float = RSI_OS,
+    exp_obh: float = RSI_EXP_OBH,
+    exp_obl: float = RSI_EXP_OBL,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rsi = rsi_wilder(c, int(n))
-    return detect_from_rsi(ts, o, h, l, c, rsi, int(tf_sec), float(ob), float(os))
+    return detect_from_rsi(
+        ts, o, h, l, c, rsi, int(tf_sec), float(ob), float(os),
+        float(exp_obh), float(exp_obl),
+    )

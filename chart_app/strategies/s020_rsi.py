@@ -47,6 +47,8 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
     n = int(params.get("rsi_len") or 14)
     ob = float(params.get("ob") or 70)
     os_ = float(params.get("os") or 30)
+    exp_obh = float(params.get("exp_obh") if params.get("exp_obh") is not None else 40)
+    exp_obl = float(params.get("exp_obl") if params.get("exp_obl") is not None else 60)
     show_obh = bool(params.get("show_obh", True))
     show_obl = bool(params.get("show_obl", True))
     show_levels = bool(params.get("show_levels", True))
@@ -65,7 +67,10 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
     tts, to_, th, tl, tc, tv = s020_dev.resample_tf(ts, o, h, l, c, vol, tf_sec)
     if len(tts) == 0:
         return {"lines": [], "markers": [], "series": [], "rsi": []}
-    sigs, zones = detect_rsi_div(tts, to_, th, tl, tc, tf_sec, n=n, ob=ob, os=os_)
+    sigs, zones = detect_rsi_div(
+        tts, to_, th, tl, tc, tf_sec, n=n, ob=ob, os=os_,
+        exp_obh=exp_obh, exp_obl=exp_obl,
+    )
     rsi = rsi_wilder(tc, n)
     rsi_pts = [
         {"time": int(tts[i]) + int(tf_sec), "value": float(rsi[i])}
@@ -92,6 +97,8 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
                     "active": not bool(z.get("end_reason")),
                     "level": float(z["level"]),
                     "text": kind,
+                    "end_reason": str(z.get("end_reason") or ""),
+                    "end_rsi": z.get("end_rsi", ""),
                     "points": [
                         {"time": t0, "value": float(z["level"])},
                         {"time": t1, "value": float(z["level"])},
@@ -160,6 +167,20 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
         "rsi": rsi_pts,
         "rsi_ob": ob,
         "rsi_os": os_,
+        "exp_obh": exp_obh,
+        "exp_obl": exp_obl,
+        "zones": [
+            {
+                "kind": z.get("kind"),
+                "level": z.get("level"),
+                "rsi": z.get("rsi"),
+                "end_reason": z.get("end_reason"),
+                "end_ts": z.get("end_ts"),
+                "end_rsi": z.get("end_rsi"),
+                "ob_candle_ts": z.get("ob_candle_ts"),
+            }
+            for z in zones
+        ],
     }
 
 
