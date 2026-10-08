@@ -128,6 +128,10 @@ HEDGE_TRAIL_GIVE = 60.0
 HEDGE_TRAIL_CAP = 400.0
 HEDGE_LONG_SL = 250.0
 HEDGE_N_COMBOS = 100
+HEDGE_CACHE_VER = "hv2"
+HEDGE_SIDE_ROLES = frozenset({"scall", "sput", "wcall", "wput"})
+HEDGE_SANITY_TOL = 5.0
+HEDGE_SANITY: dict[str, int] = {"checked": 0, "violations": 0}
 ARM_A4: dict[str, Any] = {
     "id": "A4",
     "legs": 2,
@@ -387,7 +391,7 @@ def path_tag(base: str, dte: int, basket: str = "std") -> str:
     elif bsk.startswith("sg"):
         tag = f"{tag}_{bsk}"
     elif bsk.startswith("hdg"):
-        tag = f"{tag}_{bsk}"
+        tag = f"{tag}_{bsk}_{HEDGE_CACHE_VER}"
     if int(dte) != 1:
         tag = f"{tag}_D{int(dte)}"
     return tag
@@ -830,6 +834,32 @@ def nearest_listed(ks: list[float], target: float) -> float | None:
     return min(ks, key=lambda k: (abs(float(k) - float(target)), float(k)))
 
 
+def listed_ge(ks: list[float], target: float) -> float | None:
+    cands = [float(k) for k in ks if float(k) >= float(target)]
+    return min(cands) if cands else None
+
+
+def listed_le(ks: list[float], target: float) -> float | None:
+    cands = [float(k) for k in ks if float(k) <= float(target)]
+    return max(cands) if cands else None
+
+
+def is_hedge_side_leg(lg: dict[str, Any], short_exp_ts: int) -> bool:
+    if str(lg.get("role", "")) in HEDGE_SIDE_ROLES:
+        return True
+    if int(short_exp_ts) <= 0:
+        return False
+    return int(lg.get("exp_ts") or 0) == int(short_exp_ts)
+
+
+def signed_leg_gp(lg: dict[str, Any], px: float) -> float:
+    qty = int(lg["qty"])
+    raw = (float(px) - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+    if str(lg.get("long_short")) == "short":
+        return -raw
+    return raw
+
+
 def pick_short_hedge_rows(
     store: Any, t: int, spot: float, e: int, off: float, wing: float
 ) -> tuple[list[tuple[dict[str, Any], str]], date] | None:
@@ -846,8 +876,8 @@ def pick_short_hedge_rows(
     spu = nearest_listed(ks, float(atm) - float(off))
     if sc is None or spu is None:
         return None
-    wc = nearest_listed(ks, float(sc) + float(wing))
-    wp = nearest_listed(ks, float(spu) - float(wing))
+    wc = listed_ge(ks, float(sc) + float(wing))
+    wp = listed_le(ks, float(spu) - float(wing))
     if wc is None or wp is None:
         return None
     specs = [
@@ -971,9 +1001,9 @@ def build_path_hedge(
     nlong: int,
 ) -> dict[str, Any] | None:
     long_exp_ts = s018.expiry_unix(long_exp)
-    shorts = [lg for lg in legs if str(lg["long_short"]) == "short"]
-    short_exp_ts = int(shorts[0]["exp_ts"]) if shorts else 0
-    short_exp = date.fromisoformat(str(shorts[0]["expiry"])) if shorts else long_exp
+    hs_legs = [lg for lg in legs if is_hedge_side_leg(lg, 0)]
+    short_exp_ts = int(hs_legs[0]["exp_ts"]) if hs_legs else 0
+    short_exp = date.fromisoformat(str(hs_legs[0]["expiry"])) if hs_legs else long_exp
     series = [load_symbol_series(store, str(lg["symbol"]), entry_ts, int(lg["exp_ts"])) for lg in legs]
     ts = np.arange(int(entry_ts) + 60, int(long_exp_ts) + 1, 60, dtype=np.int64)
     n = int(ts.size)
@@ -999,8 +1029,8 @@ def build_path_hedge(
         qs: list[Any] = []
         missing = False
         for k, lg in enumerate(legs):
-            is_short = str(lg["long_short"]) == "short"
-            if is_short and short_exp_ts and t >= short_exp_ts:
+            hs = is_hedge_side_leg(lg, short_exp_ts)
+            if hs and short_exp_ts and t >= short_exp_ts:
                 qs.append(None)
                 continue
             q = s018.series_le(series[k], t)
@@ -1013,30 +1043,29 @@ def build_path_hedge(
         long_gp = 0.0
         short_gp = 0.0
         for k, lg in enumerate(legs):
-            qty = int(lg["qty"])
-            is_short = str(lg["long_short"]) == "short"
-            if is_short and short_exp_ts and t >= short_exp_ts:
+            hs = is_hedge_side_leg(lg, short_exp_ts)
+            if hs and short_exp_ts and t >= short_exp_ts:
                 if not settled:
                     inn = intrinsic(bool(lg["is_call"]), float(lg["strike"]), sp)
                     pxs[k][i] = np.float32(inn)
                     srcs[k][i] = np.int8(3)
-                    gp = (float(lg["fill"]) - inn) * qty * OPTIONS_CONTRACT_VALUE
+                    gp = signed_leg_gp(lg, inn)
                     settle_gp += gp
                     settle_gross += gp
                     if inn > 0:
-                        settle_fee += fee_gst_qty(inn, sp if sp else 1.0, qty)
+                        settle_fee += fee_gst_qty(inn, sp if sp else 1.0, int(lg["qty"]))
                 else:
                     pxs[k][i] = pxs[k][i - 1] if i else np.float32(np.nan)
                 continue
             q = qs[k]
             pxs[k][i] = np.float32(q.px)
             srcs[k][i] = np.int8(s020.SRC_CODE.get(q.src, 0))
-            gp = (float(q.px) - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
-            if is_short:
-                short_gp += -gp
+            gp = signed_leg_gp(lg, float(q.px))
+            if hs:
+                short_gp += gp
             else:
                 long_gp += gp
-        if shorts and short_exp_ts and t >= short_exp_ts:
+        if hs_legs and short_exp_ts and t >= short_exp_ts:
             if not settled:
                 settled = True
             short_gp = settle_gp
@@ -1062,7 +1091,7 @@ def build_path_hedge(
         "pxs": pxs,
         "srcs": srcs,
         "short_exp_ts": int(short_exp_ts),
-        "short_exp": short_exp.isoformat() if shorts else "",
+        "short_exp": short_exp.isoformat() if hs_legs else "",
         "short_settle_fee": float(settle_fee),
         "short_settle_slip": float(settle_slip),
         "short_settle_gross": float(settle_gross),
@@ -1134,11 +1163,17 @@ def get_or_build_hedge_path(
             q = s018.mark_le(store, sexp, str(r["symbol"]), t)
             if q is None:
                 return None, False
-            fill, _ = s018.sell_fill(q.px, dte_s)
+            is_wing = role in ("wcall", "wput")
+            if is_wing:
+                fill, _ = s018.buy_fill(q.px, dte_s)
+                ls = "long"
+            else:
+                fill, _ = s018.sell_fill(q.px, dte_s)
+                ls = "short"
             dlt = s018.signed_delta(q.px, float(sp), float(r["strike"]), t_yr_s, bool(r["is_call"]))
             fee = fee_gst_qty(float(q.px), float(sp), qty_s)
             slip = (float(fill) - float(q.px)) * qty_s * OPTIONS_CONTRACT_VALUE
-            legs.append(_leg_dict(r, q, fill, dlt, role, "short", qty_s, sexp, fee, slip))
+            legs.append(_leg_dict(r, q, fill, dlt, role, ls, qty_s, sexp, fee, slip))
     path = build_path_hedge(store, spot_c, legs, t, long_exp, nlong)
     if path is None:
         return None, False
@@ -1188,28 +1223,38 @@ def _hedge_exit(
     for k, lg in enumerate(path["legs"]):
         qty = int(lg["qty"])
         is_short = str(lg["long_short"]) == "short"
-        if is_short and short_exp_ts and t >= short_exp_ts:
+        hs = is_hedge_side_leg(lg, short_exp_ts)
+        if hs and short_exp_ts and t >= short_exp_ts:
             continue
         mark = float(path["pxs"][k][i])
         dte = max(0, (date.fromisoformat(str(lg["expiry"])) - ist_date(t)).days)
         if is_short:
             xf, _ = s018.buy_fill(mark, dte)
-            gp = (float(lg["fill"]) - xf) * qty * OPTIONS_CONTRACT_VALUE
+            gp = signed_leg_gp(lg, xf)
             fees += fee_gst_qty(mark, sp if sp else 1.0, qty)
             slip += (xf - mark) * qty * OPTIONS_CONTRACT_VALUE
-            gross_s += gp
+            if hs:
+                gross_s += gp
+            else:
+                gross_l += gp
         elif reason == "EXPIRY":
             xf = intrinsic(bool(lg["is_call"]), float(lg["strike"]), sp)
-            gp = (xf - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+            gp = signed_leg_gp(lg, xf)
             if xf > 0:
                 fees += fee_gst_qty(xf, sp if sp else 1.0, qty)
-            gross_l += gp
+            if hs:
+                gross_s += gp
+            else:
+                gross_l += gp
         else:
             xf, _ = s018.sell_fill(mark, dte)
-            gp = (xf - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+            gp = signed_leg_gp(lg, xf)
             fees += fee_gst_qty(mark, sp if sp else 1.0, qty)
             slip += (mark - xf) * qty * OPTIONS_CONTRACT_VALUE
-            gross_l += gp
+            if hs:
+                gross_s += gp
+            else:
+                gross_l += gp
     gross = gross_l + gross_s
     return {
         "exit_ts": t,
@@ -1642,6 +1687,70 @@ def simulate_plan(
     return rows, n_stale
 
 
+def hedge_sanity_check(
+    path: dict[str, Any], walked: dict[str, Any], entry_ts: int, side: str
+) -> None:
+    by = {str(lg.get("role")): lg for lg in list(path.get("legs") or [])}
+    if any(r not in by for r in ("scall", "sput", "wcall", "wput")):
+        return
+    sc, spu, wc, wp = by["scall"], by["sput"], by["wcall"], by["wput"]
+    w_call = float(wc["strike"]) - float(sc["strike"])
+    w_put = float(spu["strike"]) - float(wp["strike"])
+    qty = int(sc["qty"])
+    qmult = qty * OPTIONS_CONTRACT_VALUE
+    credit_pts = (
+        float(sc["fill"]) + float(spu["fill"]) - float(wc["fill"]) - float(wp["fill"])
+    )
+    bound = (max(w_call, w_put) - credit_pts) * qmult
+    HEDGE_SANITY["checked"] += 1
+    msgs: list[str] = []
+    ts = path["ts"]
+    ok = path["ok"]
+    ex = int(walked["exit_ts"])
+    min_s = float("inf")
+    for i in range(int(ts.size)):
+        if int(ts[i]) > ex:
+            break
+        if not bool(ok[i]):
+            continue
+        v = float(path["pnl_short"][i])
+        if np.isfinite(v):
+            min_s = min(min_s, v)
+    if np.isfinite(min_s) and min_s < -bound - HEDGE_SANITY_TOL:
+        msgs.append(
+            f"max_loss min_short={min_s:.2f} bound={-bound:.2f} "
+            f"Wcall={w_call:.0f} Wput={w_put:.0f} credit_pts={credit_pts:.2f}"
+        )
+    short_exp = int(path.get("short_exp_ts") or 0)
+    if short_exp > 0:
+        for i in range(int(ts.size)):
+            if int(ts[i]) < short_exp or not bool(ok[i]):
+                continue
+            spx = float(path["spot"][i])
+            settled = float(path["pnl_short"][i])
+            if spx >= float(wc["strike"]):
+                expected = -(w_call - credit_pts) * qmult
+                if abs(settled - expected) > HEDGE_SANITY_TOL:
+                    msgs.append(
+                        f"settle_outside_call spot={spx:.1f} short_pnl={settled:.2f} "
+                        f"expected={expected:.2f}"
+                    )
+            elif spx <= float(wp["strike"]):
+                expected = -(w_put - credit_pts) * qmult
+                if abs(settled - expected) > HEDGE_SANITY_TOL:
+                    msgs.append(
+                        f"settle_outside_put spot={spx:.1f} short_pnl={settled:.2f} "
+                        f"expected={expected:.2f}"
+                    )
+            break
+    if msgs:
+        HEDGE_SANITY["violations"] += 1
+        print(
+            f"SANITY FAIL entry={s018.ist_str(int(entry_ts))} side={side} " + " | ".join(msgs),
+            flush=True,
+        )
+
+
 def simulate_hedge_plan(
     store: Any,
     spot_c: dict[int, float],
@@ -1700,6 +1809,8 @@ def simulate_hedge_plan(
         exp = date.fromisoformat(str(path["exp"]))
         hrs_exp = (s018.expiry_unix(exp) - int(t)) / 3600.0
         mf, ma, mfe_ts, mae_ts = mfe_mae_with_ts(path, nlong, int(walked["exit_ts"]))
+        eiv = entry_iv_avg(path, float(spot_c.get(t, 0.0)), t)
+        hedge_sanity_check(path, walked, t, side)
         sel = list(path["legs"])
         nd = 0.0
         nfin = 0
@@ -1724,6 +1835,7 @@ def simulate_hedge_plan(
                 "mae_ts": mae_ts,
                 "exit_reason": walked.get("reason"),
                 "spot": float(spot_c.get(t, 0.0)),
+                "entry_iv": eiv,
                 "net_delta": nd if nfin else float("nan"),
                 "long_pnl": walked.get("long_pnl"),
                 "short_pnl": walked.get("short_pnl"),
@@ -1928,12 +2040,15 @@ def emit_archive_trade(
             slip_x = 0.0
         elif hedge and "pxs" in path:
             xm = float(path["pxs"][k][xi])
-            if ls_lg == "short" and int(path.get("short_exp_ts") or 0) and exit_ts >= int(path["short_exp_ts"]):
+            dte_lg = max(0, (date.fromisoformat(exp_lg) - ist_date(exit_ts)).days)
+            short_exp_ts = int(path.get("short_exp_ts") or 0)
+            hs = is_hedge_side_leg(lg, short_exp_ts)
+            if hs and short_exp_ts and exit_ts >= short_exp_ts:
                 xf = xm
                 fee_x = fee_gst_qty(xm, spot_x, qlg) if xm > 0 else 0.0
                 slip_x = 0.0
             elif ls_lg == "short":
-                xf, _ = s018.buy_fill(xm, dte)
+                xf, _ = s018.buy_fill(xm, dte_lg)
                 fee_x = fee_gst_qty(xm, spot_x if spot_x else 1.0, qlg)
                 slip_x = (xf - xm) * qlg * OPTIONS_CONTRACT_VALUE
             elif reason == "EXPIRY":
@@ -1942,7 +2057,7 @@ def emit_archive_trade(
                 fee_x = fee_gst_qty(xf, spot_x, qlg) if xf > 0 else 0.0
                 slip_x = 0.0
             else:
-                xf, _ = s018.sell_fill(xm, dte)
+                xf, _ = s018.sell_fill(xm, dte_lg)
                 fee_x = fee_gst_qty(xm, spot_x if spot_x else 1.0, qlg)
                 slip_x = (xm - xf) * qlg * OPTIONS_CONTRACT_VALUE
         elif reason == "EXPIRY":
@@ -2606,6 +2721,11 @@ def print_hedge_leg_details(rows: list[dict[str, Any]], e_label: str) -> None:
             f"fee={float(lg.get('fee', float('nan'))):.4f}",
             flush=True,
         )
+    by = {str(lg.get("role")): lg for lg in list(r.get("legs") or [])}
+    if all(k in by for k in ("scall", "sput", "wcall", "wput")):
+        w_call = float(by["wcall"]["strike"]) - float(by["scall"]["strike"])
+        w_put = float(by["sput"]["strike"]) - float(by["wput"]["strike"])
+        print(f"  wing widths actual call={w_call:.0f} put={w_put:.0f}", flush=True)
 
 
 def _dump_leg_fields(lg: dict[str, Any] | None, exit_px: float) -> dict[str, Any]:
@@ -2790,6 +2910,9 @@ def main() -> None:
     strangle_grid = bool(args.strangle_grid)
     tf_band = bool(args.tf_band_grid)
     hedge_grid = bool(args.hedge_grid)
+    if hedge_grid:
+        HEDGE_SANITY["checked"] = 0
+        HEDGE_SANITY["violations"] = 0
     need_d2 = dump_trades or exit_grid or hedge_grid or int(args.dte) >= 2
     pad_d = 5 if need_d2 else 3
     lo = start_ts - 3 * 86400
@@ -3095,6 +3218,13 @@ def main() -> None:
                     break
             if shown == 0:
                 print("  (no filled V3 trades)", flush=True)
+
+    if hedge_grid:
+        print(
+            f"sanity: {HEDGE_SANITY['checked']} trades checked, "
+            f"{HEDGE_SANITY['violations']} violations",
+            flush=True,
+        )
 
     wh = work[0]
     hdr_st = done.get(
