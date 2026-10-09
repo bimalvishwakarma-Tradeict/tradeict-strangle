@@ -114,12 +114,21 @@ def rsi_tag(tf: str) -> str:
     return f"RSI_{tf}"
 
 
+def _exp_key_part(x: float) -> str:
+    v = float(x)
+    if v == int(v):
+        return str(int(v))
+    return str(v)
+
+
 def rsi_cell_key(
     month: str,
     w: dict[str, Any],
     max_days: int,
     start_ts: int,
     cutoff: int,
+    exp_obh: float = RSI_EXP_OBH,
+    exp_obl: float = RSI_EXP_OBL,
 ) -> str:
     base = d.cell_key(
         month, str(w["tf"]), "RSI", int(w["tgt"]), int(w["sl"]), 0, "near",
@@ -127,8 +136,9 @@ def rsi_cell_key(
         trail_give=float(w["trail_give"]), trail_cap=float(w["trail_cap"]),
         arm_id=str(w["arm_id"]), basket=str(w["basket"]),
     )
+    exp = f"exp={_exp_key_part(exp_obh)}-{_exp_key_part(exp_obl)}"
     return (
-        f"{base}|{CODE_VER}|md={int(max_days)}|{int(start_ts)}|{int(cutoff)}"
+        f"{base}|{CODE_VER}|{exp}|md={int(max_days)}|{int(start_ts)}|{int(cutoff)}"
     )
 
 
@@ -852,7 +862,7 @@ def run_one(
     hedge = bool(w.get("hedge", False))
     extra_by = {(int(s["ts"]), str(s["side"])): s for s in sigs}
     plan_all = [(int(s["ts"]), str(s["side"])) for s in sigs if d.keep_signal(s, 0, "near")]
-    key = rsi_cell_key(month, w, max_days, start_ts, cutoff)
+    key = rsi_cell_key(month, w, max_days, start_ts, cutoff, exp_obh, exp_obl)
     if key in done:
         print(f"done SKIP {key}", flush=True)
         return
@@ -1119,7 +1129,13 @@ def main() -> None:
             archive, vwap_1m, c,
             exp_obh=float(args.exp_obh), exp_obl=float(args.exp_obl),
         )
-        st = done.get(rsi_cell_key(month, w, max_days, start_ts, cutoff), {})
+        st = done.get(
+            rsi_cell_key(
+                month, w, max_days, start_ts, cutoff,
+                float(args.exp_obh), float(args.exp_obl),
+            ),
+            {},
+        )
         extra = ""
         if hedge_grid and "Wnone" in str(w.get("arm_id", "")):
             extra = (
@@ -1151,7 +1167,10 @@ def main() -> None:
             f"{d.HEDGE_SANITY['violations']} violations"
         )
     for w in work:
-        k = rsi_cell_key(month, w, max_days, start_ts, cutoff)
+        k = rsi_cell_key(
+            month, w, max_days, start_ts, cutoff,
+            float(args.exp_obh), float(args.exp_obl),
+        )
         st = done.get(k)
         if st is None:
             continue
