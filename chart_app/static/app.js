@@ -11,7 +11,8 @@
     "1h": "candlestick_1h",
     "4h": "candlestick_4h",
   };
-  const RES_SEC = { "1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400 };
+  const RES_SEC = { "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400 };
+  const REPLAY_MS = { 1: 900, 3: 300, 10: 90 };
 
   const el = (id) => document.getElementById(id);
   const fmtIst = (ts) =>
@@ -39,6 +40,14 @@
   let wsTimer = null;
   let backoff = 1000;
   let lastBarClose = 0;
+  let replayOn = false;
+  let replayPicking = false;
+  let replayPlaying = false;
+  let replayBarOpen = null;
+  let replayTimer = null;
+  let lastOverlaySigClose = -1;
+  let replaySigs = [];
+  let overlayGen = 0;
 
   const chart = LightweightCharts.createChart(el("chart"), {
     layout: { background: { color: "#0e1117" }, textColor: "#8b949e" },
@@ -94,8 +103,34 @@
   function sortedCandles() {
     return [...candleMap.values()].sort((a, b) => a.time - b.time);
   }
+  function barSecNow() {
+    return RES_SEC[tf] || 60;
+  }
+  function sigTfSec() {
+    const v = el("signalTf") ? el("signalTf").value : "15m";
+    return RES_SEC[v] || 900;
+  }
+  function replayCursorClose() {
+    if (!replayOn || replayBarOpen == null) return null;
+    return Number(replayBarOpen) + barSecNow();
+  }
+  function viewNewestOpen() {
+    if (replayOn && replayBarOpen != null) return Number(replayBarOpen);
+    return newestCandleTime();
+  }
+  function visibleCandles() {
+    const all = sortedCandles();
+    if (!replayOn || replayBarOpen == null) return all;
+    const cap = Number(replayBarOpen);
+    return all.filter((c) => Number(c.time) <= cap);
+  }
   function applyCandles() {
-    series.setData(sortedCandles());
+    series.setData(visibleCandles());
+  }
+  function completedSigClose(cursorClose) {
+    const sec = sigTfSec();
+    if (sec <= 0) return 0;
+    return Math.floor((Number(cursorClose) - 1) / sec) * sec + sec;
   }
   function setStatus(mode) {
     const dot = el("dot");
@@ -138,7 +173,7 @@
     const newest = newestCandleTime();
     const fromTxt = oldest != null ? fmtIst(oldest) : "—";
     const toTxt = newest != null ? fmtIst(newest) : "—";
-    const mode = historyMode ? "HISTORY" : "LIVE";
+    const mode = replayOn ? "REPLAY" : (historyMode ? "HISTORY" : "LIVE");
     const phase = loadingLeft || loadingRight ? "loading…" : "idle";
     box.textContent =
       "Candles: " + n + " | from " + fromTxt + " | to " + toTxt + " | " + mode + " | " + phase;
@@ -254,7 +289,7 @@
     if (!historyEnd && oldest != null && range.from <= oldest + 20 * barSec) {
       loadOlder();
     }
-    if (historyMode && newest != null && range.to >= newest - 20 * barSec) {
+    if (!replayOn && historyMode && newest != null && range.to >= newest - 20 * barSec) {
       loadNewer();
     }
   });
@@ -315,11 +350,21 @@
     extraSeries.length = 0;
   }
 
-  async function reloadOverlay() {
+  async function reloadOverlay(force) {
     const times = [...candleMap.keys()];
     if (!times.length) return;
     const from = Math.min(...times);
-    const to = Math.max(...times);
+    const capOpen = viewNewestOpen();
+    const cursorClose = replayOn && replayBarOpen != null
+      ? replayCursorClose()
+      : (capOpen != null ? Number(capOpen) + barSecNow() : Math.max(...times));
+    const to = replayOn && replayBarOpen != null
+      ? Number(replayBarOpen) + barSecNow() - 1
+      : (capOpen != null ? capOpen : Math.max(...times));
+    if (replayOn && !force) {
+      const sigClose = completedSigClose(cursorClose);
+      if (sigClose <= lastOverlaySigClose) return;
+    }
     const hours = el("hours").value || "24";
     const lineTf = el("lineTf").value;
     const variant = el("variant").value;
@@ -343,10 +388,14 @@
       show_levels: el("togLevels") && el("togLevels").checked ? "true" : "false",
       show_signals: el("togSigs") && el("togSigs").checked ? "true" : "false",
     });
+    const gen = ++overlayGen;
     const r = await fetch("/api/overlay?" + q.toString());
     const j = await r.json();
+    if (gen !== overlayGen) return;
     overlayPayload = j;
+    if (replayOn) lastOverlaySigClose = completedSigClose(cursorClose);
     paintOverlay(j);
+    if (replayOn) ingestReplaySignals(j);
   }
 
   function clipPts(pts, oldest, newest) {
@@ -386,7 +435,8 @@
 
   function paintOverlay(j) {
     const oldest = oldestCandleTime();
-    const newest = newestCandleTime();
+    const newest = viewNewestOpen();
+    const cursorClose = replayOn ? replayCursorClose() : (newest != null ? newest + barSecNow() : null);
     const showVwap = el("togVwap").checked;
     const showActive = el("togActive").checked;
     const showExpired = el("togExpired").checked;
@@ -462,7 +512,9 @@
         : "48px 1fr 0px 28px";
     }
     if (rsiLine && rsiObLine && rsiOsLine) {
-      const rsiPts = useRsi ? (j.rsi || []) : [];
+      const rsiPts = useRsi
+        ? (j.rsi || []).filter((p) => cursorClose == null || Number(p.time) <= cursorClose)
+        : [];
       rsiLine.setData(rsiPts);
       const ob = Number(j.rsi_ob != null ? j.rsi_ob : 70);
       const os = Number(j.rsi_os != null ? j.rsi_os : 30);
@@ -473,15 +525,15 @@
   }
 
   ["togVwap", "togActive", "togExpired", "togMarks", "togObh", "togObl", "togLevels", "togSigs", "togRsiPane"].forEach((id) => {
-    if (el(id)) el(id).addEventListener("change", () => reloadOverlay());
+    if (el(id)) el(id).addEventListener("change", () => reloadOverlay(true));
   });
-  el("btnOverlay").addEventListener("click", () => reloadOverlay());
-  el("lineTf").addEventListener("change", () => reloadOverlay());
-  el("variant").addEventListener("change", () => reloadOverlay());
-  el("hours").addEventListener("change", () => reloadOverlay());
-  if (el("strategy")) el("strategy").addEventListener("change", () => reloadOverlay());
+  el("btnOverlay").addEventListener("click", () => reloadOverlay(true));
+  el("lineTf").addEventListener("change", () => reloadOverlay(true));
+  el("variant").addEventListener("change", () => reloadOverlay(true));
+  el("hours").addEventListener("change", () => reloadOverlay(true));
+  if (el("strategy")) el("strategy").addEventListener("change", () => { lastOverlaySigClose = -1; reloadOverlay(true); });
   ["signalTf", "rsiLen", "rsiOb", "rsiOs", "rsiExpObh", "rsiExpObl"].forEach((id) => {
-    if (el(id)) el(id).addEventListener("change", () => reloadOverlay());
+    if (el(id)) el(id).addEventListener("change", () => { lastOverlaySigClose = -1; reloadOverlay(true); });
   });
   if (el("markerMode")) {
     el("markerMode").addEventListener("change", () => paintOverlay(overlayPayload));
@@ -497,7 +549,7 @@
   }
 
   function applyLiveBar(raw) {
-    if (historyMode) return;
+    if (historyMode || replayOn) return;
     const t = wsCandleTime(raw);
     if (t == null) return;
     const bar = {
@@ -539,7 +591,7 @@
   }
 
   function connectWs() {
-    if (historyMode) return;
+    if (historyMode || replayOn) return;
     setStatus("reconnecting");
     try {
       if (ws) ws.close();
@@ -559,7 +611,7 @@
       if (typ.startsWith("candlestick_")) applyLiveBar(msg);
     };
     ws.onclose = () => {
-      if (historyMode) return;
+      if (historyMode || replayOn) return;
       setStatus("reconnecting");
       scheduleReconnect();
     };
@@ -569,7 +621,7 @@
   }
 
   function scheduleReconnect() {
-    if (historyMode) return;
+    if (historyMode || replayOn) return;
     if (wsTimer) clearTimeout(wsTimer);
     wsTimer = setTimeout(connectWs, backoff);
     backoff = Math.min(backoff * 2, 15000);
@@ -586,8 +638,235 @@
     return Math.floor(Date.now() / 1000);
   }
 
+  function snapBarOpen(t) {
+    const all = sortedCandles();
+    let best = null;
+    for (let i = 0; i < all.length; i += 1) {
+      if (Number(all[i].time) <= t) best = Number(all[i].time);
+      else break;
+    }
+    return best;
+  }
+
+  function closeAt(ts) {
+    const all = sortedCandles();
+    let bar = null;
+    for (let i = 0; i < all.length; i += 1) {
+      if (Number(all[i].time) <= ts) bar = all[i];
+      else break;
+    }
+    return bar && Number.isFinite(bar.close) ? Number(bar.close) : null;
+  }
+
+  function dirMovePct(side, px0, px1) {
+    if (px0 == null || px1 == null || px0 === 0) return null;
+    const raw = (px1 - px0) / px0;
+    return (side === "long" || side === "LONG" ? raw : -raw) * 100;
+  }
+
+  function fmtPct(x) {
+    if (x == null || !Number.isFinite(x)) return "—";
+    const s = x >= 0 ? "+" : "";
+    return s + x.toFixed(2) + "%";
+  }
+
+  function ingestReplaySignals(j) {
+    const cap = replayCursorClose();
+    (j.markers || []).forEach((m) => {
+      const txt = String(m.text || "");
+      if (txt !== "SHORT" && txt !== "LONG") return;
+      const t = Number(m.time);
+      if (!Number.isFinite(t) || (cap != null && t > replayBarOpen)) return;
+      const id = txt + "@" + t;
+      if (replaySigs.some((s) => s.id === id)) return;
+      replaySigs.push({
+        id,
+        time: t,
+        closeTs: Number(m.signal_close_ts || t + sigTfSec()),
+        side: txt === "LONG" ? "long" : "short",
+        text: txt,
+        level: m.level,
+        ob_rsi: m.ob_rsi,
+        sig_rsi: m.sig_rsi,
+      });
+    });
+    replaySigs.sort((a, b) => a.time - b.time);
+    renderReplayStats();
+  }
+
+  function renderReplayStats() {
+    const lab = el("replayCursorLab");
+    const ul = el("replayStats");
+    if (lab) {
+      if (!replayOn || replayBarOpen == null) lab.textContent = "off";
+      else lab.textContent = "cursor close " + fmtIst(replayCursorClose()) + " | n=" + replaySigs.length;
+    }
+    if (!ul) return;
+    ul.innerHTML = "";
+    const cur = replayCursorClose();
+    replaySigs.forEach((s) => {
+      const px0 = closeAt(s.closeTs - 1);
+      const h1ok = cur != null && cur >= s.closeTs + 3600;
+      const h4ok = cur != null && cur >= s.closeTs + 14400;
+      const m1 = h1ok ? dirMovePct(s.side, px0, closeAt(s.closeTs + 3600 - 1)) : null;
+      const m4 = h4ok ? dirMovePct(s.side, px0, closeAt(s.closeTs + 14400 - 1)) : null;
+      const li = document.createElement("li");
+      li.className = s.side;
+      li.textContent =
+        fmtIst(s.time) + " " + s.text +
+        " L=" + (s.level != null ? Number(s.level).toFixed(1) : "—") +
+        "  1h " + (h1ok ? fmtPct(m1) : "pending") +
+        "  4h " + (h4ok ? fmtPct(m4) : "pending");
+      ul.appendChild(li);
+    });
+  }
+
+  function setReplayButtons() {
+    const on = replayOn;
+    if (el("btnSelectBar")) el("btnSelectBar").classList.toggle("active", replayPicking);
+    if (el("btnReplayPlay")) {
+      el("btnReplayPlay").disabled = !on;
+      el("btnReplayPlay").textContent = replayPlaying ? "Pause" : "Play";
+    }
+    if (el("btnReplayStep")) el("btnReplayStep").disabled = !on;
+    const lab = el("statusLabel");
+    if (on && lab) {
+      lab.textContent = replayPlaying ? "replay play" : "replay";
+      el("dot").className = "";
+    }
+  }
+
+  function stopReplayTimer() {
+    if (replayTimer) {
+      clearTimeout(replayTimer);
+      replayTimer = null;
+    }
+    replayPlaying = false;
+  }
+
+  async function ensureNextBar() {
+    const all = sortedCandles();
+    const cap = Number(replayBarOpen);
+    const nxt = all.find((c) => Number(c.time) > cap);
+    if (nxt) return nxt;
+    const start = cap + barSecNow();
+    const j = await fetchCandles({ start, limit: 500 });
+    mergeRows(j.candles || []);
+    return sortedCandles().find((c) => Number(c.time) > cap) || null;
+  }
+
+  async function startReplayAt(openTs) {
+    const snapped = snapBarOpen(Number(openTs));
+    if (snapped == null) return;
+    stopReplayTimer();
+    replayOn = true;
+    replayPicking = false;
+    replayBarOpen = snapped;
+    replaySigs = [];
+    lastOverlaySigClose = -1;
+    historyMode = true;
+    disconnectWs();
+    if (overlayTimer) {
+      clearTimeout(overlayTimer);
+      overlayTimer = null;
+    }
+    applyCandles();
+    const vis = barSecNow();
+    chart.timeScale().setVisibleRange({
+      from: snapped - 80 * vis,
+      to: snapped + 8 * vis,
+    });
+    setReplayButtons();
+    updateHistStatus();
+    renderReplayStats();
+    await reloadOverlay(true);
+  }
+
+  async function replayStep() {
+    if (!replayOn || replayBarOpen == null) return;
+    const nxt = await ensureNextBar();
+    if (!nxt) {
+      stopReplayTimer();
+      setReplayButtons();
+      return;
+    }
+    replayBarOpen = Number(nxt.time);
+    applyCandles();
+    updateHistStatus();
+    renderReplayStats();
+    await reloadOverlay(false);
+    const vis = chart.timeScale().getVisibleRange();
+    if (vis && replayBarOpen > vis.to - 5 * barSecNow()) {
+      chart.timeScale().setVisibleRange({
+        from: replayBarOpen - 80 * barSecNow(),
+        to: replayBarOpen + 8 * barSecNow(),
+      });
+    }
+  }
+
+  function replayPlayLoop() {
+    if (!replayOn || !replayPlaying) return;
+    const spd = Number(el("replaySpeed") ? el("replaySpeed").value : 1);
+    const ms = REPLAY_MS[spd] || 900;
+    replayTimer = setTimeout(async () => {
+      await replayStep();
+      if (replayPlaying) replayPlayLoop();
+    }, ms);
+  }
+
+  async function exitReplayLive() {
+    stopReplayTimer();
+    replayOn = false;
+    replayPicking = false;
+    replayBarOpen = null;
+    replaySigs = [];
+    lastOverlaySigClose = -1;
+    historyMode = false;
+    setReplayButtons();
+    renderReplayStats();
+    await loadInitial();
+    connectWs();
+  }
+
+  if (el("btnSelectBar")) {
+    el("btnSelectBar").addEventListener("click", () => {
+      replayPicking = !replayPicking;
+      setReplayButtons();
+    });
+  }
+  chart.subscribeClick((param) => {
+    if (!replayPicking || !param || param.time == null) return;
+    startReplayAt(Number(param.time));
+  });
+  if (el("btnReplayPlay")) {
+    el("btnReplayPlay").addEventListener("click", () => {
+      if (!replayOn) return;
+      if (replayPlaying) {
+        stopReplayTimer();
+        setReplayButtons();
+        return;
+      }
+      replayPlaying = true;
+      setReplayButtons();
+      replayPlayLoop();
+    });
+  }
+  if (el("btnReplayStep")) el("btnReplayStep").addEventListener("click", () => replayStep());
+  if (el("btnReplayLive")) el("btnReplayLive").addEventListener("click", () => exitReplayLive());
+
   el("tf").addEventListener("change", async () => {
     tf = el("tf").value;
+    if (replayOn) {
+      const cur = replayCursorClose() || jumpCenterTime();
+      disconnectWs();
+      await loadAround(cur);
+      replayBarOpen = snapBarOpen(cur - 1);
+      lastOverlaySigClose = -1;
+      applyCandles();
+      await reloadOverlay(true);
+      setReplayButtons();
+      return;
+    }
     if (historyMode) {
       const center = jumpCenterTime();
       disconnectWs();
@@ -609,6 +888,10 @@
   });
 
   el("btnLive").addEventListener("click", async () => {
+    if (replayOn) {
+      await exitReplayLive();
+      return;
+    }
     historyMode = false;
     await loadInitial();
     connectWs();

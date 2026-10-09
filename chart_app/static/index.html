@@ -13,6 +13,13 @@
     select, input, button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-size: 12px; }
     button { cursor: pointer; }
     button:hover { background: #30363d; }
+    button.active { background: #388bfd; border-color: #388bfd; color: #fff; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    #replayStats { list-style: none; margin: 0; padding: 0; }
+    #replayStats li { padding: 6px 4px; border-bottom: 1px solid #21262d; }
+    #replayStats .long { color: #3fb950; }
+    #replayStats .short { color: #f85149; }
+    #replayStats .pending { color: #8b949e; }
     #chart { grid-row: 2; min-width: 0; }
     #rsiChart { grid-row: 3; min-width: 0; border-top: 1px solid #30363d; }
     #rsiChart.hidden { display: none; }
@@ -51,6 +58,17 @@
       </label>
       <button id="btnJump">Go</button>
       <button id="btnLive" type="button">Live</button>
+      <button id="btnSelectBar" type="button">Select bar</button>
+      <button id="btnReplayPlay" type="button" disabled>Play</button>
+      <button id="btnReplayStep" type="button" disabled>Step</button>
+      <label>Speed
+        <select id="replaySpeed">
+          <option value="1" selected>1x</option>
+          <option value="3">3x</option>
+          <option value="10">10x</option>
+        </select>
+      </label>
+      <button id="btnReplayLive" type="button">Jump to real-time</button>
       <span id="statusLabel">connecting</span>
       <span id="histStatus">Candles: 0 | idle</span>
     </header>
@@ -123,6 +141,9 @@
         <label><input type="checkbox" id="togSigs" checked /> Show Signals</label>
         <label><input type="checkbox" id="togRsiPane" checked /> RSI pane (70/30)</label>
       </div>
+      <h2>Replay stats</h2>
+      <div id="replayCursorLab" class="row">off</div>
+      <ul id="replayStats"></ul>
       <h2>Backtest trades</h2>
       <select id="tradeFile" style="width:100%"></select>
       <button id="btnTrades">Load trades</button>
@@ -135,6 +156,6 @@
     </footer>
   </div>
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/app.js?v=rsi4"></script>
+  <script src="/static/app.js?v=replay1"></script>
 </body>
 </html>
