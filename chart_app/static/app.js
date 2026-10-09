@@ -8,6 +8,7 @@
     "3m": "candlestick_3m",
     "5m": "candlestick_5m",
     "15m": "candlestick_15m",
+    "30m": "candlestick_30m",
     "1h": "candlestick_1h",
     "4h": "candlestick_4h",
   };
@@ -48,6 +49,11 @@
   let lastOverlaySigClose = -1;
   let replaySigs = [];
   let overlayGen = 0;
+  let lastSigTfOpen = 0;
+  let audioCtx = null;
+  let alertBannerTimer = null;
+  const pageLoadTs = Math.floor(Date.now() / 1000);
+  let alertsOn = false;
 
   const chart = LightweightCharts.createChart(el("chart"), {
     layout: { background: { color: "#0e1117" }, textColor: "#8b949e" },
@@ -393,9 +399,10 @@
     const j = await r.json();
     if (gen !== overlayGen) return;
     overlayPayload = j;
-    if (replayOn) lastOverlaySigClose = completedSigClose(cursorClose);
+    lastOverlaySigClose = completedSigClose(cursorClose);
     paintOverlay(j);
     if (replayOn) ingestReplaySignals(j);
+    else scanLiveAlerts(j);
   }
 
   function clipPts(pts, oldest, newest) {
@@ -533,10 +540,236 @@
   el("hours").addEventListener("change", () => reloadOverlay(true));
   if (el("strategy")) el("strategy").addEventListener("change", () => { lastOverlaySigClose = -1; reloadOverlay(true); });
   ["signalTf", "rsiLen", "rsiOb", "rsiOs", "rsiExpObh", "rsiExpObl"].forEach((id) => {
-    if (el(id)) el(id).addEventListener("change", () => { lastOverlaySigClose = -1; reloadOverlay(true); });
+    if (el(id)) {
+      el(id).addEventListener("change", () => {
+        lastOverlaySigClose = -1;
+        lastSigTfOpen = 0;
+        reloadOverlay(true);
+        if (id === "signalTf" && !historyMode && !replayOn) connectWs();
+      });
+    }
   });
   if (el("markerMode")) {
     el("markerMode").addEventListener("change", () => paintOverlay(overlayPayload));
+  }
+
+  function lsGet(key, fallback) {
+    try {
+      const v = localStorage.getItem(key);
+      return v == null ? fallback : v;
+    } catch (e) {
+      return fallback;
+    }
+  }
+  function lsSet(key, val) {
+    try {
+      localStorage.setItem(key, val);
+    } catch (e) {}
+  }
+  function loadJsonLs(key, fallback) {
+    try {
+      const parsed = JSON.parse(lsGet(key, JSON.stringify(fallback)));
+      return parsed == null ? fallback : parsed;
+    } catch (e) {
+      return fallback;
+    }
+  }
+  function stratLabel() {
+    const s = el("strategy") ? el("strategy").value : "S020";
+    return s === "S020_RSI" ? "RSI Div" : "VWAP";
+  }
+  function fmtHmIst(ts) {
+    return new Date(Number(ts) * 1000).toLocaleString("en-IN", {
+      timeZone: IST,
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+  function fmtPx(n) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return "—";
+    return Math.round(x).toLocaleString("en-US");
+  }
+  function signalPrice(m) {
+    const t = Number(m.time);
+    const bar = candleMap.get(t);
+    if (bar && Number.isFinite(Number(bar.close))) return Number(bar.close);
+    const newest = newestCandleTime();
+    const last = newest != null ? candleMap.get(newest) : null;
+    if (last && Number.isFinite(Number(last.close))) return Number(last.close);
+    return Number(m.price);
+  }
+  function unlockAudio() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!audioCtx) audioCtx = new AC();
+      if (audioCtx.state === "suspended") void audioCtx.resume();
+      const buf = audioCtx.createBuffer(1, 1, 22050);
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(audioCtx.destination);
+      src.start(0);
+    } catch (e) {}
+  }
+  function playBeeps(side) {
+    unlockAudio();
+    if (!audioCtx) return;
+    const rising = String(side).toUpperCase() === "LONG";
+    const freqs = rising ? [523.25, 659.25, 783.99] : [783.99, 659.25, 523.25];
+    freqs.forEach((f, i) => {
+      const t0 = audioCtx.currentTime + i * 0.18;
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(f, t0);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.18, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.14);
+      osc.connect(g);
+      g.connect(audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.16);
+    });
+  }
+  function hideAlertBanner() {
+    const b = el("alertBanner");
+    if (b) b.className = "";
+    if (alertBannerTimer) {
+      clearTimeout(alertBannerTimer);
+      alertBannerTimer = null;
+    }
+  }
+  function showAlertBanner(text, side) {
+    const b = el("alertBanner");
+    if (!b) return;
+    b.textContent = text;
+    b.className = "show " + (String(side).toUpperCase() === "LONG" ? "long" : "short");
+    if (alertBannerTimer) clearTimeout(alertBannerTimer);
+    alertBannerTimer = setTimeout(hideAlertBanner, 10000);
+  }
+  function showDesktopNote(text) {
+    try {
+      if (!window.Notification || Notification.permission !== "granted") return;
+      const n = new Notification(text, { body: text });
+      n.onclick = () => {
+        try { window.focus(); } catch (e) {}
+        n.close();
+      };
+    } catch (e) {}
+  }
+  function renderAlertLog() {
+    const ul = el("alertLog");
+    if (!ul) return;
+    const rows = loadJsonLs("chart_app.alertLog", []);
+    ul.innerHTML = "";
+    (Array.isArray(rows) ? rows : []).slice(0, 20).forEach((row) => {
+      const li = document.createElement("li");
+      li.className = String(row.side || "").toLowerCase();
+      li.textContent = fmtHmIst(row.ts) + " IST  " + (row.side || "") + "  " + (row.tf || "") + "  " + fmtPx(row.price);
+      ul.appendChild(li);
+    });
+  }
+  function pushAlertLog(row) {
+    const rows = loadJsonLs("chart_app.alertLog", []);
+    const next = [row].concat(Array.isArray(rows) ? rows : []).slice(0, 20);
+    lsSet("chart_app.alertLog", JSON.stringify(next));
+    renderAlertLog();
+  }
+  function loadDedupe() {
+    const a = loadJsonLs("chart_app.alertDedupe", []);
+    return Array.isArray(a) ? a : [];
+  }
+  function markDedupe(key) {
+    const a = loadDedupe();
+    if (a.indexOf(key) >= 0) return;
+    a.push(key);
+    lsSet("chart_app.alertDedupe", JSON.stringify(a.slice(-500)));
+  }
+  function fireAlert(opts) {
+    const side = String(opts.side || "").toUpperCase();
+    const tfLab = opts.tf || (el("signalTf") ? el("signalTf").value : "15m");
+    const ts = Number(opts.ts) || Math.floor(Date.now() / 1000);
+    const price = opts.price;
+    const text = opts.text || (
+      side + " signal — " + stratLabel() + " " + tfLab + " — " + fmtHmIst(ts) + " IST — price " + fmtPx(price)
+    );
+    showAlertBanner(text, side);
+    playBeeps(side);
+    showDesktopNote(text);
+    pushAlertLog({ ts, side, tf: tfLab, price });
+  }
+  function isSkippedMarker(m) {
+    if (m.entry_allowed === false) return true;
+    const r = m.reason != null ? String(m.reason).trim() : "";
+    return r.length > 0;
+  }
+  function scanLiveAlerts(j) {
+    if (!alertsOn || replayOn || historyMode) return;
+    const includeSkipped = el("togAlertSkipped") && el("togAlertSkipped").checked;
+    const st = el("strategy") ? el("strategy").value : "S020";
+    const sigTf = el("signalTf") ? el("signalTf").value : "15m";
+    const seen = loadDedupe();
+    (j.markers || []).forEach((m) => {
+      const side = String(m.text || "").toUpperCase();
+      if (side !== "LONG" && side !== "SHORT") return;
+      if (isSkippedMarker(m) && !includeSkipped) return;
+      const ts = Number(m.signal_close_ts != null ? m.signal_close_ts : m.time);
+      if (!Number.isFinite(ts) || ts <= pageLoadTs) return;
+      const key = st + "|" + sigTf + "|" + ts + "|" + side;
+      if (seen.indexOf(key) >= 0) return;
+      seen.push(key);
+      markDedupe(key);
+      fireAlert({ side, tf: sigTf, ts, price: signalPrice(m) });
+    });
+  }
+  function syncAlertUi() {
+    const btn = el("btnAlerts");
+    if (btn) btn.textContent = alertsOn ? "🔔 Alerts ON" : "🔔 Alerts";
+    const skip = el("togAlertSkipped");
+    if (skip) skip.checked = lsGet("chart_app.alertsSkipped", "0") === "1";
+  }
+  function initAlertUi() {
+    alertsOn = lsGet("chart_app.alertsOn", "0") === "1";
+    syncAlertUi();
+    renderAlertLog();
+    const banner = el("alertBanner");
+    if (banner) banner.addEventListener("click", hideAlertBanner);
+    if (el("btnAlerts")) {
+      el("btnAlerts").addEventListener("click", async () => {
+        alertsOn = !alertsOn;
+        if (alertsOn) {
+          unlockAudio();
+          try {
+            if (window.Notification && Notification.permission === "default") {
+              await Notification.requestPermission();
+            }
+          } catch (e) {}
+        }
+        lsSet("chart_app.alertsOn", alertsOn ? "1" : "0");
+        syncAlertUi();
+      });
+    }
+    if (el("togAlertSkipped")) {
+      el("togAlertSkipped").addEventListener("change", () => {
+        lsSet("chart_app.alertsSkipped", el("togAlertSkipped").checked ? "1" : "0");
+      });
+    }
+    if (el("btnTestAlert")) {
+      el("btnTestAlert").addEventListener("click", () => {
+        unlockAudio();
+        const newest = newestCandleTime();
+        const last = newest != null ? candleMap.get(newest) : null;
+        const px = last ? last.close : 0;
+        fireAlert({
+          side: "LONG",
+          tf: el("signalTf") ? el("signalTf").value : "15m",
+          ts: Math.floor(Date.now() / 1000),
+          price: px,
+        });
+      });
+    }
   }
 
   function wsCandleTime(raw) {
@@ -564,13 +797,28 @@
     candleMap.set(t, bar);
     series.update(bar);
     updateHistStatus();
-    const res = RES_SEC[tf] || 60;
     if (lastBarClose && t > lastBarClose) {
-      if (overlayTimer) clearTimeout(overlayTimer);
-      overlayTimer = setTimeout(() => reloadOverlay(), 400);
+      scheduleLiveOverlayOnSigClose(lastBarClose + barSecNow());
     }
     lastBarClose = t;
-    void res;
+  }
+
+  function onSigTfCandle(raw) {
+    if (historyMode || replayOn) return;
+    const t = wsCandleTime(raw);
+    if (t == null) return;
+    if (lastSigTfOpen && t > lastSigTfOpen) {
+      scheduleLiveOverlayOnSigClose(lastSigTfOpen + sigTfSec());
+    }
+    lastSigTfOpen = t;
+  }
+
+  function scheduleLiveOverlayOnSigClose(barCloseUnix) {
+    if (historyMode || replayOn) return;
+    const sc = completedSigClose(barCloseUnix);
+    if (sc <= lastOverlaySigClose) return;
+    if (overlayTimer) clearTimeout(overlayTimer);
+    overlayTimer = setTimeout(() => reloadOverlay(true), 400);
   }
 
   function disconnectWs() {
@@ -601,14 +849,22 @@
       backoff = 1000;
       setStatus("live");
       const ch = WS_CH[tf] || "candlestick_1m";
-      ws.send(JSON.stringify({ type: "subscribe", payload: { channels: [{ name: ch, symbols: [SYMBOL] }] } }));
+      const sigTf = el("signalTf") ? el("signalTf").value : "15m";
+      const sigCh = WS_CH[sigTf];
+      const channels = [{ name: ch, symbols: [SYMBOL] }];
+      if (sigCh && sigCh !== ch) channels.push({ name: sigCh, symbols: [SYMBOL] });
+      ws.send(JSON.stringify({ type: "subscribe", payload: { channels } }));
       ws.send(JSON.stringify({ type: "enable_heartbeat" }));
     };
     ws.onmessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
       const typ = String(msg.type || "");
-      if (typ.startsWith("candlestick_")) applyLiveBar(msg);
+      const chartCh = WS_CH[tf] || "candlestick_1m";
+      const sigTf = el("signalTf") ? el("signalTf").value : "15m";
+      const sigCh = WS_CH[sigTf];
+      if (typ === chartCh) applyLiveBar(msg);
+      else if (sigCh && typ === sigCh) onSigTfCandle(msg);
     };
     ws.onclose = () => {
       if (historyMode || replayOn) return;
@@ -955,5 +1211,6 @@
   chart.applyOptions({ width: el("chart").clientWidth, height: el("chart").clientHeight });
 
   loadFileList();
+  initAlertUi();
   loadInitial().then(connectWs);
 })();
