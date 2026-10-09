@@ -89,6 +89,7 @@
     lastValueVisible: true,
     priceLineVisible: true,
   });
+  let drawingsApi = null;
   const vwapSeries = chart.addLineSeries({ color: "#58a6ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
   const extraSeries = [];
   const rsiHost = el("rsiChart");
@@ -196,6 +197,7 @@
   }
   function applyCandles() {
     series.setData(visibleCandles());
+    if (drawingsApi) drawingsApi.refresh();
   }
   function completedSigClose(cursorClose) {
     const sec = sigTfSec();
@@ -1232,6 +1234,7 @@
     });
   }
   chart.subscribeClick((param) => {
+    if (drawingsApi && drawingsApi.isToolActive()) return;
     if (!replayPicking || !param || param.time == null) return;
     startReplayAt(Number(param.time));
   });
@@ -1362,9 +1365,19 @@
     if (rsiChart && rsiHost) {
       rsiChart.applyOptions({ width: rsiHost.clientWidth, height: rsiHost.clientHeight || 130 });
     }
+    if (drawingsApi) drawingsApi.refresh();
   }
   window.addEventListener("resize", () => sizeCharts());
   sizeCharts();
+  if (typeof window.createChartDrawings === "function") {
+    drawingsApi = window.createChartDrawings({
+      chart: chart,
+      series: series,
+      host: el("chart"),
+      getCandles: function () { return sortedCandles(); },
+      isReplayPicking: function () { return replayPicking; },
+    });
+  }
 
   loadFileList();
   initAlertUi();
@@ -1396,6 +1409,14 @@
         const half = Math.max(8, (Number(lr.to) - Number(lr.from)) / 4);
         chart.timeScale().setVisibleLogicalRange({ from: mid - half, to: mid + half });
       }
+    }
+    if (d.cmd === "draw" && drawingsApi) {
+      const item = d.item || {};
+      drawingsApi.add(item);
+      window.__caDraw = drawingsApi.list();
+    }
+    if (d.cmd === "drawList") {
+      window.__caDraw = drawingsApi ? drawingsApi.list() : [];
     }
     if (d.cmd === "xh" && d.time != null) {
       const bar = candleMap.get(Number(d.time));
