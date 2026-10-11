@@ -84,6 +84,7 @@ STRADDLE_PRE_EXP_SEC = 30 * 60
 STRADDLE_EXP_CODES = ("E_1D", "E_2D", "E_WK")
 _STRADDLE_SAMPLES: list[dict[str, Any]] = []
 _RATCHET_TRACE_PRINTED = False
+_E5_TRACE_PRINTED = False
 
 
 class RsiArchive(RunArchive):
@@ -547,6 +548,7 @@ def straddle_exit_specs() -> list[dict[str, Any]]:
                     "trail_cap": 0.0,
                     "time_stop_sec": None,
                     "ratchet": False,
+                    "ratchet2": False,
                     "do_c2": int(tgt) == 250 and int(slv) == 250,
                 }
             )
@@ -561,6 +563,7 @@ def straddle_exit_specs() -> list[dict[str, Any]]:
             "trail_cap": 400.0,
             "time_stop_sec": None,
             "ratchet": False,
+            "ratchet2": False,
             "do_c2": True,
         }
     )
@@ -576,6 +579,7 @@ def straddle_exit_specs() -> list[dict[str, Any]]:
                 "trail_cap": 0.0,
                 "time_stop_sec": None,
                 "ratchet": True,
+                "ratchet2": False,
                 "do_c2": int(tgt) == 250 and int(slv) == 250,
             }
         )
@@ -591,7 +595,24 @@ def straddle_exit_specs() -> list[dict[str, Any]]:
                 "trail_cap": 0.0,
                 "time_stop_sec": int(hrs) * 3600,
                 "ratchet": False,
+                "ratchet2": False,
                 "do_c2": int(hrs) == 2,
+            }
+        )
+    for tgt, slv in ((250, 250), (350, 250), (250, 150)):
+        out.append(
+            {
+                "exit_id": f"E5_T{tgt}_SL{slv}",
+                "family": "E5",
+                "tgt": int(tgt),
+                "sl": int(slv),
+                "trail_arm": 0.0,
+                "trail_give": 0.0,
+                "trail_cap": 0.0,
+                "time_stop_sec": None,
+                "ratchet": False,
+                "ratchet2": True,
+                "do_c2": int(tgt) == 250 and int(slv) == 250,
             }
         )
     return out
@@ -626,6 +647,7 @@ def rsi_straddle_work(tfs: list[str], exp_codes: list[str]) -> list[dict[str, An
                         "family": str(sp["family"]),
                         "time_stop_sec": sp["time_stop_sec"],
                         "ratchet": bool(sp["ratchet"]),
+                        "ratchet2": bool(sp.get("ratchet2")),
                         "do_c2": bool(sp["do_c2"]),
                         "do_c3": False,
                     }
@@ -791,12 +813,20 @@ def scan_straddle(
     trail_cap = float(w.get("trail_cap") or 0.0)
     trail_on = trail_arm > 0.0
     ratchet = bool(w.get("ratchet"))
+    ratchet2 = bool(w.get("ratchet2"))
     tstop = w.get("time_stop_sec")
     stop_at = int(entry) + int(tstop) if tstop else None
     hard = exp_ts - int(STRADDLE_PRE_EXP_SEC)
     armed = False
     peak = 0.0
     trace: list[tuple[int, float, float, float]] = []
+
+    def _trace_exit(path_: dict[str, Any], i_: int, reason: str) -> dict[str, Any]:
+        out = _straddle_exit(path_, i_, reason, spot_c)
+        if trace:
+            out["ratchet_trace"] = trace[:: max(1, len(trace) // 4)][:4] + trace[-1:]
+        return out
+
     for i in range(n):
         t = int(ts[i])
         if t >= hard:
@@ -804,7 +834,7 @@ def scan_straddle(
                 out = _straddle_exit(path, i, "PRE_EXPIRY", spot_c)
             else:
                 continue
-            if ratchet:
+            if ratchet or ratchet2:
                 out["ratchet_trace"] = trace[-5:] if len(trace) > 5 else trace
             return out
         if not bool(ok[i]) or not np.isfinite(pnl_a[i]):
@@ -812,18 +842,24 @@ def scan_straddle(
                 return _straddle_exit(path, i, "EXPIRY", spot_c)
             continue
         gp = float(pnl_a[i])
-        if ratchet:
+        if ratchet2:
+            peak = max(peak, gp)
+            stop = max(-slv, 2.0 * peak - slv)
+            trace.append((t, gp, peak, stop))
+            if peak >= slv:
+                return _trace_exit(path, i, "RATCHET_LOCK")
+            if gp <= stop:
+                return _trace_exit(path, i, "RATCHET2")
+            if gp >= tgt:
+                return _trace_exit(path, i, "TARGET")
+        elif ratchet:
             peak = max(peak, gp)
             stop = max(-slv, peak - slv)
             trace.append((t, gp, peak, stop))
             if gp <= stop:
-                out = _straddle_exit(path, i, "SL", spot_c)
-                out["ratchet_trace"] = trace[:: max(1, len(trace) // 4)][:4] + trace[-1:]
-                return out
+                return _trace_exit(path, i, "SL")
             if gp >= tgt:
-                out = _straddle_exit(path, i, "TARGET", spot_c)
-                out["ratchet_trace"] = trace[:: max(1, len(trace) // 4)][:4] + trace[-1:]
-                return out
+                return _trace_exit(path, i, "TARGET")
         else:
             hit_tgt = trail_cap if trail_on and trail_cap > 0.0 else tgt
             if gp <= -slv:
@@ -889,7 +925,7 @@ def simulate_straddle(
     on_trade: Any | None = None,
     smoke: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
-    global _RATCHET_TRACE_PRINTED
+    global _RATCHET_TRACE_PRINTED, _E5_TRACE_PRINTED
     busy = -1
     rows: list[dict[str, Any]] = []
     n_missing = 0
@@ -993,6 +1029,25 @@ def simulate_straddle(
             pts = list(walked.get("ratchet_trace") or [])
             print(
                 f"RATCHET check entry={s018.ist_str(int(t))} exit={s018.ist_str(int(walked['exit_ts']))} "
+                f"reason={walked.get('reason')} net={walked.get('net')}",
+                flush=True,
+            )
+            for ts_i, gp, pk, st in pts[:5]:
+                print(
+                    f"  {s018.ist_str(int(ts_i))} gp={gp:.2f} peak={pk:.2f} stop={st:.2f}",
+                    flush=True,
+                )
+        if (
+            smoke
+            and bool(w.get("ratchet2"))
+            and str(w.get("exit_id")) == "E5_T250_SL250"
+            and not _E5_TRACE_PRINTED
+        ):
+            _E5_TRACE_PRINTED = True
+            pts = list(walked.get("ratchet_trace") or [])
+            print(
+                f"E5 RATCHET2 check entry={s018.ist_str(int(t))} "
+                f"exit={s018.ist_str(int(walked['exit_ts']))} "
                 f"reason={walked.get('reason')} net={walked.get('net')}",
                 flush=True,
             )
@@ -1767,6 +1822,37 @@ def main() -> None:
                 f"reason={rec.get('exit_reason')} net={rec.get('net')}",
                 flush=True,
             )
+        e3_rows: list[dict[str, Any]] = []
+        e5_rows: list[dict[str, Any]] = []
+        for w in work:
+            k = rsi_cell_key(
+                month, w, max_days, start_ts, cutoff,
+                float(args.exp_obh), float(args.exp_obl),
+            )
+            if str(w.get("exit_id")) == "E3_T250_SL250":
+                e3_rows = cell_rows.get(k, [])
+            if str(w.get("exit_id")) == "E5_T250_SL250":
+                e5_rows = cell_rows.get(k, [])
+        e3_by = {(int(r["entry_ts"]), str(r["side"])): r for r in e3_rows}
+        found_diff = False
+        for r5 in e5_rows:
+            r3 = e3_by.get((int(r5["entry_ts"]), str(r5["side"])))
+            if r3 is None:
+                continue
+            if int(r3.get("exit_ts") or 0) != int(r5.get("exit_ts") or 0) or str(
+                r3.get("exit_reason")
+            ) != str(r5.get("exit_reason")):
+                print(
+                    f"E3 vs E5 differ entry={s018.ist_str(int(r5['entry_ts']))} "
+                    f"{r5['side']}: E3 reason={r3.get('exit_reason')} "
+                    f"net={r3.get('net')} | E5 reason={r5.get('exit_reason')} "
+                    f"net={r5.get('net')}",
+                    flush=True,
+                )
+                found_diff = True
+                break
+        if e3_rows and e5_rows and not found_diff:
+            print("E3 vs E5: no differing exit on overlapping trades", flush=True)
 
     report = [
         f"S020 RSI month={month} {win_from}..{win_to} stamp={stamp}",
