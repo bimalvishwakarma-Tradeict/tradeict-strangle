@@ -3,6 +3,7 @@
 
 python backtest\\strategies\\s020_vwap_touch\\run_s020_rsi.py --month 2025-06 --rsi-grid --max-days 3
 python backtest\\strategies\\s020_vwap_touch\\run_s020_rsi.py --month 2025-06 --rsi-hedge-grid --tfs 1m,15m --max-days 3
+python backtest\\strategies\\s020_vwap_touch\\run_s020_rsi.py --month 2025-06 --rsi-straddle-grid --tfs 15m --straddle-expiries E_1D --max-days 3
 """
 
 from __future__ import annotations
@@ -61,9 +62,28 @@ RSI_TFS = ("1m", "3m", "5m", "15m", "30m")
 A0_T = (100, 150, 200, 250, 300, 350)
 A0_SL = (100, 150, 200, 250, 300, 350)
 RSI_LEG_COLS = tuple(list(LEG_COLS) + ["add_no", "entry_ts"])
-RSI_TRADE_COLS = tuple(list(TRADE_COLS) + ["qty", "avg_entry"])
+RSI_TRADE_COLS = tuple(
+    list(TRADE_COLS)
+    + [
+        "qty",
+        "avg_entry",
+        "strike",
+        "debit",
+        "iv_call",
+        "iv_put",
+        "implied_1h",
+        "realized_1h",
+        "weekday",
+    ]
+)
 WING_NONE = -1.0
 _SCALE_SAMPLE_PRINTED = False
+STRADDLE_TFS = ("5m", "15m", "30m")
+STRADDLE_QTY = 1000
+STRADDLE_PRE_EXP_SEC = 30 * 60
+STRADDLE_EXP_CODES = ("E_1D", "E_2D", "E_WK")
+_STRADDLE_SAMPLES: list[dict[str, Any]] = []
+_RATCHET_TRACE_PRINTED = False
 
 
 class RsiArchive(RunArchive):
@@ -130,6 +150,8 @@ def rsi_cell_key(
     exp_obh: float = RSI_EXP_OBH,
     exp_obl: float = RSI_EXP_OBL,
 ) -> str:
+    if bool(w.get("straddle")):
+        return straddle_cell_key(month, w, max_days, start_ts, cutoff, exp_obh, exp_obl)
     base = d.cell_key(
         month, str(w["tf"]), "RSI", int(w["tgt"]), int(w["sl"]), 0, "near",
         legs=int(w["legs"]), dte=int(w["dte"]), trail_arm=float(w["trail_arm"]),
@@ -317,6 +339,13 @@ def emit_archive_trade_scale(
         "mae_time": s018.ist_str(int(r["mae_ts"])) if int(r.get("mae_ts") or 0) else "",
         "qty": qty_tot,
         "avg_entry": avg_entry,
+        "strike": "",
+        "debit": "",
+        "iv_call": "",
+        "iv_put": "",
+        "implied_1h": "",
+        "realized_1h": "",
+        "weekday": "",
     }
     snaps: list[dict[str, Any]] = []
     p0 = tranches[0]["path"] if tranches else path
@@ -479,6 +508,534 @@ def rsi_hedge_work(tfs: list[str]) -> list[dict[str, Any]]:
                     }
                 )
     return out
+
+
+def expiry_weekly_bimal(t: int) -> date:
+    """Nearest Friday 17:30 IST at least 2 days away, else the next Friday."""
+    dt = datetime.fromtimestamp(int(t), tz=s018.UTC).astimezone(s018.IST)
+    d0 = dt.date()
+    days_to_fri = (4 - int(d0.weekday())) % 7
+    fri = d0 + timedelta(days=days_to_fri)
+    for _ in range(4):
+        if int(s018.expiry_unix(fri)) - int(t) >= 2 * 86400:
+            return fri
+        fri = fri + timedelta(days=7)
+    return fri
+
+
+def straddle_expiry(t: int, code: str) -> date:
+    c = str(code)
+    if c == "E_2D":
+        return d.expiry_1dte_bimal(t) + timedelta(days=1)
+    if c == "E_WK":
+        return expiry_weekly_bimal(t)
+    return d.expiry_1dte_bimal(t)
+
+
+def straddle_exit_specs() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for tgt in (150, 250, 350):
+        for slv in (150, 250, 350):
+            out.append(
+                {
+                    "exit_id": f"E1_T{tgt}_SL{slv}",
+                    "family": "E1",
+                    "tgt": int(tgt),
+                    "sl": int(slv),
+                    "trail_arm": 0.0,
+                    "trail_give": 0.0,
+                    "trail_cap": 0.0,
+                    "time_stop_sec": None,
+                    "ratchet": False,
+                    "do_c2": int(tgt) == 250 and int(slv) == 250,
+                }
+            )
+    out.append(
+        {
+            "exit_id": "E2_TRAIL",
+            "family": "E2",
+            "tgt": 250,
+            "sl": 250,
+            "trail_arm": 80.0,
+            "trail_give": 60.0,
+            "trail_cap": 400.0,
+            "time_stop_sec": None,
+            "ratchet": False,
+            "do_c2": True,
+        }
+    )
+    for tgt, slv in ((250, 250), (350, 250), (250, 150)):
+        out.append(
+            {
+                "exit_id": f"E3_T{tgt}_SL{slv}",
+                "family": "E3",
+                "tgt": int(tgt),
+                "sl": int(slv),
+                "trail_arm": 0.0,
+                "trail_give": 0.0,
+                "trail_cap": 0.0,
+                "time_stop_sec": None,
+                "ratchet": True,
+                "do_c2": int(tgt) == 250 and int(slv) == 250,
+            }
+        )
+    for hrs in (1, 2, 4):
+        out.append(
+            {
+                "exit_id": f"E4_H{hrs}",
+                "family": "E4",
+                "tgt": 250,
+                "sl": 250,
+                "trail_arm": 0.0,
+                "trail_give": 0.0,
+                "trail_cap": 0.0,
+                "time_stop_sec": int(hrs) * 3600,
+                "ratchet": False,
+                "do_c2": int(hrs) == 2,
+            }
+        )
+    return out
+
+
+def rsi_straddle_work(tfs: list[str], exp_codes: list[str]) -> list[dict[str, Any]]:
+    specs = straddle_exit_specs()
+    out: list[dict[str, Any]] = []
+    for tf in tfs:
+        for exp_code in exp_codes:
+            for sp in specs:
+                dte = 1 if exp_code == "E_1D" else (2 if exp_code == "E_2D" else 7)
+                out.append(
+                    {
+                        "tf": tf,
+                        "arm_id": str(sp["exit_id"]),
+                        "legs": 2,
+                        "dte": dte,
+                        "trail_arm": float(sp["trail_arm"]),
+                        "trail_give": float(sp["trail_give"]),
+                        "trail_cap": float(sp["trail_cap"]),
+                        "tgt": int(sp["tgt"]),
+                        "sl": int(sp["sl"]),
+                        "basket": str(exp_code),
+                        "prem_pct": 0.0,
+                        "strangle_exit": False,
+                        "scale": False,
+                        "hedge": False,
+                        "straddle": True,
+                        "exp_code": str(exp_code),
+                        "exit_id": str(sp["exit_id"]),
+                        "family": str(sp["family"]),
+                        "time_stop_sec": sp["time_stop_sec"],
+                        "ratchet": bool(sp["ratchet"]),
+                        "do_c2": bool(sp["do_c2"]),
+                        "do_c3": False,
+                    }
+                )
+    return out
+
+
+def straddle_cell_key(
+    month: str,
+    w: dict[str, Any],
+    max_days: int,
+    start_ts: int,
+    cutoff: int,
+    exp_obh: float = RSI_EXP_OBH,
+    exp_obl: float = RSI_EXP_OBL,
+) -> str:
+    exp = f"exp={_exp_key_part(exp_obh)}-{_exp_key_part(exp_obl)}"
+    return (
+        f"{month}|{w['tf']}|straddle|{w['exp_code']}|{w['exit_id']}|{exp}"
+        f"|md={int(max_days)}|{int(start_ts)}|{int(cutoff)}"
+    )
+
+
+def pick_straddle_legs(
+    store: Any, t: int, exp: date, spot: float
+) -> list[s018.Leg] | None:
+    packed = s018.load_chain(store, exp, t)
+    if packed is None:
+        return None
+    rows, _ = packed
+    pairs: dict[float, dict[str, dict[str, Any]]] = {}
+    for r in rows:
+        k = float(r["strike"])
+        slot = pairs.setdefault(k, {})
+        if bool(r["is_call"]):
+            slot["c"] = r
+        else:
+            slot["p"] = r
+    best: tuple[float, float, float] | None = None
+    chosen: tuple[dict[str, Any], dict[str, Any]] | None = None
+    for k, slot in pairs.items():
+        if "c" not in slot or "p" not in slot:
+            continue
+        diff = abs(float(slot["c"]["mark"]) - float(slot["p"]["mark"]))
+        key = (diff, abs(k - float(spot)), k)
+        if best is None or key < best:
+            best = key
+            chosen = (slot["c"], slot["p"])
+    if chosen is None:
+        return None
+    dte = max(0, (exp - ist_date(t)).days)
+    t_yr = t_years(t, s018.expiry_unix(exp))
+    legs: list[s018.Leg] = []
+    for r, role in ((chosen[0], "scall"), (chosen[1], "sput")):
+        q = s018.mark_le(store, exp, str(r["symbol"]), t)
+        if q is None:
+            return None
+        fill, _ = s018.buy_fill(q.px, dte)
+        dlt = s018.signed_delta(q.px, float(spot), float(r["strike"]), t_yr, bool(r["is_call"]))
+        legs.append(
+            s018.Leg(
+                symbol=str(r["symbol"]),
+                strike=float(r["strike"]),
+                is_call=bool(r["is_call"]),
+                role=role,
+                mark=q.px,
+                fill=fill,
+                src=q.src,
+                delta=dlt,
+                ts=q.ts,
+            )
+        )
+    return legs
+
+
+def get_or_build_straddle(
+    store: Any,
+    spot_c: dict[int, float],
+    t: int,
+    exp: date,
+    tag: str,
+) -> tuple[dict[str, Any] | None, bool]:
+    fp = d.cache_file(t, "S", exp, d.path_tag(tag, 1, basket=f"strdl_{exp.isoformat()}"))
+    path = s020.load_path(fp)
+    if path is not None:
+        return path, False
+    sp = spot_c.get(int(t))
+    if sp is None:
+        return None, False
+    legs = pick_straddle_legs(store, t, exp, float(sp))
+    if legs is None:
+        return None, False
+    path = s020.build_path(store, spot_c, legs, t, exp)
+    if path is None:
+        return None, False
+    for lg, src in zip(path["legs"], legs):
+        lg["qty"] = int(STRADDLE_QTY)
+        lg["long_short"] = "long"
+        lg["fee"] = d.fee_gst_qty(float(src.mark), float(sp), int(STRADDLE_QTY))
+        lg["slip"] = (float(src.fill) - float(src.mark)) * int(STRADDLE_QTY) * OPTIONS_CONTRACT_VALUE
+        lg["expiry"] = exp.isoformat()
+        lg["exp_ts"] = s018.expiry_unix(exp)
+    s020.save_path(fp, path)
+    return path, True
+
+
+def _straddle_exit(
+    path: dict[str, Any],
+    i: int,
+    reason: str,
+    spot_c: dict[int, float],
+) -> dict[str, Any]:
+    t = int(path["ts"][i])
+    legs = list(path["legs"])[:2]
+    dte = max(0, (date.fromisoformat(str(path["exp"])) - ist_date(t)).days)
+    idx = float(path["spot"][i]) or float(spot_c.get(t, 0.0))
+    pxs = [float(path["px0"][i]), float(path["px1"][i])]
+    qty = int(STRADDLE_QTY)
+    gross = 0.0
+    fees = sum(float(lg.get("fee", 0.0)) for lg in legs)
+    slip = sum(float(lg.get("slip", 0.0)) for lg in legs)
+    srcs = [str(lg.get("src", "")) for lg in legs]
+    if str(reason) == "EXPIRY":
+        for lg in legs:
+            px = intrinsic(bool(lg["is_call"]), float(lg["strike"]), idx if idx else 0.0)
+            gross += (px - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+            if px > 0 and idx > 0:
+                fees += d.fee_gst_qty(px, idx, qty)
+            srcs.append("settle")
+    else:
+        for lg, mark in zip(legs, pxs):
+            xf, _ = s018.sell_fill(mark, dte)
+            gross += (xf - float(lg["fill"])) * qty * OPTIONS_CONTRACT_VALUE
+            fees += d.fee_gst_qty(mark, idx if idx else 1.0, qty)
+            slip += (mark - xf) * qty * OPTIONS_CONTRACT_VALUE
+            srcs.append("mark")
+    return {
+        "exit_ts": t,
+        "reason": reason,
+        "gross": gross,
+        "fees": fees,
+        "slip": slip,
+        "net": gross - fees,
+        "srcs": srcs,
+    }
+
+
+def scan_straddle(
+    path: dict[str, Any],
+    w: dict[str, Any],
+    spot_c: dict[int, float],
+) -> dict[str, Any] | None:
+    ts = path["ts"]
+    ok = path["ok"]
+    pnl_a = path["pnl"]
+    exp_ts = int(path["exp_ts"])
+    entry = int(path["entry_ts"])
+    n = int(ts.size)
+    tgt = float(w["tgt"])
+    slv = float(w["sl"])
+    trail_arm = float(w.get("trail_arm") or 0.0)
+    trail_give = float(w.get("trail_give") or 0.0)
+    trail_cap = float(w.get("trail_cap") or 0.0)
+    trail_on = trail_arm > 0.0
+    ratchet = bool(w.get("ratchet"))
+    tstop = w.get("time_stop_sec")
+    stop_at = int(entry) + int(tstop) if tstop else None
+    hard = exp_ts - int(STRADDLE_PRE_EXP_SEC)
+    armed = False
+    peak = 0.0
+    trace: list[tuple[int, float, float, float]] = []
+    for i in range(n):
+        t = int(ts[i])
+        if t >= hard:
+            if bool(ok[i]) and np.isfinite(pnl_a[i]):
+                out = _straddle_exit(path, i, "PRE_EXPIRY", spot_c)
+            else:
+                continue
+            if ratchet:
+                out["ratchet_trace"] = trace[-5:] if len(trace) > 5 else trace
+            return out
+        if not bool(ok[i]) or not np.isfinite(pnl_a[i]):
+            if t == exp_ts:
+                return _straddle_exit(path, i, "EXPIRY", spot_c)
+            continue
+        gp = float(pnl_a[i])
+        if ratchet:
+            peak = max(peak, gp)
+            stop = max(-slv, peak - slv)
+            trace.append((t, gp, peak, stop))
+            if gp <= stop:
+                out = _straddle_exit(path, i, "SL", spot_c)
+                out["ratchet_trace"] = trace[:: max(1, len(trace) // 4)][:4] + trace[-1:]
+                return out
+            if gp >= tgt:
+                out = _straddle_exit(path, i, "TARGET", spot_c)
+                out["ratchet_trace"] = trace[:: max(1, len(trace) // 4)][:4] + trace[-1:]
+                return out
+        else:
+            hit_tgt = trail_cap if trail_on and trail_cap > 0.0 else tgt
+            if gp <= -slv:
+                return _straddle_exit(path, i, "SL", spot_c)
+            if gp >= hit_tgt:
+                return _straddle_exit(path, i, "TARGET", spot_c)
+            if trail_on:
+                if gp >= trail_arm:
+                    armed = True
+                if armed:
+                    peak = max(peak, gp)
+                    if gp <= peak - trail_give:
+                        return _straddle_exit(path, i, "TRAIL", spot_c)
+            if stop_at is not None and t >= stop_at:
+                return _straddle_exit(path, i, "TIME", spot_c)
+        if t == exp_ts:
+            return _straddle_exit(path, i, "EXPIRY", spot_c)
+    return None
+
+
+def weekday_ist(t: int) -> str:
+    dt = datetime.fromtimestamp(int(t), tz=s018.UTC).astimezone(s018.IST)
+    return "weekday" if int(dt.weekday()) < 5 else "weekend"
+
+
+def implied_1h_move(debit_pts: float, tte_sec: float) -> float:
+    hrs = float(tte_sec) / 3600.0
+    if hrs <= 1e-9 or not np.isfinite(debit_pts):
+        return float("nan")
+    return float(debit_pts) * float(np.sqrt(1.0 / hrs))
+
+
+def weekly_chain_coverage(
+    store: Any, plan: list[tuple[int, str]]
+) -> tuple[int, int]:
+    ok_n = 0
+    need = 0
+    seen: set[tuple[int, str]] = set()
+    for t, _side in plan:
+        exp = expiry_weekly_bimal(int(t))
+        key = (int(t), exp.isoformat())
+        if key in seen:
+            continue
+        seen.add(key)
+        need += 1
+        if s018.load_chain(store, exp, int(t)) is not None:
+            ok_n += 1
+    return ok_n, need
+
+
+def simulate_straddle(
+    store: Any,
+    spot_c: dict[int, float],
+    plan: list[tuple[int, str]],
+    w: dict[str, Any],
+    tag: str,
+    start_ts: int,
+    cutoff: int,
+    win_from: date,
+    win_to: date,
+    extra_by: dict[tuple[int, str], dict[str, Any]] | None,
+    label: str = "",
+    on_trade: Any | None = None,
+    smoke: bool = False,
+) -> tuple[list[dict[str, Any]], int]:
+    global _RATCHET_TRACE_PRINTED
+    busy = -1
+    rows: list[dict[str, Any]] = []
+    n_missing = 0
+    built = 0
+    t0 = time.perf_counter()
+    st_prog: dict[str, int] = {"mark": -1}
+    nplan = len(plan)
+    exp_code = str(w["exp_code"])
+    for j, (t, side) in enumerate(plan, start=1):
+        if label:
+            s020.progress_every_2pct(label, j, nplan, built, t0, st_prog)
+        if t < start_ts or t >= cutoff or t <= busy:
+            continue
+        if not s020.in_window(t, win_from, win_to):
+            continue
+        extra: dict[str, Any] = {}
+        if extra_by is not None:
+            extra = dict(extra_by.get((int(t), str(side)), {}))
+        if extra:
+            if not d.keep_signal(extra, 0, "near"):
+                continue
+        elif not d.entry_allowed(t):
+            continue
+        exp = straddle_expiry(t, exp_code)
+        path, newp = get_or_build_straddle(store, spot_c, t, exp, tag)
+        if newp:
+            built += 1
+        if path is None:
+            n_missing += 1
+            continue
+        walked = scan_straddle(path, w, spot_c)
+        if walked is None:
+            continue
+        hold = (int(walked["exit_ts"]) - int(t)) / 3600.0
+        hrs_exp = (s018.expiry_unix(exp) - int(t)) / 3600.0
+        mf, ma, mfe_ts, mae_ts = d.mfe_mae_with_ts(path, 2, int(walked["exit_ts"]))
+        legs = list(path["legs"])[:2]
+        spot_e = float(spot_c.get(t, 0.0))
+        t_yr = t_years(t, int(path["exp_ts"]))
+        ivs: list[float] = []
+        iv_c = float("nan")
+        iv_p = float("nan")
+        for lg in legs:
+            g = greeks_from_mark(
+                float(lg["mark"]), spot_e, float(lg["strike"]), t_yr, bool(lg["is_call"])
+            )
+            ivs.append(float(g["iv"]))
+            if bool(lg["is_call"]):
+                iv_c = float(g["iv"])
+            else:
+                iv_p = float(g["iv"])
+        debit_pts = float(sum(float(lg["mark"]) for lg in legs))
+        debit_usd = float(sum(float(lg["fill"]) for lg in legs)) * int(STRADDLE_QTY) * OPTIONS_CONTRACT_VALUE
+        strike = float(legs[0]["strike"]) if legs else float("nan")
+        impl = implied_1h_move(debit_pts, float(path["exp_ts"]) - float(t))
+        sp1 = spot_c.get(int(t) + 3600)
+        realized = abs(float(sp1) - spot_e) if sp1 is not None and spot_e > 0 else float("nan")
+        eiv = float(np.mean([x for x in ivs if np.isfinite(x)])) if any(np.isfinite(x) for x in ivs) else float("nan")
+        nd = 0.0
+        nfin = 0
+        for lg in legs:
+            dv = float(lg.get("delta", float("nan")))
+            if np.isfinite(dv):
+                nd += dv
+                nfin += 1
+        rec = {
+            "entry_ts": t,
+            "side": side,
+            "hod": s018.hod_ist(t),
+            "hold_hrs": hold,
+            "hrs_to_exp": hrs_exp,
+            "legs": legs,
+            "exp": exp.isoformat(),
+            "mfe": mf,
+            "mfe_ts": mfe_ts,
+            "mae": ma,
+            "mae_ts": mae_ts,
+            "exit_reason": walked.get("reason"),
+            "spot": spot_e,
+            "spot_exit": float(spot_c.get(int(walked["exit_ts"]), 0.0)),
+            "entry_iv": eiv,
+            "iv_call": iv_c,
+            "iv_put": iv_p,
+            "net_delta": nd if nfin else float("nan"),
+            "strike": strike,
+            "debit": debit_usd,
+            "debit_pts": debit_pts,
+            "implied_1h": impl,
+            "realized_1h": realized,
+            "weekday": weekday_ist(t),
+            "call_mark": float(next((lg["mark"] for lg in legs if lg["is_call"]), float("nan"))),
+            "put_mark": float(next((lg["mark"] for lg in legs if not lg["is_call"]), float("nan"))),
+            **extra,
+            **walked,
+        }
+        rows.append(rec)
+        if smoke and len(_STRADDLE_SAMPLES) < 3:
+            _STRADDLE_SAMPLES.append(rec)
+        if smoke and bool(w.get("ratchet")) and not _RATCHET_TRACE_PRINTED:
+            _RATCHET_TRACE_PRINTED = True
+            pts = list(walked.get("ratchet_trace") or [])
+            print(
+                f"RATCHET check entry={s018.ist_str(int(t))} exit={s018.ist_str(int(walked['exit_ts']))} "
+                f"reason={walked.get('reason')} net={walked.get('net')}",
+                flush=True,
+            )
+            for ts_i, gp, pk, st in pts[:5]:
+                print(
+                    f"  {s018.ist_str(int(ts_i))} gp={gp:.2f} peak={pk:.2f} stop={st:.2f}",
+                    flush=True,
+                )
+        if on_trade is not None:
+            on_trade(rec, path)
+        busy = int(walked["exit_ts"])
+    return rows, n_missing
+
+
+def emit_archive_trade_straddle(
+    archive: RsiArchive,
+    cfg: dict[str, Any],
+    r: dict[str, Any],
+    path: dict[str, Any],
+) -> None:
+    orig = archive.add_trade
+
+    def wrapped(
+        trade_dict: dict[str, Any],
+        legs: list[dict[str, Any]],
+        snapshots: list[dict[str, Any]],
+    ) -> None:
+        trade_dict["qty"] = int(STRADDLE_QTY) * 2
+        trade_dict["avg_entry"] = float(r.get("debit_pts", float("nan"))) / 2.0
+        trade_dict["strike"] = r.get("strike")
+        trade_dict["debit"] = r.get("debit")
+        trade_dict["iv_call"] = r.get("iv_call")
+        trade_dict["iv_put"] = r.get("iv_put")
+        trade_dict["implied_1h"] = r.get("implied_1h")
+        trade_dict["realized_1h"] = r.get("realized_1h")
+        trade_dict["weekday"] = r.get("weekday")
+        orig(trade_dict, legs, snapshots)
+
+    archive.add_trade = wrapped  # type: ignore[method-assign]
+    try:
+        d.emit_archive_trade(archive, cfg, r, path, 2, "long")
+    finally:
+        archive.add_trade = orig  # type: ignore[method-assign]
 
 
 def sigs_to_entry(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -876,11 +1433,16 @@ def run_one(
         "month": month, "tf": tf, "variant": variant, "key": key,
         "band": band, "band_mode": band_mode, "arm_id": arm_id, "dte": dte_mode,
     }
-    ls = "long" if (strangle_exit or hedge) else "short"
+    straddle = bool(w.get("straddle"))
+    ls = "long" if (strangle_exit or hedge or straddle) else "short"
     on_tr = None
     if archive is not None:
         if bool(w.get("scale")):
             on_tr = lambda r, p, _c=cfg_now: emit_archive_trade_scale(
+                archive, _c, r, p
+            )
+        elif straddle:
+            on_tr = lambda r, p, _c=cfg_now: emit_archive_trade_straddle(
                 archive, _c, r, p
             )
         else:
@@ -891,6 +1453,12 @@ def run_one(
         rows, n_stale = simulate_scale(
             store, spot_c, plan_all, tag, start_ts, cutoff, win_from, win_to,
             extra_by, label=f"{tf} SCALE", on_trade=on_tr,
+        )
+    elif straddle:
+        rows, n_stale = simulate_straddle(
+            store, spot_c, plan_all, w, tag, start_ts, cutoff, win_from, win_to,
+            extra_by, label=f"{tf} {arm_id}", on_trade=on_tr,
+            smoke=bool(max_days),
         )
     elif hedge:
         rows, n_stale = simulate_hedge_rsi(
@@ -921,6 +1489,7 @@ def run_one(
             "signal": SIGNAL_NAME, "code_ver": CODE_VER,
             "win_start": int(start_ts), "win_cutoff": int(cutoff),
             "exp_obh": float(exp_obh), "exp_obl": float(exp_obl),
+            "n_missing": n_stale if straddle else 0,
         }
     )
     if hedge and float(w.get("hedge_w", 0.0)) < 0:
@@ -931,7 +1500,7 @@ def run_one(
         stt["worst"] = float(min(nets)) if nets else float("nan")
         stt["short_worst"] = float(min(shorts)) if shorts else float("nan")
     c2m = float("nan")
-    if bool(w.get("do_c2")):
+    if bool(w.get("do_c2")) and not (straddle and int(max_days) > 0):
         hour_idx = d.hour_idx_band(
             ts, c, vwap_1m, start_ts, cutoff, win_from, win_to, 0, "near"
         )
@@ -941,14 +1510,21 @@ def run_one(
         for si, seed in enumerate(seeds, start=1):
             print(f"C2 {key} seed {si}/{len(seeds)}", flush=True)
             forced = s020.random_c2(rows, ts, hour_idx, seed)
-            rr, _ = d.simulate_plan(
-                store, spot_c, forced, float(tgt), float(slv), f"C2{tag}", False,
-                start_ts, cutoff, win_from, win_to, None,
-                label=f"C2 {key} seed={si}",
-                nlegs=nlegs, dte_mode=dte_mode, trail_arm=trail_arm,
-                trail_give=trail_give, trail_cap=trail_cap, basket=basket,
-                prem_pct=0.0, strangle_exit=strangle_exit,
-            )
+            if straddle:
+                rr, _ = simulate_straddle(
+                    store, spot_c, forced, w, f"C2{tag}", start_ts, cutoff,
+                    win_from, win_to, None, label=f"C2 {key} seed={si}",
+                    on_trade=None, smoke=False,
+                )
+            else:
+                rr, _ = d.simulate_plan(
+                    store, spot_c, forced, float(tgt), float(slv), f"C2{tag}", False,
+                    start_ts, cutoff, win_from, win_to, None,
+                    label=f"C2 {key} seed={si}",
+                    nlegs=nlegs, dte_mode=dte_mode, trail_arm=trail_arm,
+                    trail_give=trail_give, trail_cap=trail_cap, basket=basket,
+                    prem_pct=0.0, strangle_exit=strangle_exit,
+                )
             c2_pool.extend(rr)
             if rr:
                 c2s.append(float(np.mean([x["net"] for x in rr])))
@@ -1016,6 +1592,8 @@ def main() -> None:
     ap.add_argument("--month", default="2025-06")
     ap.add_argument("--rsi-grid", action="store_true")
     ap.add_argument("--rsi-hedge-grid", action="store_true")
+    ap.add_argument("--rsi-straddle-grid", action="store_true")
+    ap.add_argument("--straddle-expiries", default="E_1D,E_2D,E_WK")
     ap.add_argument("--tfs", default="1m,15m")
     ap.add_argument("--max-days", type=int, default=0)
     ap.add_argument("--fresh", action="store_true")
@@ -1053,22 +1631,37 @@ def main() -> None:
             sys.exit(1)
 
     hedge_grid = bool(args.rsi_hedge_grid)
+    straddle_grid = bool(args.rsi_straddle_grid)
     tfs = [x.strip() for x in str(args.tfs).split(",") if x.strip()]
-    if hedge_grid:
+    if straddle_grid:
+        if tfs == ["1m", "15m"]:
+            tfs = list(STRADDLE_TFS)
+        exp_codes = [
+            x.strip()
+            for x in str(args.straddle_expiries).split(",")
+            if x.strip() in STRADDLE_EXP_CODES
+        ]
+        if not exp_codes:
+            print("need --straddle-expiries in E_1D,E_2D,E_WK", flush=True)
+            sys.exit(2)
+        work = rsi_straddle_work(tfs, exp_codes)
+        mode = "rsi-straddle-grid"
+        print(f"straddle expiries={exp_codes} tfs={tfs} cells={len(work)}", flush=True)
+    elif hedge_grid:
         work = rsi_hedge_work(tfs)
         mode = "rsi-hedge-grid"
     elif bool(args.rsi_grid):
         work = rsi_grid_work()
         mode = "rsi-grid"
     else:
-        print("need --rsi-grid or --rsi-hedge-grid", flush=True)
+        print("need --rsi-grid or --rsi-hedge-grid or --rsi-straddle-grid", flush=True)
         sys.exit(2)
     print(f"{mode} combos={len(work)}", flush=True)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     spot = s018.load_spot_1m(args.csv)
     ts, o, h, l, c, vol = s020.bars_1m_vol(spot)
-    pad_d = 5
+    pad_d = 14 if straddle_grid else 5
     lo = start_ts - 3 * 86400
     hi = cutoff + pad_d * 86400
     sel = (ts >= lo) & (ts < hi)
@@ -1118,6 +1711,18 @@ def main() -> None:
                     flush=True,
                 )
 
+    if straddle_grid:
+        wk_plan: list[tuple[int, str]] = []
+        for tf in need_tfs:
+            wk_plan.extend((int(s["ts"]), str(s["side"])) for s in sig_cache[tf][0])
+        wok, wneed = weekly_chain_coverage(store, wk_plan)
+        wmiss = max(0, int(wneed) - int(wok))
+        wpct = (100.0 * wmiss / float(wneed)) if wneed else 0.0
+        print(
+            f"weekly chain entries ok={wok}/{wneed} missing={wmiss} ({wpct:.1f}%)",
+            flush=True,
+        )
+
     arm_n = max(1, len(work))
     t_all = time.perf_counter()
     for arm_i, w in enumerate(work, start=1):
@@ -1137,6 +1742,8 @@ def main() -> None:
             {},
         )
         extra = ""
+        if straddle_grid:
+            extra = f" missing={int(st.get('n_missing', 0))}"
         if hedge_grid and "Wnone" in str(w.get("arm_id", "")):
             extra = (
                 f" worst={s020._fnum(st.get('worst', float('nan')), 2)} "
@@ -1149,6 +1756,18 @@ def main() -> None:
             flush=True,
         )
 
+    if straddle_grid and _STRADDLE_SAMPLES:
+        print("first 3 straddle trades:", flush=True)
+        for rec in _STRADDLE_SAMPLES[:3]:
+            print(
+                f"  {s018.ist_str(int(rec['entry_ts']))} {rec['side']} "
+                f"strike={rec.get('strike')} call={rec.get('call_mark')} "
+                f"put={rec.get('put_mark')} debit={rec.get('debit')} "
+                f"iv_c={rec.get('iv_call')} iv_p={rec.get('iv_put')} "
+                f"reason={rec.get('exit_reason')} net={rec.get('net')}",
+                flush=True,
+            )
+
     report = [
         f"S020 RSI month={month} {win_from}..{win_to} stamp={stamp}",
         f"signal={SIGNAL_NAME}",
@@ -1159,6 +1778,10 @@ def main() -> None:
         kept, n_raw, n_long, n_short = sig_cache[tf]
         report.append(
             f"TF {tf} raw={n_raw} after_filters={len(kept)} long={n_long} short={n_short}"
+        )
+    if straddle_grid:
+        report.append(
+            "straddle: LONG call+put same strike qty=1000; E1-E4; hard PRE_EXPIRY 30m"
         )
     if hedge_grid:
         report.append("NONE-wing arms: worst + short_worst in combo lines")
