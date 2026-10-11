@@ -65,6 +65,22 @@
     #dot.live { background: #3fb950; }
     #dot.reconnecting { background: #d29922; }
     .ohlc span { margin-right: 10px; }
+    #drawDialog {
+      display: none; position: fixed; inset: 0; z-index: 60; background: #0008;
+      align-items: center; justify-content: center;
+    }
+    #drawDialog.open { display: flex; }
+    #drawDialog .dlg {
+      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      width: 420px; max-width: 94vw; max-height: 88vh; overflow: auto; padding: 12px 14px;
+    }
+    #drawDialog .dlg-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+    #drawDialog .row { margin: 8px 0; }
+    #drawDialog label { min-width: 110px; }
+    #drawDialog input[type="text"], #drawDialog input[type="number"] { width: 160px; }
+    #drawDialog .swatch { width: 22px; height: 22px; padding: 0; border-radius: 4px; }
+    #drawDialog #dlgErr { color: #f85149; min-height: 16px; font-size: 12px; }
+    #drawDialog .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -186,7 +202,7 @@
         <label><input type="checkbox" id="togObl" checked /> Show OBL</label>
         <label><input type="checkbox" id="togLevels" checked /> Show OBH/OBL Levels</label>
         <label><input type="checkbox" id="togSigs" checked /> Show Signals</label>
-        <label><input type="checkbox" id="togRsiPane" checked /> RSI pane (70/30)</label>
+        <label><input type="checkbox" id="togRsiPane" checked /> RSI pane (<span id="rsiPaneLab">70/30</span>)</label>
       </div>
       <h2>Alerts</h2>
       <ul id="alertLog"></ul>
@@ -220,13 +236,81 @@
     <button type="button" data-style="solid">Solid</button>
     <button type="button" data-style="dashed">Dashed</button>
     <div>
+      <button type="button" data-act="settings">Settings</button>
       <button type="button" data-act="lock">Lock</button>
       <button type="button" data-act="delete">Delete</button>
     </div>
   </div>
+  <div id="drawDialog">
+    <div class="dlg">
+      <div class="dlg-tabs">
+        <button type="button" id="tabStyle" class="active">Style</button>
+        <button type="button" id="tabCoords">Coordinates</button>
+      </div>
+      <div id="dlgStyle">
+        <div class="row" id="gLine">Line color
+          <button type="button" class="swatch" data-qcolor="#f85149" style="background:#f85149" title="red"></button>
+          <button type="button" class="swatch" data-qcolor="#3fb950" style="background:#3fb950" title="green"></button>
+          <button type="button" class="swatch" data-qcolor="#58a6ff" style="background:#58a6ff" title="blue"></button>
+          <button type="button" class="swatch" data-qcolor="#e3b341" style="background:#e3b341" title="yellow"></button>
+          <button type="button" class="swatch" data-qcolor="#f0883e" style="background:#f0883e" title="orange"></button>
+          <button type="button" class="swatch" data-qcolor="#d2a8ff" style="background:#d2a8ff" title="purple"></button>
+          <button type="button" class="swatch" data-qcolor="#e6edf3" style="background:#e6edf3" title="white"></button>
+          <button type="button" class="swatch" data-qcolor="#8b949e" style="background:#8b949e" title="grey"></button>
+          <input id="dlgCustom" type="color" value="#58a6ff" />
+        </div>
+        <div class="row">Width
+          <select id="dlgWidth"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+          Style
+          <select id="dlgLineStyle">
+            <option value="solid">solid</option>
+            <option value="dashed">dashed</option>
+            <option value="dotted">dotted</option>
+          </select>
+        </div>
+        <div class="row" id="gFill">Fill <input id="dlgFill" type="color" value="#58a6ff" />
+          Opacity <input id="dlgFillOp" type="range" min="0" max="100" value="15" />
+          <span id="dlgFillOpLab">15%</span>
+        </div>
+        <div class="row" id="gText">Text color <input id="dlgTextColor" type="color" value="#e6edf3" />
+          Font <input id="dlgFont" type="number" min="10" max="24" value="12" style="width:56px" />
+        </div>
+        <div class="row" id="gPosCol">Target <input id="dlgTargetCol" type="color" value="#3fb950" />
+          SL <input id="dlgSlCol" type="color" value="#f85149" />
+        </div>
+        <div class="row" id="gMeas">
+          <label><input type="checkbox" id="dlgShowMeas" /> Show measurement</label>
+        </div>
+      </div>
+      <div id="dlgCoords" hidden>
+        <div class="row" id="cPrice"><label>Price</label><input id="dlgPrice" type="number" step="0.1" /></div>
+        <div class="row" id="cTime"><label>Date-time IST</label><input id="dlgTime" type="text" placeholder="DD-MM-YYYY HH:MM" /></div>
+        <div class="row" id="cT1"><label>Point 1 time</label><input id="dlgT1" type="text" placeholder="DD-MM-YYYY HH:MM" /></div>
+        <div class="row" id="cP1"><label>Point 1 price</label><input id="dlgP1" type="number" step="0.1" /></div>
+        <div class="row" id="cT2"><label>Point 2 time</label><input id="dlgT2" type="text" placeholder="DD-MM-YYYY HH:MM" /></div>
+        <div class="row" id="cP2"><label>Point 2 price</label><input id="dlgP2" type="number" step="0.1" /></div>
+        <div class="row" id="cTop"><label>Top price</label><input id="dlgTop" type="number" step="0.1" /></div>
+        <div class="row" id="cBot"><label>Bottom price</label><input id="dlgBot" type="number" step="0.1" /></div>
+        <div class="row" id="cLeft"><label>Left time</label><input id="dlgLeft" type="text" placeholder="DD-MM-YYYY HH:MM" /></div>
+        <div class="row" id="cRight"><label>Right time</label><input id="dlgRight" type="text" placeholder="DD-MM-YYYY HH:MM" /></div>
+        <div class="row" id="cText"><label>Text</label><input id="dlgNote" type="text" /></div>
+        <div class="row" id="cEntry"><label>Entry</label><input id="dlgEntry" type="number" step="0.1" /></div>
+        <div class="row" id="cTarget"><label>Target</label><input id="dlgTarget" type="number" step="0.1" /></div>
+        <div class="row" id="cSl"><label>SL</label><input id="dlgSl" type="number" step="0.1" /></div>
+        <div class="row" id="cStart"><label>Start time</label><input id="dlgStart" type="text" placeholder="DD-MM-YYYY HH:MM" /></div>
+        <div class="row" id="cEnd"><label>End time</label><input id="dlgEnd" type="text" placeholder="DD-MM-YYYY HH:MM" /></div>
+        <div class="row" id="cRr">R:R <span id="dlgRr">—</span> · target pts <span id="dlgRew">—</span> · SL pts <span id="dlgRisk">—</span></div>
+      </div>
+      <div id="dlgErr"></div>
+      <div class="dlg-actions">
+        <button type="button" id="dlgCancel">Cancel</button>
+        <button type="button" id="dlgApply">Apply</button>
+      </div>
+    </div>
+  </div>
   <input id="drawTextInput" hidden placeholder="Note…" />
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/drawings.js?v=draw1"></script>
-  <script src="/static/app.js?v=draw1"></script>
+  <script src="/static/drawings.js?v=draw2"></script>
+  <script src="/static/app.js?v=draw2"></script>
 </body>
 </html>

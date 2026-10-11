@@ -653,6 +653,7 @@
       const os = Number(j.rsi_os != null ? j.rsi_os : 30);
       rsiObLine.setData(useRsi ? candles.map((c) => ({ time: Number(c.time), value: ob })) : []);
       rsiOsLine.setData(useRsi ? candles.map((c) => ({ time: Number(c.time), value: os })) : []);
+      syncRsiPaneLabel(ob, os);
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           if (replayOn && replayFollow) centerReplayCursor();
@@ -673,14 +674,26 @@
   el("variant").addEventListener("change", () => reloadOverlay(true));
   el("hours").addEventListener("change", () => reloadOverlay(true));
   if (el("strategy")) el("strategy").addEventListener("change", () => { lastOverlaySigClose = -1; reloadOverlay(true); });
+  function syncRsiPaneLabel(ob, os) {
+    const lab = el("rsiPaneLab");
+    if (!lab) return;
+    const obv = ob != null ? ob : (el("rsiOb") ? el("rsiOb").value : "70");
+    const osv = os != null ? os : (el("rsiOs") ? el("rsiOs").value : "30");
+    lab.textContent = String(obv) + "/" + String(osv);
+  }
+  syncRsiPaneLabel();
   ["signalTf", "rsiLen", "rsiOb", "rsiOs", "rsiExpObh", "rsiExpObl"].forEach((id) => {
     if (el(id)) {
       el(id).addEventListener("change", () => {
         lastOverlaySigClose = -1;
         lastSigTfOpen = 0;
+        if (id === "rsiOb" || id === "rsiOs") syncRsiPaneLabel();
         reloadOverlay(true);
         if (id === "signalTf" && !historyMode && !replayOn) connectWs();
       });
+      if (id === "rsiOb" || id === "rsiOs") {
+        el(id).addEventListener("input", () => syncRsiPaneLabel());
+      }
     }
   });
   if (el("markerMode")) {
@@ -1375,6 +1388,7 @@
       series: series,
       host: el("chart"),
       getCandles: function () { return sortedCandles(); },
+      getTfSec: function () { return RES_SEC[tf] || 60; },
       isReplayPicking: function () { return replayPicking; },
     });
   }
