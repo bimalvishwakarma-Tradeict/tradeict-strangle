@@ -387,7 +387,12 @@
       extra = Math.max(32, Math.min(240, extra));
       const opt = { timeScale: { rightOffset: extra } };
       chart.applyOptions(opt);
-      if (opts.rsiChart) opts.rsiChart.applyOptions(opt);
+      const extras = typeof opts.getPaneCharts === "function"
+        ? opts.getPaneCharts()
+        : (opts.rsiChart ? [opts.rsiChart] : []);
+      (extras || []).forEach(function (ch) {
+        if (ch && ch.applyOptions) ch.applyOptions(opt);
+      });
     }
     function paneXY(ev) {
       const r = host.getBoundingClientRect();

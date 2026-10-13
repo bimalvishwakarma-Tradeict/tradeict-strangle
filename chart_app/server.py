@@ -269,7 +269,7 @@ async def api_indicator(
     now = int(time.time())
     to_u = int(to_ts) if to_ts is not None else now
     from_u = int(from_ts) if from_ts is not None else to_u - 24 * 3600
-    warmup = 3000 * res
+    warmup = max(500, 3000) * res
     bars = await _candles(tf, from_u - warmup, to_u)
     bars = [b for b in bars if int(b["time"]) <= to_u]
     try:

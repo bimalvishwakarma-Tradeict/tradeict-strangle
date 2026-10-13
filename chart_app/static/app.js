@@ -102,27 +102,32 @@
   const LS_PANEL = "chart_app.rightPanel";
   const vwapSeries = chart.addLineSeries({ color: "#58a6ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
   const extraSeries = [];
-  const rsiHost = el("rsiChart");
-  const rsiChart = rsiHost
-    ? LightweightCharts.createChart(rsiHost, {
-        layout: { background: { color: "#131722" }, textColor: "#787b86" },
-        grid: { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },
-        rightPriceScale: { borderColor: "#2a2e39", minimumWidth: PRICE_SCALE_W },
-        timeScale: { visible: false, rightOffset: 48, shiftVisibleRangeOnNewBar: false },
-        height: 130,
-      })
-    : null;
-  const rsiLine = rsiChart
-    ? rsiChart.addLineSeries({ color: "#d2a8ff", lineWidth: 1, priceLineVisible: false, lastValueVisible: false })
-    : null;
-  const rsiObLine = rsiChart
-    ? rsiChart.addLineSeries({ color: "#f85149", lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false })
-    : null;
-  const rsiOsLine = rsiChart
-    ? rsiChart.addLineSeries({ color: "#3fb950", lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false })
-    : null;
-  function rsiPaneOn() {
-    return Boolean(rsiHost && rsiChart && !rsiHost.classList.contains("hidden"));
+  const paneCharts = [];
+  function paneList() {
+    return paneCharts;
+  }
+  function upsertPane(entry) {
+    const i = paneCharts.findIndex((p) => p.id === entry.id);
+    if (i >= 0) paneCharts[i] = Object.assign(paneCharts[i], entry);
+    else {
+      paneCharts.push(entry);
+      entry.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+        pushRangePeer("pane", range);
+      });
+      entry.chart.subscribeCrosshairMove((param) => {
+        if (syncingXh) return;
+        syncingXh = true;
+        try {
+          syncCrosshairToMain(param);
+          syncCrosshairToPanes(param, entry.id);
+        } catch (e) {}
+        syncingXh = false;
+      });
+    }
+  }
+  function dropPane(id) {
+    const i = paneCharts.findIndex((p) => p.id === id);
+    if (i >= 0) paneCharts.splice(i, 1);
   }
   function rememberViewWidth(range) {
     if (!range || range.from == null || range.to == null) return;
@@ -135,7 +140,9 @@
     syncingTs = true;
     try {
       chart.timeScale().setVisibleLogicalRange(range);
-      if (rsiPaneOn()) rsiChart.timeScale().setVisibleLogicalRange(range);
+      paneCharts.forEach((p) => {
+        try { p.chart.timeScale().setVisibleLogicalRange(range); } catch (e) {}
+      });
     } catch (e) {}
     syncingTs = false;
     requestAnimationFrame(() => { applyingRange = false; });
@@ -145,8 +152,12 @@
     if (replayOn && replayFollow && fromChart === "rsi") return;
     syncingTs = true;
     try {
-      if (fromChart === "main" && rsiPaneOn()) rsiChart.timeScale().setVisibleLogicalRange(range);
-      if (fromChart === "rsi") chart.timeScale().setVisibleLogicalRange(range);
+      if (fromChart === "main") {
+        paneCharts.forEach((p) => {
+          try { p.chart.timeScale().setVisibleLogicalRange(range); } catch (e) {}
+        });
+      }
+      if (fromChart === "pane") chart.timeScale().setVisibleLogicalRange(range);
     } catch (e) {}
     syncingTs = false;
   }
@@ -166,11 +177,6 @@
     pushRangePeer("main", range);
     onUserMovedRange(range);
   });
-  if (rsiChart) {
-    rsiChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-      pushRangePeer("rsi", range);
-    });
-  }
   function centerReplayCursor() {
     if (!replayOn || replayBarOpen == null) return;
     const vis = visibleCandles();
@@ -434,21 +440,19 @@
     return bits.join(" | ");
   }
 
-  function rsiValueAt(time) {
-    const t = Number(time);
-    const pts = overlayPayload.rsi || [];
-    for (let i = 0; i < pts.length; i += 1) {
-      if (Number(pts[i].time) === t && Number.isFinite(Number(pts[i].value))) return Number(pts[i].value);
-    }
-    return 50;
-  }
-  function syncCrosshairToRsi(param) {
-    if (!rsiPaneOn() || !rsiLine || typeof rsiChart.setCrosshairPosition !== "function") return;
-    if (!param || param.time == null) {
-      if (typeof rsiChart.clearCrosshairPosition === "function") rsiChart.clearCrosshairPosition();
-      return;
-    }
-    rsiChart.setCrosshairPosition(rsiValueAt(param.time), param.time, rsiLine);
+  function syncCrosshairToPanes(param, exceptId) {
+    paneCharts.forEach((p) => {
+      if (exceptId && p.id === exceptId) return;
+      if (typeof p.chart.setCrosshairPosition !== "function") return;
+      if (!param || param.time == null) {
+        if (typeof p.chart.clearCrosshairPosition === "function") p.chart.clearCrosshairPosition();
+        return;
+      }
+      const ser = p.mainSeries;
+      if (!ser) return;
+      const y = p.valueAt ? p.valueAt(param.time) : 50;
+      p.chart.setCrosshairPosition(y, param.time, ser);
+    });
   }
   function syncCrosshairToMain(param) {
     if (typeof chart.setCrosshairPosition !== "function") return;
@@ -467,7 +471,7 @@
       if (tip) tip.textContent = "";
       if (!syncingXh) {
         syncingXh = true;
-        try { syncCrosshairToRsi(param); } catch (e) {}
+        try { syncCrosshairToPanes(param); } catch (e) {}
         syncingXh = false;
       }
       return;
@@ -479,18 +483,10 @@
     if (tip) tip.textContent = markerTooltip(param.time);
     if (!syncingXh) {
       syncingXh = true;
-      try { syncCrosshairToRsi(param); } catch (e) {}
+      try { syncCrosshairToPanes(param); } catch (e) {}
       syncingXh = false;
     }
   });
-  if (rsiChart) {
-    rsiChart.subscribeCrosshairMove((param) => {
-      if (syncingXh) return;
-      syncingXh = true;
-      try { syncCrosshairToMain(param); } catch (e) {}
-      syncingXh = false;
-    });
-  }
 
   function clearExtra() {
     extraSeries.forEach((s) => chart.removeSeries(s));
@@ -692,42 +688,46 @@
     }
     const rp = rsiInst();
     const useRsi = Boolean(rp && rp.visible !== false && rp.params && rp.params.show_rsi_pane !== false);
-    if (rsiHost) {
-      rsiHost.classList.toggle("hidden", !useRsi);
-      sizeCharts();
-    }
-    if (rsiLine && rsiObLine && rsiOsLine) {
-      const candles = visibleCandles();
-      const rsiByT = new Map();
-      (j.rsi || []).forEach((p) => {
-        const t = Number(p.time);
-        const v = Number(p.value);
-        if (!Number.isFinite(t) || !Number.isFinite(v)) return;
-        if (cursorClose != null && t > cursorClose) return;
-        rsiByT.set(t, v);
-      });
-      const rsiPts = useRsi
-        ? candles.map((c) => {
-            const t = Number(c.time);
-            return rsiByT.has(t) ? { time: t, value: rsiByT.get(t) } : { time: t };
-          })
-        : [];
-      rsiLine.setData(rsiPts);
-      const ob = Number(j.rsi_ob != null ? j.rsi_ob : 70);
-      const os = Number(j.rsi_os != null ? j.rsi_os : 30);
-      rsiObLine.setData(useRsi ? candles.map((c) => ({ time: Number(c.time), value: ob })) : []);
-      rsiOsLine.setData(useRsi ? candles.map((c) => ({ time: Number(c.time), value: os })) : []);
-      syncRsiPaneLabel(ob, os);
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (replayOn && replayFollow) centerReplayCursor();
-          else {
-            const r = chart.timeScale().getVisibleLogicalRange();
-            if (r) pushRangePeer("main", r);
-          }
+    if (indApi && typeof indApi.setAuxPane === "function") {
+      if (!useRsi) indApi.setAuxPane("s020rsi", { visible: false });
+      else {
+        const candles = visibleCandles();
+        const rsiByT = new Map();
+        (j.rsi || []).forEach((p) => {
+          const t = Number(p.time);
+          const v = Number(p.value);
+          if (!Number.isFinite(t) || !Number.isFinite(v)) return;
+          if (cursorClose != null && t > cursorClose) return;
+          rsiByT.set(t, v);
         });
-      });
+        const rsiPts = candles.map((c) => {
+          const t = Number(c.time);
+          return rsiByT.has(t) ? { time: t, value: rsiByT.get(t) } : { time: t };
+        });
+        const ob = Number(j.rsi_ob != null ? j.rsi_ob : 70);
+        const os = Number(j.rsi_os != null ? j.rsi_os : 30);
+        const lvl = (val) => candles.map((c) => ({ time: Number(c.time), value: val }));
+        indApi.setAuxPane("s020rsi", {
+          visible: true,
+          title: "RSI Div",
+          series: [
+            { key: "rsi", color: "#d2a8ff", width: 1, style: "solid", lastValueVisible: true, points: rsiPts },
+            { key: "ob", color: "#f85149", width: 1, style: "dashed", lastValueVisible: false, points: lvl(ob) },
+            { key: "os", color: "#3fb950", width: 1, style: "dashed", lastValueVisible: false, points: lvl(os) },
+          ],
+          fills: [{ kind: "hband", top: ob, bottom: os, fill: "rgba(126,87,194,0.08)" }],
+        });
+      }
     }
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (replayOn && replayFollow) centerReplayCursor();
+        else {
+          const r = chart.timeScale().getVisibleLogicalRange();
+          if (r) pushRangePeer("main", r);
+        }
+      });
+    });
   }
 
   function syncRsiPaneLabel(ob, os) {
@@ -1427,9 +1427,10 @@
 
   function sizeCharts() {
     chart.applyOptions({ width: el("chart").clientWidth, height: el("chart").clientHeight });
-    if (rsiChart && rsiHost) {
-      rsiChart.applyOptions({ width: rsiHost.clientWidth, height: rsiHost.clientHeight || 130 });
-    }
+    paneCharts.forEach((p) => {
+      const h = p.host ? p.host.clientHeight : 132;
+      try { p.chart.applyOptions({ width: (p.host || el("chart")).clientWidth, height: Math.max(60, h - 6) }); } catch (e) {}
+    });
     if (drawingsApi) drawingsApi.refresh();
     if (indApi) indApi.refresh();
   }
@@ -1448,7 +1449,7 @@
         if (!vis.length) return null;
         return Number(vis[vis.length - 1].close);
       },
-      rsiChart: rsiChart,
+      getPaneCharts: function () { return paneList().map((p) => p.chart); },
     });
   }
   if (typeof window.createChartIndicators === "function") {
@@ -1457,6 +1458,21 @@
       series: series,
       getTf: function () { return tf; },
       getRange: function () { return indicatorRange(); },
+      paneHost: el("paneHost"),
+      priceScaleW: PRICE_SCALE_W,
+      registerPane: upsertPane,
+      unregisterPane: dropPane,
+      onResize: function () { sizeCharts(); },
+      onAuxSettings: function () { openRightPanel("paneStrat"); },
+      onAuxRemove: function () {
+        const it = rsiInst();
+        if (it && it.params) {
+          it.params.show_rsi_pane = false;
+          saveStrats();
+          lastOverlaySigClose = -1;
+          reloadOverlay(true);
+        }
+      },
     });
   }
 
@@ -1930,7 +1946,7 @@
       const vis = visibleCandles();
       const last = vis.length ? vis[vis.length - 1] : null;
       const lr = chart.timeScale().getVisibleLogicalRange();
-      const rr = rsiChart ? rsiChart.timeScale().getVisibleLogicalRange() : null;
+      const rr = paneCharts[0] ? paneCharts[0].chart.timeScale().getVisibleLogicalRange() : null;
       window.__caSnap = {
         n: vis.length,
         lastClose: last ? last.close : null,
@@ -1943,10 +1959,10 @@
         mid: lr ? (Number(lr.from) + Number(lr.to)) / 2 : null,
         lastIdx: vis.length ? vis.length - 1 : null,
         xAlign: (function () {
-          if (!last || !rsiChart) return null;
+          if (!last || !paneCharts[0]) return null;
           const x = chart.timeScale().timeToCoordinate(last.time);
           const tM = chart.timeScale().coordinateToTime(x);
-          const tR = rsiChart.timeScale().coordinateToTime(x);
+          const tR = paneCharts[0].chart.timeScale().coordinateToTime(x);
           return { x, tM, tR };
         })(),
       };

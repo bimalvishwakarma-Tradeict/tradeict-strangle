@@ -57,7 +57,7 @@
     #replayStats .short { color: #f85149; }
     #replayStats .pending { color: #8b949e; }
     #mid { grid-column: 2; grid-row: 2; min-width: 0; display: flex; flex-direction: column; position: relative; }
-    #chart { flex: 1; min-width: 0; min-height: 0; position: relative; }
+    #chart { flex: 1; min-width: 0; min-height: 80px; position: relative; }
     #chart::after {
       content: "BTCUSD  ·  Delta India";
       position: absolute; left: 10px; bottom: 38px; z-index: 1; pointer-events: none;
@@ -115,8 +115,17 @@
     .ind-cat-desc { color: #8b949e; font-size: 11px; }
     #indDialog .dlg-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
     #indDialog .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-    #rsiChart { height: 132px; min-width: 0; border-top: 1px solid var(--bd); flex: none; }
-    #rsiChart.hidden { display: none; height: 0; border: 0; }
+    #paneHost { flex: none; min-width: 0; display: flex; flex-direction: column; }
+    .ind-pane { position: relative; height: 132px; min-width: 0; border-top: 1px solid var(--bd); flex: none; }
+    .ind-pane.hidden { display: none; }
+    .ind-pane-chart { height: 100%; min-width: 0; }
+    .ind-pane-legend {
+      position: absolute; top: 4px; left: 8px; z-index: 6; pointer-events: none;
+    }
+    .ind-pane-legend .ind-row { pointer-events: auto; }
+    .ind-pane-resizer {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 6px; cursor: ns-resize; z-index: 8;
+    }
     #sidePanel { grid-column: 3; grid-row: 2; border-left: 1px solid var(--bd); background: var(--panel); overflow: auto; padding: 10px; font-size: 12px; }
     #sidePanel.closed { display: none; }
     #sidePanel h2 { font-size: 11px; margin: 12px 0 6px; color: var(--mut); text-transform: uppercase; }
@@ -245,7 +254,7 @@
           <button id="btnReplayExit" type="button" title="Exit replay">✕</button>
         </div>
       </div>
-      <div id="rsiChart"></div>
+      <div id="paneHost"></div>
     </div>
     <aside id="sidePanel" class="closed">
       <div id="paneStrat" class="pane">
@@ -493,8 +502,8 @@
   </div>
   <input id="drawTextInput" hidden placeholder="Note…" />
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/drawings.js?v=tv2"></script>
-  <script src="/static/indicators.js?v=tv2"></script>
-  <script src="/static/app.js?v=tv2b"></script>
+  <script src="/static/drawings.js?v=ind1"></script>
+  <script src="/static/indicators.js?v=ind1b"></script>
+  <script src="/static/app.js?v=ind1"></script>
 </body>
 </html>
