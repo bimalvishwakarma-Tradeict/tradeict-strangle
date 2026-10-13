@@ -36,6 +36,7 @@ from indicators import (  # noqa: E402
     load_indicators,
     short_name_for,
 )
+from indicators.htf import aggregate_1m  # noqa: E402
 from strategies import PLUGINS, compute, list_strategies, load_plugins  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -205,6 +206,17 @@ async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
     return rows
 
 
+async def _candles_no_lookahead(tf: str, start: int, to_u: int) -> list[dict[str, Any]]:
+    """HTF bars with no future 1m inside the last bucket. 1m is passed through."""
+    cap = int(to_u)
+    want_start = int(start)
+    rows_1m = await _candles("1m", want_start, cap)
+    rows_1m = [b for b in rows_1m if want_start <= int(b["time"]) <= cap]
+    if tf == "1m":
+        return rows_1m
+    return aggregate_1m(rows_1m, tf, cap)
+
+
 @app.get("/api/candles")
 async def api_candles(
     tf: str = Query("1m"),
@@ -281,11 +293,6 @@ async def api_overlay(
     if hit is not None:
         logger.info("overlay %s cache-hit ms=%.1f", strategy, (time.perf_counter() - t0) * 1000.0)
         return hit
-    for (sk, stf, sparams, sfrom, sto), cached in list(_OVERLAY_CACHE.items()):
-        if sk == strategy and stf == tf and sparams == json.dumps(extra, sort_keys=True) and sfrom == from_u and sto >= to_u:
-            sliced = _slice_payload_to(cached, to_u)
-            logger.info("overlay %s cache-slice to=%s ms=%.1f", strategy, to_u, (time.perf_counter() - t0) * 1000.0)
-            return sliced
     warmup = 10 * 86400
     bars = await _candles("1m", from_u - warmup, to_u)
     bars = [b for b in bars if from_u - warmup <= int(b["time"]) <= to_u]
@@ -308,7 +315,13 @@ async def api_overlay(
         "show_signals": extra.get("show_signals", show_signals),
     }
     data = compute(strategy, bars, merged)
-    out = {"strategy": strategy, "bars_used": len(bars), **data}
+    htf = aggregate_1m(bars, tf, to_u)
+    out = {
+        "strategy": strategy,
+        "bars_used": len(bars),
+        "last_bar": htf[-1] if htf else None,
+        **data,
+    }
     _cache_put(_OVERLAY_CACHE, cache_key, out)
     logger.info(
         "overlay %s bars=%s ms=%.1f",
@@ -358,14 +371,8 @@ async def api_indicator(
     if hit is not None:
         logger.info("indicator %s cache-hit ms=%.1f", ind_id, (time.perf_counter() - t0) * 1000.0)
         return hit
-    for (iid, itf, ip, ifr, ito), cached in list(_IND_CACHE.items()):
-        if iid == ind_id and itf == tf and ip == pkey and ifr == from_u and ito >= to_u:
-            sliced = _slice_payload_to(cached, to_u)
-            logger.info("indicator %s cache-slice to=%s ms=%.1f", ind_id, to_u, (time.perf_counter() - t0) * 1000.0)
-            return sliced
     warmup = max(500, 3000) * res
-    bars = await _candles(tf, from_u - warmup, to_u)
-    bars = [b for b in bars if int(b["time"]) <= to_u]
+    bars = await _candles_no_lookahead(tf, from_u - warmup, to_u)
     data = compute_indicator(ind_id, bars, raw_p)
     out = {
         "id": ind_id,
@@ -374,6 +381,7 @@ async def api_indicator(
         "to": to_u,
         "short_name": short_name_for(ind_id, raw_p),
         "bars_used": len(bars),
+        "last_bar": bars[-1] if bars else None,
         **data,
     }
     _cache_put(_IND_CACHE, cache_key, out)
@@ -453,6 +461,8 @@ async def api_trades(file: str = Query(...)) -> dict[str, Any]:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    import os
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8700, log_level="info")
+    port = int(os.environ.get("CHART_APP_PORT", "8700"))
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")

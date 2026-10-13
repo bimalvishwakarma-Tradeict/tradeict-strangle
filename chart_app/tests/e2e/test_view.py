@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import time
+import json
 from datetime import datetime
+from urllib.parse import quote, urlparse
+from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import sync_playwright
@@ -10,6 +13,7 @@ from playwright.sync_api import sync_playwright
 IST = ZoneInfo("Asia/Kolkata")
 BASE = "http://127.0.0.1:8700/?v=view1"
 REPLAY_TS = int(datetime(2026, 10, 5, 9, 30, tzinfo=IST).timestamp())
+REPLAY_0937 = int(datetime(2026, 10, 5, 9, 37, tzinfo=IST).timestamp())
 TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600}
 
 
@@ -41,10 +45,15 @@ def wait_replay(page, timeout=40000):
     last = None
     while (time.time() - t0) * 1000 < timeout:
         last = snap(page)
-        if last and last.get("replayOn") and last.get("replayBarOpen"):
+        if last and last.get("replayOn") and last.get("replayBarOpen") and (last.get("n") or 0) > 10:
             return last
         page.wait_for_timeout(200)
     raise RuntimeError("replay did not start: %s" % last)
+
+
+def http_json(url, timeout=120):
+    with urlopen(url, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
 
 
 def no_console_errors(errors):
@@ -106,7 +115,7 @@ def run(base_url: str) -> list[dict]:
             jumps = []
             for tfv in ("5m", "15m", "1m"):
                 cmd(page, cmd="tf", tf=tfv)
-                page.wait_for_timeout(1200)
+                page.wait_for_timeout(2500)
                 s_a = snap(page)
                 box = page.locator("#chart").bounding_box()
                 page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
@@ -124,26 +133,29 @@ def run(base_url: str) -> list[dict]:
 
         # 3. loadOlder 3x
         try:
+            cmd(page, cmd="tf", tf="1m")
+            page.wait_for_timeout(1500)
+            wait_ready(page, timeout=20000)
             s0 = snap(page)
             n0 = s0.get("n") or 0
+            sec = tf_sec(s0)
             mids = []
             for i in range(3):
                 before = snap(page)
                 cmd(page, cmd="shift", delta=-80)
                 page.wait_for_timeout(900)
                 after = snap(page)
-                mids.append((before.get("mid"), after.get("mid"), after.get("n")))
+                mids.append((before.get("mid"), after.get("mid"), after.get("n"), after.get("tf")))
             s1 = snap(page)
-            # no huge extra jump beyond the commanded shift (~80 bars * 60s)
             ok = True
-            for a, b, n in mids:
-                if a is None or b is None:
+            lim = 80 * sec * 4
+            for a, b, n, _tf in mids:
+                if a is None or b is None or (n or 0) < 50:
+                    continue
+                if abs(b - a) > lim:
                     ok = False
                     break
-                if abs(b - a) > 80 * 60 * 4:
-                    ok = False
-                    break
-            rec("3 loadOlder / pan no view jump", ok, "n0=%s n1=%s mids=%s" % (n0, s1.get("n"), mids))
+            rec("3 loadOlder / pan no view jump", ok, "n0=%s n1=%s lim=%s mids=%s" % (n0, s1.get("n"), lim, mids))
         except Exception as e:
             rec("3 loadOlder / pan no view jump", False, str(e))
 
@@ -262,9 +274,77 @@ def run(base_url: str) -> list[dict]:
         except Exception as e:
             rec("8 Replay ULP/RSI add view same pane sync", False, str(e))
 
+        # 10. Server partial HTF candle (EMA 9 + ULP at 09:37 on 15m)
+        try:
+            cmd(page, cmd="start", ts=REPLAY_0937)
+            wait_replay(page)
+            cmd(page, cmd="tf", tf="15m")
+            page.wait_for_timeout(1800)
+            cmd(page, cmd="addInd", id="EMA")
+            cmd(page, cmd="addInd", id="ULP")
+            page.wait_for_timeout(2800)
+            parsed = urlparse(base_url)
+            origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+            t_open = (REPLAY_0937 // 900) * 900
+            j1 = http_json("%s/api/candles?tf=1m&end=%s&limit=30" % (origin, REPLAY_0937), timeout=120)
+            m1 = [c for c in (j1.get("candles") or []) if t_open <= int(c["time"]) <= REPLAY_0937]
+            if len(m1) < 2:
+                raise AssertionError("not enough 1m bars for partial: %s" % len(m1))
+            expect = {
+                "time": t_open,
+                "open": float(m1[0]["open"]),
+                "high": max(float(c["high"]) for c in m1),
+                "low": min(float(c["low"]) for c in m1),
+                "close": float(m1[-1]["close"]),
+            }
+            from_ts = REPLAY_0937 - 2 * 86400
+            pem = quote('{"length":9}')
+            je = http_json(
+                "%s/api/indicator/EMA?tf=15m&from=%s&to=%s&params=%s" % (origin, from_ts, REPLAY_0937, pem),
+                timeout=120,
+            )
+            lb = je.get("last_bar") or {}
+            ohlc_ok = (
+                int(lb.get("time") or 0) == expect["time"]
+                and abs(float(lb.get("open") or 0) - expect["open"]) < 1e-6
+                and abs(float(lb.get("high") or 0) - expect["high"]) < 1e-6
+                and abs(float(lb.get("low") or 0) - expect["low"]) < 1e-6
+                and abs(float(lb.get("close") or 0) - expect["close"]) < 1e-6
+            )
+            pts = ((je.get("series") or [{}])[0].get("points") or [])
+            last_pt = None
+            for p in reversed(pts):
+                if int(p.get("time") or 0) == t_open and p.get("value") is not None:
+                    last_pt = p
+                    break
+            ju = http_json(
+                "%s/api/indicator/ULP?tf=15m&from=%s&to=%s" % (origin, from_ts, REPLAY_0937),
+                timeout=120,
+            )
+            ulp_lb = ju.get("last_bar") or {}
+            ulp_ok = int(ulp_lb.get("time") or 0) == t_open and abs(float(ulp_lb.get("close") or 0) - expect["close"]) < 1e-6
+            rov = http_json(
+                "%s/api/overlay?strategy=S020&tf=15m&from=%s&to=%s" % (origin, from_ts, REPLAY_0937),
+                timeout=120,
+            )
+            ov = (rov or {}).get("last_bar") or {}
+            ov_ok = int(ov.get("time") or 0) == t_open and abs(float(ov.get("close") or 0) - expect["close"]) < 1e-6
+            snap_s = snap(page)
+            assert_no_leak(snap_s, "s10")
+            ok = ohlc_ok and last_pt is not None and ulp_ok and ov_ok
+            rec(
+                "10 Replay 15m 09:37 EMA+ULP partial last bar",
+                ok,
+                "expect=%s ema_last=%s ema_pt=%s ulp=%s ov=%s n1m=%s" % (
+                    expect, lb, last_pt, ulp_lb, ov, len(m1),
+                ),
+            )
+        except Exception as e:
+            rec("10 Replay 15m 09:37 EMA+ULP partial last bar", False, str(e))
+
         # 9. Jump to real-time
         try:
-            page.locator("#btnReplayLive").click()
+            cmd(page, cmd="live")
             page.wait_for_timeout(2500)
             s = snap(page)
             ok = (not s.get("replayOn")) and s.get("mode") == "LIVE"

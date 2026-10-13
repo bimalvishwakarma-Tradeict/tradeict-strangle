@@ -8,6 +8,7 @@ import numpy as np
 
 from backtest.strategies.s020_vwap_touch import run_s020 as s020
 from backtest.strategies.s020_vwap_touch import run_s020_dev as s020_dev
+from indicators.htf import resample_tf_partial
 from strategies import register
 
 LINE_TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900}
@@ -96,7 +97,7 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
             vwap_pts.append({"time": t, "value": float(vwap_1m[i])})
 
     tf_sec = LINE_TF_SEC.get(line_tf, 60)
-    tts, to_, th, tl, tc, tv = s020_dev.resample_tf(ts, o, h, l, c, vol, tf_sec)
+    tts, to_, th, tl, tc, tv = resample_tf_partial(ts, o, h, l, c, vol, tf_sec)
     if len(tts) == 0:
         return {
             "lines": [{"id": "vwap", "kind": "vwap", "active": True, "points": vwap_pts}],

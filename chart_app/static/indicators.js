@@ -745,7 +745,7 @@
       if (!range) return;
       const tf = getTf ? getTf() : "1m";
       const pjson = JSON.stringify(it.params || {});
-      if (it._cached && it._cached.params === pjson && Number(it._cached.to) >= Number(range.to) && Number(it._cached.from) <= Number(range.from) && it._cached.tf === tf) {
+      if (it._cached && it._cached.params === pjson && Number(it._cached.to) === Number(range.to) && Number(it._cached.from) <= Number(range.from) && it._cached.tf === tf) {
         applyVisuals(it);
         return;
       }

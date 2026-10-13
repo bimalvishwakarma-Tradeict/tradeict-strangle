@@ -2088,6 +2088,7 @@
   window.addEventListener("ca-cmd", (ev) => {
     const d = ev.detail || {};
     if (d.cmd === "start" && d.ts != null) void startReplayAt(Number(d.ts));
+    if (d.cmd === "live") void exitReplayLive();
     if (d.cmd === "step") void replayStep();
     if (d.cmd === "play") {
       if (!replayOn || replayPlaying) return;

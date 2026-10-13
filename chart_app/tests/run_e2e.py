@@ -13,8 +13,9 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[2]
 SERVER = ROOT / "chart_app" / "server.py"
 TEST = ROOT / "chart_app" / "tests" / "e2e" / "test_view.py"
-URL = "http://127.0.0.1:8700/?v=view1"
-HEALTH = "http://127.0.0.1:8700/"
+PORT = int(os.environ.get("CHART_APP_E2E_PORT", "8701"))
+URL = "http://127.0.0.1:%s/?v=view1" % PORT
+HEALTH = "http://127.0.0.1:%s/" % PORT
 
 
 def wait_http(url: str, timeout: float = 40.0) -> None:
@@ -46,6 +47,7 @@ def main() -> int:
         subprocess.run([sys.executable, "-m", "pip", "install", "playwright", "-q"], check=False)
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
     env = os.environ.copy()
+    env["CHART_APP_PORT"] = str(PORT)
     proc = None
     started = False
     if not _port_up():
@@ -53,8 +55,8 @@ def main() -> int:
             [sys.executable, str(SERVER)],
             cwd=str(ROOT),
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         started = True
         wait_http(HEALTH)

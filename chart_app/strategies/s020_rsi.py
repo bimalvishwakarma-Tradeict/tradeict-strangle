@@ -8,6 +8,7 @@ import numpy as np
 
 from backtest.strategies.s020_vwap_touch import run_s020_dev as s020_dev
 from backtest.strategies.s020_vwap_touch.rsi_div import detect_rsi_div, rsi_wilder
+from indicators.htf import resample_tf_partial
 from strategies import register
 
 LINE_TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800}
@@ -64,7 +65,7 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
     tf_sec = LINE_TF_SEC.get(sig_tf, 900)
     chart_tf = str(params.get("chart_tf") or params.get("tf") or "1m")
     chart_sec = LINE_TF_SEC.get(chart_tf, 60)
-    tts, to_, th, tl, tc, tv = s020_dev.resample_tf(ts, o, h, l, c, vol, tf_sec)
+    tts, to_, th, tl, tc, tv = resample_tf_partial(ts, o, h, l, c, vol, tf_sec)
     if len(tts) == 0:
         return {"lines": [], "markers": [], "series": [], "rsi": []}
     sigs, zones = detect_rsi_div(
