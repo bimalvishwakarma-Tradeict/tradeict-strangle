@@ -341,8 +341,23 @@
       return x == null ? null : x;
     }
     function p2y(p) {
-      const y = series.priceToCoordinate(Number(p));
-      return y == null ? null : y;
+      const n = Number(p);
+      if (!Number.isFinite(n)) return null;
+      const direct = series.priceToCoordinate(n);
+      if (direct != null) return direct;
+      const candles = candlesNow();
+      if (!candles.length) return null;
+      let pA = Number(candles[0].close);
+      let pB = Number(candles[candles.length - 1].close);
+      if (pA === pB) {
+        pA = Number(candles[0].low);
+        pB = Number(candles[candles.length - 1].high);
+      }
+      if (pA === pB) pB = pA + 1;
+      const yA = series.priceToCoordinate(pA);
+      const yB = series.priceToCoordinate(pB);
+      if (yA == null || yB == null) return null;
+      return yA + (n - pA) * (yB - yA) / (pB - pA);
     }
     function xToTime(x) {
       const ts = chart.timeScale();
@@ -397,6 +412,32 @@
     function paneXY(ev) {
       const r = host.getBoundingClientRect();
       return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+    }
+    function allCharts() {
+      const list = [chart];
+      const extras = typeof opts.getPaneCharts === "function"
+        ? opts.getPaneCharts()
+        : (opts.rsiChart ? [opts.rsiChart] : []);
+      (extras || []).forEach(function (ch) {
+        if (ch && list.indexOf(ch) < 0) list.push(ch);
+      });
+      return list;
+    }
+    function setChartInteraction(on) {
+      const opt = { handleScroll: Boolean(on), handleScale: Boolean(on) };
+      allCharts().forEach(function (ch) {
+        if (ch && ch.applyOptions) ch.applyOptions(opt);
+      });
+    }
+    function lockPan(ev) {
+      if (ev) {
+        if (ev.preventDefault) ev.preventDefault();
+        if (ev.stopPropagation) ev.stopPropagation();
+      }
+      setChartInteraction(false);
+    }
+    function unlockPan() {
+      setChartInteraction(true);
     }
     function snapTP(time, price) {
       if (!magnet) return { time: time, price: price };
@@ -759,7 +800,7 @@
       const x2 = timeToX(d.t2);
       const y1 = p2y(d.p1);
       const y2 = p2y(d.p2);
-      if (x1 == null || x2 == null || y1 == null || y2 == null) return;
+      if (x1 == null || x2 == null) return;
       const left = Math.min(x1, x2);
       const right = Math.max(x1, x2);
       const ext = d.extend || "none";
@@ -781,7 +822,7 @@
         ctx.fillStyle = hexA(col, bgOp);
         ctx.fillRect(xL, Math.min(ya, yb), Math.max(1, xR - xL), Math.abs(yb - ya));
       }
-      if (d.trendOn !== false) {
+      if (d.trendOn !== false && y1 != null && y2 != null) {
         ctx.strokeStyle = d.trendColor || "#787b86";
         ctx.lineWidth = d.width || 1;
         ctx.setLineDash([6, 4]);
@@ -1012,6 +1053,7 @@
         if (handle === "target") d.target = price;
         else if (handle === "sl") d.sl = price;
         else if (handle === "right") d.t2 = time;
+        else if (handle === "left") d.t1 = time;
         else {
           d.t1 += dxT;
           d.t2 += dxT;
@@ -1137,10 +1179,10 @@
       pointerDown = true;
       const time0 = xToTime(pt.x);
       const price0 = y2p(pt.y);
-      if (time0 == null || price0 == null) return;
-      const sn = snapTP(time0, price0);
       if (tool !== "cursor") {
-        ev.preventDefault();
+        lockPan(ev);
+        if (time0 == null || price0 == null) return;
+        const sn = snapTP(time0, price0);
         if (tool === "hline") {
           draft = Object.assign(defaultStyle(), { type: "hline", price: sn.price });
           finishDraft();
@@ -1199,11 +1241,14 @@
         prim.requestUpdate();
         return;
       }
+      lockPan(ev);
       selectedId = hit.d.id;
       if (hit.d.locked) {
         prim.requestUpdate();
         return;
       }
+      if (time0 == null || price0 == null) return;
+      const sn = snapTP(time0, price0);
       drag = {
         id: hit.d.id,
         handle: hit.handle || "body",
@@ -1211,7 +1256,6 @@
         p0: sn.price,
         clone: JSON.parse(JSON.stringify(hit.d)),
       };
-      chart.applyOptions({ handleScroll: false, handleScale: false });
       prim.requestUpdate();
     }
 
@@ -1256,7 +1300,7 @@
 
     function onPointerUp() {
       pointerDown = false;
-      chart.applyOptions({ handleScroll: true, handleScale: true });
+      unlockPan();
       if (drag) {
         pushUndo();
         drag = null;
@@ -1595,7 +1639,10 @@
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (ev.key === "Escape") {
         draft = null;
+        drag = null;
+        pointerDown = false;
         tool = "cursor";
+        unlockPan();
         hideMenu();
         bump();
         return;
@@ -1636,9 +1683,11 @@
       if (hide) hide.classList.toggle("active", hideAll);
     }
 
-    host.addEventListener("pointerdown", onPointerDown);
+    host.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    host.addEventListener("pointerleave", onPointerUp);
     host.addEventListener("contextmenu", onContext);
     host.addEventListener("dblclick", function (ev) {
       if (tool !== "cursor") return;

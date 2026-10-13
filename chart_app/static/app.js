@@ -590,9 +590,21 @@
     if (!times.length) return src;
     const out = [];
     let i = 0;
+    let prevDay = null;
     for (const t of times) {
+      const day = Math.floor(Number(t) / 86400);
       while (i + 1 < src.length && Number(src[i + 1].time) <= t) i += 1;
-      if (Number(src[i].time) <= t) out.push({ time: t, value: src[i].value });
+      if (prevDay != null && day !== prevDay) {
+        out.push({ time: t });
+        prevDay = day;
+        continue;
+      }
+      prevDay = day;
+      const srcT = Number(src[i].time);
+      const srcVal = Number(src[i].value);
+      if (!Number.isFinite(srcVal) || srcT > t) continue;
+      if (Math.floor(srcT / 86400) !== day) continue;
+      out.push({ time: t, value: srcVal });
     }
     return out;
   }

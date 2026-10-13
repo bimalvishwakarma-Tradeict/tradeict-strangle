@@ -82,11 +82,18 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
 
     ts, o, h, l, c, vol = _arrays(bars)
     vwap_1m = s020.session_vwap(ts, h, l, c, vol)
-    vwap_pts = [
-        {"time": int(ts[i]), "value": float(vwap_1m[i])}
-        for i in range(len(ts))
-        if np.isfinite(vwap_1m[i])
-    ]
+    vwap_pts: list[dict[str, Any]] = []
+    prev_day: int | None = None
+    for i in range(len(ts)):
+        day = int(ts[i]) // 86400
+        t = int(ts[i])
+        if prev_day is not None and day != prev_day:
+            vwap_pts.append({"time": t})
+            prev_day = day
+            continue
+        prev_day = day
+        if np.isfinite(vwap_1m[i]):
+            vwap_pts.append({"time": t, "value": float(vwap_1m[i])})
 
     tf_sec = LINE_TF_SEC.get(line_tf, 60)
     tts, to_, th, tl, tc, tv = s020_dev.resample_tf(ts, o, h, l, c, vol, tf_sec)
