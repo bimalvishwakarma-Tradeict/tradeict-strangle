@@ -386,16 +386,7 @@
       return p == null ? null : Number(p);
     }
     function padRight() {
-      // Replay start / Follow only. Never grow offset from drawing times
-      // (future t2 would pack candles to the left).
-      const opt = { timeScale: { rightOffset: 48 } };
-      chart.applyOptions(opt);
-      const extras = typeof opts.getPaneCharts === "function"
-        ? opts.getPaneCharts()
-        : (opts.rsiChart ? [opts.rsiChart] : []);
-      (extras || []).forEach(function (ch) {
-        if (ch && ch.applyOptions) ch.applyOptions(opt);
-      });
+      if (typeof opts.onViewRequest === "function") opts.onViewRequest("follow");
     }
     function paneXY(ev) {
       const r = host.getBoundingClientRect();

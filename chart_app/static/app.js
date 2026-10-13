@@ -57,7 +57,6 @@
   const pageLoadTs = Math.floor(Date.now() / 1000);
   let alertsOn = false;
   let replayFollow = true;
-  let replayViewWidth = DEFAULT_REPLAY_BARS;
   let applyingRange = false;
   let syncingTs = false;
   let syncingXh = false;
@@ -119,10 +118,8 @@
     if (i >= 0) paneCharts[i] = Object.assign(paneCharts[i], entry);
     else {
       paneCharts.push(entry);
-      entry.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      entry.chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
         subCount += 1;
-        if (resizing || applyingRange) return;
-        pushRangePeer("pane", range);
       });
       entry.chart.subscribeCrosshairMove((param) => {
         if (syncingXh) return;
@@ -139,64 +136,43 @@
     const i = paneCharts.findIndex((p) => p.id === id);
     if (i >= 0) paneCharts.splice(i, 1);
   }
-  function rememberViewWidth(range) {
-    if (resizing || applyingRange || syncingTs) return;
-    if (!range || range.from == null || range.to == null) return;
-    const w = Number(range.to) - Number(range.from);
-    if (Number.isFinite(w) && w >= 8) replayViewWidth = w;
-  }
-  function applyLogicalRange(range) {
-    if (!range) return;
-    applyingRange = true;
-    syncingTs = true;
-    try {
-      chart.timeScale().setVisibleLogicalRange(range);
-      paneCharts.forEach((p) => {
-        try { p.chart.timeScale().setVisibleLogicalRange(range); } catch (e) {}
-      });
-    } catch (e) {}
-    syncingTs = false;
-    requestAnimationFrame(() => { applyingRange = false; });
-  }
-  function pushRangePeer(fromChart, range) {
-    if (syncingTs || !range) return;
-    if (replayOn && replayFollow && fromChart === "rsi") return;
-    syncingTs = true;
-    try {
-      if (fromChart === "main") {
-        paneCharts.forEach((p) => {
-          try { p.chart.timeScale().setVisibleLogicalRange(range); } catch (e) {}
-        });
-      }
-      if (fromChart === "pane") chart.timeScale().setVisibleLogicalRange(range);
-    } catch (e) {}
-    syncingTs = false;
-  }
-  function onUserMovedRange(range) {
-    if (applyingRange || syncingTs) return;
-    if (!replayOn || !replayFollow || !range) return;
-    const vis = visibleCandles();
-    if (!vis.length) return;
-    const lastIdx = vis.length - 1;
-    const mid = (Number(range.from) + Number(range.to)) / 2;
-    if (!Number.isFinite(mid) || Math.abs(mid - lastIdx) < 1.5) return;
-    replayFollow = false;
-    syncFollowBtn();
-  }
-  chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-    subCount += 1;
-    if (range) rememberViewWidth(range);
-    if (!resizing) pushRangePeer("main", range);
-    onUserMovedRange(range);
+  let m1Map = new Map();
+  const view = window.createViewController({
+    chart: chart,
+    host: el("chart"),
+    getPaneCharts: function () { return paneList().map((p) => p.chart); },
+    getBarSec: function () { return RES_SEC[tf] || 60; },
+    getCursorTime: function () { return replayBarOpen; },
+    getLastTime: function () {
+      const vis = visibleCandles();
+      return vis.length ? Number(vis[vis.length - 1].time) : null;
+    },
+    getOldestTime: function () { return oldestCandleTime(); },
+    isReplay: function () { return replayOn; },
+    isFollow: function () { return replayFollow; },
+    isHistory: function () { return historyMode; },
+    isLoading: function () { return loadingLeft || loadingRight || resizing || applyingRange; },
+    onFollowOff: function () {
+      replayFollow = false;
+      syncFollowBtn();
+    },
+    onNeedOlder: function () { void loadOlder(); },
+    onNeedNewer: function () { void loadNewer(); },
+    onLogical: function () {
+      subCount += 1;
+      updateGoRtBtn();
+    },
+    onUserRange: function () { updateGoRtBtn(); },
   });
+  window.__caView = view;
   function centerReplayCursor() {
     if (!replayOn || replayBarOpen == null) return;
-    const vis = visibleCandles();
-    if (!vis.length) return;
-    const idx = vis.length - 1;
-    const width = replayViewWidth >= 8 ? replayViewWidth : DEFAULT_REPLAY_BARS;
-    const half = width / 2;
-    applyLogicalRange({ from: idx - half, to: idx + half });
+    view.request("follow");
+  }
+  function viewModeSync() {
+    if (replayOn) view.request("set-mode", { mode: replayPlaying ? "REPLAY_PLAYING" : "REPLAY_PAUSED" });
+    else if (historyMode) view.request("set-mode", { mode: "HISTORY" });
+    else view.request("set-mode", { mode: "LIVE" });
   }
 
   function sortedCandles() {
@@ -224,7 +200,7 @@
   }
   function replayCursorClose() {
     if (!replayOn || replayBarOpen == null) return null;
-    return Number(replayBarOpen) + barSecNow();
+    return Number(replayBarOpen) + 60;
   }
   function maxShowTime() {
     if (replayOn && replayBarOpen != null) return Number(replayBarOpen);
@@ -276,6 +252,7 @@
     paintOhlcLegend(last);
     updateGoRtBtn();
     leakCheck("applyCandles");
+    if (mode !== "step") view.request("after-data", { reason: mode || "setData" });
   }
   function completedSigClose(cursorClose) {
     const sec = sigTfSec();
@@ -329,15 +306,14 @@
     box.title = "Candles: " + n + " | from " + fromTxt + " | to " + toTxt + " | " + mode + " | " + phase;
   }
 
-  async function fetchCandles(opts) {
-    const q = new URLSearchParams({ tf, limit: String((opts && opts.limit) || 1500) });
+  async function fetchCandlesTf(resTf, opts) {
+    const q = new URLSearchParams({ tf: resTf, limit: String((opts && opts.limit) || 1500) });
     let start = opts && opts.start != null ? Number(opts.start) : null;
     let end = opts && opts.end != null ? Number(opts.end) : null;
     const cap = maxShowTime();
     if (replayOn && cap != null && !(opts && opts.allowAhead)) {
-      const to = cap;
-      if (end == null || end > to) end = to;
-      if (start != null && start > to) {
+      if (end == null || end > cap) end = cap;
+      if (start != null && start > cap) {
         return { candles: [], reached_now: false, first: null, last: null };
       }
     }
@@ -346,8 +322,63 @@
     const r = await fetch("/api/candles?" + q.toString());
     return r.json();
   }
+  async function fetchCandles(opts) {
+    return fetchCandlesTf(tf, opts);
+  }
+  function mergeM1(rows) {
+    let n = 0;
+    (rows || []).forEach((c) => {
+      const t = Number(c && c.time);
+      if (!Number.isFinite(t) || t < 1e9) return;
+      if (!m1Map.has(t)) n += 1;
+      m1Map.set(t, c);
+    });
+    return n;
+  }
+  function bucketOpen(t, sec) {
+    return Math.floor(Number(t) / sec) * sec;
+  }
+  function aggregateM1(capOpen, tfSec) {
+    const buckets = new Map();
+    const cap = Number(capOpen);
+    m1Map.forEach((c) => {
+      const ts = Number(c.time);
+      if (!Number.isFinite(ts) || ts > cap) return;
+      const b = bucketOpen(ts, tfSec);
+      let o = buckets.get(b);
+      if (!o) {
+        buckets.set(b, {
+          time: b,
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close),
+          volume: Number(c.volume || 0),
+        });
+      } else {
+        o.high = Math.max(o.high, Number(c.high));
+        o.low = Math.min(o.low, Number(c.low));
+        o.close = Number(c.close);
+        o.volume += Number(c.volume || 0);
+      }
+    });
+    return [...buckets.values()].sort((a, b) => a.time - b.time);
+  }
+  function rebuildReplayCandles(applyMode) {
+    if (!replayOn || replayBarOpen == null) return;
+    const rows = aggregateM1(replayBarOpen, barSecNow());
+    candleMap = new Map();
+    rows.forEach((c) => candleMap.set(c.time, c));
+    applyCandles(applyMode);
+  }
+  function last1mOfBar(barOpen, barSec) {
+    const sec = Number(barSec) || 60;
+    const t = Number(barOpen);
+    if (sec <= 60) return t;
+    return t + sec - 60;
+  }
 
-  async function loadInitial() {
+  async function loadInitial(opts) {
     candleMap = new Map();
     historyEnd = false;
     historyMode = false;
@@ -357,10 +388,10 @@
       const j = await fetchCandles({ limit: 1500 });
       mergeRows(j.candles || []);
       applyCandles();
-      if (!replayOn && candleMap.size) chart.timeScale().scrollToRealTime();
+      if (!(opts && opts.keepView) && !replayOn && candleMap.size) view.request("jump-live");
       await new Promise((r) => requestAnimationFrame(r));
       await reloadOverlay();
-      pushRangePeer("main", chart.timeScale().getVisibleLogicalRange());
+      view.request("sync-panes");
     } finally {
       loadingLeft = false;
       updateHistStatus();
@@ -388,10 +419,8 @@
         if (fwd.reached_now) historyMode = false;
       }
       applyCandles();
-      chart.timeScale().setVisibleRange({
-        from: centerTs - 150 * barSec,
-        to: noFwd ? centerTs : centerTs + 150 * barSec,
-      });
+      view.request("goto", { center: centerTs });
+      if (noFwd) view.request("tf-change", { center: centerTs });
       await reloadOverlay(true);
     } finally {
       loadingLeft = false;
@@ -406,18 +435,33 @@
     const oldest = oldestCandleTime();
     if (oldest == null) return;
     loadingLeft = true;
+    view.request("load-older-start");
     updateHistStatus();
     try {
-      const j = await fetchCandles({ end: oldest - 1, limit: 1500 });
-      const n = mergeRows(j.candles || []);
-      if (n === 0) {
-        historyEnd = true;
+      if (replayOn) {
+        let oldest1 = null;
+        m1Map.forEach((c) => {
+          const t = Number(c.time);
+          if (oldest1 == null || t < oldest1) oldest1 = t;
+        });
+        const j = await fetchCandlesTf("1m", { end: (oldest1 != null ? oldest1 : oldest) - 1, limit: 1500 });
+        const n = mergeM1(j.candles || []);
+        if (n === 0) historyEnd = true;
+        else {
+          rebuildReplayCandles();
+          await reloadOverlay();
+        }
       } else {
-        applyCandles();
-        await reloadOverlay();
-        pushRangePeer("main", chart.timeScale().getVisibleLogicalRange());
+        const j = await fetchCandles({ end: oldest - 1, limit: 1500 });
+        const n = mergeRows(j.candles || []);
+        if (n === 0) historyEnd = true;
+        else {
+          applyCandles();
+          await reloadOverlay();
+        }
       }
     } finally {
+      view.request("load-older-end");
       loadingLeft = false;
       updateHistStatus();
     }
@@ -430,37 +474,25 @@
     if (newest == null) return;
     const barSec = RES_SEC[tf] || 60;
     loadingRight = true;
+    view.request("load-newer-start");
     updateHistStatus();
     try {
       const j = await fetchCandles({ start: newest + barSec, limit: 1500 });
       mergeRows(j.candles || []);
       applyCandles();
       await reloadOverlay();
-      pushRangePeer("main", chart.timeScale().getVisibleLogicalRange());
       if (j.reached_now) {
         historyMode = false;
+        viewModeSync();
         updateHistStatus();
         connectWs();
       }
     } finally {
+      view.request("load-newer-end");
       loadingRight = false;
       updateHistStatus();
     }
   }
-
-  chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-    subCount += 1;
-    if (!range || loadingLeft || loadingRight || resizing || applyingRange) return;
-    const barSec = RES_SEC[tf] || 60;
-    const oldest = oldestCandleTime();
-    const newest = newestCandleTime();
-    if (!historyEnd && oldest != null && range.from <= oldest + 20 * barSec) {
-      loadOlder();
-    }
-    if (!replayOn && historyMode && newest != null && range.to >= newest - 20 * barSec) {
-      loadNewer();
-    }
-  });
 
   function markerTooltip(time) {
     const t = Number(time);
@@ -831,11 +863,7 @@
     }
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        if (replayOn && replayFollow) centerReplayCursor();
-        else {
-          const r = chart.timeScale().getVisibleLogicalRange();
-          if (r) pushRangePeer("main", r);
-        }
+        view.request("indicator");
       });
     });
   }
@@ -1312,60 +1340,59 @@
   }
 
   async function ensureNextBar() {
-    const all = sortedCandles();
     const cap = Number(replayBarOpen);
-    const nxt = all.find((c) => Number(c.time) > cap);
+    const nextT = cap + 60;
+    if (m1Map.has(nextT)) return m1Map.get(nextT);
+    let nxt = null;
+    m1Map.forEach((c) => {
+      const t = Number(c.time);
+      if (t > cap && (nxt == null || t < Number(nxt.time))) nxt = c;
+    });
     if (nxt) return nxt;
-    const start = cap + barSecNow();
-    const j = await fetchCandles({ start: start, end: start, limit: 1, allowAhead: true });
-    mergeRows(j.candles || []);
-    return sortedCandles().find((c) => Number(c.time) > cap) || null;
+    const j = await fetchCandlesTf("1m", { start: nextT, end: nextT, limit: 1, allowAhead: true });
+    mergeM1(j.candles || []);
+    return m1Map.get(nextT) || null;
   }
 
   async function startReplayAt(openTs) {
     const want = Number(openTs);
     if (!Number.isFinite(want)) return;
-    let snapped = snapBarOpen(want);
-    if (snapped == null || Math.abs(snapped - want) > barSecNow() * 2) {
-      historyMode = true;
-      disconnectWs();
-      replayOn = true;
-      replayBarOpen = want;
-      await loadAround(want, { noForward: true });
-      snapped = snapBarOpen(want);
-    }
-    if (snapped == null) return;
     stopReplayTimer();
-    replayOn = true;
-    replayPicking = false;
-    replayBarOpen = snapped;
-    replaySigs = [];
-    lastOverlaySigClose = -1;
     historyMode = true;
     disconnectWs();
+    replayOn = true;
+    replayPicking = false;
+    replayFollow = true;
+    replaySigs = [];
+    lastOverlaySigClose = -1;
     if (overlayTimer) {
       clearTimeout(overlayTimer);
       overlayTimer = null;
     }
-    replayFollow = true;
-    replayViewWidth = DEFAULT_REPLAY_BARS;
+    replayBarOpen = last1mOfBar(want, barSecNow());
+    m1Map = new Map();
+    candleMap = new Map();
     applyingRange = true;
-    applyCandles();
+    viewModeSync();
+    try {
+      const back = await fetchCandlesTf("1m", { end: replayBarOpen, limit: 1500 });
+      mergeM1(back.candles || []);
+      rebuildReplayCandles();
+    } finally {
+      applyingRange = false;
+    }
     showReplayBar(true);
     setReplayButtons();
     updateHistStatus();
     renderReplayStats();
+    syncFollowBtn();
     await reloadOverlay(true);
-    if (drawingsApi && drawingsApi.padRight) drawingsApi.padRight();
-    centerReplayCursor();
-    requestAnimationFrame(() => { applyingRange = false; });
-    void fetchCandles({
-      start: Number(replayBarOpen) + barSecNow(),
+    view.request("replay-start");
+    void fetchCandlesTf("1m", {
+      start: Number(replayBarOpen) + 60,
       limit: 1500,
       allowAhead: true,
-    }).then((j) => {
-      mergeRows(j.candles || []);
-    }).catch(function () {});
+    }).then((j) => { mergeM1(j.candles || []); }).catch(function () {});
   }
 
   async function replayStep() {
@@ -1375,26 +1402,23 @@
     if (!nxt) {
       stopReplayTimer();
       setReplayButtons();
+      viewModeSync();
       return;
     }
     replayBarOpen = Number(nxt.time);
-    replayFollow = true;
-    syncFollowBtn();
     applyingRange = true;
-    applyCandles("step");
+    rebuildReplayCandles("step");
     paintOverlay(overlayPayload);
     updateHistStatus();
     renderReplayStats();
     const sigClose = completedSigClose(replayCursorClose());
     if (sigClose > lastOverlaySigClose) scheduleOverlay(false);
     else scheduleIndicators();
-    centerReplayCursor();
+    view.request("replay-step");
     lastStepMs = performance.now() - t0;
     window.__caStepMs = lastStepMs;
-    requestAnimationFrame(() => {
-      centerReplayCursor();
-      applyingRange = false;
-    });
+    requestAnimationFrame(() => { applyingRange = false; });
+    viewModeSync();
   }
 
   function replayPlayLoop() {
@@ -1416,9 +1440,11 @@
     replaySigs = [];
     lastOverlaySigClose = -1;
     historyMode = false;
+    m1Map = new Map();
     showReplayBar(false);
     setReplayButtons();
     renderReplayStats();
+    viewModeSync();
     await loadInitial();
     connectWs();
   }
@@ -1453,32 +1479,33 @@
       if (!replayOn) return;
       replayFollow = true;
       syncFollowBtn();
-      if (drawingsApi && drawingsApi.padRight) drawingsApi.padRight();
-      centerReplayCursor();
+      view.request("follow");
     });
   }
   if (el("btnReplayLive")) el("btnReplayLive").addEventListener("click", () => exitReplayLive());
 
   el("tf").addEventListener("change", async () => {
     tf = el("tf").value;
+    const savedCenter = jumpCenterTime();
+    view.request("capture");
     if (replayOn) {
-      const cur = replayCursorClose() || jumpCenterTime();
       disconnectWs();
-      await loadAround(cur, { noForward: true });
-      replayBarOpen = snapBarOpen(cur - 1);
       lastOverlaySigClose = -1;
-      applyCandles();
+      applyingRange = true;
+      rebuildReplayCandles();
+      applyingRange = false;
       await reloadOverlay(true);
-      if (replayFollow) centerReplayCursor();
+      view.request("tf-change", { center: replayBarOpen });
       setReplayButtons();
       return;
     }
     if (historyMode) {
-      const center = jumpCenterTime();
       disconnectWs();
-      await loadAround(center);
+      await loadAround(savedCenter);
+      view.request("tf-change", { center: savedCenter });
     } else {
-      await loadInitial();
+      await loadInitial({ keepView: true });
+      view.request("tf-change", { center: savedCenter });
       connectWs();
     }
   });
@@ -1488,10 +1515,26 @@
     if (!v) return;
     const ms = new Date(v + "+05:30").getTime();
     if (!Number.isFinite(ms)) return;
-    historyMode = true;
-    disconnectWs();
+    const ts = Math.floor(ms / 1000);
     if (el("gotoModal")) el("gotoModal").classList.remove("open");
-    await loadAround(Math.floor(ms / 1000));
+    if (replayOn) {
+      stopReplayTimer();
+      replayBarOpen = bucketOpen(ts, 60);
+      applyingRange = true;
+      const need = await fetchCandlesTf("1m", { end: replayBarOpen, limit: 1500 });
+      mergeM1(need.candles || []);
+      rebuildReplayCandles();
+      applyingRange = false;
+      viewModeSync();
+      await reloadOverlay(true);
+      view.request("replay-start");
+      return;
+    }
+    historyMode = true;
+    viewModeSync();
+    disconnectWs();
+    await loadAround(ts);
+    view.request("goto", { center: ts });
   });
 
   el("btnLive").addEventListener("click", async () => {
@@ -1538,7 +1581,7 @@
       li.onclick = () => {
         const from = t.entry_ts - 3600;
         const to = (t.exit_ts || t.entry_ts) + 3600;
-        chart.timeScale().setVisibleRange({ from, to });
+        view.request("trade-range", { from, to });
       };
       ul.appendChild(li);
       tradeMarks.push({
@@ -1565,34 +1608,17 @@
     if (resizeRaf) return;
     resizeRaf = requestAnimationFrame(() => {
       resizeRaf = 0;
-      const saved = chart.timeScale().getVisibleLogicalRange();
       resizing = true;
-      syncingTs = true;
       applyingRange = true;
       const cw = el("chart").clientWidth;
       const chgt = el("chart").clientHeight;
-      try {
-        if (typeof chart.resize === "function") chart.resize(cw, chgt);
-        else chart.applyOptions({ width: cw, height: chgt });
-      } catch (e) {}
-      paneCharts.forEach((p) => {
+      const panes = paneCharts.map((p) => {
         const host = p.host || el("chart");
         const h = Math.max(60, (host.clientHeight || 132) - 6);
-        try {
-          if (p.chart && typeof p.chart.resize === "function") p.chart.resize(host.clientWidth, h);
-          else if (p.chart) p.chart.applyOptions({ width: host.clientWidth, height: h });
-        } catch (e) {}
+        return { chart: p.chart, width: host.clientWidth, height: h };
       });
-      if (saved) {
-        try { chart.timeScale().setVisibleLogicalRange(saved); } catch (e) {}
-        paneCharts.forEach((p) => {
-          try { p.chart.timeScale().setVisibleLogicalRange(saved); } catch (e) {}
-        });
-      } else if (replayOn && replayFollow) {
-        centerReplayCursor();
-      }
+      view.request("resize", { width: cw, height: chgt, panes: panes });
       leakCheck("resize");
-      syncingTs = false;
       requestAnimationFrame(() => {
         applyingRange = false;
         resizing = false;
@@ -1621,6 +1647,7 @@
         return Number(vis[vis.length - 1].close);
       },
       getPaneCharts: function () { return paneList().map((p) => p.chart); },
+      onViewRequest: function (ev) { view.request(ev); },
     });
   }
   if (typeof window.createChartIndicators === "function") {
@@ -1634,6 +1661,7 @@
       registerPane: upsertPane,
       unregisterPane: dropPane,
       onResize: function () { sizeCharts(); },
+      resizeChart: function (ch, w, h) { view.resizeChart(ch, w, h); },
       onAuxSettings: function () { openRightPanel("paneStrat"); },
       onAuxRemove: function () {
         const it = rsiInst();
@@ -1909,7 +1937,7 @@
       from = oldest != null ? oldest : now - 86400;
     }
     void loadAround(Math.floor((from + now) / 2)).then(() => {
-      chart.timeScale().setVisibleRange({ from, to: now + barSecNow() * 5 });
+      view.request("trade-range", { from, to: now + barSecNow() * 5 });
     });
   }
   function tickClock() {
@@ -2008,26 +2036,10 @@
         if (replayOn) {
           replayFollow = true;
           syncFollowBtn();
-          centerReplayCursor();
+          view.request("follow");
           return;
         }
-        const vis = visibleCandles();
-        if (!vis.length) return;
-        const lastIdx = vis.length - 1;
-        const lr = chart.timeScale().getVisibleLogicalRange();
-        const width = lr && Number.isFinite(Number(lr.to) - Number(lr.from))
-          ? Math.max(20, Number(lr.to) - Number(lr.from))
-          : 80;
-        try {
-          chart.timeScale().setVisibleLogicalRange({
-            from: lastIdx - width + 10,
-            to: lastIdx + 10,
-          });
-        } catch (e) {}
-        try { chart.timeScale().scrollToPosition(0, false); } catch (e) {}
-        if (!replayOn) {
-          try { chart.timeScale().scrollToRealTime(); } catch (e) {}
-        }
+        view.request("jump-live");
         requestAnimationFrame(() => updateGoRtBtn());
       });
     }
@@ -2077,38 +2089,47 @@
     const d = ev.detail || {};
     if (d.cmd === "start" && d.ts != null) void startReplayAt(Number(d.ts));
     if (d.cmd === "step") void replayStep();
+    if (d.cmd === "play") {
+      if (!replayOn || replayPlaying) return;
+      replayPlaying = true;
+      setReplayButtons();
+      viewModeSync();
+      replayPlayLoop();
+    }
+    if (d.cmd === "pause") {
+      stopReplayTimer();
+      setReplayButtons();
+      viewModeSync();
+    }
     if (d.cmd === "follow") {
       replayFollow = true;
       syncFollowBtn();
-      if (drawingsApi && drawingsApi.padRight) drawingsApi.padRight();
-      centerReplayCursor();
+      view.request("follow");
     }
-    if (d.cmd === "shift") {
-      const lr = chart.timeScale().getVisibleLogicalRange();
-      if (lr) {
-        const delta = Number(d.delta) || -20;
-        chart.timeScale().setVisibleLogicalRange({
-          from: Number(lr.from) + delta,
-          to: Number(lr.to) + delta,
-        });
-      }
+    if (d.cmd === "shift") view.request("shift", { delta: d.delta });
+    if (d.cmd === "zoom") view.request("zoom");
+    if (d.cmd === "tf" && d.tf) {
+      el("tf").value = d.tf;
+      document.querySelectorAll("#tfBar [data-tf]").forEach((b) => {
+        b.classList.toggle("active", b.getAttribute("data-tf") === d.tf);
+      });
+      el("tf").dispatchEvent(new Event("change"));
     }
-    if (d.cmd === "zoom") {
-      const lr = chart.timeScale().getVisibleLogicalRange();
-      if (lr) {
-        const mid = (Number(lr.from) + Number(lr.to)) / 2;
-        const half = Math.max(8, (Number(lr.to) - Number(lr.from)) / 4);
-        chart.timeScale().setVisibleLogicalRange({ from: mid - half, to: mid + half });
-      }
-    }
+    if (d.cmd === "panel") openRightPanel(d.pane || "paneTrades");
+    if (d.cmd === "size") sizeCharts();
+    if (d.cmd === "addInd" && indApi && indApi.add) void indApi.add(d.id || "ULP");
+    if (d.cmd === "removeInd" && indApi && indApi.removeLast) indApi.removeLast();
+    if (d.cmd === "addStrat") addStrat(d.id || "S020_RSI");
     if (d.cmd === "draw" && drawingsApi) {
       const item = d.item || {};
       drawingsApi.add(item);
       window.__caDraw = drawingsApi.list();
+      view.request("drawing");
     }
     if (d.cmd === "drawList") {
       window.__caDraw = drawingsApi ? drawingsApi.list() : [];
     }
+    if (d.cmd === "setTool" && drawingsApi && d.tool) drawingsApi.setTool(d.tool);
     if (d.cmd === "xh" && d.time != null) {
       const bar = candleMap.get(Number(d.time));
       const px = bar ? Number(bar.close) : 0;
@@ -2116,25 +2137,40 @@
         chart.setCrosshairPosition(px, Number(d.time), series);
       }
     }
-    if (d.cmd === "snap") {
+    if (d.cmd === "snap" || d.cmd === "test") {
       const vis = visibleCandles();
       const last = vis.length ? vis[vis.length - 1] : null;
       const lr = chart.timeScale().getVisibleLogicalRange();
+      const vr = chart.timeScale().getVisibleRange();
       const rr = paneCharts[0] ? paneCharts[0].chart.timeScale().getVisibleLogicalRange() : null;
-      window.__caSnap = {
+      const host = el("chart");
+      const cx = host ? host.clientWidth / 2 : 0;
+      let tCenter = null;
+      try { tCenter = chart.timeScale().coordinateToTime(cx); } catch (e) {}
+      const snap = {
         n: vis.length,
+        tf,
         lastClose: last ? last.close : null,
         lastTime: last ? last.time : null,
         lastIst: last ? fmtIst(last.time) : null,
         lr,
+        vr,
         rr,
         replayBarOpen,
         replayFollow,
-        mid: lr ? (Number(lr.from) + Number(lr.to)) / 2 : null,
+        replayOn,
+        replayPlaying,
+        historyMode,
+        mode: view.mode(),
+        ws: Boolean(ws),
+        mid: vr ? (Number(vr.from) + Number(vr.to)) / 2 : null,
+        tCenter: tCenter != null ? Number(tCenter) : null,
         lastIdx: vis.length ? vis.length - 1 : null,
         leak: leakCheck("snap"),
         stepMs: lastStepMs,
         subs: subCount,
+        m1n: m1Map.size,
+        lastPartial: last && replayOn ? last : null,
         xAlign: (function () {
           if (!last || !paneCharts[0]) return null;
           const x = chart.timeScale().timeToCoordinate(last.time);
@@ -2143,6 +2179,8 @@
           return { x, tM, tR };
         })(),
       };
+      window.__caSnap = snap;
+      window.__caTest = snap;
     }
   });
 })();

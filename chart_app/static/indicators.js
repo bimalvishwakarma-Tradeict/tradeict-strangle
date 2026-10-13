@@ -364,7 +364,8 @@
           wrap.style.height = nh + "px";
           paneHMap[it.uid] = nh;
           if (it._pane && it._pane.chart) {
-            it._pane.chart.applyOptions({ width: wrap.clientWidth, height: nh - 6 });
+            if (typeof opts.resizeChart === "function") opts.resizeChart(it._pane.chart, wrap.clientWidth, nh - 6);
+            else it._pane.chart.applyOptions({ width: wrap.clientWidth, height: nh - 6 });
           }
           if (opts.onResize) opts.onResize();
         }
@@ -471,7 +472,8 @@
       const w = wrap.clientWidth;
       const nh = Math.max(60, h - 6);
       try {
-        if (typeof it._pane.chart.resize === "function") it._pane.chart.resize(w, nh);
+        if (typeof opts.resizeChart === "function") opts.resizeChart(it._pane.chart, w, nh);
+        else if (typeof it._pane.chart.resize === "function") it._pane.chart.resize(w, nh);
         else it._pane.chart.applyOptions({ width: w, height: nh });
       } catch (e) {}
       if (it._pane.fillPrim) it._pane.fillPrim.requestUpdate();
@@ -884,6 +886,11 @@
       paneCharts: paneCharts,
       setAuxPane: setAuxPane,
       renderCatalog: renderCatalog,
+      add: addInstance,
+      removeLast: function () {
+        if (!instances.length) return;
+        removeInstance(instances[instances.length - 1].uid);
+      },
     };
   }
 
