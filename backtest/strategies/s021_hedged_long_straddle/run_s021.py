@@ -4,6 +4,7 @@
 python backtest/strategies/s021_hedged_long_straddle/run_s021.py --month 2025-06 --max-days 3 --m 2 --tgt 400 --sl 400 --a1 50 --a2 50 --baselines
 python backtest/strategies/s021_hedged_long_straddle/run_s021.py --month 2025-06 --stage1
 python backtest/strategies/s021_hedged_long_straddle/run_s021.py --rsi-entry --max-days 5 --tf 15m --variant m3_noadj --tgt 400 --sl 400
+python backtest/strategies/s021_hedged_long_straddle/run_s021.py --rsi-entry --rsi-quick --month 2025-06
 """
 
 from __future__ import annotations
@@ -81,6 +82,7 @@ RSI_VARIANTS: tuple[dict[str, Any], ...] = (
     {"vname": "m3_adj_50_50", "m": 3, "mode": "adj", "a1": 50, "a2": 50},
 )
 C2_VNAMES = ("m0", "m3_noadj", "m3_adj_30_30")
+RSI_QUICK_TSL: tuple[tuple[int, int], ...] = ((300, 300), (400, 400), (500, 500))
 ADJ_COLS = (
     "trade_id", "ts_ist", "adj_no", "kind", "state_from", "state_to",
     "closed_role", "closed_strike", "closed_prem", "opened_role",
@@ -345,23 +347,22 @@ def rsi_work_cells(
     vnames: list[str],
     tgts: list[int],
     sls: list[int],
+    pairs: list[tuple[int, int]] | None = None,
 ) -> list[dict[str, Any]]:
     by_name = {str(v["vname"]): v for v in RSI_VARIANTS}
+    tsl: list[tuple[int, int]]
+    if pairs is not None:
+        tsl = [(int(a), int(b)) for a, b in pairs]
+    else:
+        tsl = [(int(tgt), int(slv)) for tgt in tgts for slv in sls]
     out: list[dict[str, Any]] = []
     for tf in tfs:
         for vn in vnames:
             base = by_name[str(vn)]
-            for tgt in tgts:
-                for slv in sls:
-                    rec = dict(base)
-                    rec.update(
-                        {
-                            "tf": str(tf),
-                            "tgt": int(tgt),
-                            "sl": int(slv),
-                        }
-                    )
-                    out.append(rec)
+            for tgt, slv in tsl:
+                rec = dict(base)
+                rec.update({"tf": str(tf), "tgt": int(tgt), "sl": int(slv)})
+                out.append(rec)
     return out
 
 
@@ -1356,6 +1357,7 @@ def main() -> None:
     ap.add_argument("--baselines", action="store_true")
     ap.add_argument("--stage1", action="store_true")
     ap.add_argument("--rsi-entry", action="store_true")
+    ap.add_argument("--rsi-quick", action="store_true")
     ap.add_argument("--tf", default="")
     ap.add_argument("--variant", default="")
     ap.add_argument("--fresh", action="store_true")
@@ -1368,6 +1370,10 @@ def main() -> None:
     reset_mark_cache(max_bytes=int(float(args.cache_gb) * 1024**3))
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rsi_mode = bool(args.rsi_entry)
+    rsi_quick = bool(args.rsi_quick)
+    if rsi_quick and not rsi_mode:
+        print("--rsi-quick requires --rsi-entry", flush=True)
+        sys.exit(2)
     ckpt_path = CKPT_R if rsi_mode else CKPT
     if args.fresh and ckpt_path.exists():
         ckpt_path.unlink()
@@ -1405,7 +1411,13 @@ def main() -> None:
             sys.exit(2)
         tgts = list(TSL) if int(args.tgt) < 0 else [int(args.tgt)]
         sls = list(TSL) if int(args.sl) < 0 else [int(args.sl)]
-        work = rsi_work_cells(rsi_tfs, rsi_vnames, tgts, sls)
+        pairs: list[tuple[int, int]] | None = None
+        if rsi_quick:
+            if int(args.tgt) >= 0 and int(args.sl) >= 0:
+                pairs = [(int(args.tgt), int(args.sl))]
+            else:
+                pairs = list(RSI_QUICK_TSL)
+        work = rsi_work_cells(rsi_tfs, rsi_vnames, tgts, sls, pairs=pairs)
     elif args.stage1:
         work = stage1_cells()
     else:
@@ -1419,10 +1431,11 @@ def main() -> None:
     smoke = bool(max_days)
     print(
         f"cells={len(work)} month={month} rsi_entry={rsi_mode} "
-        f"entry0={s018.ist_str(start_entry)}",
+        f"rsi_quick={rsi_quick} entry0={s018.ist_str(start_entry)}",
         flush=True,
     )
 
+    t_load = time.perf_counter()
     spot = s018.load_spot_1m(args.csv)
     ts, o, h, l, c, vol = s020.bars_1m_vol(spot)
     lo = start_ts - (3 * 86400 if rsi_mode else 86400)
@@ -1430,6 +1443,8 @@ def main() -> None:
     sel = (ts >= lo) & (ts < hi)
     ts, o, h, l, c, vol = ts[sel], o[sel], h[sel], l[sel], c[sel], vol[sel]
     spot_c = {int(t): float(x) for t, x in zip(ts, c)}
+    data_load_s = time.perf_counter() - t_load
+    print(f"data_load_s={data_load_s:.2f}", flush=True)
     inner = MarksStore()
     store = d.MonthGuardStore(inner, win_from - timedelta(days=1), win_to + timedelta(days=14))
     _BOOK = MarkBook(start_ts - 86400, cutoff + 14 * 86400)
@@ -1440,6 +1455,7 @@ def main() -> None:
     done = {} if args.fresh else s020.load_ckpt(ckpt_path)
     arch_mode = (
         "s021r-smoke" if (rsi_mode and smoke)
+        else "s021r-quick" if rsi_quick
         else "s021r" if rsi_mode
         else "smoke" if smoke
         else ("stage1" if args.stage1 else "grid")
@@ -1463,6 +1479,7 @@ def main() -> None:
     meta["mark_cache"] = True
     meta["cycle_memo"] = True
     meta["rsi_entry"] = bool(rsi_mode)
+    meta["rsi_quick"] = bool(rsi_quick)
     if rsi_mode:
         meta["exp_obh"] = float(RSI_EXP_OBH)
         meta["exp_obl"] = float(RSI_EXP_OBL)
@@ -1677,8 +1694,9 @@ def main() -> None:
         f"S021 month={month} {win_from}..{win_to}",
         (
             f"cells_run={len(done)} work={n_work} stage1={bool(args.stage1)} "
-            f"rsi_entry={rsi_mode}"
+            f"rsi_entry={rsi_mode} rsi_quick={rsi_quick}"
         ),
+        f"data_load_s={data_load_s:.2f}",
     ]
     if rsi_mode:
         for tf, (n_raw, n_kept, _) in sig_stats.items():
@@ -1716,6 +1734,35 @@ def main() -> None:
     txtp = OUT_DIR / f"{'s021r' if rsi_mode else 's021'}_{month}_{stamp}.txt"
     txtp.write_text("\n".join(report) + "\n", encoding="utf-8")
     print("\n".join(report), flush=True)
+    if rsi_mode:
+        print(
+            f"{'TF':<5} {'variant':<16} {'T/SL':<9} {'n':>4} {'mean_net':>10} "
+            f"{'gross':>10} {'broker':>9} {'slip':>9} {'win%':>7} {'C2':>10}",
+            flush=True,
+        )
+        rows_tbl = [
+            st for st in done.values()
+            if str(st.get("key", "")).startswith("s021r|")
+        ]
+        rows_tbl.sort(
+            key=lambda st: (
+                str(st.get("tf", "")),
+                str(st.get("vname", "")),
+                int(st.get("tgt") or 0),
+                int(st.get("sl") or 0),
+            )
+        )
+        for st in rows_tbl:
+            tsl = f"{int(st.get('tgt') or 0)}/{int(st.get('sl') or 0)}"
+            c2v = st.get("c2", float("nan"))
+            print(
+                f"{str(st.get('tf', '')):<5} {str(st.get('vname', '')):<16} {tsl:<9} "
+                f"{int(st.get('n') or 0):>4} {s020._fnum(st.get('mean'), 2):>10} "
+                f"{s020._fnum(st.get('gross'), 2):>10} {s020._fnum(st.get('fee'), 2):>9} "
+                f"{s020._fnum(st.get('slip'), 2):>9} {s020._fnum(st.get('win'), 1):>7} "
+                f"{s020._fnum(c2v, 2):>10}",
+                flush=True,
+            )
     print(f"wrote {txtp} elapsed={time.perf_counter() - t_all:.0f}s", flush=True)
     archive.finalize()
     store.close()
