@@ -19,7 +19,11 @@
       grid-column: 1; grid-row: 2; display: flex; flex-direction: column; gap: 4px;
       padding: 6px 4px; background: var(--panel); border-right: 1px solid var(--bd); overflow-y: auto;
     }
-    #drawBar button { width: 32px; height: 28px; padding: 0; font-size: 13px; line-height: 1; }
+    #drawBar button {
+      width: 32px; height: 28px; padding: 0; font-size: 13px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #drawBar button svg { width: 16px; height: 16px; display: block; }
     #drawBar hr { border: 0; border-top: 1px solid var(--bd); margin: 4px 0; }
     #drawMenu {
       position: fixed; z-index: 50; background: var(--panel); border: 1px solid var(--bd);
@@ -226,12 +230,20 @@
       <button type="button" data-tool="trend" title="Trend line">╱</button>
       <button type="button" data-tool="vline" title="Vertical line">│</button>
       <button type="button" data-tool="rect" title="Rectangle">▭</button>
-      <button type="button" data-tool="text" title="Text note">T</button>
+      <button type="button" data-tool="text" title="Text">T</button>
       <button type="button" data-tool="long" title="Long position">L▲</button>
       <button type="button" data-tool="short" title="Short position">S▼</button>
-      <button type="button" data-tool="fib" title="Fib retracement">Φ</button>
+      <button type="button" data-tool="fib" title="Fib retracement" aria-label="Fib retracement">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="none" stroke="currentColor" stroke-width="1.7" d="M4 20 L20 4" />
+          <path fill="none" stroke="currentColor" stroke-width="1.5" d="M5 18 H19" />
+          <path fill="none" stroke="currentColor" stroke-width="1.5" d="M6 14 H18" />
+          <path fill="none" stroke="currentColor" stroke-width="1.5" d="M7 10 H17" />
+          <path fill="none" stroke="currentColor" stroke-width="1.5" d="M8 6 H16" />
+        </svg>
+      </button>
       <hr />
-      <button type="button" id="drawMagnet" title="Magnet OHLC">M</button>
+      <button type="button" id="drawMagnet" title="Magnet">M</button>
       <button type="button" id="drawHide" title="Hide all">H</button>
       <button type="button" id="drawDeleteAll" title="Delete all">✕</button>
     </div>
@@ -508,8 +520,8 @@
   </div>
   <input id="drawTextInput" hidden placeholder="Note…" />
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/drawings.js?v=smooth3"></script>
+  <script src="/static/drawings.js?v=drawsel1"></script>
   <script src="/static/indicators.js?v=smooth3"></script>
-  <script src="/static/app.js?v=smooth3"></script>
+  <script src="/static/app.js?v=drawsel1"></script>
 </body>
 </html>

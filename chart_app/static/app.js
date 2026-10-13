@@ -1356,6 +1356,7 @@
     updateHistStatus();
     renderReplayStats();
     await reloadOverlay(true);
+    if (drawingsApi && drawingsApi.padRight) drawingsApi.padRight();
     centerReplayCursor();
     requestAnimationFrame(() => { applyingRange = false; });
     void fetchCandles({
@@ -1452,6 +1453,7 @@
       if (!replayOn) return;
       replayFollow = true;
       syncFollowBtn();
+      if (drawingsApi && drawingsApi.padRight) drawingsApi.padRight();
       centerReplayCursor();
     });
   }
@@ -2078,6 +2080,7 @@
     if (d.cmd === "follow") {
       replayFollow = true;
       syncFollowBtn();
+      if (drawingsApi && drawingsApi.padRight) drawingsApi.padRight();
       centerReplayCursor();
     }
     if (d.cmd === "shift") {

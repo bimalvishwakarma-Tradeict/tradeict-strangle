@@ -303,7 +303,6 @@
     }
     function bump() {
       save();
-      padRight();
       prim.requestUpdate();
       syncToolbar();
     }
@@ -387,20 +386,9 @@
       return p == null ? null : Number(p);
     }
     function padRight() {
-      const candles = candlesNow();
-      if (!candles.length) return;
-      const lastT = Number(candles[candles.length - 1].time);
-      const sec = tfSec();
-      let extra = 48;
-      drawings.concat(draft ? [draft] : []).forEach(function (d) {
-        [d.t1, d.t2, d.time].forEach(function (tm) {
-          if (tm == null) return;
-          const bars = (Number(tm) - lastT) / sec;
-          if (bars + 12 > extra) extra = Math.ceil(bars + 12);
-        });
-      });
-      extra = Math.max(32, Math.min(240, extra));
-      const opt = { timeScale: { rightOffset: extra } };
+      // Replay start / Follow only. Never grow offset from drawing times
+      // (future t2 would pack candles to the left).
+      const opt = { timeScale: { rightOffset: 48 } };
       chart.applyOptions(opt);
       const extras = typeof opts.getPaneCharts === "function"
         ? opts.getPaneCharts()
@@ -1294,7 +1282,6 @@
       const dxP = sn.price - drag.p0;
       Object.assign(d, JSON.parse(JSON.stringify(drag.clone)));
       applyDrag(d, drag.handle, sn.time, sn.price, dxT, dxP);
-      padRight();
       prim.requestUpdate();
     }
 
@@ -1834,7 +1821,6 @@
 
     load();
     syncToolbar();
-    padRight();
     prim.requestUpdate();
 
     return {
@@ -1848,7 +1834,8 @@
         bump();
         return d;
       },
-      refresh: function () { padRight(); prim.requestUpdate(); },
+      refresh: function () { prim.requestUpdate(); },
+      padRight: padRight,
       openSettings: openDialog,
       undo: doUndo,
       redo: doRedo,
