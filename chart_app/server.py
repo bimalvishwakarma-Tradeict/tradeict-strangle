@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import logging
 import sys
 import time
@@ -28,6 +29,13 @@ for _p in (str(APP_DIR), str(ROOT)):
         sys.path.insert(0, _p)
 
 from backtest.download_candles import _fetch_page  # noqa: E402
+from indicators import (  # noqa: E402
+    INDICATORS,
+    compute_indicator,
+    list_indicators,
+    load_indicators,
+    short_name_for,
+)
 from strategies import PLUGINS, compute, load_plugins  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -48,6 +56,7 @@ logger = logging.getLogger("chart_app")
 
 app = FastAPI(title="chart_app")
 load_plugins()
+load_indicators()
 STATIC = APP_DIR / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
@@ -225,6 +234,48 @@ async def api_overlay(
         },
     )
     return {"strategy": strategy, "bars_used": len(bars), **data}
+
+
+@app.get("/api/indicators")
+async def api_indicators() -> dict[str, Any]:
+    return {"indicators": list_indicators()}
+
+
+@app.get("/api/indicator/{ind_id}")
+async def api_indicator(
+    ind_id: str,
+    tf: str = Query("1m"),
+    from_ts: int | None = Query(None, alias="from"),
+    to_ts: int | None = Query(None, alias="to"),
+    params: str = Query("{}"),
+) -> dict[str, Any]:
+    if ind_id not in INDICATORS:
+        raise HTTPException(404, f"unknown indicator {ind_id}")
+    if tf not in RES_SEC:
+        raise HTTPException(400, f"bad tf {tf}")
+    res = RES_SEC[tf]
+    now = int(time.time())
+    to_u = int(to_ts) if to_ts is not None else now
+    from_u = int(from_ts) if from_ts is not None else to_u - 24 * 3600
+    warmup = 3000 * res
+    bars = await _candles(tf, from_u - warmup, to_u)
+    bars = [b for b in bars if int(b["time"]) <= to_u]
+    try:
+        raw_p = json.loads(params) if params else {}
+        if not isinstance(raw_p, dict):
+            raw_p = {}
+    except json.JSONDecodeError:
+        raw_p = {}
+    data = compute_indicator(ind_id, bars, raw_p)
+    return {
+        "id": ind_id,
+        "tf": tf,
+        "from": from_u,
+        "to": to_u,
+        "short_name": short_name_for(ind_id, raw_p),
+        "bars_used": len(bars),
+        **data,
+    }
 
 
 def _runs_root() -> Path:

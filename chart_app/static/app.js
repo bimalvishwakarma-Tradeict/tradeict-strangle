@@ -90,6 +90,7 @@
     priceLineVisible: true,
   });
   let drawingsApi = null;
+  let indApi = null;
   const vwapSeries = chart.addLineSeries({ color: "#58a6ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
   const extraSeries = [];
   const rsiHost = el("rsiChart");
@@ -198,6 +199,7 @@
   function applyCandles() {
     series.setData(visibleCandles());
     if (drawingsApi) drawingsApi.refresh();
+    if (indApi) indApi.refresh();
   }
   function completedSigClose(cursorClose) {
     const sec = sigTfSec();
@@ -469,6 +471,16 @@
     extraSeries.length = 0;
   }
 
+  function indicatorRange() {
+    const times = [...candleMap.keys()];
+    if (!times.length) return null;
+    const capOpen = viewNewestOpen();
+    const to = replayOn && replayBarOpen != null
+      ? Number(replayBarOpen) + barSecNow() - 1
+      : (capOpen != null ? capOpen : Math.max(...times));
+    return { from: Math.min(...times), to: to };
+  }
+
   async function reloadOverlay(force) {
     const times = [...candleMap.keys()];
     if (!times.length) return;
@@ -482,7 +494,10 @@
       : (capOpen != null ? capOpen : Math.max(...times));
     if (replayOn && !force) {
       const sigClose = completedSigClose(cursorClose);
-      if (sigClose <= lastOverlaySigClose) return;
+      if (sigClose <= lastOverlaySigClose) {
+        if (indApi) await indApi.reload();
+        return;
+      }
     }
     const hours = el("hours").value || "24";
     const lineTf = el("lineTf").value;
@@ -516,6 +531,7 @@
     paintOverlay(j);
     if (replayOn) ingestReplaySignals(j);
     else scanLiveAlerts(j);
+    if (indApi) await indApi.reload();
   }
 
   function clipPts(pts, oldest, newest) {
@@ -946,6 +962,7 @@
     updateHistStatus();
     if (lastBarClose && t > lastBarClose) {
       scheduleLiveOverlayOnSigClose(lastBarClose + barSecNow());
+      if (indApi) void indApi.reload();
     }
     lastBarClose = t;
   }
@@ -1379,6 +1396,7 @@
       rsiChart.applyOptions({ width: rsiHost.clientWidth, height: rsiHost.clientHeight || 130 });
     }
     if (drawingsApi) drawingsApi.refresh();
+    if (indApi) indApi.refresh();
   }
   window.addEventListener("resize", () => sizeCharts());
   sizeCharts();
@@ -1390,6 +1408,14 @@
       getCandles: function () { return sortedCandles(); },
       getTfSec: function () { return RES_SEC[tf] || 60; },
       isReplayPicking: function () { return replayPicking; },
+    });
+  }
+  if (typeof window.createChartIndicators === "function") {
+    indApi = window.createChartIndicators({
+      chart: chart,
+      series: series,
+      getTf: function () { return tf; },
+      getRange: function () { return indicatorRange(); },
     });
   }
 

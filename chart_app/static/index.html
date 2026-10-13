@@ -48,7 +48,39 @@
     #replayStats .long { color: #3fb950; }
     #replayStats .short { color: #f85149; }
     #replayStats .pending { color: #8b949e; }
-    #chart { grid-column: 2; grid-row: 2; min-width: 0; }
+    #chart { grid-column: 2; grid-row: 2; min-width: 0; position: relative; }
+    #indLegend {
+      position: absolute; top: 8px; left: 8px; z-index: 6; pointer-events: none;
+      display: flex; flex-direction: column; gap: 2px; font-size: 12px;
+    }
+    #indLegend .ind-row {
+      pointer-events: auto; display: flex; align-items: center; gap: 4px;
+      background: #161b22cc; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px;
+    }
+    #indLegend .ind-row.hidden .ind-name { opacity: 0.45; text-decoration: line-through; }
+    #indLegend .ind-name { color: #e6edf3; margin-right: 4px; }
+    #indLegend button { padding: 0 4px; font-size: 12px; line-height: 18px; border: 0; background: transparent; }
+    #indModal, #indDialog {
+      display: none; position: fixed; inset: 0; z-index: 70; background: #0008;
+      align-items: center; justify-content: center;
+    }
+    #indModal.open, #indDialog.open { display: flex; }
+    #indModal .dlg, #indDialog .dlg {
+      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      width: 420px; max-width: 94vw; max-height: 88vh; overflow: auto; padding: 12px 14px;
+    }
+    #indList { margin-top: 8px; }
+    .ind-cat-row {
+      display: flex; align-items: flex-start; gap: 8px; padding: 8px 6px;
+      border-bottom: 1px solid #21262d; cursor: pointer;
+    }
+    .ind-cat-row:hover { background: #21262d; }
+    .ind-star { border: 0; background: transparent; color: #8b949e; font-size: 16px; padding: 0 4px; }
+    .ind-star.on { color: #e3b341; }
+    .ind-cat-name { font-weight: 600; }
+    .ind-cat-desc { color: #8b949e; font-size: 11px; }
+    #indDialog .dlg-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+    #indDialog .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
     #rsiChart { grid-column: 2; grid-row: 3; min-width: 0; border-top: 1px solid #30363d; }
     #rsiChart.hidden { display: none; }
     aside { grid-column: 3; grid-row: 2 / 4; border-left: 1px solid #30363d; background: #161b22; overflow: auto; padding: 10px; font-size: 12px; }
@@ -114,6 +146,7 @@
         </select>
       </label>
       <button id="btnReplayLive" type="button">Jump to real-time</button>
+      <button id="btnIndicators" type="button">Indicators</button>
       <button id="btnAlerts" type="button">🔔 Alerts</button>
       <label><input type="checkbox" id="togAlertSkipped" /> Skipped signals pe bhi alert</label>
       <button id="btnTestAlert" type="button">Test alert</button>
@@ -135,7 +168,7 @@
       <button type="button" id="drawHide" title="Hide all">H</button>
       <button type="button" id="drawDeleteAll" title="Delete all">✕</button>
     </div>
-    <div id="chart"></div>
+    <div id="chart"><div id="indLegend"></div></div>
     <div id="rsiChart"></div>
     <aside>
       <h2>Strategy</h2>
@@ -308,9 +341,36 @@
       </div>
     </div>
   </div>
+  <div id="indModal">
+    <div class="dlg">
+      <div class="row" style="justify-content:space-between">
+        <strong>Indicators</strong>
+        <button type="button" id="indModalClose">✕</button>
+      </div>
+      <input id="indSearch" type="search" placeholder="Search" style="width:100%;margin-top:8px" />
+      <div id="indList"></div>
+    </div>
+  </div>
+  <div id="indDialog">
+    <div class="dlg">
+      <div id="indDlgTitle" style="font-weight:600;margin-bottom:8px">Indicator</div>
+      <div class="dlg-tabs">
+        <button type="button" id="indTabInputs" class="active">Inputs</button>
+        <button type="button" id="indTabStyle">Style</button>
+      </div>
+      <div id="indDlgInputs"></div>
+      <div id="indDlgStyle" hidden></div>
+      <div class="dlg-actions">
+        <button type="button" id="indDlgDefaults">Defaults</button>
+        <button type="button" id="indDlgCancel">Cancel</button>
+        <button type="button" id="indDlgOk">Ok</button>
+      </div>
+    </div>
+  </div>
   <input id="drawTextInput" hidden placeholder="Note…" />
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
   <script src="/static/drawings.js?v=draw2"></script>
-  <script src="/static/app.js?v=draw2"></script>
+  <script src="/static/indicators.js?v=ind1"></script>
+  <script src="/static/app.js?v=ind1"></script>
 </body>
 </html>
