@@ -184,5 +184,53 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
     }
 
 
+META: dict[str, Any] = {
+    "name": "RSI Div Signal",
+    "description": "RSI divergence OBH/OBL zones and signals",
+    "short_name": "RSI Div",
+    "overlay": True,
+    "inputs": [
+        {
+            "key": "signal_tf", "label": "Signal TF", "type": "select", "default": "15m",
+            "options": [
+                {"value": "1m", "label": "1m"},
+                {"value": "3m", "label": "3m"},
+                {"value": "5m", "label": "5m"},
+                {"value": "15m", "label": "15m"},
+                {"value": "30m", "label": "30m"},
+            ],
+            "tab": "inputs",
+        },
+        {
+            "key": "rsi_len", "label": "RSI Length", "type": "int", "default": 14,
+            "min": 2, "max": 50, "step": 1, "tab": "inputs",
+        },
+        {
+            "key": "ob", "label": "OB", "type": "float", "default": 70,
+            "min": 50, "max": 90, "step": 1, "tab": "inputs",
+        },
+        {
+            "key": "os", "label": "OS", "type": "float", "default": 30,
+            "min": 10, "max": 50, "step": 1, "tab": "inputs",
+        },
+        {
+            "key": "exp_obh", "label": "OBH expire RSI", "type": "float", "default": 40,
+            "min": 10, "max": 70, "step": 1, "tab": "inputs",
+        },
+        {
+            "key": "exp_obl", "label": "OBL expire RSI", "type": "float", "default": 60,
+            "min": 30, "max": 90, "step": 1, "tab": "inputs",
+        },
+        {"key": "show_obh", "label": "Show OBH", "type": "bool", "default": True, "tab": "inputs"},
+        {"key": "show_obl", "label": "Show OBL", "type": "bool", "default": True, "tab": "inputs"},
+        {"key": "show_levels", "label": "Show OBH/OBL Levels", "type": "bool", "default": True, "tab": "inputs"},
+        {"key": "show_signals", "label": "Show Signals", "type": "bool", "default": True, "tab": "inputs"},
+        {"key": "show_rsi_pane", "label": "RSI pane", "type": "bool", "default": True, "tab": "inputs"},
+    ],
+}
+
+
 def register_plugin() -> None:
-    return
+    from strategies import register_meta
+
+    register_meta("S020_RSI", META)

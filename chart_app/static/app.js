@@ -63,11 +63,16 @@
   let syncingXh = false;
 
   const chart = LightweightCharts.createChart(el("chart"), {
-    layout: { background: { color: "#0e1117" }, textColor: "#8b949e" },
-    grid: { vertLines: { color: "#21262d" }, horzLines: { color: "#21262d" } },
-    rightPriceScale: { borderColor: "#30363d", minimumWidth: PRICE_SCALE_W },
+    layout: { background: { color: "#131722" }, textColor: "#787b86" },
+    grid: { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },
+    rightPriceScale: { borderColor: "#2a2e39", minimumWidth: PRICE_SCALE_W },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Normal,
+      vertLine: { color: "#758696", labelBackgroundColor: "#363a45" },
+      horzLine: { color: "#758696", labelBackgroundColor: "#363a45" },
+    },
     timeScale: {
-      borderColor: "#30363d",
+      borderColor: "#2a2e39",
       timeVisible: true,
       secondsVisible: false,
       rightOffset: 48,
@@ -77,28 +82,32 @@
         return d.toLocaleString("en-IN", { timeZone: IST, hour12: false, hour: "2-digit", minute: "2-digit" });
       },
     },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     localization: { timeFormatter: (t) => fmtIst(t) },
   });
   const series = chart.addCandlestickSeries({
-    upColor: "#3fb950",
-    downColor: "#f85149",
+    upColor: "#089981",
+    downColor: "#f23645",
     borderVisible: false,
-    wickUpColor: "#3fb950",
-    wickDownColor: "#f85149",
+    wickUpColor: "#089981",
+    wickDownColor: "#f23645",
     lastValueVisible: true,
     priceLineVisible: true,
+    priceLineColor: "#089981",
   });
   let drawingsApi = null;
   let indApi = null;
+  let stratCatalog = [];
+  let stratInstances = [];
+  const LS_STRAT = "chart_app.strategies.BTCUSD";
+  const LS_PANEL = "chart_app.rightPanel";
   const vwapSeries = chart.addLineSeries({ color: "#58a6ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
   const extraSeries = [];
   const rsiHost = el("rsiChart");
   const rsiChart = rsiHost
     ? LightweightCharts.createChart(rsiHost, {
-        layout: { background: { color: "#0e1117" }, textColor: "#8b949e" },
-        grid: { vertLines: { color: "#21262d" }, horzLines: { color: "#21262d" } },
-        rightPriceScale: { borderColor: "#30363d", minimumWidth: PRICE_SCALE_W },
+        layout: { background: { color: "#131722" }, textColor: "#787b86" },
+        grid: { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },
+        rightPriceScale: { borderColor: "#2a2e39", minimumWidth: PRICE_SCALE_W },
         timeScale: { visible: false, rightOffset: 48, shiftVisibleRangeOnNewBar: false },
         height: 130,
       })
@@ -178,9 +187,22 @@
   function barSecNow() {
     return RES_SEC[tf] || 60;
   }
+  function rsiInst() {
+    return stratInstances.find((s) => s.id === "S020_RSI" && s.visible !== false)
+      || stratInstances.find((s) => s.id === "S020_RSI")
+      || null;
+  }
+  function sigTfValue() {
+    const it = rsiInst();
+    return (it && it.params && it.params.signal_tf) || "15m";
+  }
   function sigTfSec() {
-    const v = el("signalTf") ? el("signalTf").value : "15m";
-    return RES_SEC[v] || 900;
+    return RES_SEC[sigTfValue()] || 900;
+  }
+  function vwapParams() {
+    const it = stratInstances.find((s) => s.id === "S020" && s.visible !== false)
+      || stratInstances.find((s) => s.id === "S020");
+    return (it && it.params) || {};
   }
   function replayCursorClose() {
     if (!replayOn || replayBarOpen == null) return null;
@@ -197,9 +219,21 @@
     return all.filter((c) => Number(c.time) <= cap);
   }
   function applyCandles() {
-    series.setData(visibleCandles());
+    const vis = visibleCandles();
+    series.setData(vis);
+    const last = vis.length ? vis[vis.length - 1] : null;
+    if (last) {
+      const up = Number(last.close) >= Number(last.open);
+      series.applyOptions({
+        priceLineColor: up ? "#089981" : "#f23645",
+        lastValueVisible: true,
+        priceLineVisible: true,
+      });
+    }
     if (drawingsApi) drawingsApi.refresh();
     if (indApi) indApi.refresh();
+    paintOhlcLegend(last);
+    updateGoRtBtn();
   }
   function completedSigClose(cursorClose) {
     const sec = sigTfSec();
@@ -249,8 +283,8 @@
     const toTxt = newest != null ? fmtIst(newest) : "—";
     const mode = replayOn ? "REPLAY" : (historyMode ? "HISTORY" : "LIVE");
     const phase = loadingLeft || loadingRight ? "loading…" : "idle";
-    box.textContent =
-      "Candles: " + n + " | from " + fromTxt + " | to " + toTxt + " | " + mode + " | " + phase;
+    box.textContent = mode + " · " + n;
+    box.title = "Candles: " + n + " | from " + fromTxt + " | to " + toTxt + " | " + mode + " | " + phase;
   }
 
   async function fetchCandles(opts) {
@@ -427,10 +461,9 @@
     chart.setCrosshairPosition(px, param.time, series);
   }
   chart.subscribeCrosshairMove((param) => {
-    const box = el("ohlc");
     const tip = el("markTip");
     if (!param || !param.time || !param.seriesData) {
-      box.textContent = "OHLC —";
+      paintOhlcLegend(null);
       if (tip) tip.textContent = "";
       if (!syncingXh) {
         syncingXh = true;
@@ -440,16 +473,9 @@
       return;
     }
     const d = param.seriesData.get(series);
-    if (!d) {
-      box.textContent = fmtIst(param.time);
-    } else {
-      box.innerHTML =
-        "<span>" + fmtIst(param.time) + "</span>" +
-        "<span>O " + d.open.toFixed(1) + "</span>" +
-        "<span>H " + d.high.toFixed(1) + "</span>" +
-        "<span>L " + d.low.toFixed(1) + "</span>" +
-        "<span>C " + d.close.toFixed(1) + "</span>";
-    }
+    if (d) {
+      paintOhlcLegend({ time: param.time, open: d.open, high: d.high, low: d.low, close: d.close });
+    } else paintOhlcLegend(null);
     if (tip) tip.textContent = markerTooltip(param.time);
     if (!syncingXh) {
       syncingXh = true;
@@ -499,39 +525,62 @@
         return;
       }
     }
-    const hours = el("hours").value || "24";
-    const lineTf = el("lineTf").value;
-    const variant = el("variant").value;
-    const strategy = el("strategy") ? el("strategy").value : "S020";
-    const q = new URLSearchParams({
-      strategy,
-      tf,
-      line_tf: lineTf,
-      variant,
-      from: String(from),
-      to: String(to),
-      hours: String(hours),
-      signal_tf: el("signalTf") ? el("signalTf").value : "15m",
-      rsi_len: el("rsiLen") ? el("rsiLen").value : "14",
-      ob: el("rsiOb") ? el("rsiOb").value : "70",
-      os: el("rsiOs") ? el("rsiOs").value : "30",
-      exp_obh: el("rsiExpObh") ? el("rsiExpObh").value : "40",
-      exp_obl: el("rsiExpObl") ? el("rsiExpObl").value : "60",
-      show_obh: el("togObh") && el("togObh").checked ? "true" : "false",
-      show_obl: el("togObl") && el("togObl").checked ? "true" : "false",
-      show_levels: el("togLevels") && el("togLevels").checked ? "true" : "false",
-      show_signals: el("togSigs") && el("togSigs").checked ? "true" : "false",
-    });
     const gen = ++overlayGen;
-    const r = await fetch("/api/overlay?" + q.toString());
-    const j = await r.json();
+    const visible = stratInstances.filter((s) => s.visible !== false);
+    if (!visible.length) {
+      overlayPayload = { lines: [], markers: [] };
+      lastOverlaySigClose = completedSigClose(cursorClose);
+      paintOverlay(overlayPayload);
+      if (indApi) await indApi.reload();
+      return;
+    }
+    await Promise.all(visible.map(async (it) => {
+      const q = new URLSearchParams({
+        strategy: it.id,
+        tf,
+        from: String(from),
+        to: String(to),
+        params: JSON.stringify(it.params || {}),
+      });
+      const r = await fetch("/api/overlay?" + q.toString());
+      const j = await r.json();
+      it._payload = j;
+    }));
     if (gen !== overlayGen) return;
-    overlayPayload = j;
+    overlayPayload = mergeStratPayloads();
     lastOverlaySigClose = completedSigClose(cursorClose);
-    paintOverlay(j);
-    if (replayOn) ingestReplaySignals(j);
-    else scanLiveAlerts(j);
+    paintOverlay(overlayPayload);
+    if (replayOn) ingestReplaySignals(overlayPayload);
+    else scanLiveAlerts(overlayPayload);
     if (indApi) await indApi.reload();
+  }
+
+  function mergeStratPayloads() {
+    const lines = [];
+    const markers = [];
+    let rsi = [];
+    let rsi_ob = 70;
+    let rsi_os = 30;
+    stratInstances.forEach((it) => {
+      if (it.visible === false || !it._payload) return;
+      const j = it._payload;
+      const p = it.params || {};
+      (j.lines || []).forEach((ln) => {
+        if (ln.kind === "vwap" && p.show_vwap === false) return;
+        if (ln.kind !== "vwap" && ln.active && p.show_active === false) return;
+        if (ln.kind !== "vwap" && !ln.active && p.show_expired === false) return;
+        lines.push(ln);
+      });
+      const showMarks = p.show_marks !== false;
+      const backtest = p.marker_mode === "backtest";
+      if (showMarks && !backtest) markers.push.apply(markers, j.markers || []);
+      if (it.id === "S020_RSI" && p.show_rsi_pane !== false) {
+        rsi = j.rsi || rsi;
+        if (j.rsi_ob != null) rsi_ob = j.rsi_ob;
+        if (j.rsi_os != null) rsi_os = j.rsi_os;
+      }
+    });
+    return { lines, markers, rsi, rsi_ob, rsi_os };
   }
 
   function clipPts(pts, oldest, newest) {
@@ -573,10 +622,11 @@
     const oldest = oldestCandleTime();
     const newest = viewNewestOpen();
     const cursorClose = replayOn ? replayCursorClose() : (newest != null ? newest + barSecNow() : null);
-    const showVwap = el("togVwap").checked;
-    const showActive = el("togActive").checked;
-    const showExpired = el("togExpired").checked;
-    const showMarks = el("togMarks").checked;
+    const vp = vwapParams();
+    const showVwap = vp.show_vwap !== false;
+    const showActive = vp.show_active !== false;
+    const showExpired = vp.show_expired !== false;
+    const showMarks = vp.show_marks !== false;
     const vwap = (j.lines || []).find((x) => x.kind === "vwap");
     vwapSeries.applyOptions({ visible: showVwap });
     const vwapPts = showVwap && vwap && oldest != null ? clipLinePoints(vwap, oldest, newest) : [];
@@ -602,7 +652,7 @@
     });
     const inRange = (t) =>
       (oldest == null || Number(t) >= oldest) && (newest == null || Number(t) <= newest);
-    const mode = el("markerMode") ? el("markerMode").value : "raw";
+    const mode = vp.marker_mode || "raw";
     let marks = [];
     if (showMarks && mode === "backtest") {
       marks = tradeMarks.filter((m) => inRange(m.time));
@@ -640,12 +690,10 @@
     } catch (err) {
       console.warn("setMarkers failed", err, marks.slice(0, 8));
     }
-    const useRsi = el("strategy") && el("strategy").value === "S020_RSI" && el("togRsiPane") && el("togRsiPane").checked;
+    const rp = rsiInst();
+    const useRsi = Boolean(rp && rp.visible !== false && rp.params && rp.params.show_rsi_pane !== false);
     if (rsiHost) {
       rsiHost.classList.toggle("hidden", !useRsi);
-      document.getElementById("layout").style.gridTemplateRows = useRsi
-        ? "48px 1fr 132px 28px"
-        : "48px 1fr 0px 28px";
       sizeCharts();
     }
     if (rsiLine && rsiObLine && rsiOsLine) {
@@ -682,38 +730,8 @@
     }
   }
 
-  ["togVwap", "togActive", "togExpired", "togMarks", "togObh", "togObl", "togLevels", "togSigs", "togRsiPane"].forEach((id) => {
-    if (el(id)) el(id).addEventListener("change", () => reloadOverlay(true));
-  });
-  el("btnOverlay").addEventListener("click", () => reloadOverlay(true));
-  el("lineTf").addEventListener("change", () => reloadOverlay(true));
-  el("variant").addEventListener("change", () => reloadOverlay(true));
-  el("hours").addEventListener("change", () => reloadOverlay(true));
-  if (el("strategy")) el("strategy").addEventListener("change", () => { lastOverlaySigClose = -1; reloadOverlay(true); });
   function syncRsiPaneLabel(ob, os) {
-    const lab = el("rsiPaneLab");
-    if (!lab) return;
-    const obv = ob != null ? ob : (el("rsiOb") ? el("rsiOb").value : "70");
-    const osv = os != null ? os : (el("rsiOs") ? el("rsiOs").value : "30");
-    lab.textContent = String(obv) + "/" + String(osv);
-  }
-  syncRsiPaneLabel();
-  ["signalTf", "rsiLen", "rsiOb", "rsiOs", "rsiExpObh", "rsiExpObl"].forEach((id) => {
-    if (el(id)) {
-      el(id).addEventListener("change", () => {
-        lastOverlaySigClose = -1;
-        lastSigTfOpen = 0;
-        if (id === "rsiOb" || id === "rsiOs") syncRsiPaneLabel();
-        reloadOverlay(true);
-        if (id === "signalTf" && !historyMode && !replayOn) connectWs();
-      });
-      if (id === "rsiOb" || id === "rsiOs") {
-        el(id).addEventListener("input", () => syncRsiPaneLabel());
-      }
-    }
-  });
-  if (el("markerMode")) {
-    el("markerMode").addEventListener("change", () => paintOverlay(overlayPayload));
+    return { ob, os };
   }
 
   function lsGet(key, fallback) {
@@ -738,8 +756,9 @@
     }
   }
   function stratLabel() {
-    const s = el("strategy") ? el("strategy").value : "S020";
-    return s === "S020_RSI" ? "RSI Div" : "VWAP";
+    const it = rsiInst() || stratInstances[0];
+    if (it && it.id === "S020_RSI") return "RSI Div";
+    return "VWAP";
   }
   function fmtHmIst(ts) {
     return new Date(Number(ts) * 1000).toLocaleString("en-IN", {
@@ -852,7 +871,7 @@
   }
   function fireAlert(opts) {
     const side = String(opts.side || "").toUpperCase();
-    const tfLab = opts.tf || (el("signalTf") ? el("signalTf").value : "15m");
+    const tfLab = opts.tf || sigTfValue();
     const ts = Number(opts.ts) || Math.floor(Date.now() / 1000);
     const price = opts.price;
     const text = opts.text || (
@@ -871,8 +890,8 @@
   function scanLiveAlerts(j) {
     if (!alertsOn || replayOn || historyMode) return;
     const includeSkipped = el("togAlertSkipped") && el("togAlertSkipped").checked;
-    const st = el("strategy") ? el("strategy").value : "S020";
-    const sigTf = el("signalTf") ? el("signalTf").value : "15m";
+    const st = (rsiInst() && rsiInst().id) || (stratInstances[0] && stratInstances[0].id) || "S020";
+    const sigTf = sigTfValue();
     const seen = loadDedupe();
     (j.markers || []).forEach((m) => {
       const side = String(m.text || "").toUpperCase();
@@ -889,7 +908,9 @@
   }
   function syncAlertUi() {
     const btn = el("btnAlerts");
-    if (btn) btn.textContent = alertsOn ? "🔔 Alerts ON" : "🔔 Alerts";
+    if (btn) btn.textContent = alertsOn ? "Alert ON" : "Alert";
+    const tog = el("togAlerts");
+    if (tog) tog.checked = alertsOn;
     const skip = el("togAlertSkipped");
     if (skip) skip.checked = lsGet("chart_app.alertsSkipped", "0") === "1";
   }
@@ -899,19 +920,27 @@
     renderAlertLog();
     const banner = el("alertBanner");
     if (banner) banner.addEventListener("click", hideAlertBanner);
+    async function setAlertsOn(on) {
+      alertsOn = Boolean(on);
+      if (alertsOn) {
+        unlockAudio();
+        try {
+          if (window.Notification && Notification.permission === "default") {
+            await Notification.requestPermission();
+          }
+        } catch (e) {}
+      }
+      lsSet("chart_app.alertsOn", alertsOn ? "1" : "0");
+      syncAlertUi();
+    }
     if (el("btnAlerts")) {
       el("btnAlerts").addEventListener("click", async () => {
-        alertsOn = !alertsOn;
-        if (alertsOn) {
-          unlockAudio();
-          try {
-            if (window.Notification && Notification.permission === "default") {
-              await Notification.requestPermission();
-            }
-          } catch (e) {}
-        }
-        lsSet("chart_app.alertsOn", alertsOn ? "1" : "0");
-        syncAlertUi();
+        await setAlertsOn(!alertsOn);
+      });
+    }
+    if (el("togAlerts")) {
+      el("togAlerts").addEventListener("change", async () => {
+        await setAlertsOn(el("togAlerts").checked);
       });
     }
     if (el("togAlertSkipped")) {
@@ -927,7 +956,7 @@
         const px = last ? last.close : 0;
         fireAlert({
           side: "LONG",
-          tf: el("signalTf") ? el("signalTf").value : "15m",
+          tf: sigTfValue(),
           ts: Math.floor(Date.now() / 1000),
           price: px,
         });
@@ -1013,7 +1042,7 @@
       backoff = 1000;
       setStatus("live");
       const ch = WS_CH[tf] || "candlestick_1m";
-      const sigTf = el("signalTf") ? el("signalTf").value : "15m";
+      const sigTf = sigTfValue();
       const sigCh = WS_CH[sigTf];
       const channels = [{ name: ch, symbols: [SYMBOL] }];
       if (sigCh && sigCh !== ch) channels.push({ name: sigCh, symbols: [SYMBOL] });
@@ -1025,7 +1054,7 @@
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
       const typ = String(msg.type || "");
       const chartCh = WS_CH[tf] || "candlestick_1m";
-      const sigTf = el("signalTf") ? el("signalTf").value : "15m";
+      const sigTf = sigTfValue();
       const sigCh = WS_CH[sigTf];
       if (typ === chartCh) applyLiveBar(msg);
       else if (sigCh && typ === sigCh) onSigTfCandle(msg);
@@ -1146,7 +1175,7 @@
     if (el("btnSelectBar")) el("btnSelectBar").classList.toggle("active", replayPicking);
     if (el("btnReplayPlay")) {
       el("btnReplayPlay").disabled = !on;
-      el("btnReplayPlay").textContent = replayPlaying ? "Pause" : "Play";
+      el("btnReplayPlay").textContent = replayPlaying ? "⏸" : "▶";
     }
     if (el("btnReplayStep")) el("btnReplayStep").disabled = !on;
     syncFollowBtn();
@@ -1202,6 +1231,7 @@
     replayViewWidth = DEFAULT_REPLAY_BARS;
     applyingRange = true;
     applyCandles();
+    showReplayBar(true);
     setReplayButtons();
     updateHistStatus();
     renderReplayStats();
@@ -1251,6 +1281,7 @@
     replaySigs = [];
     lastOverlaySigClose = -1;
     historyMode = false;
+    showReplayBar(false);
     setReplayButtons();
     renderReplayStats();
     await loadInitial();
@@ -1323,6 +1354,7 @@
     if (!Number.isFinite(ms)) return;
     historyMode = true;
     disconnectWs();
+    if (el("gotoModal")) el("gotoModal").classList.remove("open");
     await loadAround(Math.floor(ms / 1000));
   });
 
@@ -1358,7 +1390,10 @@
     ul.innerHTML = "";
     tradeMarks = [];
     loadedTrades = j.trades || [];
-    if (el("markerMode")) el("markerMode").value = "backtest";
+    stratInstances.forEach((it) => {
+      if (it.id === "S020") it.params.marker_mode = "backtest";
+    });
+    saveStrats();
     (j.trades || []).forEach((t) => {
       const li = document.createElement("li");
       li.className = t.side;
@@ -1425,9 +1460,429 @@
     });
   }
 
+  function defaultParamsFromSchema(schema) {
+    const p = {};
+    (schema || []).forEach((f) => {
+      p[f.key] = f.default;
+    });
+    return p;
+  }
+  function saveStrats() {
+    try {
+      lsSet(LS_STRAT, JSON.stringify(stratInstances.map((s) => ({
+        uid: s.uid, id: s.id, params: s.params, visible: s.visible !== false,
+      }))));
+    } catch (e) {}
+  }
+  function stratShort(it) {
+    if (it.id === "S020") return "VWAP " + ((it.params && it.params.line_tf) || "1m") + " " + ((it.params && it.params.variant) || "V0");
+    if (it.id === "S020_RSI") return "RSI Div " + ((it.params && it.params.signal_tf) || "15m");
+    const rec = stratCatalog.find((c) => c.id === it.id);
+    return rec ? rec.short_name : it.id;
+  }
+  function paintStratLegend() {
+    const host = el("stratLegend");
+    if (!host) return;
+    host.innerHTML = "";
+    stratInstances.forEach((it) => {
+      const row = document.createElement("div");
+      row.className = "st-row" + (it.visible === false ? " hidden" : "");
+      const name = document.createElement("span");
+      name.className = "ind-name";
+      name.textContent = stratShort(it);
+      function icobtn(title, txt, fn) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.title = title;
+        b.textContent = txt;
+        b.addEventListener("click", function (ev) { ev.stopPropagation(); fn(); });
+        return b;
+      }
+      row.appendChild(name);
+      row.appendChild(icobtn("Hide/show", it.visible === false ? "🙈" : "👁", () => {
+        it.visible = it.visible === false;
+        saveStrats();
+        paintStratLegend();
+        lastOverlaySigClose = -1;
+        reloadOverlay(true);
+      }));
+      row.appendChild(icobtn("Settings", "⚙", () => {
+        openRightPanel("paneStrat");
+        renderStratSettings();
+      }));
+      row.appendChild(icobtn("Remove", "🗑", () => {
+        stratInstances = stratInstances.filter((x) => x.uid !== it.uid);
+        saveStrats();
+        paintStratLegend();
+        renderStratSettings();
+        lastOverlaySigClose = -1;
+        reloadOverlay(true);
+      }));
+      row.appendChild(icobtn("Duplicate", "⋯", () => {
+        addStrat(it.id, JSON.parse(JSON.stringify(it.params || {})));
+      }));
+      host.appendChild(row);
+    });
+  }
+  function renderField(f, params, onChange) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const lab = document.createElement("label");
+    lab.textContent = f.label || f.key;
+    row.appendChild(lab);
+    const typ = f.type || "float";
+    if (typ === "bool") {
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = Boolean(params[f.key]);
+      cb.addEventListener("change", () => { params[f.key] = cb.checked; onChange(); });
+      row.appendChild(cb);
+    } else if (typ === "select") {
+      const sel = document.createElement("select");
+      (f.options || []).forEach((op) => {
+        const o = document.createElement("option");
+        o.value = String(op.value != null ? op.value : op);
+        o.textContent = String(op.label != null ? op.label : op);
+        sel.appendChild(o);
+      });
+      sel.value = String(params[f.key]);
+      sel.addEventListener("change", () => { params[f.key] = sel.value; onChange(); });
+      row.appendChild(sel);
+    } else {
+      const inp = document.createElement("input");
+      inp.type = "number";
+      if (f.min != null) inp.min = String(f.min);
+      if (f.max != null) inp.max = String(f.max);
+      inp.step = String(f.step != null ? f.step : (typ === "int" ? 1 : 0.1));
+      inp.value = params[f.key] != null ? params[f.key] : f.default;
+      inp.addEventListener("change", () => {
+        let n = typ === "int" ? parseInt(inp.value, 10) : parseFloat(inp.value);
+        if (!Number.isFinite(n)) n = f.default;
+        if (f.min != null) n = Math.max(Number(f.min), n);
+        if (f.max != null) n = Math.min(Number(f.max), n);
+        params[f.key] = n;
+        inp.value = String(n);
+        onChange();
+      });
+      row.appendChild(inp);
+    }
+    return row;
+  }
+  function renderStratSettings() {
+    const host = el("stratSettingsHost");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!stratInstances.length) {
+      host.textContent = "No strategy deployed. Open Indicators → Strategies.";
+      return;
+    }
+    stratInstances.forEach((it) => {
+      const rec = stratCatalog.find((c) => c.id === it.id) || { name: it.id, inputs: [] };
+      const box = document.createElement("div");
+      box.className = "st-set";
+      const h = document.createElement("h2");
+      h.textContent = rec.name + " · " + stratShort(it);
+      box.appendChild(h);
+      (rec.inputs || []).forEach((f) => {
+        box.appendChild(renderField(f, it.params, () => {
+          saveStrats();
+          paintStratLegend();
+          lastOverlaySigClose = -1;
+          if (f.key === "signal_tf" && !historyMode && !replayOn) connectWs();
+          reloadOverlay(true);
+        }));
+      });
+      host.appendChild(box);
+    });
+  }
+  function addStrat(id, params) {
+    const rec = stratCatalog.find((c) => c.id === id);
+    const it = {
+      uid: "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      id,
+      params: params || defaultParamsFromSchema(rec ? rec.inputs : []),
+      visible: true,
+    };
+    stratInstances.push(it);
+    saveStrats();
+    paintStratLegend();
+    renderStratSettings();
+    lastOverlaySigClose = -1;
+    lastSigTfOpen = 0;
+    reloadOverlay(true);
+    if (id === "S020_RSI" && !historyMode && !replayOn) connectWs();
+  }
+  function renderStratCatalog(filter) {
+    const list = el("stratList");
+    if (!list) return;
+    const q = String(filter || "").trim().toLowerCase();
+    list.innerHTML = "";
+    stratCatalog
+      .filter((c) => !q || (c.name + " " + c.id + " " + (c.description || "")).toLowerCase().indexOf(q) >= 0)
+      .forEach((c) => {
+        const row = document.createElement("div");
+        row.className = "ind-cat-row";
+        const meta = document.createElement("div");
+        meta.className = "ind-cat-meta";
+        const nm = document.createElement("div");
+        nm.className = "ind-cat-name";
+        nm.textContent = c.name;
+        const ds = document.createElement("div");
+        ds.className = "ind-cat-desc";
+        ds.textContent = c.description || "";
+        meta.appendChild(nm);
+        meta.appendChild(ds);
+        row.appendChild(meta);
+        row.addEventListener("click", () => {
+          addStrat(c.id, defaultParamsFromSchema(c.inputs));
+          el("indModal").classList.remove("open");
+        });
+        list.appendChild(row);
+      });
+  }
+  function openRightPanel(paneId) {
+    const layout = el("layout");
+    const side = el("sidePanel");
+    const cur = side && side.dataset.pane;
+    if (layout.classList.contains("panel-open") && cur === paneId) {
+      layout.classList.remove("panel-open");
+      side.classList.add("closed");
+      side.dataset.pane = "";
+      document.querySelectorAll("#rightStrip button").forEach((b) => b.classList.remove("active"));
+      try { lsSet(LS_PANEL, JSON.stringify({ open: false })); } catch (e) {}
+      sizeCharts();
+      return;
+    }
+    layout.classList.add("panel-open");
+    side.classList.remove("closed");
+    side.dataset.pane = paneId;
+    document.querySelectorAll("#sidePanel .pane").forEach((p) => p.classList.toggle("show", p.id === paneId));
+    document.querySelectorAll("#rightStrip button").forEach((b) => {
+      b.classList.toggle("active", b.getAttribute("data-pane") === paneId);
+    });
+    try { lsSet(LS_PANEL, JSON.stringify({ open: true, pane: paneId })); } catch (e) {}
+    if (paneId === "paneStrat") renderStratSettings();
+    sizeCharts();
+  }
+  function showReplayBar(on) {
+    if (el("replayBar")) el("replayBar").classList.toggle("show", Boolean(on));
+    if (el("btnReplay")) el("btnReplay").classList.toggle("active", Boolean(on));
+  }
+  function paintOhlcLegend(bar) {
+    const box = el("legendOhlc");
+    if (!box) return;
+    const vis = visibleCandles();
+    const b = bar || (vis.length ? vis[vis.length - 1] : null);
+    const head = "BTCUSD · 1 · Delta Exchange India";
+    if (!b) {
+      box.textContent = head;
+      return;
+    }
+    let prev = null;
+    for (let i = vis.length - 2; i >= 0; i -= 1) {
+      if (Number(vis[i].time) < Number(b.time)) { prev = vis[i]; break; }
+    }
+    const chg = prev ? Number(b.close) - Number(prev.close) : 0;
+    const pct = prev && Number(prev.close) ? (chg / Number(prev.close)) * 100 : 0;
+    const cls = chg >= 0 ? "up" : "dn";
+    const sign = chg >= 0 ? "+" : "";
+    box.innerHTML = head +
+      "  O " + Number(b.open).toFixed(1) +
+      "  H " + Number(b.high).toFixed(1) +
+      "  L " + Number(b.low).toFixed(1) +
+      "  C <span class=\"" + cls + "\">" + Number(b.close).toFixed(1) +
+      "  " + sign + chg.toFixed(1) + " (" + sign + pct.toFixed(2) + "%)</span>";
+  }
+  function updateGoRtBtn() {
+    const btn = el("btnGoRt");
+    if (!btn) return;
+    const vis = visibleCandles();
+    if (!vis.length) { btn.classList.remove("show"); return; }
+    const vr = chart.timeScale().getVisibleRange();
+    if (!vr) { btn.classList.remove("show"); return; }
+    const last = Number(vis[vis.length - 1].time);
+    btn.classList.toggle("show", Number(vr.to) < last - barSecNow() * 2);
+  }
+  function jumpRange(key) {
+    const newest = viewNewestOpen();
+    if (newest == null) return;
+    const now = newest;
+    const d = new Date(now * 1000);
+    let from = now - 86400;
+    if (key === "5D") from = now - 5 * 86400;
+    else if (key === "1M") from = now - 30 * 86400;
+    else if (key === "3M") from = now - 90 * 86400;
+    else if (key === "6M") from = now - 180 * 86400;
+    else if (key === "1Y") from = now - 365 * 86400;
+    else if (key === "YTD") {
+      const y = new Date(new Date().toLocaleString("en-US", { timeZone: IST }));
+      from = Math.floor(Date.UTC(y.getFullYear(), 0, 1) / 1000) - 19800;
+    } else if (key === "All") {
+      const oldest = oldestCandleTime();
+      from = oldest != null ? oldest : now - 86400;
+    }
+    void loadAround(Math.floor((from + now) / 2)).then(() => {
+      chart.timeScale().setVisibleRange({ from, to: now + barSecNow() * 5 });
+    });
+  }
+  function tickClock() {
+    const n = el("liveClock");
+    if (!n) return;
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: IST, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    }).format(new Date());
+    n.textContent = parts + " UTC+5:30";
+  }
+  async function initShell() {
+    try {
+      const j = await fetch("/api/strategies").then((r) => r.json());
+      stratCatalog = j.strategies || [];
+    } catch (e) {
+      stratCatalog = [];
+    }
+    try {
+      const saved = JSON.parse(lsGet(LS_STRAT, "null"));
+      if (Array.isArray(saved) && saved.length) stratInstances = saved;
+    } catch (e) {}
+    if (!stratInstances.length && stratCatalog.length) {
+      const rec = stratCatalog.find((c) => c.id === "S020") || stratCatalog[0];
+      stratInstances = [{
+        uid: "sdef",
+        id: rec.id,
+        params: defaultParamsFromSchema(rec.inputs),
+        visible: true,
+      }];
+      saveStrats();
+    }
+    paintStratLegend();
+    try {
+      const pan = JSON.parse(lsGet(LS_PANEL, "{}"));
+      if (pan && pan.open && pan.pane) openRightPanel(pan.pane);
+    } catch (e) {}
+    document.querySelectorAll("#tfBar [data-tf]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const v = btn.getAttribute("data-tf");
+        el("tf").value = v;
+        document.querySelectorAll("#tfBar [data-tf]").forEach((b) => b.classList.toggle("active", b === btn));
+        if (el("tfMore")) el("tfMore").value = "";
+        el("tf").dispatchEvent(new Event("change"));
+      });
+    });
+    if (el("tfMore")) {
+      el("tfMore").addEventListener("change", () => {
+        const v = el("tfMore").value;
+        if (!v) return;
+        el("tf").value = v;
+        document.querySelectorAll("#tfBar [data-tf]").forEach((b) => b.classList.remove("active"));
+        el("tf").dispatchEvent(new Event("change"));
+      });
+    }
+    document.querySelectorAll("#rightStrip [data-pane]").forEach((btn) => {
+      btn.addEventListener("click", () => openRightPanel(btn.getAttribute("data-pane")));
+    });
+    document.querySelectorAll("#rangeBar [data-range]").forEach((btn) => {
+      btn.addEventListener("click", () => jumpRange(btn.getAttribute("data-range")));
+    });
+    if (el("btnReplay")) {
+      el("btnReplay").addEventListener("click", () => {
+        if (replayOn) {
+          showReplayBar(true);
+          return;
+        }
+        showReplayBar(true);
+        replayPicking = true;
+        setReplayButtons();
+      });
+    }
+    if (el("btnReplayExit")) {
+      el("btnReplayExit").addEventListener("click", () => {
+        if (replayOn) void exitReplayLive();
+        else {
+          replayPicking = false;
+          showReplayBar(false);
+          setReplayButtons();
+        }
+      });
+    }
+    if (el("btnUndo")) el("btnUndo").addEventListener("click", () => { if (drawingsApi) drawingsApi.undo(); });
+    if (el("btnRedo")) el("btnRedo").addEventListener("click", () => { if (drawingsApi) drawingsApi.redo(); });
+    if (el("legendFold")) {
+      el("legendFold").addEventListener("click", () => {
+        el("legendBody").classList.toggle("collapsed");
+      });
+    }
+    if (el("chartLegend")) {
+      ["pointerdown", "click", "dblclick"].forEach((evn) => {
+        el("chartLegend").addEventListener(evn, (ev) => ev.stopPropagation());
+      });
+    }
+    if (el("btnGoRt")) {
+      el("btnGoRt").addEventListener("click", () => {
+        if (replayOn) {
+          replayFollow = true;
+          syncFollowBtn();
+          centerReplayCursor();
+          return;
+        }
+        const vis = visibleCandles();
+        if (!vis.length) return;
+        const lastIdx = vis.length - 1;
+        const lr = chart.timeScale().getVisibleLogicalRange();
+        const width = lr && Number.isFinite(Number(lr.to) - Number(lr.from))
+          ? Math.max(20, Number(lr.to) - Number(lr.from))
+          : 80;
+        try {
+          chart.timeScale().setVisibleLogicalRange({
+            from: lastIdx - width + 10,
+            to: lastIdx + 10,
+          });
+        } catch (e) {}
+        try { chart.timeScale().scrollToPosition(0, false); } catch (e) {}
+        try { chart.timeScale().scrollToRealTime(); } catch (e) {}
+        requestAnimationFrame(() => updateGoRtBtn());
+      });
+    }
+    if (el("btnGoto")) {
+      el("btnGoto").addEventListener("click", () => el("gotoModal").classList.add("open"));
+    }
+    if (el("gotoCancel")) {
+      el("gotoCancel").addEventListener("click", () => el("gotoModal").classList.remove("open"));
+    }
+    if (el("catTabInd")) {
+      el("catTabInd").addEventListener("click", () => {
+        el("catTabInd").classList.add("active");
+        el("catTabStrat").classList.remove("active");
+        el("indList").hidden = false;
+        el("stratList").hidden = true;
+      });
+    }
+    if (el("catTabStrat")) {
+      el("catTabStrat").addEventListener("click", () => {
+        el("catTabStrat").classList.add("active");
+        el("catTabInd").classList.remove("active");
+        el("indList").hidden = true;
+        el("stratList").hidden = false;
+        renderStratCatalog(el("indSearch") ? el("indSearch").value : "");
+      });
+    }
+    if (el("indSearch")) {
+      el("indSearch").addEventListener("input", () => {
+        if (el("stratList") && !el("stratList").hidden) renderStratCatalog(el("indSearch").value);
+      });
+    }
+    if (el("btnIndicators")) {
+      el("btnIndicators").addEventListener("click", () => {
+        renderStratCatalog("");
+      });
+    }
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => updateGoRtBtn());
+    tickClock();
+    setInterval(tickClock, 1000);
+  }
+
   loadFileList();
   initAlertUi();
-  loadInitial().then(connectWs);
+  initShell().then(() => loadInitial().then(connectWs));
 
   window.addEventListener("ca-cmd", (ev) => {
     const d = ev.detail || {};

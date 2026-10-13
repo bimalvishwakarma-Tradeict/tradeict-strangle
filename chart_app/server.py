@@ -36,7 +36,7 @@ from indicators import (  # noqa: E402
     load_indicators,
     short_name_for,
 )
-from strategies import PLUGINS, compute, load_plugins  # noqa: E402
+from strategies import PLUGINS, compute, list_strategies, load_plugins  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
 SYMBOL = "BTCUSD"
@@ -49,6 +49,7 @@ RES_SEC = {
     "3m": 180,
     "5m": 300,
     "15m": 900,
+    "30m": 1800,
     "1h": 3600,
     "4h": 14400,
 }
@@ -202,38 +203,49 @@ async def api_overlay(
     show_obl: bool = Query(True),
     show_levels: bool = Query(True),
     show_signals: bool = Query(True),
+    params: str = Query("{}"),
 ) -> dict[str, Any]:
     if strategy not in PLUGINS:
         raise HTTPException(404, f"unknown strategy {strategy}")
+    extra: dict[str, Any] = {}
+    try:
+        raw_p = json.loads(params) if params else {}
+        if isinstance(raw_p, dict):
+            extra = raw_p
+    except json.JSONDecodeError:
+        extra = {}
     now = int(time.time())
     to_u = int(to_ts) if to_ts is not None else now
-    from_u = int(from_ts) if from_ts is not None else to_u - int(hours * 3600)
+    hrs = float(extra.get("hours", hours))
+    from_u = int(from_ts) if from_ts is not None else to_u - int(hrs * 3600)
     warmup = 10 * 86400
     bars = await _candles("1m", from_u - warmup, to_u)
     bars = [b for b in bars if from_u - warmup <= int(b["time"]) <= to_u]
-    data = compute(
-        strategy,
-        bars,
-        {
-            "line_tf": line_tf,
-            "hours": hours,
-            "from": from_u,
-            "to": to_u,
-            "chart_tf": tf,
-            "variant": variant,
-            "signal_tf": signal_tf,
-            "rsi_len": rsi_len,
-            "ob": ob,
-            "os": os,
-            "exp_obh": exp_obh,
-            "exp_obl": exp_obl,
-            "show_obh": show_obh,
-            "show_obl": show_obl,
-            "show_levels": show_levels,
-            "show_signals": show_signals,
-        },
-    )
+    merged = {
+        "line_tf": extra.get("line_tf", line_tf),
+        "hours": hrs,
+        "from": from_u,
+        "to": to_u,
+        "chart_tf": tf,
+        "variant": extra.get("variant", variant),
+        "signal_tf": extra.get("signal_tf", signal_tf),
+        "rsi_len": extra.get("rsi_len", rsi_len),
+        "ob": extra.get("ob", ob),
+        "os": extra.get("os", os),
+        "exp_obh": extra.get("exp_obh", exp_obh),
+        "exp_obl": extra.get("exp_obl", exp_obl),
+        "show_obh": extra.get("show_obh", show_obh),
+        "show_obl": extra.get("show_obl", show_obl),
+        "show_levels": extra.get("show_levels", show_levels),
+        "show_signals": extra.get("show_signals", show_signals),
+    }
+    data = compute(strategy, bars, merged)
     return {"strategy": strategy, "bars_used": len(bars), **data}
+
+
+@app.get("/api/strategies")
+async def api_strategies() -> dict[str, Any]:
+    return {"strategies": list_strategies()}
 
 
 @app.get("/api/indicators")

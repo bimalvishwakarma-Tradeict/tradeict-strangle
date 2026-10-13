@@ -252,6 +252,7 @@
     const getCandles = opts.getCandles;
     let drawings = [];
     let undo = [];
+    let redo = [];
     let tool = "cursor";
     let magnet = false;
     let hideAll = false;
@@ -282,6 +283,23 @@
     function pushUndo() {
       undo.push(JSON.stringify(drawings));
       if (undo.length > 20) undo.shift();
+      redo = [];
+    }
+    function doUndo() {
+      if (!undo.length) return;
+      redo.push(JSON.stringify(drawings));
+      drawings = JSON.parse(undo.pop());
+      selectedId = null;
+      save();
+      prim.requestUpdate();
+    }
+    function doRedo() {
+      if (!redo.length) return;
+      undo.push(JSON.stringify(drawings));
+      drawings = JSON.parse(redo.pop());
+      selectedId = null;
+      save();
+      prim.requestUpdate();
     }
     function bump() {
       save();
@@ -1583,11 +1601,12 @@
       }
       if ((ev.ctrlKey || ev.metaKey) && String(ev.key).toLowerCase() === "z") {
         ev.preventDefault();
-        if (!undo.length) return;
-        drawings = JSON.parse(undo.pop());
-        selectedId = null;
-        save();
-        prim.requestUpdate();
+        if (ev.shiftKey) doRedo();
+        else doUndo();
+      }
+      if ((ev.ctrlKey || ev.metaKey) && String(ev.key).toLowerCase() === "y") {
+        ev.preventDefault();
+        doRedo();
       }
     }
 
@@ -1777,6 +1796,8 @@
       },
       refresh: function () { padRight(); prim.requestUpdate(); },
       openSettings: openDialog,
+      undo: doUndo,
+      redo: doRedo,
     };
   }
 

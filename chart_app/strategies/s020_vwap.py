@@ -183,6 +183,51 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
     return {"lines": out_lines, "markers": markers, "series": []}
 
 
+META: dict[str, Any] = {
+    "name": "VWAP Signal",
+    "description": "VWAP swing highs/lows with touch markers",
+    "short_name": "VWAP Signal",
+    "overlay": True,
+    "inputs": [
+        {
+            "key": "line_tf", "label": "Line TF", "type": "select", "default": "1m",
+            "options": [
+                {"value": "1m", "label": "1m"},
+                {"value": "3m", "label": "3m"},
+                {"value": "5m", "label": "5m"},
+                {"value": "15m", "label": "15m"},
+            ],
+            "tab": "inputs",
+        },
+        {
+            "key": "variant", "label": "Variant", "type": "select", "default": "V0",
+            "options": [
+                {"value": "V0", "label": "V0 touch"},
+                {"value": "V3", "label": "V3 sweep-reclaim"},
+            ],
+            "tab": "inputs",
+        },
+        {
+            "key": "hours", "label": "Last hours", "type": "int", "default": 24,
+            "min": 1, "max": 168, "step": 1, "tab": "inputs",
+        },
+        {"key": "show_vwap", "label": "VWAP", "type": "bool", "default": True, "tab": "inputs"},
+        {"key": "show_active", "label": "Active lines", "type": "bool", "default": True, "tab": "inputs"},
+        {"key": "show_expired", "label": "Expired lines", "type": "bool", "default": True, "tab": "inputs"},
+        {"key": "show_marks", "label": "Markers", "type": "bool", "default": True, "tab": "inputs"},
+        {
+            "key": "marker_mode", "label": "Marker mode", "type": "select", "default": "raw",
+            "options": [
+                {"value": "raw", "label": "Raw touches"},
+                {"value": "backtest", "label": "Backtest entries"},
+            ],
+            "tab": "inputs",
+        },
+    ],
+}
+
+
 def register_plugin() -> None:
-    """Import side-effect: @register already bound compute."""
-    return
+    from strategies import register_meta
+
+    register_meta("S020", META)

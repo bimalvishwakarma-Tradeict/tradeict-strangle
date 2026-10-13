@@ -4,19 +4,25 @@
   <meta charset="UTF-8" />
   <title>chart_app — Delta BTCUSD</title>
   <style>
-    :root { color-scheme: dark; }
+    :root { color-scheme: dark; --bg:#131722; --panel:#1e222d; --bd:#2a2e39; --tx:#d1d4dc; --mut:#787b86; --up:#089981; --dn:#f23645; --panel-w:0px; }
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; font-family: Segoe UI, sans-serif; background: #0e1117; color: #d8dee9; }
-    #layout { display: grid; grid-template-columns: 42px 1fr 300px; grid-template-rows: 48px 1fr 132px 28px; height: 100%; }
-    header { grid-column: 1 / 4; display: flex; align-items: center; flex-wrap: nowrap; gap: 8px 12px; padding: 0 12px; background: #161b22; border-bottom: 1px solid #30363d; overflow-x: auto; }
+    html, body { margin: 0; height: 100%; font-family: -apple-system, "Trebuchet MS", Roboto, Ubuntu, sans-serif; background: var(--bg); color: var(--tx); font-size: 13px; }
+    #layout {
+      display: grid;
+      grid-template-columns: 42px minmax(0,1fr) var(--panel-w) 40px;
+      grid-template-rows: 38px minmax(0,1fr) 28px;
+      height: 100%;
+    }
+    #layout.panel-open { --panel-w: 280px; }
+    header { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; flex-wrap: nowrap; gap: 6px 10px; padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--bd); overflow-x: auto; }
     #drawBar {
-      grid-column: 1; grid-row: 2 / 4; display: flex; flex-direction: column; gap: 4px;
-      padding: 6px 4px; background: #161b22; border-right: 1px solid #30363d; overflow-y: auto;
+      grid-column: 1; grid-row: 2; display: flex; flex-direction: column; gap: 4px;
+      padding: 6px 4px; background: var(--panel); border-right: 1px solid var(--bd); overflow-y: auto;
     }
     #drawBar button { width: 32px; height: 28px; padding: 0; font-size: 13px; line-height: 1; }
-    #drawBar hr { border: 0; border-top: 1px solid #30363d; margin: 4px 0; }
+    #drawBar hr { border: 0; border-top: 1px solid var(--bd); margin: 4px 0; }
     #drawMenu {
-      position: fixed; z-index: 50; background: #161b22; border: 1px solid #30363d;
+      position: fixed; z-index: 50; background: var(--panel); border: 1px solid var(--bd);
       border-radius: 6px; padding: 8px; min-width: 160px; font-size: 12px;
     }
     #drawMenu button { margin: 2px 2px; }
@@ -37,29 +43,57 @@
     #alertLog li { padding: 6px 4px; border-bottom: 1px solid #21262d; }
     #alertLog .long { color: #3fb950; }
     #alertLog .short { color: #f85149; }
-    header h1 { font-size: 14px; margin: 0; font-weight: 600; }
-    select, input, button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-size: 12px; }
+    header h1 { font-size: 13px; margin: 0; font-weight: 600; white-space: nowrap; }
+    .tf-bar { display: flex; gap: 2px; }
+    .tf-bar button { padding: 3px 7px; }
+    select, input, button { background: #2a2e39; color: var(--tx); border: 1px solid var(--bd); border-radius: 4px; padding: 4px 8px; font-size: 12px; }
     button { cursor: pointer; }
-    button:hover { background: #30363d; }
-    button.active { background: #388bfd; border-color: #388bfd; color: #fff; }
+    button:hover { background: #363a45; }
+    button.active { background: #2962ff; border-color: #2962ff; color: #fff; }
     button:disabled { opacity: 0.45; cursor: default; }
     #replayStats { list-style: none; margin: 0; padding: 0; }
     #replayStats li { padding: 6px 4px; border-bottom: 1px solid #21262d; }
     #replayStats .long { color: #3fb950; }
     #replayStats .short { color: #f85149; }
     #replayStats .pending { color: #8b949e; }
-    #chart { grid-column: 2; grid-row: 2; min-width: 0; position: relative; }
-    #indLegend {
-      position: absolute; top: 8px; left: 8px; z-index: 6; pointer-events: none;
-      display: flex; flex-direction: column; gap: 2px; font-size: 12px;
+    #mid { grid-column: 2; grid-row: 2; min-width: 0; display: flex; flex-direction: column; position: relative; }
+    #chart { flex: 1; min-width: 0; min-height: 0; position: relative; }
+    #chart::after {
+      content: "BTCUSD  ·  Delta India";
+      position: absolute; left: 10px; bottom: 38px; z-index: 1; pointer-events: none;
+      font-size: 28px; font-weight: 700; letter-spacing: 0.5px; color: rgba(209,212,220,0.10);
     }
-    #indLegend .ind-row {
+    #chartLegend {
+      position: absolute; top: 6px; left: 8px; z-index: 6; pointer-events: none;
+      max-width: min(72%, 640px);
+    }
+    #legendOhlc { pointer-events: none; font-size: 11px; color: var(--tx); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #legendOhlc .up { color: var(--up); }
+    #legendOhlc .dn { color: var(--dn); }
+    #legendFold { pointer-events: auto; border: 0; background: transparent; color: var(--mut); padding: 0 4px; font-size: 11px; }
+    #legendBody { display: flex; flex-direction: column; gap: 2px; }
+    #legendBody.collapsed { display: none; }
+    #indLegend, #stratLegend { pointer-events: none; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+    .ind-row, .st-row {
       pointer-events: auto; display: flex; align-items: center; gap: 4px;
-      background: #161b22cc; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px;
+      background: transparent; padding: 1px 2px; color: var(--tx);
     }
-    #indLegend .ind-row.hidden .ind-name { opacity: 0.45; text-decoration: line-through; }
-    #indLegend .ind-name { color: #e6edf3; margin-right: 4px; }
-    #indLegend button { padding: 0 4px; font-size: 12px; line-height: 18px; border: 0; background: transparent; }
+    .ind-row.hidden .ind-name, .st-row.hidden .ind-name { opacity: 0.45; text-decoration: line-through; }
+    .ind-name { color: var(--tx); margin-right: 4px; }
+    .ind-row button, .st-row button { padding: 0 4px; font-size: 12px; line-height: 16px; border: 0; background: transparent; opacity: 0; }
+    .ind-row:hover button, .st-row:hover button { opacity: 1; }
+    #btnGoRt {
+      display: none; position: absolute; right: 92px; bottom: 26px; z-index: 12;
+      width: 28px; height: 22px; padding: 0; font-size: 12px;
+    }
+    #btnGoRt.show { display: block; }
+    #replayBar {
+      display: none; position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+      z-index: 16; gap: 6px; align-items: center; padding: 6px 10px;
+      background: var(--panel); border: 1px solid var(--bd); border-radius: 6px;
+      box-shadow: 0 4px 16px #0008;
+    }
+    #replayBar.show { display: flex; }
     #indModal, #indDialog {
       display: none; position: fixed; inset: 0; z-index: 70; background: #0008;
       align-items: center; justify-content: center;
@@ -81,10 +115,22 @@
     .ind-cat-desc { color: #8b949e; font-size: 11px; }
     #indDialog .dlg-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
     #indDialog .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-    #rsiChart { grid-column: 2; grid-row: 3; min-width: 0; border-top: 1px solid #30363d; }
-    #rsiChart.hidden { display: none; }
-    aside { grid-column: 3; grid-row: 2 / 4; border-left: 1px solid #30363d; background: #161b22; overflow: auto; padding: 10px; font-size: 12px; }
-    aside h2 { font-size: 12px; margin: 12px 0 6px; color: #8b949e; text-transform: uppercase; }
+    #rsiChart { height: 132px; min-width: 0; border-top: 1px solid var(--bd); flex: none; }
+    #rsiChart.hidden { display: none; height: 0; border: 0; }
+    #sidePanel { grid-column: 3; grid-row: 2; border-left: 1px solid var(--bd); background: var(--panel); overflow: auto; padding: 10px; font-size: 12px; }
+    #sidePanel.closed { display: none; }
+    #sidePanel h2 { font-size: 11px; margin: 12px 0 6px; color: var(--mut); text-transform: uppercase; }
+    #rightStrip {
+      grid-column: 4; grid-row: 2; display: flex; flex-direction: column; gap: 4px;
+      padding: 6px 4px; background: var(--panel); border-left: 1px solid var(--bd);
+    }
+    #rightStrip button { width: 32px; height: 32px; padding: 0; }
+    #gotoModal {
+      display: none; position: fixed; inset: 0; z-index: 72; background: #0008;
+      align-items: center; justify-content: center;
+    }
+    #gotoModal.open { display: flex; }
+    #gotoModal .dlg { background: var(--panel); border: 1px solid var(--bd); border-radius: 8px; padding: 12px 14px; width: 320px; }
     .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
     label { display: flex; align-items: center; gap: 4px; }
     #trades { list-style: none; margin: 0; padding: 0; }
@@ -92,11 +138,18 @@
     #trades li:hover { background: #21262d; }
     #trades .long { color: #3fb950; }
     #trades .short { color: #f85149; }
-    footer { grid-column: 1 / 4; display: flex; align-items: center; gap: 16px; padding: 0 12px; font-size: 12px; background: #161b22; border-top: 1px solid #30363d; }
-    #dot { width: 8px; height: 8px; border-radius: 50%; background: #8b949e; }
-    #dot.live { background: #3fb950; }
-    #dot.reconnecting { background: #d29922; }
+    footer { grid-column: 1 / -1; grid-row: 3; display: flex; align-items: center; gap: 10px; padding: 0 10px; font-size: 12px; background: var(--panel); border-top: 1px solid var(--bd); }
+    #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mut); }
+    #dot.live { background: var(--up); }
+    #dot.reconnecting { background: #e2a917; }
     .ohlc span { margin-right: 10px; }
+    #rangeBar { display: flex; gap: 2px; }
+    #rangeBar button { padding: 2px 7px; }
+    #histStatus { color: var(--mut); font-size: 11px; margin-left: auto; }
+    #liveClock { color: var(--tx); font-variant-numeric: tabular-nums; }
+    .pane { display: none; }
+    .pane.show { display: block; }
+    #stratSettingsHost .st-set { border-bottom: 1px solid var(--bd); padding-bottom: 8px; margin-bottom: 8px; }
     #drawDialog {
       display: none; position: fixed; inset: 0; z-index: 60; background: #0008;
       align-items: center; justify-content: center;
@@ -122,39 +175,34 @@
   <div id="layout">
     <header>
       <h1>BTCUSD · Delta India</h1>
-      <label>TF
-        <select id="tf">
-          <option value="1m" selected>1m</option>
-          <option value="3m">3m</option>
-          <option value="5m">5m</option>
-          <option value="15m">15m</option>
-          <option value="1h">1h</option>
-          <option value="4h">4h</option>
+      <div class="tf-bar" id="tfBar">
+        <button type="button" data-tf="1m" class="active">1m</button>
+        <button type="button" data-tf="3m">3m</button>
+        <button type="button" data-tf="5m">5m</button>
+        <button type="button" data-tf="15m">15m</button>
+        <button type="button" data-tf="1h">1h</button>
+        <button type="button" data-tf="4h">4h</button>
+        <select id="tfMore" title="More timeframes">
+          <option value="">…</option>
+          <option value="30m">30m</option>
         </select>
-      </label>
-      <label>Jump IST
-        <input id="jump" type="datetime-local" />
-      </label>
-      <button id="btnJump">Go</button>
-      <button id="btnLive" type="button">Live</button>
-      <button id="btnSelectBar" type="button">Select bar</button>
-      <button id="btnReplayPlay" type="button" disabled>Play</button>
-      <button id="btnReplayStep" type="button" disabled>Step</button>
-      <button id="btnReplayFollow" type="button" disabled>Follow</button>
-      <label>Speed
-        <select id="replaySpeed">
-          <option value="1" selected>1x</option>
-          <option value="3">3x</option>
-          <option value="10">10x</option>
-        </select>
-      </label>
-      <button id="btnReplayLive" type="button">Jump to real-time</button>
-      <button id="btnIndicators" type="button">Indicators</button>
-      <button id="btnAlerts" type="button">🔔 Alerts</button>
-      <label><input type="checkbox" id="togAlertSkipped" /> Skipped signals pe bhi alert</label>
-      <button id="btnTestAlert" type="button">Test alert</button>
-      <span id="statusLabel">connecting</span>
-      <span id="histStatus">Candles: 0 | idle</span>
+      </div>
+      <select id="tf" hidden>
+        <option value="1m" selected>1m</option>
+        <option value="3m">3m</option>
+        <option value="5m">5m</option>
+        <option value="15m">15m</option>
+        <option value="30m">30m</option>
+        <option value="1h">1h</option>
+        <option value="4h">4h</option>
+      </select>
+      <button id="btnIndicators" type="button">ƒx Indicators</button>
+      <button id="btnAlerts" type="button">Alert</button>
+      <button id="btnReplay" type="button">Replay</button>
+      <button id="btnUndo" type="button" title="Undo">↶</button>
+      <button id="btnRedo" type="button" title="Redo">↷</button>
+      <button id="btnLive" type="button" hidden>Live</button>
+      <span id="statusLabel" hidden>connecting</span>
     </header>
     <div id="drawBar">
       <button type="button" data-tool="cursor" title="Cursor">↖</button>
@@ -172,88 +220,83 @@
       <button type="button" id="drawHide" title="Hide all">H</button>
       <button type="button" id="drawDeleteAll" title="Delete all">✕</button>
     </div>
-    <div id="chart"><div id="indLegend"></div></div>
-    <div id="rsiChart"></div>
-    <aside>
-      <h2>Strategy</h2>
-      <div class="row">
-        <label>Signal
-          <select id="strategy">
-            <option value="S020" selected>VWAP Signal</option>
-            <option value="S020_RSI">RSI Div Signal</option>
+    <div id="mid">
+      <div id="chart">
+        <div id="chartLegend">
+          <div id="legendOhlc">BTCUSD · 1 · Delta Exchange India</div>
+          <button type="button" id="legendFold" title="Collapse legend">^</button>
+          <div id="legendBody">
+            <div id="stratLegend"></div>
+            <div id="indLegend"></div>
+          </div>
+        </div>
+        <button type="button" id="btnGoRt" title="Scroll to realtime">&gt;&gt;</button>
+        <div id="replayBar">
+          <button id="btnSelectBar" type="button">Select bar</button>
+          <button id="btnReplayPlay" type="button" disabled>▶</button>
+          <button id="btnReplayStep" type="button" disabled>Step</button>
+          <select id="replaySpeed">
+            <option value="1" selected>1x</option>
+            <option value="3">3x</option>
+            <option value="10">10x</option>
           </select>
-        </label>
+          <button id="btnReplayFollow" type="button" disabled>Follow</button>
+          <button id="btnReplayLive" type="button">Jump to real-time</button>
+          <button id="btnReplayExit" type="button" title="Exit replay">✕</button>
+        </div>
       </div>
-      <h2>S020 VWAP Swing</h2>
-      <div class="row">
-        <label>Line TF
-          <select id="lineTf">
-            <option value="1m" selected>1m</option>
-            <option value="3m">3m</option>
-            <option value="5m">5m</option>
-            <option value="15m">15m</option>
-          </select>
-        </label>
-        <label>Variant
-          <select id="variant">
-            <option value="V0" selected>V0 touch</option>
-            <option value="V3">V3 sweep-reclaim</option>
-          </select>
-        </label>
-        <label>Last hours
-          <input id="hours" type="number" value="24" min="1" max="168" style="width:56px" />
-        </label>
+      <div id="rsiChart"></div>
+    </div>
+    <aside id="sidePanel" class="closed">
+      <div id="paneStrat" class="pane">
+        <h2>Strategy settings</h2>
+        <div id="stratSettingsHost"></div>
       </div>
-      <div class="row">
-        <label><input type="checkbox" id="togVwap" checked /> VWAP</label>
-        <label><input type="checkbox" id="togActive" checked /> Active lines</label>
-        <label><input type="checkbox" id="togExpired" checked /> Expired lines</label>
-        <label><input type="checkbox" id="togMarks" checked /> Markers</label>
-        <label>Marker mode
-          <select id="markerMode">
-            <option value="raw">Raw touches</option>
-            <option value="backtest">Backtest entries</option>
-          </select>
-        </label>
+      <div id="paneAlerts" class="pane">
+        <h2>Alerts</h2>
+        <div class="row">
+          <label><input type="checkbox" id="togAlerts" /> Alerts ON</label>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="togAlertSkipped" /> Skipped signals pe bhi alert</label>
+        </div>
+        <button id="btnTestAlert" type="button">Test alert</button>
+        <ul id="alertLog"></ul>
       </div>
-      <button id="btnOverlay">Reload overlay</button>
-      <h2>RSI Div</h2>
-      <div class="row">
-        <label>Signal TF
-          <select id="signalTf">
-            <option value="1m">1m</option>
-            <option value="3m">3m</option>
-            <option value="5m">5m</option>
-            <option value="15m" selected>15m</option>
-            <option value="30m">30m</option>
-          </select>
-        </label>
-        <label>RSI Length <input id="rsiLen" type="number" value="14" min="2" max="50" style="width:48px" /></label>
-        <label>OB <input id="rsiOb" type="number" value="70" min="50" max="90" style="width:48px" /></label>
-        <label>OS <input id="rsiOs" type="number" value="30" min="10" max="50" style="width:48px" /></label>
-        <label>OBH expire RSI <input id="rsiExpObh" type="number" value="40" min="10" max="70" style="width:48px" /></label>
-        <label>OBL expire RSI <input id="rsiExpObl" type="number" value="60" min="30" max="90" style="width:48px" /></label>
+      <div id="paneReplay" class="pane">
+        <h2>Replay stats</h2>
+        <div id="replayCursorLab" class="row">off</div>
+        <ul id="replayStats"></ul>
       </div>
-      <div class="row">
-        <label><input type="checkbox" id="togObh" checked /> Show OBH</label>
-        <label><input type="checkbox" id="togObl" checked /> Show OBL</label>
-        <label><input type="checkbox" id="togLevels" checked /> Show OBH/OBL Levels</label>
-        <label><input type="checkbox" id="togSigs" checked /> Show Signals</label>
-        <label><input type="checkbox" id="togRsiPane" checked /> RSI pane (<span id="rsiPaneLab">70/30</span>)</label>
+      <div id="paneTrades" class="pane">
+        <h2>Backtest trades</h2>
+        <select id="tradeFile" style="width:100%"></select>
+        <button id="btnTrades">Load trades</button>
+        <ul id="trades"></ul>
       </div>
-      <h2>Alerts</h2>
-      <ul id="alertLog"></ul>
-      <h2>Replay stats</h2>
-      <div id="replayCursorLab" class="row">off</div>
-      <ul id="replayStats"></ul>
-      <h2>Backtest trades</h2>
-      <select id="tradeFile" style="width:100%"></select>
-      <button id="btnTrades">Load trades</button>
-      <ul id="trades"></ul>
     </aside>
+    <div id="rightStrip">
+      <button type="button" data-pane="paneStrat" title="Strategy settings">⚙</button>
+      <button type="button" data-pane="paneAlerts" title="Alerts">🔔</button>
+      <button type="button" data-pane="paneReplay" title="Replay stats">▶</button>
+      <button type="button" data-pane="paneTrades" title="Backtest trades">☰</button>
+    </div>
     <footer>
+      <div id="rangeBar">
+        <button type="button" data-range="1D">1D</button>
+        <button type="button" data-range="5D">5D</button>
+        <button type="button" data-range="1M">1M</button>
+        <button type="button" data-range="3M">3M</button>
+        <button type="button" data-range="6M">6M</button>
+        <button type="button" data-range="YTD">YTD</button>
+        <button type="button" data-range="1Y">1Y</button>
+        <button type="button" data-range="All">All</button>
+      </div>
+      <button type="button" id="btnGoto" title="Go to date">📅</button>
       <div id="dot"></div>
-      <div class="ohlc" id="ohlc">OHLC —</div>
+      <span id="histStatus" title="">LIVE · 0</span>
+      <span id="liveClock">—</span>
+      <div id="ohlc" hidden></div>
       <div id="markTip"></div>
     </footer>
   </div>
@@ -407,14 +450,29 @@
       </div>
     </div>
   </div>
+  <div id="gotoModal">
+    <div class="dlg">
+      <strong>Go to date</strong>
+      <div class="row"><label>IST</label><input id="jump" type="datetime-local" /></div>
+      <div class="dlg-actions">
+        <button type="button" id="gotoCancel">Cancel</button>
+        <button type="button" id="btnJump">Go</button>
+      </div>
+    </div>
+  </div>
   <div id="indModal">
     <div class="dlg">
       <div class="row" style="justify-content:space-between">
-        <strong>Indicators</strong>
+        <strong>Add to chart</strong>
         <button type="button" id="indModalClose">✕</button>
+      </div>
+      <div class="dlg-tabs" style="margin-top:8px">
+        <button type="button" id="catTabInd" class="active">Indicators</button>
+        <button type="button" id="catTabStrat">Strategies</button>
       </div>
       <input id="indSearch" type="search" placeholder="Search" style="width:100%;margin-top:8px" />
       <div id="indList"></div>
+      <div id="stratList" hidden></div>
     </div>
   </div>
   <div id="indDialog">
@@ -435,8 +493,8 @@
   </div>
   <input id="drawTextInput" hidden placeholder="Note…" />
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/drawings.js?v=draw3"></script>
-  <script src="/static/indicators.js?v=ind1"></script>
-  <script src="/static/app.js?v=draw3"></script>
+  <script src="/static/drawings.js?v=tv2"></script>
+  <script src="/static/indicators.js?v=tv2"></script>
+  <script src="/static/app.js?v=tv2b"></script>
 </body>
 </html>
