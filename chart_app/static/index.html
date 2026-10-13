@@ -79,6 +79,12 @@
       background: transparent; padding: 1px 2px; color: var(--tx);
     }
     .ind-row.hidden .ind-name, .st-row.hidden .ind-name { opacity: 0.45; text-decoration: line-through; }
+    #legendBody.loading .ind-name::after, .ind-row.loading .ind-name::after {
+      content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px;
+      border-radius: 50%; background: #58a6ff; vertical-align: middle;
+      animation: caDot 0.8s ease-in-out infinite;
+    }
+    @keyframes caDot { 50% { opacity: 0.2; } }
     .ind-name { color: var(--tx); margin-right: 4px; }
     .ind-row button, .st-row button { padding: 0 4px; font-size: 12px; line-height: 16px; border: 0; background: transparent; opacity: 0; }
     .ind-row:hover button, .st-row:hover button { opacity: 1; }
@@ -502,8 +508,8 @@
   </div>
   <input id="drawTextInput" hidden placeholder="Note…" />
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/drawings.js?v=drawfix1"></script>
-  <script src="/static/indicators.js?v=ind1b"></script>
-  <script src="/static/app.js?v=drawfix1"></script>
+  <script src="/static/drawings.js?v=smooth3"></script>
+  <script src="/static/indicators.js?v=smooth3"></script>
+  <script src="/static/app.js?v=smooth3"></script>
 </body>
 </html>

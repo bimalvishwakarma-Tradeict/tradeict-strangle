@@ -61,6 +61,14 @@
   let applyingRange = false;
   let syncingTs = false;
   let syncingXh = false;
+  let resizing = false;
+  let resizeRaf = 0;
+  let overlayAbort = null;
+  let overlayDebounce = null;
+  let indDebounce = null;
+  let overlayBusy = false;
+  let lastStepMs = 0;
+  let subCount = 0;
 
   const chart = LightweightCharts.createChart(el("chart"), {
     layout: { background: { color: "#131722" }, textColor: "#787b86" },
@@ -112,6 +120,8 @@
     else {
       paneCharts.push(entry);
       entry.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+        subCount += 1;
+        if (resizing || applyingRange) return;
         pushRangePeer("pane", range);
       });
       entry.chart.subscribeCrosshairMove((param) => {
@@ -130,6 +140,7 @@
     if (i >= 0) paneCharts.splice(i, 1);
   }
   function rememberViewWidth(range) {
+    if (resizing || applyingRange || syncingTs) return;
     if (!range || range.from == null || range.to == null) return;
     const w = Number(range.to) - Number(range.from);
     if (Number.isFinite(w) && w >= 8) replayViewWidth = w;
@@ -173,8 +184,9 @@
     syncFollowBtn();
   }
   chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+    subCount += 1;
     if (range) rememberViewWidth(range);
-    pushRangePeer("main", range);
+    if (!resizing) pushRangePeer("main", range);
     onUserMovedRange(range);
   });
   function centerReplayCursor() {
@@ -214,20 +226,43 @@
     if (!replayOn || replayBarOpen == null) return null;
     return Number(replayBarOpen) + barSecNow();
   }
+  function maxShowTime() {
+    if (replayOn && replayBarOpen != null) return Number(replayBarOpen);
+    return null;
+  }
+  function canShowTime(t) {
+    const cap = maxShowTime();
+    if (cap == null) return true;
+    return Number(t) <= cap;
+  }
   function viewNewestOpen() {
     if (replayOn && replayBarOpen != null) return Number(replayBarOpen);
     return newestCandleTime();
   }
   function visibleCandles() {
     const all = sortedCandles();
-    if (!replayOn || replayBarOpen == null) return all;
-    const cap = Number(replayBarOpen);
+    const cap = maxShowTime();
+    if (cap == null) return all;
     return all.filter((c) => Number(c.time) <= cap);
   }
-  function applyCandles() {
+  function leakCheck(tag) {
     const vis = visibleCandles();
-    series.setData(vis);
+    const last = vis.length ? Number(vis[vis.length - 1].time) : null;
+    const cap = maxShowTime();
+    const leak = cap != null && last != null && last > cap;
+    window.__caLeak = { tag: tag || "", cursor: cap, last: last, leak: leak, n: vis.length, lastIst: last != null ? fmtIst(last) : null };
+    if (leak) console.warn("REPLAY FUTURE LEAK", window.__caLeak);
+    return window.__caLeak;
+  }
+  function applyCandles(mode) {
+    const vis = visibleCandles();
     const last = vis.length ? vis[vis.length - 1] : null;
+    if (mode === "step" && last && vis.length > 1) {
+      try { series.update(last); }
+      catch (e) { series.setData(vis); }
+    } else {
+      series.setData(vis);
+    }
     if (last) {
       const up = Number(last.close) >= Number(last.open);
       series.applyOptions({
@@ -240,6 +275,7 @@
     if (indApi) indApi.refresh();
     paintOhlcLegend(last);
     updateGoRtBtn();
+    leakCheck("applyCandles");
   }
   function completedSigClose(cursorClose) {
     const sec = sigTfSec();
@@ -295,8 +331,18 @@
 
   async function fetchCandles(opts) {
     const q = new URLSearchParams({ tf, limit: String((opts && opts.limit) || 1500) });
-    if (opts && opts.start != null) q.set("start", String(opts.start));
-    if (opts && opts.end != null) q.set("end", String(opts.end));
+    let start = opts && opts.start != null ? Number(opts.start) : null;
+    let end = opts && opts.end != null ? Number(opts.end) : null;
+    const cap = maxShowTime();
+    if (replayOn && cap != null && !(opts && opts.allowAhead)) {
+      const to = cap;
+      if (end == null || end > to) end = to;
+      if (start != null && start > to) {
+        return { candles: [], reached_now: false, first: null, last: null };
+      }
+    }
+    if (start != null) q.set("start", String(start));
+    if (end != null) q.set("end", String(end));
     const r = await fetch("/api/candles?" + q.toString());
     return r.json();
   }
@@ -311,7 +357,7 @@
       const j = await fetchCandles({ limit: 1500 });
       mergeRows(j.candles || []);
       applyCandles();
-      if (candleMap.size) chart.timeScale().scrollToRealTime();
+      if (!replayOn && candleMap.size) chart.timeScale().scrollToRealTime();
       await new Promise((r) => requestAnimationFrame(r));
       await reloadOverlay();
       pushRangePeer("main", chart.timeScale().getVisibleLogicalRange());
@@ -321,7 +367,7 @@
     }
   }
 
-  async function loadAround(centerTs) {
+  async function loadAround(centerTs, opts) {
     candleMap = new Map();
     historyEnd = false;
     loadingLeft = true;
@@ -331,23 +377,26 @@
     series.setMarkers([]);
     updateHistStatus();
     const barSec = RES_SEC[tf] || 60;
+    const noFwd = Boolean(replayOn || (opts && opts.noForward));
+    applyingRange = true;
     try {
-      const [back, fwd] = await Promise.all([
-        fetchCandles({ end: centerTs, limit: 750 }),
-        fetchCandles({ start: centerTs, limit: 750 }),
-      ]);
+      const back = await fetchCandles({ end: centerTs, limit: 1500 });
       mergeRows(back.candles || []);
-      mergeRows(fwd.candles || []);
+      if (!noFwd) {
+        const fwd = await fetchCandles({ start: centerTs, limit: 750 });
+        mergeRows(fwd.candles || []);
+        if (fwd.reached_now) historyMode = false;
+      }
       applyCandles();
       chart.timeScale().setVisibleRange({
         from: centerTs - 150 * barSec,
-        to: centerTs + 150 * barSec,
+        to: noFwd ? centerTs : centerTs + 150 * barSec,
       });
-      if (fwd.reached_now) historyMode = false;
-      await reloadOverlay();
+      await reloadOverlay(true);
     } finally {
       loadingLeft = false;
       loadingRight = false;
+      applyingRange = false;
       updateHistStatus();
     }
   }
@@ -375,6 +424,7 @@
   }
 
   async function loadNewer() {
+    if (replayOn) return;
     if (!historyMode || loadingRight || candleMap.size === 0) return;
     const newest = newestCandleTime();
     if (newest == null) return;
@@ -399,7 +449,8 @@
   }
 
   chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-    if (!range || loadingLeft || loadingRight) return;
+    subCount += 1;
+    if (!range || loadingLeft || loadingRight || resizing || applyingRange) return;
     const barSec = RES_SEC[tf] || 60;
     const oldest = oldestCandleTime();
     const newest = newestCandleTime();
@@ -494,61 +545,97 @@
   }
 
   function indicatorRange() {
-    const times = [...candleMap.keys()];
-    if (!times.length) return null;
-    const capOpen = viewNewestOpen();
-    const to = replayOn && replayBarOpen != null
-      ? Number(replayBarOpen) + barSecNow() - 1
-      : (capOpen != null ? capOpen : Math.max(...times));
-    return { from: Math.min(...times), to: to };
+    const vis = visibleCandles();
+    if (!vis.length) return null;
+    const cap = maxShowTime();
+    const to = cap != null ? cap : Number(vis[vis.length - 1].time);
+    return { from: Number(vis[0].time), to: to };
   }
 
+  function setLegendLoading(on) {
+    const body = el("legendBody");
+    if (body) body.classList.toggle("loading", Boolean(on));
+  }
+  function scheduleOverlay(force) {
+    if (overlayDebounce) clearTimeout(overlayDebounce);
+    const wait = replayPlaying ? 140 : (force ? 0 : 40);
+    overlayDebounce = setTimeout(() => {
+      overlayDebounce = null;
+      void reloadOverlay(Boolean(force));
+    }, wait);
+  }
+  function scheduleIndicators() {
+    if (indDebounce) clearTimeout(indDebounce);
+    const wait = replayPlaying ? 140 : 40;
+    indDebounce = setTimeout(() => {
+      indDebounce = null;
+      if (indApi) void indApi.reload();
+    }, wait);
+  }
   async function reloadOverlay(force) {
-    const times = [...candleMap.keys()];
-    if (!times.length) return;
-    const from = Math.min(...times);
+    const vis = visibleCandles();
+    if (!vis.length) return;
+    const from = Number(vis[0].time);
     const capOpen = viewNewestOpen();
     const cursorClose = replayOn && replayBarOpen != null
       ? replayCursorClose()
-      : (capOpen != null ? Number(capOpen) + barSecNow() : Math.max(...times));
+      : (capOpen != null ? Number(capOpen) + barSecNow() : Number(vis[vis.length - 1].time));
     const to = replayOn && replayBarOpen != null
-      ? Number(replayBarOpen) + barSecNow() - 1
-      : (capOpen != null ? capOpen : Math.max(...times));
+      ? Number(replayBarOpen)
+      : (capOpen != null ? capOpen : Number(vis[vis.length - 1].time));
     if (replayOn && !force) {
       const sigClose = completedSigClose(cursorClose);
       if (sigClose <= lastOverlaySigClose) {
-        if (indApi) await indApi.reload();
+        paintOverlay(overlayPayload);
+        scheduleIndicators();
         return;
       }
     }
     const gen = ++overlayGen;
+    if (overlayAbort) {
+      try { overlayAbort.abort(); } catch (e) {}
+    }
+    overlayAbort = typeof AbortController === "function" ? new AbortController() : null;
+    const signal = overlayAbort ? overlayAbort.signal : undefined;
     const visible = stratInstances.filter((s) => s.visible !== false);
-    if (!visible.length) {
-      overlayPayload = { lines: [], markers: [] };
+    overlayBusy = true;
+    setLegendLoading(true);
+    try {
+      if (!visible.length) {
+        overlayPayload = { lines: [], markers: [] };
+        lastOverlaySigClose = completedSigClose(cursorClose);
+        paintOverlay(overlayPayload);
+        scheduleIndicators();
+        return;
+      }
+      await Promise.all(visible.map(async (it) => {
+        const q = new URLSearchParams({
+          strategy: it.id,
+          tf,
+          from: String(from),
+          to: String(to),
+          params: JSON.stringify(it.params || {}),
+        });
+        const r = await fetch("/api/overlay?" + q.toString(), signal ? { signal: signal } : {});
+        const j = await r.json();
+        it._payload = j;
+      }));
+      if (gen !== overlayGen) return;
+      overlayPayload = mergeStratPayloads();
       lastOverlaySigClose = completedSigClose(cursorClose);
       paintOverlay(overlayPayload);
-      if (indApi) await indApi.reload();
-      return;
+      if (replayOn) ingestReplaySignals(overlayPayload);
+      else scanLiveAlerts(overlayPayload);
+      scheduleIndicators();
+    } catch (err) {
+      if (err && err.name === "AbortError") return;
+      console.warn("overlay reload failed", err);
+    } finally {
+      if (gen === overlayGen) {
+        overlayBusy = false;
+        setLegendLoading(false);
+      }
     }
-    await Promise.all(visible.map(async (it) => {
-      const q = new URLSearchParams({
-        strategy: it.id,
-        tf,
-        from: String(from),
-        to: String(to),
-        params: JSON.stringify(it.params || {}),
-      });
-      const r = await fetch("/api/overlay?" + q.toString());
-      const j = await r.json();
-      it._payload = j;
-    }));
-    if (gen !== overlayGen) return;
-    overlayPayload = mergeStratPayloads();
-    lastOverlaySigClose = completedSigClose(cursorClose);
-    paintOverlay(overlayPayload);
-    if (replayOn) ingestReplaySignals(overlayPayload);
-    else scanLiveAlerts(overlayPayload);
-    if (indApi) await indApi.reload();
   }
 
   function mergeStratPayloads() {
@@ -584,9 +671,9 @@
       .filter((p) => Number(p.time) >= oldest && (newest == null || Number(p.time) <= newest))
       .sort((a, b) => Number(a.time) - Number(b.time));
     if (!src.length) return [];
-    const times = sortedCandles()
+    const times = visibleCandles()
       .map((c) => c.time)
-      .filter((t) => t >= oldest && (newest == null || t <= newest));
+      .filter((t) => t >= oldest && (newest == null || t <= newest) && canShowTime(t));
     if (!times.length) return src;
     const out = [];
     let i = 0;
@@ -638,25 +725,36 @@
     const vwap = (j.lines || []).find((x) => x.kind === "vwap");
     vwapSeries.applyOptions({ visible: showVwap });
     const vwapPts = showVwap && vwap && oldest != null ? clipLinePoints(vwap, oldest, newest) : [];
-    vwapSeries.setData(vwapPts);
-    clearExtra();
+    vwapSeries.setData(vwapPts.filter((p) => p.time == null || canShowTime(p.time)));
+    const wanted = [];
     (j.lines || []).forEach((ln) => {
       if (ln.kind === "vwap") return;
       if (ln.active && !showActive) return;
       if (!ln.active && !showExpired) return;
       const pts = oldest != null ? clipLinePoints(ln, oldest, newest) : (ln.points || []);
-      if (pts.length < 2) return;
+      const capped = pts.filter((p) => p.time == null || canShowTime(p.time));
+      if (capped.length < 2) return;
       const color = ln.kind === "high"
         ? (ln.active ? "#ef4444" : "rgba(239,68,68,0.5)")
         : (ln.active ? "#22c55e" : "rgba(34,197,94,0.5)");
-      const s = chart.addLineSeries({
-        color,
-        lineWidth: ln.active ? 2 : 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-      });
-      s.setData(pts);
-      extraSeries.push(s);
+      wanted.push({ pts: capped, color, width: ln.active ? 2 : 1 });
+    });
+    while (extraSeries.length > wanted.length) {
+      const s = extraSeries.pop();
+      try { chart.removeSeries(s); } catch (e) {}
+    }
+    wanted.forEach((w, i) => {
+      if (!extraSeries[i]) {
+        extraSeries[i] = chart.addLineSeries({
+          color: w.color,
+          lineWidth: w.width,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+      } else {
+        extraSeries[i].applyOptions({ color: w.color, lineWidth: w.width });
+      }
+      extraSeries[i].setData(w.pts);
     });
     const inRange = (t) =>
       (oldest == null || Number(t) >= oldest) && (newest == null || Number(t) <= newest);
@@ -1219,13 +1317,23 @@
     const nxt = all.find((c) => Number(c.time) > cap);
     if (nxt) return nxt;
     const start = cap + barSecNow();
-    const j = await fetchCandles({ start, limit: 500 });
+    const j = await fetchCandles({ start: start, end: start, limit: 1, allowAhead: true });
     mergeRows(j.candles || []);
     return sortedCandles().find((c) => Number(c.time) > cap) || null;
   }
 
   async function startReplayAt(openTs) {
-    const snapped = snapBarOpen(Number(openTs));
+    const want = Number(openTs);
+    if (!Number.isFinite(want)) return;
+    let snapped = snapBarOpen(want);
+    if (snapped == null || Math.abs(snapped - want) > barSecNow() * 2) {
+      historyMode = true;
+      disconnectWs();
+      replayOn = true;
+      replayBarOpen = want;
+      await loadAround(want, { noForward: true });
+      snapped = snapBarOpen(want);
+    }
     if (snapped == null) return;
     stopReplayTimer();
     replayOn = true;
@@ -1250,10 +1358,18 @@
     await reloadOverlay(true);
     centerReplayCursor();
     requestAnimationFrame(() => { applyingRange = false; });
+    void fetchCandles({
+      start: Number(replayBarOpen) + barSecNow(),
+      limit: 1500,
+      allowAhead: true,
+    }).then((j) => {
+      mergeRows(j.candles || []);
+    }).catch(function () {});
   }
 
   async function replayStep() {
     if (!replayOn || replayBarOpen == null) return;
+    const t0 = performance.now();
     const nxt = await ensureNextBar();
     if (!nxt) {
       stopReplayTimer();
@@ -1264,11 +1380,16 @@
     replayFollow = true;
     syncFollowBtn();
     applyingRange = true;
-    applyCandles();
+    applyCandles("step");
+    paintOverlay(overlayPayload);
     updateHistStatus();
     renderReplayStats();
-    await reloadOverlay(false);
+    const sigClose = completedSigClose(replayCursorClose());
+    if (sigClose > lastOverlaySigClose) scheduleOverlay(false);
+    else scheduleIndicators();
     centerReplayCursor();
+    lastStepMs = performance.now() - t0;
+    window.__caStepMs = lastStepMs;
     requestAnimationFrame(() => {
       centerReplayCursor();
       applyingRange = false;
@@ -1279,9 +1400,10 @@
     if (!replayOn || !replayPlaying) return;
     const spd = Number(el("replaySpeed") ? el("replaySpeed").value : 1);
     const ms = REPLAY_MS[spd] || 900;
-    replayTimer = setTimeout(async () => {
-      await replayStep();
-      if (replayPlaying) replayPlayLoop();
+    replayTimer = setTimeout(() => {
+      void replayStep().then(() => {
+        if (replayPlaying) replayPlayLoop();
+      });
     }, ms);
   }
 
@@ -1340,7 +1462,7 @@
     if (replayOn) {
       const cur = replayCursorClose() || jumpCenterTime();
       disconnectWs();
-      await loadAround(cur);
+      await loadAround(cur, { noForward: true });
       replayBarOpen = snapBarOpen(cur - 1);
       lastOverlaySigClose = -1;
       applyCandles();
@@ -1438,22 +1560,57 @@
   });
 
   function sizeCharts() {
-    chart.applyOptions({ width: el("chart").clientWidth, height: el("chart").clientHeight });
-    paneCharts.forEach((p) => {
-      const h = p.host ? p.host.clientHeight : 132;
-      try { p.chart.applyOptions({ width: (p.host || el("chart")).clientWidth, height: Math.max(60, h - 6) }); } catch (e) {}
+    if (resizeRaf) return;
+    resizeRaf = requestAnimationFrame(() => {
+      resizeRaf = 0;
+      const saved = chart.timeScale().getVisibleLogicalRange();
+      resizing = true;
+      syncingTs = true;
+      applyingRange = true;
+      const cw = el("chart").clientWidth;
+      const chgt = el("chart").clientHeight;
+      try {
+        if (typeof chart.resize === "function") chart.resize(cw, chgt);
+        else chart.applyOptions({ width: cw, height: chgt });
+      } catch (e) {}
+      paneCharts.forEach((p) => {
+        const host = p.host || el("chart");
+        const h = Math.max(60, (host.clientHeight || 132) - 6);
+        try {
+          if (p.chart && typeof p.chart.resize === "function") p.chart.resize(host.clientWidth, h);
+          else if (p.chart) p.chart.applyOptions({ width: host.clientWidth, height: h });
+        } catch (e) {}
+      });
+      if (saved) {
+        try { chart.timeScale().setVisibleLogicalRange(saved); } catch (e) {}
+        paneCharts.forEach((p) => {
+          try { p.chart.timeScale().setVisibleLogicalRange(saved); } catch (e) {}
+        });
+      } else if (replayOn && replayFollow) {
+        centerReplayCursor();
+      }
+      leakCheck("resize");
+      syncingTs = false;
+      requestAnimationFrame(() => {
+        applyingRange = false;
+        resizing = false;
+      });
     });
-    if (drawingsApi) drawingsApi.refresh();
-    if (indApi) indApi.refresh();
   }
   window.addEventListener("resize", () => sizeCharts());
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver(() => sizeCharts());
+    if (el("mid")) ro.observe(el("mid"));
+    if (el("chart")) ro.observe(el("chart"));
+    if (el("paneHost")) ro.observe(el("paneHost"));
+  }
   sizeCharts();
   if (typeof window.createChartDrawings === "function") {
     drawingsApi = window.createChartDrawings({
       chart: chart,
       series: series,
       host: el("chart"),
-      getCandles: function () { return sortedCandles(); },
+      getCandles: function () { return visibleCandles(); },
       getTfSec: function () { return RES_SEC[tf] || 60; },
       isReplayPicking: function () { return replayPicking; },
       getMarkPrice: function () {
@@ -1866,7 +2023,9 @@
           });
         } catch (e) {}
         try { chart.timeScale().scrollToPosition(0, false); } catch (e) {}
-        try { chart.timeScale().scrollToRealTime(); } catch (e) {}
+        if (!replayOn) {
+          try { chart.timeScale().scrollToRealTime(); } catch (e) {}
+        }
         requestAnimationFrame(() => updateGoRtBtn());
       });
     }
@@ -1970,6 +2129,9 @@
         replayFollow,
         mid: lr ? (Number(lr.from) + Number(lr.to)) / 2 : null,
         lastIdx: vis.length ? vis.length - 1 : null,
+        leak: leakCheck("snap"),
+        stepMs: lastStepMs,
+        subs: subCount,
         xAlign: (function () {
           if (!last || !paneCharts[0]) return null;
           const x = chart.timeScale().timeToCoordinate(last.time);

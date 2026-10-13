@@ -44,6 +44,9 @@ MAX_BARS = 1500
 # STEP 1: 1000/2000/3000 returned in full; 6000-min window returned 4000 from the newest end.
 DELTA_PAGE_CAP = 4000
 _CANDLE_CACHE: dict[tuple[str, int], list[dict[str, Any]]] = {}
+_OVERLAY_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_IND_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_CACHE_CAP = 48
 RES_SEC = {
     "1m": 60,
     "3m": 180,
@@ -80,31 +83,81 @@ def _norm_row(raw: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _cache_put(store: dict[tuple[Any, ...], dict[str, Any]], key: tuple[Any, ...], val: dict[str, Any]) -> None:
+    store[key] = val
+    extra = len(store) - _CACHE_CAP
+    if extra <= 0:
+        return
+    for old in list(store.keys())[:extra]:
+        store.pop(old, None)
+
+
+def _slice_payload_to(data: dict[str, Any], to_u: int) -> dict[str, Any]:
+    out = dict(data)
+
+    def _cap_pts(pts: Any) -> Any:
+        if not isinstance(pts, list):
+            return pts
+        return [p for p in pts if not isinstance(p, dict) or p.get("time") is None or int(p["time"]) <= to_u]
+
+    if isinstance(out.get("series"), list):
+        series = []
+        for sp in out["series"]:
+            if not isinstance(sp, dict):
+                series.append(sp)
+                continue
+            item = dict(sp)
+            item["points"] = _cap_pts(item.get("points"))
+            series.append(item)
+        out["series"] = series
+    if isinstance(out.get("lines"), list):
+        lines = []
+        for ln in out["lines"]:
+            if not isinstance(ln, dict):
+                lines.append(ln)
+                continue
+            item = dict(ln)
+            item["points"] = _cap_pts(item.get("points"))
+            lines.append(item)
+        out["lines"] = lines
+    for key in ("markers", "rsi", "boxes", "labels", "bands"):
+        if isinstance(out.get(key), list):
+            out[key] = _cap_pts(out[key])
+    return out
+
+
 async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
     if tf not in RES_SEC:
         raise HTTPException(400, f"bad tf {tf}")
     res = RES_SEC[tf]
     want_start = int(start)
-    page_end = int(end)
-    if page_end <= want_start:
-        logger.info("tf=%s range=%s..%s pages=0 rows=0", tf, want_start, page_end)
+    want_end = int(end)
+    if want_end <= want_start:
+        logger.info("tf=%s range=%s..%s pages=0 rows=0", tf, want_start, want_end)
         return []
+    t0 = time.perf_counter()
     now = int(time.time())
     closed_before = now - res
     by_ts: dict[int, dict[str, Any]] = {}
     pages = 0
+    fetched = 0
     empty_streak = 0
     span = DELTA_PAGE_CAP * res
+    # Align pages to a fixed grid so replay stepping reuses the same closed-page cache.
+    aligned_end = ((want_end // span) + 1) * span
+    page_end = aligned_end
     async with httpx.AsyncClient() as client:
         while page_end > want_start:
-            page_start = max(want_start, page_end - span)
+            page_start = page_end - span
             pages += 1
             cache_key = (tf, int(page_start))
-            chunk_closed = page_end < closed_before
+            chunk_closed = page_end <= closed_before
             rows_chunk: list[dict[str, Any]] = []
-            if chunk_closed and cache_key in _CANDLE_CACHE:
+            hit = chunk_closed and cache_key in _CANDLE_CACHE
+            if hit:
                 rows_chunk = _CANDLE_CACHE[cache_key]
             else:
+                fetched += 1
                 raw = await _fetch_page(
                     client,
                     symbol=SYMBOL,
@@ -116,17 +169,18 @@ async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
                     row = _norm_row(item) if isinstance(item, dict) else None
                     if row is not None:
                         rows_chunk.append(row)
-                closed_rows = [r for r in rows_chunk if int(r["time"]) < closed_before]
                 if chunk_closed:
+                    closed_rows = [r for r in rows_chunk if int(r["time"]) < closed_before]
                     _CANDLE_CACHE[cache_key] = closed_rows
+                    rows_chunk = closed_rows
             got = 0
             for row in rows_chunk:
                 ts = int(row["time"])
-                if ts < want_start or ts > int(end):
+                if ts < want_start or ts > want_end:
                     continue
                 by_ts[ts] = row
                 got += 1
-            if got == 0:
+            if got == 0 and page_end < want_start + span:
                 empty_streak += 1
             else:
                 empty_streak = 0
@@ -135,15 +189,18 @@ async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
             if page_start <= want_start:
                 break
             page_end = page_start
-            await asyncio.sleep(0.15)
+            if not hit:
+                await asyncio.sleep(0.15)
     rows = [by_ts[k] for k in sorted(by_ts)]
     logger.info(
-        "tf=%s range=%s..%s pages=%s rows=%s",
+        "tf=%s range=%s..%s pages=%s fetch=%s rows=%s ms=%.1f",
         tf,
         want_start,
-        int(end),
+        want_end,
         pages,
+        fetched,
         len(rows),
+        (time.perf_counter() - t0) * 1000.0,
     )
     return rows
 
@@ -207,6 +264,7 @@ async def api_overlay(
 ) -> dict[str, Any]:
     if strategy not in PLUGINS:
         raise HTTPException(404, f"unknown strategy {strategy}")
+    t0 = time.perf_counter()
     extra: dict[str, Any] = {}
     try:
         raw_p = json.loads(params) if params else {}
@@ -218,6 +276,16 @@ async def api_overlay(
     to_u = int(to_ts) if to_ts is not None else now
     hrs = float(extra.get("hours", hours))
     from_u = int(from_ts) if from_ts is not None else to_u - int(hrs * 3600)
+    cache_key = (strategy, tf, json.dumps(extra, sort_keys=True), from_u, to_u)
+    hit = _OVERLAY_CACHE.get(cache_key)
+    if hit is not None:
+        logger.info("overlay %s cache-hit ms=%.1f", strategy, (time.perf_counter() - t0) * 1000.0)
+        return hit
+    for (sk, stf, sparams, sfrom, sto), cached in list(_OVERLAY_CACHE.items()):
+        if sk == strategy and stf == tf and sparams == json.dumps(extra, sort_keys=True) and sfrom == from_u and sto >= to_u:
+            sliced = _slice_payload_to(cached, to_u)
+            logger.info("overlay %s cache-slice to=%s ms=%.1f", strategy, to_u, (time.perf_counter() - t0) * 1000.0)
+            return sliced
     warmup = 10 * 86400
     bars = await _candles("1m", from_u - warmup, to_u)
     bars = [b for b in bars if from_u - warmup <= int(b["time"]) <= to_u]
@@ -240,7 +308,15 @@ async def api_overlay(
         "show_signals": extra.get("show_signals", show_signals),
     }
     data = compute(strategy, bars, merged)
-    return {"strategy": strategy, "bars_used": len(bars), **data}
+    out = {"strategy": strategy, "bars_used": len(bars), **data}
+    _cache_put(_OVERLAY_CACHE, cache_key, out)
+    logger.info(
+        "overlay %s bars=%s ms=%.1f",
+        strategy,
+        len(bars),
+        (time.perf_counter() - t0) * 1000.0,
+    )
+    return out
 
 
 @app.get("/api/strategies")
@@ -265,21 +341,33 @@ async def api_indicator(
         raise HTTPException(404, f"unknown indicator {ind_id}")
     if tf not in RES_SEC:
         raise HTTPException(400, f"bad tf {tf}")
+    t0 = time.perf_counter()
     res = RES_SEC[tf]
     now = int(time.time())
     to_u = int(to_ts) if to_ts is not None else now
     from_u = int(from_ts) if from_ts is not None else to_u - 24 * 3600
-    warmup = max(500, 3000) * res
-    bars = await _candles(tf, from_u - warmup, to_u)
-    bars = [b for b in bars if int(b["time"]) <= to_u]
     try:
         raw_p = json.loads(params) if params else {}
         if not isinstance(raw_p, dict):
             raw_p = {}
     except json.JSONDecodeError:
         raw_p = {}
+    pkey = json.dumps(raw_p, sort_keys=True)
+    cache_key = (ind_id, tf, pkey, from_u, to_u)
+    hit = _IND_CACHE.get(cache_key)
+    if hit is not None:
+        logger.info("indicator %s cache-hit ms=%.1f", ind_id, (time.perf_counter() - t0) * 1000.0)
+        return hit
+    for (iid, itf, ip, ifr, ito), cached in list(_IND_CACHE.items()):
+        if iid == ind_id and itf == tf and ip == pkey and ifr == from_u and ito >= to_u:
+            sliced = _slice_payload_to(cached, to_u)
+            logger.info("indicator %s cache-slice to=%s ms=%.1f", ind_id, to_u, (time.perf_counter() - t0) * 1000.0)
+            return sliced
+    warmup = max(500, 3000) * res
+    bars = await _candles(tf, from_u - warmup, to_u)
+    bars = [b for b in bars if int(b["time"]) <= to_u]
     data = compute_indicator(ind_id, bars, raw_p)
-    return {
+    out = {
         "id": ind_id,
         "tf": tf,
         "from": from_u,
@@ -288,6 +376,14 @@ async def api_indicator(
         "bars_used": len(bars),
         **data,
     }
+    _cache_put(_IND_CACHE, cache_key, out)
+    logger.info(
+        "indicator %s bars=%s ms=%.1f",
+        ind_id,
+        len(bars),
+        (time.perf_counter() - t0) * 1000.0,
+    )
+    return out
 
 
 def _runs_root() -> Path:

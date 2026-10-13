@@ -258,8 +258,12 @@
         };
         if (!it._lwc[key]) it._lwc[key] = hostChart.addLineSeries(opts);
         else it._lwc[key].applyOptions(opts);
+        const range = getRange ? getRange() : null;
+        const capTo = range && range.to != null ? Number(range.to) : null;
         const pts = (sp.points || []).filter(function (p) {
-          return p && p.time != null;
+          if (!p || p.time == null) return false;
+          if (capTo != null && Number(p.time) > capTo) return false;
+          return true;
         });
         it._lwc[key].setData(pts);
         if (sp.markers) {
@@ -464,7 +468,12 @@
       if (!it._pane) return;
       const wrap = it._pane.wrap;
       const h = wrap.clientHeight || 132;
-      it._pane.chart.applyOptions({ width: wrap.clientWidth, height: Math.max(60, h - 6) });
+      const w = wrap.clientWidth;
+      const nh = Math.max(60, h - 6);
+      try {
+        if (typeof it._pane.chart.resize === "function") it._pane.chart.resize(w, nh);
+        else it._pane.chart.applyOptions({ width: w, height: nh });
+      } catch (e) {}
       if (it._pane.fillPrim) it._pane.fillPrim.requestUpdate();
     }
 
@@ -733,22 +742,38 @@
       const range = getRange ? getRange() : null;
       if (!range) return;
       const tf = getTf ? getTf() : "1m";
+      const pjson = JSON.stringify(it.params || {});
+      if (it._cached && it._cached.params === pjson && Number(it._cached.to) >= Number(range.to) && Number(it._cached.from) <= Number(range.from) && it._cached.tf === tf) {
+        applyVisuals(it);
+        return;
+      }
       const q = new URLSearchParams({ tf: String(tf), params: JSON.stringify(it.params || {}) });
       if (range.from != null) q.set("from", String(range.from));
       if (range.to != null) q.set("to", String(range.to));
       it._gen = (it._gen || 0) + 1;
       const my = it._gen;
+      if (it._abort) {
+        try { it._abort.abort(); } catch (e) {}
+      }
+      it._abort = typeof AbortController === "function" ? new AbortController() : null;
+      const row = document.querySelector('#indLegend .ind-row');
+      if (row) row.classList.add("loading");
       try {
-        const r = await fetch("/api/indicator/" + encodeURIComponent(it.id) + "?" + q.toString());
+        const r = await fetch("/api/indicator/" + encodeURIComponent(it.id) + "?" + q.toString(), it._abort ? { signal: it._abort.signal } : {});
         const j = await r.json();
         if (my !== it._gen) return;
         it.data = j;
+        it._cached = { from: Number(range.from), to: Number(range.to), tf: tf, params: pjson };
         if (j.short_name) it.short_name = j.short_name;
         const rec = catalogById(it.id);
         if (rec) it.overlay = rec.overlay !== false;
         save();
         applyVisuals(it);
-      } catch (e) {}
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+      } finally {
+        document.querySelectorAll("#indLegend .ind-row.loading").forEach(function (n) { n.classList.remove("loading"); });
+      }
     }
 
     async function reloadAll() {
@@ -769,7 +794,9 @@
         return;
       }
       let it = aux[id];
+      let created = false;
       if (!it) {
+        created = true;
         it = {
           uid: "aux-" + id,
           id: id,
@@ -790,7 +817,7 @@
         bands: [],
       };
       applyVisuals(it);
-      if (opts.onResize) opts.onResize();
+      if (created && opts.onResize) opts.onResize();
     }
 
     function paneCharts() {
