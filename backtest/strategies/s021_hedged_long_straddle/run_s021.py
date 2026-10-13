@@ -3,6 +3,7 @@
 
 python backtest/strategies/s021_hedged_long_straddle/run_s021.py --month 2025-06 --max-days 3 --m 2 --tgt 400 --sl 400 --a1 50 --a2 50 --baselines
 python backtest/strategies/s021_hedged_long_straddle/run_s021.py --month 2025-06 --stage1
+python backtest/strategies/s021_hedged_long_straddle/run_s021.py --rsi-entry --max-days 5 --tf 15m --variant m3_noadj --tgt 400 --sl 400
 """
 
 from __future__ import annotations
@@ -47,11 +48,17 @@ from backtest.strategies.s012_trend_follow.engine import (  # noqa: E402
 from backtest.strategies.s018_4h_trend import run_s018 as s018  # noqa: E402
 from backtest.strategies.s020_vwap_touch import run_s020 as s020  # noqa: E402
 from backtest.strategies.s020_vwap_touch import run_s020_dev as d  # noqa: E402
+from backtest.strategies.s020_vwap_touch.rsi_div import (  # noqa: E402
+    RSI_EXP_OBH,
+    RSI_EXP_OBL,
+)
+from backtest.strategies.s020_vwap_touch.run_s020_rsi import collect_rsi_tf  # noqa: E402
 
 logger = logging.getLogger("s021")
 
 OUT_DIR = Path("backtest/strategies/s021_hedged_long_straddle/runs")
 CKPT = OUT_DIR / "s021_ckpt.jsonl"
+CKPT_R = OUT_DIR / "s021r_ckpt.jsonl"
 ARCHIVE_PTR = OUT_DIR / "s021_archive_ptr.json"
 QTY = 1000
 M_GRID = (1, 2, 3)
@@ -59,8 +66,21 @@ TSL = (200, 250, 300, 350, 400, 450, 500)
 A_GRID = (30, 40, 50, 60, 70)
 SIX_H = 6 * 3600
 TRADE_EXTRA = (
-    "m", "a1", "a2", "n_adj", "weekday", "n_atm_fallback", "state_end"
+    "m", "a1", "a2", "n_adj", "weekday", "n_atm_fallback", "state_end",
+    "signal_ts", "signal_side", "rsi_tf", "hrs_to_e0", "six_h_rolled",
 )
+RSI_TFS = ("5m", "15m", "30m")
+RSI_EXP_TAG = "exp=40-60"
+RSI_VARIANTS: tuple[dict[str, Any], ...] = (
+    {"vname": "m0", "m": 0, "mode": "m0", "a1": 0, "a2": 0},
+    {"vname": "m2_noadj", "m": 2, "mode": "noadj", "a1": -1, "a2": -1},
+    {"vname": "m3_noadj", "m": 3, "mode": "noadj", "a1": -1, "a2": -1},
+    {"vname": "m2_adj_30_30", "m": 2, "mode": "adj", "a1": 30, "a2": 30},
+    {"vname": "m3_adj_30_30", "m": 3, "mode": "adj", "a1": 30, "a2": 30},
+    {"vname": "m2_adj_50_50", "m": 2, "mode": "adj", "a1": 50, "a2": 50},
+    {"vname": "m3_adj_50_50", "m": 3, "mode": "adj", "a1": 50, "a2": 50},
+)
+C2_VNAMES = ("m0", "m3_noadj", "m3_adj_30_30")
 ADJ_COLS = (
     "trade_id", "ts_ist", "adj_no", "kind", "state_from", "state_to",
     "closed_role", "closed_strike", "closed_prem", "opened_role",
@@ -314,6 +334,51 @@ def a_label(w: dict[str, Any]) -> tuple[str, str]:
     if str(w["mode"]) == "noadj":
         return "noadj", "noadj"
     return str(int(w["a1"])), str(int(w["a2"]))
+
+
+def rsi_cell_key(month: str, tf: str, vname: str, tgt: int, slv: int) -> str:
+    return f"s021r|{tf}|{vname}|{int(tgt)}|{int(slv)}|{month}|{RSI_EXP_TAG}"
+
+
+def rsi_work_cells(
+    tfs: list[str],
+    vnames: list[str],
+    tgts: list[int],
+    sls: list[int],
+) -> list[dict[str, Any]]:
+    by_name = {str(v["vname"]): v for v in RSI_VARIANTS}
+    out: list[dict[str, Any]] = []
+    for tf in tfs:
+        for vn in vnames:
+            base = by_name[str(vn)]
+            for tgt in tgts:
+                for slv in sls:
+                    rec = dict(base)
+                    rec.update(
+                        {
+                            "tf": str(tf),
+                            "tgt": int(tgt),
+                            "sl": int(slv),
+                        }
+                    )
+                    out.append(rec)
+    return out
+
+
+def six_h_info(t: int) -> tuple[float, bool]:
+    e0 = d.expiry_0dte_bimal(int(t))
+    hrs = (int(s018.expiry_unix(e0)) - int(t)) / 3600.0
+    return hrs, bool(hrs * 3600.0 < float(SIX_H))
+
+
+def attach_rsi_meta(rec: dict[str, Any], sig: dict[str, Any], tf: str, t: int) -> None:
+    rec["signal_ts"] = int(sig.get("signal_ts") or (int(t) - 60))
+    rec["signal_side"] = str(sig.get("side") or "")
+    rec["side"] = rec["signal_side"]
+    rec["rsi_tf"] = str(tf)
+    hrs, rolled = six_h_info(t)
+    rec["hrs_to_e0"] = float(hrs)
+    rec["six_h_rolled"] = bool(rolled)
 
 
 _EXP_CACHE: dict[str, list[date]] = {}
@@ -1028,8 +1093,8 @@ def emit_trade(
     trade = {
         "trade_id": tid,
         "month": cfg.get("month"),
-        "tf": "1m",
-        "variant": "S021",
+        "tf": cfg.get("tf") or "1m",
+        "variant": cfg.get("variant") or "S021",
         "band": cfg.get("tgt"),
         "band_mode": cfg.get("sl"),
         "arm": cfg.get("arm"),
@@ -1062,6 +1127,13 @@ def emit_trade(
         "weekday": r["weekday"],
         "n_atm_fallback": r["n_fb"],
         "state_end": r.get("state", ""),
+        "signal_ts": (
+            s018.ist_str(int(r["signal_ts"])) if r.get("signal_ts") else ""
+        ),
+        "signal_side": r.get("signal_side", ""),
+        "rsi_tf": r.get("rsi_tf", ""),
+        "hrs_to_e0": r.get("hrs_to_e0", ""),
+        "six_h_rolled": r.get("six_h_rolled", ""),
     }
     archive.add_trade(trade, legs_out, list(r.get("snaps") or []))
     archive.add_adjustments(tid, list(r.get("adjs") or []))
@@ -1173,6 +1245,103 @@ def run_group(
     return stts, rows_per, elapsed
 
 
+def run_rsi_group(
+    store: Any,
+    spot_c: dict[int, float],
+    sigs: list[dict[str, Any]],
+    ws: list[dict[str, Any]],
+    month: str,
+    cutoff: int,
+    win_to: date,
+    archive: S021Archive | None,
+    cov: dict[str, int],
+    smoke: bool,
+    archive_trades: bool = True,
+) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]], float, int]:
+    """Signal-driven entries. One position at a time; next signal after exit."""
+    global _MEMO_HIT, _MEMO_MISS
+    t0c = time.perf_counter()
+    n = len(ws)
+    rows_per: list[list[dict[str, Any]]] = [[] for _ in range(n)]
+    n_entered = 0
+    if not sigs:
+        elapsed = time.perf_counter() - t0c
+        stts = []
+        for i, w in enumerate(ws):
+            a1s, a2s = a_label(w)
+            key = rsi_cell_key(month, str(w["tf"]), str(w["vname"]), int(w["tgt"]), int(w["sl"]))
+            stts.append(_summarize(key, month, w, a1s, a2s, rows_per[i], elapsed / max(1, n)))
+        return stts, rows_per, elapsed, 0
+    sig_i = [0] * n
+    pending: dict[int, list[int]] = {int(sigs[0]["ts"]): list(range(n))}
+    while pending:
+        t = min(pending)
+        idxs = pending.pop(t)
+        if t >= cutoff or ist_date(t) > win_to:
+            continue
+        if t not in spot_c:
+            for i in idxs:
+                j = sig_i[i] + 1
+                sig_i[i] = j
+                if j < len(sigs):
+                    pending.setdefault(int(sigs[j]["ts"]), []).append(i)
+            continue
+        w0 = ws[idxs[0]]
+        mk = (int(t), int(w0["m"]), str(w0["mode"]), int(w0["a1"]), int(w0["a2"]))
+        if mk in _MEMO:
+            _MEMO_HIT += len(idxs)
+            sim = _MEMO[mk]
+        else:
+            _MEMO_MISS += 1
+            _MEMO_HIT += max(0, len(idxs) - 1)
+            sim = simulate_hold(store, spot_c, t, w0, cov)
+            _MEMO[mk] = sim
+        if sim is None:
+            for i in idxs:
+                j = sig_i[i] + 1
+                sig_i[i] = j
+                if j < len(sigs):
+                    pending.setdefault(int(sigs[j]["ts"]), []).append(i)
+            continue
+        for i in idxs:
+            w = ws[i]
+            a1s, a2s = a_label(w)
+            rec = apply_tsl(sim, w, smoke and len(rows_per[i]) < 2)
+            sig = sigs[sig_i[i]] if sig_i[i] < len(sigs) else {}
+            attach_rsi_meta(rec, sig, str(w["tf"]), t)
+            key = rsi_cell_key(month, str(w["tf"]), str(w["vname"]), int(w["tgt"]), int(w["sl"]))
+            rec["key"] = key
+            rows_per[i].append(rec)
+            n_entered += 1
+            if archive is not None and archive_trades:
+                emit_trade(
+                    archive,
+                    {
+                        "key": key, "month": month, "tgt": w["tgt"], "sl": w["sl"],
+                        "m": w["m"], "arm": f"{w['tf']}_{w['vname']}",
+                        "tf": w["tf"], "variant": f"S021R_{w['vname']}",
+                    },
+                    rec,
+                    a1s,
+                    a2s,
+                )
+            ex = int(rec["exit_ts"])
+            j = sig_i[i] + 1
+            while j < len(sigs) and int(sigs[j]["ts"]) <= ex:
+                j += 1
+            sig_i[i] = j
+            if j < len(sigs) and int(sigs[j]["ts"]) < cutoff:
+                pending.setdefault(int(sigs[j]["ts"]), []).append(i)
+    elapsed = time.perf_counter() - t0c
+    stts: list[dict[str, Any]] = []
+    share = elapsed / max(1, n)
+    for i, w in enumerate(ws):
+        a1s, a2s = a_label(w)
+        key = rsi_cell_key(month, str(w["tf"]), str(w["vname"]), int(w["tgt"]), int(w["sl"]))
+        stts.append(_summarize(key, month, w, a1s, a2s, rows_per[i], share))
+    return stts, rows_per, elapsed, n_entered
+
+
 def main() -> None:
     global _BOOK, _CHAIN_S021, _MEMO, _MEMO_HIT, _MEMO_MISS
     ap = argparse.ArgumentParser()
@@ -1186,6 +1355,9 @@ def main() -> None:
     ap.add_argument("--a2", type=int, default=-1)
     ap.add_argument("--baselines", action="store_true")
     ap.add_argument("--stage1", action="store_true")
+    ap.add_argument("--rsi-entry", action="store_true")
+    ap.add_argument("--tf", default="")
+    ap.add_argument("--variant", default="")
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--cache-gb", type=float, default=1.0)
     args = ap.parse_args()
@@ -1195,9 +1367,11 @@ def main() -> None:
     load_slip_table()
     reset_mark_cache(max_bytes=int(float(args.cache_gb) * 1024**3))
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    if args.fresh and CKPT.exists():
-        CKPT.unlink()
-        print(f"fresh: dropped {CKPT.name}", flush=True)
+    rsi_mode = bool(args.rsi_entry)
+    ckpt_path = CKPT_R if rsi_mode else CKPT
+    if args.fresh and ckpt_path.exists():
+        ckpt_path.unlink()
+        print(f"fresh: dropped {ckpt_path.name}", flush=True)
 
     month = str(args.month)
     win_from, win_to = d.month_bounds(month)
@@ -1208,13 +1382,32 @@ def main() -> None:
         cutoff = start_ts + max_days * 86400
         win_to = min(win_to, ist_date(cutoff - 1))
     start_entry = to_unix(ist_dt(win_from, 18, 0))
-    if start_entry >= cutoff:
+    if (not rsi_mode) and start_entry >= cutoff:
         print("start_entry after cutoff", flush=True)
         sys.exit(2)
 
-    if args.stage1:
+    rsi_tfs: list[str] = []
+    rsi_vnames: list[str] = []
+    if rsi_mode:
+        rsi_tfs = [x.strip() for x in str(args.tf).split(",") if x.strip()] or list(RSI_TFS)
+        all_vn = [str(v["vname"]) for v in RSI_VARIANTS]
+        if str(args.variant).strip():
+            rsi_vnames = [x.strip() for x in str(args.variant).split(",") if x.strip()]
+        elif int(args.m) >= 0:
+            rsi_vnames = [
+                str(v["vname"]) for v in RSI_VARIANTS if int(v["m"]) == int(args.m)
+            ]
+        else:
+            rsi_vnames = list(all_vn)
+        bad = [x for x in rsi_vnames if x not in all_vn]
+        if bad:
+            print(f"unknown --variant {bad} need {all_vn}", flush=True)
+            sys.exit(2)
+        tgts = list(TSL) if int(args.tgt) < 0 else [int(args.tgt)]
+        sls = list(TSL) if int(args.sl) < 0 else [int(args.sl)]
+        work = rsi_work_cells(rsi_tfs, rsi_vnames, tgts, sls)
+    elif args.stage1:
         work = stage1_cells()
-        baselines = True
     else:
         ms = list(M_GRID) if int(args.m) < 0 else [int(args.m)]
         tgts = list(TSL) if int(args.tgt) < 0 else [int(args.tgt)]
@@ -1224,14 +1417,18 @@ def main() -> None:
         baselines = bool(args.baselines) or (int(args.m) < 0)
         work = work_cells(ms, tgts, sls, a1s, a2s, baselines)
     smoke = bool(max_days)
-    print(f"cells={len(work)} month={month} entry0={s018.ist_str(start_entry)}", flush=True)
+    print(
+        f"cells={len(work)} month={month} rsi_entry={rsi_mode} "
+        f"entry0={s018.ist_str(start_entry)}",
+        flush=True,
+    )
 
     spot = s018.load_spot_1m(args.csv)
-    ts, _o, _h, _l, c, _v = s020.bars_1m_vol(spot)
-    lo = start_ts - 86400
+    ts, o, h, l, c, vol = s020.bars_1m_vol(spot)
+    lo = start_ts - (3 * 86400 if rsi_mode else 86400)
     hi = cutoff + 14 * 86400
     sel = (ts >= lo) & (ts < hi)
-    ts, c = ts[sel], c[sel]
+    ts, o, h, l, c, vol = ts[sel], o[sel], h[sel], l[sel], c[sel], vol[sel]
     spot_c = {int(t): float(x) for t, x in zip(ts, c)}
     inner = MarksStore()
     store = d.MonthGuardStore(inner, win_from - timedelta(days=1), win_to + timedelta(days=14))
@@ -1240,13 +1437,24 @@ def main() -> None:
     _MEMO = {}
     _MEMO_HIT = 0
     _MEMO_MISS = 0
-    done = {} if args.fresh else s020.load_ckpt(CKPT)
+    done = {} if args.fresh else s020.load_ckpt(ckpt_path)
+    arch_mode = (
+        "s021r-smoke" if (rsi_mode and smoke)
+        else "s021r" if rsi_mode
+        else "smoke" if smoke
+        else ("stage1" if args.stage1 else "grid")
+    )
     archive = S021Archive(
-        "s021",
-        "smoke" if smoke else ("stage1" if args.stage1 else "grid"),
+        "s021r" if rsi_mode else "s021",
+        arch_mode,
         args,
         month=month,
-        prereg_note="S021 hedged long straddle; settlement_fee_assumed_0; mark_cache+cycle_memo",
+        prereg_note=(
+            "S021-R RSI Div entry; detect_rsi_div rev4 OB/OS 70/30 exp 40/60; "
+            "settlement_fee_assumed_0"
+            if rsi_mode
+            else "S021 hedged long strangle; settlement_fee_assumed_0; mark_cache+cycle_memo"
+        ),
     )
     meta_p = archive.folder / "run_meta.json"
     meta = json.loads(meta_p.read_text(encoding="utf-8"))
@@ -1254,6 +1462,11 @@ def main() -> None:
     meta["settlement_fee"] = "fees_sim has no expiry/settlement fee; assumed 0"
     meta["mark_cache"] = True
     meta["cycle_memo"] = True
+    meta["rsi_entry"] = bool(rsi_mode)
+    if rsi_mode:
+        meta["exp_obh"] = float(RSI_EXP_OBH)
+        meta["exp_obl"] = float(RSI_EXP_OBL)
+        meta["tfs"] = rsi_tfs
     meta_p.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     ARCHIVE_PTR.write_text(str(archive.folder), encoding="utf-8")
     print(f"archive folder={archive.folder}", flush=True)
@@ -1264,58 +1477,166 @@ def main() -> None:
     }
     t_all = time.perf_counter()
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
-    for w in work:
-        a1s_, a2s_ = a_label(w)
-        key = cell_key(month, int(w["m"]), int(w["tgt"]), int(w["sl"]), a1s_, a2s_)
-        if key in done:
-            print(f"done SKIP {key}", flush=True)
-            continue
-        groups[(int(w["m"]), str(w["mode"]), int(w["a1"]), int(w["a2"]))].append(w)
-
+    sig_stats: dict[str, tuple[int, int, int]] = {}
+    sig_cache: dict[str, list[dict[str, Any]]] = {}
     cell_secs: list[float] = []
     sample_rows: list[dict[str, Any]] = []
     n_work = len(work)
-    gi = 0
-    for _gk, ws in groups.items():
-        gi += 1
-        print(
-            f"[group {gi}/{len(groups)} n_tsl={len(ws)} m={ws[0]['m']} "
-            f"mode={ws[0]['mode']} a1={ws[0]['a1']} a2={ws[0]['a2']}]",
-            flush=True,
-        )
-        stts, rows_per, elapsed = run_group(
-            store, spot_c, ws, month, start_entry, cutoff, win_to,
-            archive, cov, smoke,
-        )
-        cell_secs.append(elapsed)
-        for stt, rows, w in zip(stts, rows_per, ws):
-            if smoke and not sample_rows and str(w["mode"]) == "adj":
-                sample_rows = rows
-            elif smoke and not sample_rows:
-                sample_rows = rows
-            s020.append_ckpt(CKPT, {k: v for k, v in stt.items() if k not in ("nets", "entry_ts")})
-            done[stt["key"]] = stt
-            if archive is not None:
-                archive.add_config_result(
-                    {
-                        "month": month, "tf": "1m", "variant": "S021",
-                        "band": w["tgt"], "band_mode": w["sl"],
-                        "arm": f"m{w['m']}_{w['mode']}",
-                        "n_legs": 2 if int(w["m"]) == 0 else 4,
-                        "dte": 0, "tgt": w["tgt"], "sl": w["sl"],
-                        "n": stt["n"], "mean": stt["mean"], "gross": stt["gross"],
-                        "brokerage": stt["fee"], "slippage": stt["slip"],
-                        "win": stt["win"], "C2": "-", "C3": "-",
-                        "n_sig": stt["n"], "n_stale": 0, "avg_net_delta": "",
-                        "key": stt["key"],
-                    }
-                )
+    n_entered_smoke = 0
+
+    if rsi_mode:
+        for tf in sorted({str(w["tf"]) for w in work}):
+            kept, n_raw, n_long, n_short = collect_rsi_tf(
+                ts, o, h, l, c, vol, tf, start_ts, cutoff, win_from, win_to,
+                exp_obh=float(RSI_EXP_OBH), exp_obl=float(RSI_EXP_OBL),
+            )
+            sig_cache[tf] = kept
+            sig_stats[tf] = (int(n_raw), int(len(kept)), int(n_long) + int(n_short))
             print(
-                f"  {stt['key']} n={stt['n']} mean={s020._fnum(stt['mean'], 2)} "
-                f"total={s020._fnum(stt['month_total'], 2)} adj={stt['avg_adj']:.2f}",
+                f"RSI {tf} raw={n_raw} filter={len(kept)} "
+                f"long={n_long} short={n_short}",
                 flush=True,
             )
-        print(f"  group_sec={elapsed:.1f} memo hit={_MEMO_HIT} miss={_MEMO_MISS}", flush=True)
+        for w in work:
+            key = rsi_cell_key(
+                month, str(w["tf"]), str(w["vname"]), int(w["tgt"]), int(w["sl"])
+            )
+            if key in done:
+                print(f"done SKIP {key}", flush=True)
+                continue
+            groups[(str(w["tf"]), str(w["vname"]))].append(w)
+        vwap_1m = s020.session_vwap(ts, h, l, c, vol) if not smoke else None
+        gi = 0
+        for (tf, vname), ws in groups.items():
+            gi += 1
+            print(
+                f"[rsi group {gi}/{len(groups)} tf={tf} var={vname} n_tsl={len(ws)}]",
+                flush=True,
+            )
+            stts, rows_per, elapsed, n_ent = run_rsi_group(
+                store, spot_c, sig_cache[str(tf)], ws, month, cutoff, win_to,
+                archive, cov, smoke, archive_trades=True,
+            )
+            cell_secs.append(elapsed)
+            n_entered_smoke = n_ent
+            for stt, rows, w in zip(stts, rows_per, ws):
+                if smoke and not sample_rows:
+                    sample_rows = rows
+                stt["n_sig_raw"] = sig_stats[str(tf)][0]
+                stt["n_sig"] = sig_stats[str(tf)][1]
+                stt["tf"] = str(tf)
+                stt["vname"] = str(vname)
+                do_c2 = (
+                    (not smoke)
+                    and str(vname) in C2_VNAMES
+                    and int(w["tgt"]) == 400
+                    and int(w["sl"]) == 400
+                    and vwap_1m is not None
+                )
+                c2m = float("nan")
+                if do_c2:
+                    hour_idx = d.hour_idx_band(
+                        ts, c, vwap_1m, start_ts, cutoff, win_from, win_to, 0, "near"
+                    )
+                    c2s: list[float] = []
+                    for si, seed in enumerate(d.RANDOM_SEEDS_20, start=1):
+                        print(f"C2 {stt['key']} seed {si}/20", flush=True)
+                        forced = s020.random_c2(rows, ts, hour_idx, seed)
+                        fake = [
+                            {"ts": int(t), "side": str(side), "signal_ts": int(t) - 60}
+                            for t, side in forced
+                        ]
+                        c2_ws = [dict(w)]
+                        rr_st, rr_rows, _, _ = run_rsi_group(
+                            store, spot_c, fake, c2_ws, month, cutoff, win_to,
+                            None, cov, False, archive_trades=False,
+                        )
+                        rr = rr_rows[0] if rr_rows else []
+                        if rr:
+                            c2s.append(float(np.mean([x["net"] for x in rr])))
+                    c2m = float(np.mean(c2s)) if c2s else float("nan")
+                    stt["c2"] = c2m
+                s020.append_ckpt(
+                    ckpt_path,
+                    {k: v for k, v in stt.items() if k not in ("nets", "entry_ts")},
+                )
+                done[stt["key"]] = stt
+                if archive is not None:
+                    archive.add_config_result(
+                        {
+                            "month": month, "tf": tf, "variant": f"S021R_{vname}",
+                            "band": w["tgt"], "band_mode": w["sl"],
+                            "arm": f"{tf}_{vname}",
+                            "n_legs": 2 if int(w["m"]) == 0 else 4,
+                            "dte": 0, "tgt": w["tgt"], "sl": w["sl"],
+                            "n": stt["n"], "mean": stt["mean"], "gross": stt["gross"],
+                            "brokerage": stt["fee"], "slippage": stt["slip"],
+                            "win": stt["win"],
+                            "C2": "-" if not np.isfinite(c2m) else c2m,
+                            "C3": "-",
+                            "n_sig": stt.get("n_sig", stt["n"]), "n_stale": 0,
+                            "avg_net_delta": "", "key": stt["key"],
+                        }
+                    )
+                print(
+                    f"  {stt['key']} n={stt['n']} mean={s020._fnum(stt['mean'], 2)} "
+                    f"total={s020._fnum(stt['month_total'], 2)} adj={stt['avg_adj']:.2f} "
+                    f"C2={s020._fnum(stt.get('c2'), 2)}",
+                    flush=True,
+                )
+            print(f"  group_sec={elapsed:.1f} memo hit={_MEMO_HIT} miss={_MEMO_MISS}", flush=True)
+    else:
+        for w in work:
+            a1s_, a2s_ = a_label(w)
+            key = cell_key(month, int(w["m"]), int(w["tgt"]), int(w["sl"]), a1s_, a2s_)
+            if key in done:
+                print(f"done SKIP {key}", flush=True)
+                continue
+            groups[(int(w["m"]), str(w["mode"]), int(w["a1"]), int(w["a2"]))].append(w)
+        gi = 0
+        for _gk, ws in groups.items():
+            gi += 1
+            print(
+                f"[group {gi}/{len(groups)} n_tsl={len(ws)} m={ws[0]['m']} "
+                f"mode={ws[0]['mode']} a1={ws[0]['a1']} a2={ws[0]['a2']}]",
+                flush=True,
+            )
+            stts, rows_per, elapsed = run_group(
+                store, spot_c, ws, month, start_entry, cutoff, win_to,
+                archive, cov, smoke,
+            )
+            cell_secs.append(elapsed)
+            for stt, rows, w in zip(stts, rows_per, ws):
+                if smoke and not sample_rows and str(w["mode"]) == "adj":
+                    sample_rows = rows
+                elif smoke and not sample_rows:
+                    sample_rows = rows
+                s020.append_ckpt(
+                    ckpt_path,
+                    {k: v for k, v in stt.items() if k not in ("nets", "entry_ts")},
+                )
+                done[stt["key"]] = stt
+                if archive is not None:
+                    archive.add_config_result(
+                        {
+                            "month": month, "tf": "1m", "variant": "S021",
+                            "band": w["tgt"], "band_mode": w["sl"],
+                            "arm": f"m{w['m']}_{w['mode']}",
+                            "n_legs": 2 if int(w["m"]) == 0 else 4,
+                            "dte": 0, "tgt": w["tgt"], "sl": w["sl"],
+                            "n": stt["n"], "mean": stt["mean"], "gross": stt["gross"],
+                            "brokerage": stt["fee"], "slippage": stt["slip"],
+                            "win": stt["win"], "C2": "-", "C3": "-",
+                            "n_sig": stt["n"], "n_stale": 0, "avg_net_delta": "",
+                            "key": stt["key"],
+                        }
+                    )
+                print(
+                    f"  {stt['key']} n={stt['n']} mean={s020._fnum(stt['mean'], 2)} "
+                    f"total={s020._fnum(stt['month_total'], 2)} adj={stt['avg_adj']:.2f}",
+                    flush=True,
+                )
+            print(f"  group_sec={elapsed:.1f} memo hit={_MEMO_HIT} miss={_MEMO_MISS}", flush=True)
 
     e1_need = max(1, int(cov["e1_need"]))
     itm_need = max(1, int(cov["itm_need"]))
@@ -1343,23 +1664,43 @@ def main() -> None:
                     f"see ratio in event line",
                     flush=True,
                 )
+            if rec.get("signal_ts"):
+                print(
+                    f"  SIGNAL {s018.ist_str(int(rec['signal_ts']))} "
+                    f"side={rec.get('signal_side')} tf={rec.get('rsi_tf')} "
+                    f"hrs_to_E0={rec.get('hrs_to_e0')} rolled={rec.get('six_h_rolled')}",
+                    flush=True,
+                )
             print(f"  NET={float(rec['net']):.6f} entry={rec['entry_ts']}", flush=True)
 
     report = [
         f"S021 month={month} {win_from}..{win_to}",
-        f"cells_run={len(done)} work={n_work} stage1={bool(args.stage1)}",
-        "settlement_fee_assumed_0=True (fees_sim has no expiry fee)",
         (
-            f"coverage E1 need={cov['e1_need']} ok={cov['e1_ok']} "
-            f"miss={cov['e1_miss']} ({e1_miss_pct:.1f}%)"
+            f"cells_run={len(done)} work={n_work} stage1={bool(args.stage1)} "
+            f"rsi_entry={rsi_mode}"
         ),
-        (
-            f"coverage ITM exact ATM±1000 ok={cov['itm_ok']}/{cov['itm_need']} "
-            f"({itm_ok_pct:.1f}%)"
-        ),
-        f"memo_hit={_MEMO_HIT} memo_miss={_MEMO_MISS}",
-        f"group_runtime_s={float(np.mean(cell_secs)) if cell_secs else float('nan'):.2f}",
     ]
+    if rsi_mode:
+        for tf, (n_raw, n_kept, _) in sig_stats.items():
+            n_ent = len(sample_rows) if smoke else ""
+            report.append(
+                f"RSI {tf} raw={n_raw} filter={n_kept} entered_smoke={n_ent}"
+            )
+    report.extend(
+        [
+            "settlement_fee_assumed_0=True (fees_sim has no expiry fee)",
+            (
+                f"coverage E1 need={cov['e1_need']} ok={cov['e1_ok']} "
+                f"miss={cov['e1_miss']} ({e1_miss_pct:.1f}%)"
+            ),
+            (
+                f"coverage ITM exact ATM±1000 ok={cov['itm_ok']}/{cov['itm_need']} "
+                f"({itm_ok_pct:.1f}%)"
+            ),
+            f"memo_hit={_MEMO_HIT} memo_miss={_MEMO_MISS}",
+            f"group_runtime_s={float(np.mean(cell_secs)) if cell_secs else float('nan'):.2f}",
+        ]
+    )
     for k, st in done.items():
         report.append(
             f"{k} n={st.get('n')} mean={s020._fnum(st.get('mean'), 2)} "
@@ -1372,7 +1713,7 @@ def main() -> None:
         if st.get("nets"):
             report.append("  nets=" + ",".join(f"{x:.4f}" for x in st["nets"]))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    txtp = OUT_DIR / f"s021_{month}_{stamp}.txt"
+    txtp = OUT_DIR / f"{'s021r' if rsi_mode else 's021'}_{month}_{stamp}.txt"
     txtp.write_text("\n".join(report) + "\n", encoding="utf-8")
     print("\n".join(report), flush=True)
     print(f"wrote {txtp} elapsed={time.perf_counter() - t_all:.0f}s", flush=True)
