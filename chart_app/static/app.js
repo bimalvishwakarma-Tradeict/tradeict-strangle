@@ -70,7 +70,7 @@
       borderColor: "#30363d",
       timeVisible: true,
       secondsVisible: false,
-      rightOffset: 0,
+      rightOffset: 48,
       shiftVisibleRangeOnNewBar: false,
       tickMarkFormatter: (t) => {
         const d = new Date(t * 1000);
@@ -99,7 +99,7 @@
         layout: { background: { color: "#0e1117" }, textColor: "#8b949e" },
         grid: { vertLines: { color: "#21262d" }, horzLines: { color: "#21262d" } },
         rightPriceScale: { borderColor: "#30363d", minimumWidth: PRICE_SCALE_W },
-        timeScale: { visible: false, rightOffset: 0, shiftVisibleRangeOnNewBar: false },
+        timeScale: { visible: false, rightOffset: 48, shiftVisibleRangeOnNewBar: false },
         height: 130,
       })
     : null;
@@ -1408,6 +1408,12 @@
       getCandles: function () { return sortedCandles(); },
       getTfSec: function () { return RES_SEC[tf] || 60; },
       isReplayPicking: function () { return replayPicking; },
+      getMarkPrice: function () {
+        const vis = visibleCandles();
+        if (!vis.length) return null;
+        return Number(vis[vis.length - 1].close);
+      },
+      rsiChart: rsiChart,
     });
   }
   if (typeof window.createChartIndicators === "function") {

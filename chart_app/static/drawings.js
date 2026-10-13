@@ -4,6 +4,41 @@
   const LS_STYLES = "chart_app.drawStyles.BTCUSD";
   const COLORS = ["#58a6ff", "#3fb950", "#f85149", "#d29922", "#d2a8ff"];
   const HIT = 8;
+  const MINTICK = 0.5;
+  const FIB_SPEC = [
+    { v: 0, on: true, color: "#787b86" },
+    { v: 0.236, on: true, color: "#f23645" },
+    { v: 0.382, on: true, color: "#ff9800" },
+    { v: 0.5, on: true, color: "#4caf50" },
+    { v: 0.618, on: true, color: "#089981" },
+    { v: 0.702, on: true, color: "#26c6da" },
+    { v: 0.786, on: true, color: "#2962ff" },
+    { v: 1, on: true, color: "#787b86" },
+    { v: 1.272, on: false, color: "#e91e63" },
+    { v: 1.414, on: false, color: "#9c27b0" },
+    { v: 2, on: false, color: "#673ab7" },
+    { v: 2.272, on: false, color: "#3f51b5" },
+    { v: 2.414, on: false, color: "#2196f3" },
+    { v: 2.618, on: false, color: "#03a9f4" },
+    { v: 3, on: false, color: "#009688" },
+    { v: 3.272, on: false, color: "#8bc34a" },
+    { v: 3.414, on: false, color: "#cddc39" },
+    { v: 3.618, on: false, color: "#ffeb3b" },
+    { v: 4, on: false, color: "#ffc107" },
+    { v: 4.236, on: false, color: "#ff9800" },
+    { v: 4.272, on: false, color: "#ff7043" },
+    { v: 4.414, on: false, color: "#ff5722" },
+    { v: 4.618, on: false, color: "#795548" },
+    { v: 4.764, on: false, color: "#9e9e9e" },
+  ];
+  function defaultFibLevels() {
+    return FIB_SPEC.map(function (x) {
+      return { v: x.v, on: x.on, color: x.color };
+    });
+  }
+  function fibPrice(p1, p2, level) {
+    return Number(p2) + (Number(p1) - Number(p2)) * Number(level);
+  }
 
   function uid() {
     return "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -224,6 +259,7 @@
     let draft = null;
     let drag = null;
     let pointerDown = false;
+    let hoverId = null;
 
     const prim = new DrawPrimitive({
       buildPriceViews: buildPriceViews,
@@ -249,6 +285,7 @@
     }
     function bump() {
       save();
+      padRight();
       prim.requestUpdate();
       syncToolbar();
     }
@@ -256,21 +293,83 @@
       return tool !== "cursor";
     }
 
-    function t2x(t) {
-      const x = chart.timeScale().timeToCoordinate(Number(t));
+    function candlesNow() {
+      return getCandles() || [];
+    }
+    function timeToX(t) {
+      const ts = chart.timeScale();
+      const n = Number(t);
+      const direct = ts.timeToCoordinate(n);
+      if (direct != null) return direct;
+      const candles = candlesNow();
+      if (!candles.length || !Number.isFinite(n)) return null;
+      const lastI = candles.length - 1;
+      const firstT = Number(candles[0].time);
+      const lastT = Number(candles[lastI].time);
+      const sec = tfSec();
+      let logical;
+      if (n > lastT) logical = lastI + (n - lastT) / sec;
+      else if (n < firstT) logical = (n - firstT) / sec;
+      else {
+        logical = lastI;
+        for (let i = 0; i < candles.length; i += 1) {
+          if (Number(candles[i].time) >= n) {
+            logical = i;
+            break;
+          }
+        }
+      }
+      const x = ts.logicalToCoordinate(logical);
       return x == null ? null : x;
     }
     function p2y(p) {
       const y = series.priceToCoordinate(Number(p));
       return y == null ? null : y;
     }
-    function x2t(x) {
-      const t = chart.timeScale().coordinateToTime(x);
-      return t == null ? null : Number(t);
+    function xToTime(x) {
+      const ts = chart.timeScale();
+      const t = ts.coordinateToTime(x);
+      if (t != null) return Number(t);
+      const logical = ts.coordinateToLogical(x);
+      if (logical == null) return null;
+      const candles = candlesNow();
+      if (!candles.length) return null;
+      const lastI = candles.length - 1;
+      const sec = tfSec();
+      if (logical > lastI) {
+        return Number(candles[lastI].time) + (logical - lastI) * sec;
+      }
+      if (logical < 0) {
+        return Number(candles[0].time) + logical * sec;
+      }
+      const i0 = Math.max(0, Math.min(lastI, Math.floor(logical)));
+      const i1 = Math.min(lastI, i0 + 1);
+      const f = logical - i0;
+      const t0 = Number(candles[i0].time);
+      const t1 = Number(candles[i1].time);
+      return t0 + f * (t1 - t0);
     }
     function y2p(y) {
       const p = series.coordinateToPrice(y);
       return p == null ? null : Number(p);
+    }
+    function padRight() {
+      const candles = candlesNow();
+      if (!candles.length) return;
+      const lastT = Number(candles[candles.length - 1].time);
+      const sec = tfSec();
+      let extra = 48;
+      drawings.concat(draft ? [draft] : []).forEach(function (d) {
+        [d.t1, d.t2, d.time].forEach(function (tm) {
+          if (tm == null) return;
+          const bars = (Number(tm) - lastT) / sec;
+          if (bars + 12 > extra) extra = Math.ceil(bars + 12);
+        });
+      });
+      extra = Math.max(32, Math.min(240, extra));
+      const opt = { timeScale: { rightOffset: extra } };
+      chart.applyOptions(opt);
+      if (opts.rsiChart) opts.rsiChart.applyOptions(opt);
     }
     function paneXY(ev) {
       const r = host.getBoundingClientRect();
@@ -290,6 +389,9 @@
         }
       }
       if (!best) return { time: time, price: price };
+      if (Math.abs(Number(best.time) - Number(time)) > tfSec() * 0.75) {
+        return { time: time, price: price };
+      }
       const lv = [best.open, best.high, best.low, best.close].map(Number);
       let bp = lv[0];
       let bd = Infinity;
@@ -336,6 +438,22 @@
         targetColor: d.targetColor,
         slColor: d.slColor,
         showMeasurement: d.showMeasurement,
+        showLabels: d.showLabels,
+        accountSize: d.accountSize,
+        riskMode: d.riskMode,
+        riskValue: d.riskValue,
+        qtyMode: d.qtyMode,
+        lotSize: d.lotSize,
+        trendOn: d.trendOn,
+        trendColor: d.trendColor,
+        extend: d.extend,
+        oneColor: d.oneColor,
+        fibBg: d.fibBg,
+        fibBgOp: d.fibBgOp,
+        labelMode: d.labelMode,
+        labelSide: d.labelSide,
+        reverse: d.reverse,
+        levels: d.levels ? JSON.parse(JSON.stringify(d.levels)) : undefined,
       };
       lsSet(LS_STYLES, JSON.stringify(lastStyles));
     }
@@ -387,7 +505,7 @@
       }
       if (d.type === "hray") {
         const y = p2y(d.price);
-        const x = t2x(d.time);
+        const x = timeToX(d.time);
         if (y == null) return;
         const x0 = x == null ? 0 : x;
         ctx.beginPath();
@@ -398,9 +516,9 @@
         return;
       }
       if (d.type === "trend") {
-        const x1 = t2x(d.t1);
+        const x1 = timeToX(d.t1);
         const y1 = p2y(d.p1);
-        const x2 = t2x(d.t2);
+        const x2 = timeToX(d.t2);
         const y2 = p2y(d.p2);
         if (x1 == null || y1 == null || x2 == null || y2 == null) return;
         ctx.beginPath();
@@ -417,7 +535,7 @@
         return;
       }
       if (d.type === "vline") {
-        const x = t2x(d.time);
+        const x = timeToX(d.time);
         if (x == null) return;
         ctx.beginPath();
         ctx.moveTo(x, 0);
@@ -427,9 +545,9 @@
         return;
       }
       if (d.type === "rect") {
-        const x1 = t2x(d.t1);
+        const x1 = timeToX(d.t1);
         const y1 = p2y(d.p1);
-        const x2 = t2x(d.t2);
+        const x2 = timeToX(d.t2);
         const y2 = p2y(d.p2);
         if (x1 == null || y1 == null || x2 == null || y2 == null) return;
         const x = Math.min(x1, x2);
@@ -450,7 +568,7 @@
         return;
       }
       if (d.type === "text") {
-        const x = t2x(d.time);
+        const x = timeToX(d.time);
         const y = p2y(d.price);
         if (x == null || y == null) return;
         ctx.setLineDash([]);
@@ -462,7 +580,11 @@
         return;
       }
       if (d.type === "long" || d.type === "short") {
-        drawPosition(ctx, w, h, d, sel);
+        drawPosition(ctx, w, h, d, sel || d.id === hoverId);
+        return;
+      }
+      if (d.type === "fib") {
+        drawFib(ctx, w, h, d, sel);
       }
     }
 
@@ -487,9 +609,43 @@
       return "rgba(" + r + "," + g + "," + b + "," + a + ")";
     }
 
+    function posQty(d) {
+      const riskPts = Math.abs(Number(d.entry) - Number(d.sl));
+      const lot = Number(d.lotSize) > 0 ? Number(d.lotSize) : 0.01;
+      if (d.qtyMode === "manual" && Number(d.qty) > 0) return Number(d.qty);
+      const acct = Number(d.accountSize != null ? d.accountSize : 1000);
+      const riskVal = Number(d.riskValue != null ? d.riskValue : 250);
+      const riskUsd = d.riskMode === "pct" ? acct * (riskVal / 100) : riskVal;
+      if (!(riskPts > 0) || !(riskUsd > 0)) return 0;
+      let q = riskUsd / riskPts;
+      if (lot > 0) q = Math.round(q / lot) * lot;
+      return Math.max(lot, q);
+    }
+    function fmtAmt(n) {
+      if (!Number.isFinite(n)) return "—";
+      const a = Math.abs(n);
+      if (a >= 100) return n.toFixed(0);
+      return n.toFixed(1);
+    }
+    function posLineText(kind, pts, entry, qty) {
+      const pct = Number(entry) > 0 ? (pts / Number(entry)) * 100 : 0;
+      const ticks = Math.round(pts / MINTICK);
+      const amt = qty * pts;
+      const name = kind === "target" ? "Target" : "Stop";
+      return name + ": " + pts.toFixed(1) + " (" + pct.toFixed(3) + "%) " + ticks + ", Amount: " + fmtAmt(amt);
+    }
+    function markPrice() {
+      if (opts.getMarkPrice) {
+        const p = Number(opts.getMarkPrice());
+        if (Number.isFinite(p)) return p;
+      }
+      const c = candlesNow();
+      return c.length ? Number(c[c.length - 1].close) : null;
+    }
+
     function drawPosition(ctx, w, h, d, sel) {
-      const x1 = t2x(d.t1);
-      const x2 = t2x(d.t2);
+      const x1 = timeToX(d.t1);
+      const x2 = timeToX(d.t2);
       const yE = p2y(d.entry);
       const yT = p2y(d.target);
       const yS = p2y(d.sl);
@@ -514,25 +670,139 @@
       ctx.strokeRect(left, topT, bw, Math.max(2, htT));
       ctx.strokeStyle = sCol;
       ctx.strokeRect(left, topS, bw, Math.max(2, htS));
-      ctx.strokeStyle = d.color || "#e6edf3";
+      ctx.strokeStyle = d.color || "#58a6ff";
       ctx.beginPath();
       ctx.moveTo(left, yE);
       ctx.lineTo(left + bw, yE);
       ctx.stroke();
-      const ratio = rrRatio(d.entry, d.target, d.sl);
-      const rrTxt = ratio == null ? "R:R —" : "R:R " + ratio.toFixed(2);
-      const rew = Math.abs(d.target - d.entry);
-      const risk = Math.abs(d.entry - d.sl);
-      const fs = Number(d.fontSize) || 11;
-      ctx.font = fs + "px Segoe UI, sans-serif";
-      ctx.fillStyle = d.textColor || "#e6edf3";
-      ctx.fillText(rrTxt + "  +" + fmtPx(rew) + " / -" + fmtPx(risk), left + 6, topT + 14);
-      if (sel) {
-        drawHandle(ctx, left + bw / 2, yT, true);
-        drawHandle(ctx, left + bw / 2, yE, true);
-        drawHandle(ctx, left + bw / 2, yS, true);
+      const showLab = d.showLabels !== false && sel;
+      if (showLab) {
+        const qty = posQty(d);
+        const rew = Math.abs(Number(d.target) - Number(d.entry));
+        const risk = Math.abs(Number(d.entry) - Number(d.sl));
+        const ratio = rrRatio(d.entry, d.target, d.sl);
+        const cur = markPrice();
+        let pnl = 0;
+        if (cur != null) {
+          pnl = d.type === "short"
+            ? (Number(d.entry) - cur) * qty
+            : (cur - Number(d.entry)) * qty;
+        }
+        const fs = Number(d.fontSize) || 11;
+        ctx.font = fs + "px Segoe UI, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+        ctx.fillStyle = tCol;
+        const tY = yT < yE ? topT - 4 : topT + htT + 12;
+        ctx.fillText(posLineText("target", rew, d.entry, qty), left + 4, tY);
+        ctx.fillStyle = sCol;
+        const sY = yS > yE ? topS + htS + 12 : topS - 4;
+        ctx.fillText(posLineText("stop", risk, d.entry, qty), left + 4, sY);
+        ctx.fillStyle = d.textColor || "#e6edf3";
+        const rrTxt = ratio == null ? "—" : ratio.toFixed(2);
+        const midY = yE - 4;
+        ctx.fillText(
+          "Open PnL: " + fmtAmt(pnl) + ", Qty: " + qty.toFixed(2) + " / Risk/reward ratio: " + rrTxt,
+          left + 4,
+          midY
+        );
+      }
+      if (sel && d.id === selectedId) {
+        drawHandle(ctx, left, yT, true);
+        drawHandle(ctx, left, yS, true);
         drawHandle(ctx, left, yE, true);
         drawHandle(ctx, left + bw, yE, true);
+      }
+    }
+
+    function fibLevelsOf(d) {
+      return Array.isArray(d.levels) && d.levels.length ? d.levels : defaultFibLevels();
+    }
+    function drawCircleHandle(ctx, x, y) {
+      if (x == null || y == null) return;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "#0e1117";
+      ctx.fill();
+      ctx.strokeStyle = "#58a6ff";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    function drawFib(ctx, w, h, d, sel) {
+      const p1 = d.reverse ? d.p2 : d.p1;
+      const p2 = d.reverse ? d.p1 : d.p2;
+      const x1 = timeToX(d.t1);
+      const x2 = timeToX(d.t2);
+      const y1 = p2y(d.p1);
+      const y2 = p2y(d.p2);
+      if (x1 == null || x2 == null || y1 == null || y2 == null) return;
+      const left = Math.min(x1, x2);
+      const right = Math.max(x1, x2);
+      const ext = d.extend || "none";
+      let xL = left;
+      let xR = right;
+      if (ext === "left" || ext === "both") xL = 0;
+      if (ext === "right" || ext === "both") xR = w;
+      const lv = fibLevelsOf(d).filter(function (x) { return x.on; }).slice().sort(function (a, b) { return a.v - b.v; });
+      const bgOn = d.fibBg !== false;
+      const bgOp = (d.fibBgOp != null ? Number(d.fibBgOp) : 20) / 100;
+      const one = Boolean(d.oneColor);
+      const lineCol = d.color || COLORS[0];
+      for (let i = 0; i + 1 < lv.length; i += 1) {
+        if (!bgOn) break;
+        const ya = p2y(fibPrice(p1, p2, lv[i].v));
+        const yb = p2y(fibPrice(p1, p2, lv[i + 1].v));
+        if (ya == null || yb == null) continue;
+        const col = one ? lineCol : (lv[i].color || lineCol);
+        ctx.fillStyle = hexA(col, bgOp);
+        ctx.fillRect(xL, Math.min(ya, yb), Math.max(1, xR - xL), Math.abs(yb - ya));
+      }
+      if (d.trendOn !== false) {
+        ctx.strokeStyle = d.trendColor || "#787b86";
+        ctx.lineWidth = d.width || 1;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+      const fs = Number(d.fontSize) || 11;
+      ctx.font = fs + "px Segoe UI, sans-serif";
+      ctx.setLineDash(d.style === "dotted" ? [2, 3] : (d.style === "solid" ? [] : [6, 4]));
+      ctx.lineWidth = d.width || 1;
+      const labMode = d.labelMode || "percent";
+      const labSide = d.labelSide || "right";
+      lv.forEach(function (lvItem) {
+        const price = fibPrice(p1, p2, lvItem.v);
+        const y = p2y(price);
+        if (y == null) return;
+        const col = one ? lineCol : (lvItem.color || lineCol);
+        ctx.strokeStyle = col;
+        ctx.beginPath();
+        ctx.moveTo(xL, y);
+        ctx.lineTo(xR, y);
+        ctx.stroke();
+        let lab = (lvItem.v * 100).toFixed(2).replace(/\.00$/, "") + "%";
+        if (Number(lvItem.v) === 0.786) lab = "78.60%";
+        else if (Number(lvItem.v) === 0.618) lab = "61.80%";
+        if (labMode === "price") lab = price.toFixed(1);
+        if (labMode === "both") lab = lab + " (" + price.toFixed(1) + ")";
+        ctx.setLineDash([]);
+        ctx.fillStyle = col;
+        ctx.textBaseline = "bottom";
+        if (labSide === "left") {
+          ctx.textAlign = "left";
+          ctx.fillText(lab, xL + 4, y - 2);
+        } else {
+          ctx.textAlign = "right";
+          ctx.fillText(lab, xR - 4, y - 2);
+        }
+        ctx.setLineDash(d.style === "dotted" ? [2, 3] : (d.style === "solid" ? [] : [6, 4]));
+      });
+      if (sel) {
+        drawCircleHandle(ctx, x1, y1);
+        drawCircleHandle(ctx, x2, y2);
       }
     }
 
@@ -543,10 +813,10 @@
         if (d.type === "hline" || d.type === "hray") {
           views.push(new PriceLabel(function () { return p2y(d.price); }, function () { return fmtPx(d.price); }, function () { return d.color || COLORS[0]; }));
         }
-        if (d.type === "long" || d.type === "short") {
-          views.push(new PriceLabel(function () { return p2y(d.entry); }, function () { return "E " + fmtPx(d.entry); }, function () { return "#e6edf3"; }));
-          views.push(new PriceLabel(function () { return p2y(d.target); }, function () { return "TP " + fmtPx(d.target); }, function () { return "#3fb950"; }));
-          views.push(new PriceLabel(function () { return p2y(d.sl); }, function () { return "SL " + fmtPx(d.sl); }, function () { return "#f85149"; }));
+        if ((d.type === "long" || d.type === "short") && (d.id === selectedId || d.id === hoverId)) {
+          views.push(new PriceLabel(function () { return p2y(d.entry); }, function () { return "E " + fmtPx(d.entry); }, function () { return d.color || "#58a6ff"; }));
+          views.push(new PriceLabel(function () { return p2y(d.target); }, function () { return "TP " + fmtPx(d.target); }, function () { return d.targetColor || "#3fb950"; }));
+          views.push(new PriceLabel(function () { return p2y(d.sl); }, function () { return "SL " + fmtPx(d.sl); }, function () { return d.slColor || "#f85149"; }));
         }
       });
       return views;
@@ -555,28 +825,30 @@
     function hitHandles(d, x, y) {
       const hs = [];
       if (d.type === "hline") hs.push({ name: "price", x: 40, y: p2y(d.price) });
-      if (d.type === "hray") hs.push({ name: "anchor", x: t2x(d.time), y: p2y(d.price) });
+      if (d.type === "hray") hs.push({ name: "anchor", x: timeToX(d.time), y: p2y(d.price) });
       if (d.type === "trend") {
-        hs.push({ name: "a", x: t2x(d.t1), y: p2y(d.p1) });
-        hs.push({ name: "b", x: t2x(d.t2), y: p2y(d.p2) });
+        hs.push({ name: "a", x: timeToX(d.t1), y: p2y(d.p1) });
+        hs.push({ name: "b", x: timeToX(d.t2), y: p2y(d.p2) });
       }
-      if (d.type === "vline") hs.push({ name: "time", x: t2x(d.time), y: y });
+      if (d.type === "vline") hs.push({ name: "time", x: timeToX(d.time), y: y });
       if (d.type === "rect") {
-        hs.push({ name: "a", x: t2x(d.t1), y: p2y(d.p1) });
-        hs.push({ name: "b", x: t2x(d.t2), y: p2y(d.p2) });
+        hs.push({ name: "a", x: timeToX(d.t1), y: p2y(d.p1) });
+        hs.push({ name: "b", x: timeToX(d.t2), y: p2y(d.p2) });
       }
-      if (d.type === "text") hs.push({ name: "anchor", x: t2x(d.time), y: p2y(d.price) });
+      if (d.type === "text") hs.push({ name: "anchor", x: timeToX(d.time), y: p2y(d.price) });
       if (d.type === "long" || d.type === "short") {
-        const x1 = t2x(d.t1);
-        const x2 = t2x(d.t2);
+        const x1 = timeToX(d.t1);
+        const x2 = timeToX(d.t2);
         const left = Math.min(x1, x2);
         const right = Math.max(x1, x2);
-        const mid = (left + right) / 2;
-        hs.push({ name: "target", x: mid, y: p2y(d.target) });
-        hs.push({ name: "entry", x: mid, y: p2y(d.entry) });
-        hs.push({ name: "sl", x: mid, y: p2y(d.sl) });
+        hs.push({ name: "target", x: left, y: p2y(d.target) });
+        hs.push({ name: "sl", x: left, y: p2y(d.sl) });
         hs.push({ name: "left", x: left, y: p2y(d.entry) });
         hs.push({ name: "right", x: right, y: p2y(d.entry) });
+      }
+      if (d.type === "fib") {
+        hs.push({ name: "a", x: timeToX(d.t1), y: p2y(d.p1) });
+        hs.push({ name: "b", x: timeToX(d.t2), y: p2y(d.p2) });
       }
       for (let i = 0; i < hs.length; i += 1) {
         const h = hs[i];
@@ -593,25 +865,25 @@
       }
       if (d.type === "hray") {
         const yy = p2y(d.price);
-        const xx = t2x(d.time);
+        const xx = timeToX(d.time);
         return yy != null && Math.abs(y - yy) <= HIT && (xx == null || x >= xx - HIT);
       }
       if (d.type === "trend") {
-        const x1 = t2x(d.t1);
+        const x1 = timeToX(d.t1);
         const y1 = p2y(d.p1);
-        const x2 = t2x(d.t2);
+        const x2 = timeToX(d.t2);
         const y2 = p2y(d.p2);
         if (x1 == null || y1 == null || x2 == null || y2 == null) return false;
         return distSeg(x, y, x1, y1, x2, y2) <= HIT;
       }
       if (d.type === "vline") {
-        const xx = t2x(d.time);
+        const xx = timeToX(d.time);
         return xx != null && Math.abs(x - xx) <= HIT;
       }
       if (d.type === "rect") {
-        const x1 = t2x(d.t1);
+        const x1 = timeToX(d.t1);
         const y1 = p2y(d.p1);
-        const x2 = t2x(d.t2);
+        const x2 = timeToX(d.t2);
         const y2 = p2y(d.p2);
         if (x1 == null || y1 == null || x2 == null || y2 == null) return false;
         const l = Math.min(x1, x2);
@@ -621,13 +893,13 @@
         return x >= l - 2 && x <= r + 2 && y >= t - 2 && y <= b + 2;
       }
       if (d.type === "text") {
-        const xx = t2x(d.time);
+        const xx = timeToX(d.time);
         const yy = p2y(d.price);
         return xx != null && yy != null && dist(x, y, xx, yy) <= 16;
       }
       if (d.type === "long" || d.type === "short") {
-        const x1 = t2x(d.t1);
-        const x2 = t2x(d.t2);
+        const x1 = timeToX(d.t1);
+        const x2 = timeToX(d.t2);
         const yE = p2y(d.entry);
         const yT = p2y(d.target);
         const yS = p2y(d.sl);
@@ -637,6 +909,23 @@
         const t = Math.min(yE, yT, yS);
         const b = Math.max(yE, yT, yS);
         return x >= l && x <= r && y >= t && y <= b;
+      }
+      if (d.type === "fib") {
+        const x1 = timeToX(d.t1);
+        const y1 = p2y(d.p1);
+        const x2 = timeToX(d.t2);
+        const y2 = p2y(d.p2);
+        if (x1 == null || y1 == null || x2 == null || y2 == null) return false;
+        if (distSeg(x, y, x1, y1, x2, y2) <= HIT) return true;
+        const lv = fibLevelsOf(d).filter(function (z) { return z.on; });
+        const pA = d.reverse ? d.p2 : d.p1;
+        const pB = d.reverse ? d.p1 : d.p2;
+        const l = Math.min(x1, x2);
+        const r = Math.max(x1, x2);
+        for (let i = 0; i < lv.length; i += 1) {
+          const yy = p2y(fibPrice(pA, pB, lv[i].v));
+          if (yy != null && Math.abs(y - yy) <= HIT && x >= l - 2 && x <= r + 2) return true;
+        }
       }
       return false;
     }
@@ -697,10 +986,8 @@
         d.time = time;
         d.price = price;
       } else if (d.type === "long" || d.type === "short") {
-        if (handle === "entry") d.entry = price;
-        else if (handle === "target") d.target = price;
+        if (handle === "target") d.target = price;
         else if (handle === "sl") d.sl = price;
-        else if (handle === "left") d.t1 = time;
         else if (handle === "right") d.t2 = time;
         else {
           d.t1 += dxT;
@@ -708,6 +995,19 @@
           d.entry += dxP;
           d.target += dxP;
           d.sl += dxP;
+        }
+      } else if (d.type === "fib") {
+        if (handle === "a") {
+          d.t1 = time;
+          d.p1 = price;
+        } else if (handle === "b") {
+          d.t2 = time;
+          d.p2 = price;
+        } else {
+          d.t1 += dxT;
+          d.t2 += dxT;
+          d.p1 += dxP;
+          d.p2 += dxP;
         }
       }
     }
@@ -727,8 +1027,31 @@
         targetColor: "#3fb950",
         slColor: "#f85149",
         showMeasurement: t === "rect",
+        showLabels: true,
+        accountSize: 1000,
+        riskMode: "usd",
+        riskValue: 250,
+        qtyMode: "auto",
+        qty: 0,
+        lotSize: 0.01,
+        levels: t === "fib" ? defaultFibLevels() : undefined,
+        trendOn: true,
+        trendColor: "#787b86",
+        extend: "none",
+        oneColor: false,
+        fibBg: true,
+        fibBgOp: 20,
+        labelMode: "percent",
+        labelSide: "right",
+        reverse: false,
       };
-      return Object.assign(base, last, { locked: false });
+      const merged = Object.assign(base, last, { locked: false });
+      if (t === "fib") {
+        merged.levels = Array.isArray(merged.levels)
+          ? JSON.parse(JSON.stringify(merged.levels))
+          : defaultFibLevels();
+      }
+      return merged;
     }
 
     function finishDraft() {
@@ -789,7 +1112,7 @@
       if (tool === "cursor" && opts.isReplayPicking && opts.isReplayPicking()) return;
       const pt = paneXY(ev);
       pointerDown = true;
-      const time0 = x2t(pt.x);
+      const time0 = xToTime(pt.x);
       const price0 = y2p(pt.y);
       if (time0 == null || price0 == null) return;
       const sn = snapTP(time0, price0);
@@ -814,7 +1137,7 @@
           startText(sn.time, sn.price, ev.clientX, ev.clientY);
           return;
         }
-        if (tool === "trend" || tool === "rect" || tool === "long" || tool === "short") {
+        if (tool === "trend" || tool === "rect" || tool === "long" || tool === "short" || tool === "fib") {
           if (!draft) {
             draft = Object.assign(defaultStyle(), {
               type: tool,
@@ -871,11 +1194,11 @@
 
     function onPointerMove(ev) {
       const pt = paneXY(ev);
-      const time0 = x2t(pt.x);
+      const time0 = xToTime(pt.x);
       const price0 = y2p(pt.y);
       if (time0 == null || price0 == null) return;
       const sn = snapTP(time0, price0);
-      if (draft && (tool === "trend" || tool === "rect" || tool === "long" || tool === "short")) {
+      if (draft && (tool === "trend" || tool === "rect" || tool === "long" || tool === "short" || tool === "fib")) {
         draft.t2 = sn.time;
         draft.p2 = sn.price;
         if (tool === "long" || tool === "short") {
@@ -888,13 +1211,23 @@
         prim.requestUpdate();
         return;
       }
-      if (!pointerDown || !drag) return;
+      if (!pointerDown) {
+        const hit = hitTop(pt.x, pt.y);
+        const nid = hit && hit.d ? hit.d.id : null;
+        if (nid !== hoverId) {
+          hoverId = nid;
+          prim.requestUpdate();
+        }
+        return;
+      }
+      if (!drag) return;
       const d = drawings.find(function (x) { return x.id === drag.id; });
       if (!d) return;
       const dxT = sn.time - drag.t0;
       const dxP = sn.price - drag.p0;
       Object.assign(d, JSON.parse(JSON.stringify(drag.clone)));
       applyDrag(d, drag.handle, sn.time, sn.price, dxT, dxP);
+      padRight();
       prim.requestUpdate();
     }
 
@@ -956,14 +1289,46 @@
       if (box) box.classList.remove("open");
     }
     function showTab(name) {
-      const st = dlgEl("dlgStyle");
-      const co = dlgEl("dlgCoords");
-      const ts = dlgEl("tabStyle");
-      const tc = dlgEl("tabCoords");
-      if (st) st.hidden = name !== "style";
-      if (co) co.hidden = name !== "coords";
-      if (ts) ts.classList.toggle("active", name === "style");
-      if (tc) tc.classList.toggle("active", name === "coords");
+      const map = { style: "dlgStyle", inputs: "dlgInputs", coords: "dlgCoords", vis: "dlgVis" };
+      Object.keys(map).forEach(function (k) {
+        const n = dlgEl(map[k]);
+        if (n) n.hidden = k !== name;
+      });
+      [["tabStyle", "style"], ["tabInputs", "inputs"], ["tabCoords", "coords"], ["tabVis", "vis"]].forEach(function (pair) {
+        const n = dlgEl(pair[0]);
+        if (n) n.classList.toggle("active", pair[1] === name);
+      });
+    }
+    function renderFibGrid(d) {
+      const host = dlgEl("dlgFibGrid");
+      if (!host) return;
+      host.innerHTML = "";
+      const levels = fibLevelsOf(d);
+      d.levels = levels;
+      levels.forEach(function (lv, i) {
+        const row = document.createElement("div");
+        row.className = "fib-lv";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = Boolean(lv.on);
+        cb.addEventListener("change", function () { lv.on = cb.checked; });
+        const num = document.createElement("input");
+        num.type = "number";
+        num.step = "0.001";
+        num.value = String(lv.v);
+        num.addEventListener("change", function () {
+          const n = parseFloat(num.value);
+          if (Number.isFinite(n)) lv.v = n;
+        });
+        const col = document.createElement("input");
+        col.type = "color";
+        col.value = toHex(lv.color || COLORS[0]);
+        col.addEventListener("input", function () { lv.color = col.value; });
+        row.appendChild(cb);
+        row.appendChild(num);
+        row.appendChild(col);
+        host.appendChild(row);
+      });
     }
     function setRow(id, on) {
       const n = dlgEl(id);
@@ -997,17 +1362,40 @@
       if (dlgEl("dlgSl")) dlgEl("dlgSl").value = price1(d.sl);
       if (dlgEl("dlgStart")) dlgEl("dlgStart").value = d.t1 != null ? fmtIstDt(d.t1) : "";
       if (dlgEl("dlgEnd")) dlgEl("dlgEnd").value = d.t2 != null ? fmtIstDt(d.t2) : "";
+      if (dlgEl("dlgShowPosLab")) dlgEl("dlgShowPosLab").checked = d.showLabels !== false;
+      if (dlgEl("dlgAcct")) dlgEl("dlgAcct").value = String(d.accountSize != null ? d.accountSize : 1000);
+      if (dlgEl("dlgRiskMode")) dlgEl("dlgRiskMode").value = d.riskMode === "pct" ? "pct" : "usd";
+      if (dlgEl("dlgRiskVal")) dlgEl("dlgRiskVal").value = String(d.riskValue != null ? d.riskValue : 250);
+      if (dlgEl("dlgQtyAuto")) dlgEl("dlgQtyAuto").checked = d.qtyMode !== "manual";
+      if (dlgEl("dlgQty")) dlgEl("dlgQty").value = String(posQty(d).toFixed(2));
+      if (dlgEl("dlgLot")) dlgEl("dlgLot").value = String(d.lotSize != null ? d.lotSize : 0.01);
+      if (dlgEl("dlgFibTrend")) dlgEl("dlgFibTrend").checked = d.trendOn !== false;
+      if (dlgEl("dlgFibTrendCol")) dlgEl("dlgFibTrendCol").value = toHex(d.trendColor || "#787b86");
+      if (dlgEl("dlgFibExtend")) dlgEl("dlgFibExtend").value = d.extend || "none";
+      if (dlgEl("dlgFibOneColor")) dlgEl("dlgFibOneColor").checked = Boolean(d.oneColor);
+      if (dlgEl("dlgFibBg")) dlgEl("dlgFibBg").checked = d.fibBg !== false;
+      if (dlgEl("dlgFibBgOp")) dlgEl("dlgFibBgOp").value = String(d.fibBgOp != null ? d.fibBgOp : 20);
+      if (dlgEl("dlgFibBgOpLab")) dlgEl("dlgFibBgOpLab").textContent = (d.fibBgOp != null ? d.fibBgOp : 20) + "%";
+      if (dlgEl("dlgFibLabelMode")) dlgEl("dlgFibLabelMode").value = d.labelMode || "percent";
+      if (dlgEl("dlgFibLabelSide")) dlgEl("dlgFibLabelSide").value = d.labelSide || "right";
+      if (dlgEl("dlgFibReverse")) dlgEl("dlgFibReverse").checked = Boolean(d.reverse);
+      if (d.type === "fib") renderFibGrid(d);
       const t = d.type;
       setRow("gFill", t === "rect" || t === "long" || t === "short");
-      setRow("gText", t === "text" || t === "rect" || t === "trend" || t === "long" || t === "short");
+      setRow("gText", t === "text" || t === "rect" || t === "trend" || t === "long" || t === "short" || t === "fib");
       setRow("gPosCol", t === "long" || t === "short");
+      setRow("gPosLab", t === "long" || t === "short");
       setRow("gMeas", t === "rect" || t === "trend");
+      setRow("gFib", t === "fib");
+      setRow("gLine", t !== "fib");
+      setRow("tabInputs", t === "long" || t === "short");
+      setRow("tabVis", t === "fib");
       setRow("cPrice", t === "hline" || t === "hray" || t === "text");
       setRow("cTime", t === "hray" || t === "vline" || t === "text");
-      setRow("cT1", t === "trend");
-      setRow("cP1", t === "trend");
-      setRow("cT2", t === "trend");
-      setRow("cP2", t === "trend");
+      setRow("cT1", t === "trend" || t === "fib");
+      setRow("cP1", t === "trend" || t === "fib");
+      setRow("cT2", t === "trend" || t === "fib");
+      setRow("cP2", t === "trend" || t === "fib");
       setRow("cTop", t === "rect");
       setRow("cBot", t === "rect");
       setRow("cLeft", t === "rect");
@@ -1092,6 +1480,23 @@
       next.targetColor = dlgEl("dlgTargetCol").value;
       next.slColor = dlgEl("dlgSlCol").value;
       next.showMeasurement = dlgEl("dlgShowMeas").checked;
+      if (dlgEl("dlgShowPosLab")) next.showLabels = dlgEl("dlgShowPosLab").checked;
+      if (dlgEl("dlgAcct")) next.accountSize = Number(dlgEl("dlgAcct").value) || 1000;
+      if (dlgEl("dlgRiskMode")) next.riskMode = dlgEl("dlgRiskMode").value === "pct" ? "pct" : "usd";
+      if (dlgEl("dlgRiskVal")) next.riskValue = Number(dlgEl("dlgRiskVal").value);
+      if (dlgEl("dlgLot")) next.lotSize = Number(dlgEl("dlgLot").value) || 0.01;
+      if (dlgEl("dlgQtyAuto")) next.qtyMode = dlgEl("dlgQtyAuto").checked ? "auto" : "manual";
+      if (dlgEl("dlgQty") && next.qtyMode === "manual") next.qty = Number(dlgEl("dlgQty").value) || 0;
+      if (dlgEl("dlgFibTrend")) next.trendOn = dlgEl("dlgFibTrend").checked;
+      if (dlgEl("dlgFibTrendCol")) next.trendColor = dlgEl("dlgFibTrendCol").value;
+      if (dlgEl("dlgFibExtend")) next.extend = dlgEl("dlgFibExtend").value;
+      if (dlgEl("dlgFibOneColor")) next.oneColor = dlgEl("dlgFibOneColor").checked;
+      if (dlgEl("dlgFibBg")) next.fibBg = dlgEl("dlgFibBg").checked;
+      if (dlgEl("dlgFibBgOp")) next.fibBgOp = Number(dlgEl("dlgFibBgOp").value);
+      if (dlgEl("dlgFibLabelMode")) next.labelMode = dlgEl("dlgFibLabelMode").value;
+      if (dlgEl("dlgFibLabelSide")) next.labelSide = dlgEl("dlgFibLabelSide").value;
+      if (dlgEl("dlgFibReverse")) next.reverse = dlgEl("dlgFibReverse").checked;
+      if (d.type === "fib" && Array.isArray(d.levels)) next.levels = JSON.parse(JSON.stringify(d.levels));
       if (d.type === "hline") {
         const p = readPrice("dlgPrice");
         if (p == null) return failCoord();
@@ -1106,7 +1511,7 @@
         const t = readTime("dlgTime");
         if (t == null) return failCoord();
         next.time = t;
-      } else if (d.type === "trend") {
+      } else if (d.type === "trend" || d.type === "fib") {
         const t1 = readTime("dlgT1");
         const t2 = readTime("dlgT2");
         const p1 = readPrice("dlgP1");
@@ -1306,9 +1711,38 @@
         if (ev.target === dlgRoot) closeDialog();
       });
       if (dlgEl("tabStyle")) dlgEl("tabStyle").addEventListener("click", function () { showTab("style"); });
+      if (dlgEl("tabInputs")) dlgEl("tabInputs").addEventListener("click", function () { showTab("inputs"); });
       if (dlgEl("tabCoords")) dlgEl("tabCoords").addEventListener("click", function () { showTab("coords"); });
+      if (dlgEl("tabVis")) dlgEl("tabVis").addEventListener("click", function () { showTab("vis"); });
       if (dlgEl("dlgCancel")) dlgEl("dlgCancel").addEventListener("click", closeDialog);
       if (dlgEl("dlgApply")) dlgEl("dlgApply").addEventListener("click", applyDialog);
+      if (dlgEl("dlgSaveDef")) {
+        dlgEl("dlgSaveDef").addEventListener("click", function () {
+          if (dlgTarget) {
+            applyDialog();
+            const d = drawings.find(function (x) { return dlgTarget && x.id === dlgTarget.id; });
+            if (d) rememberStyle(d);
+          }
+        });
+      }
+      if (dlgEl("dlgResetDef")) {
+        dlgEl("dlgResetDef").addEventListener("click", function () {
+          if (!dlgTarget) return;
+          const t = dlgTarget.type;
+          delete lastStyles[t];
+          lsSet(LS_STYLES, JSON.stringify(lastStyles));
+          const fresh = defaultStyle(t);
+          Object.keys(fresh).forEach(function (k) {
+            if (k !== "locked") dlgTarget[k] = fresh[k];
+          });
+          fillDialog(dlgTarget);
+        });
+      }
+      if (dlgEl("dlgFibBgOp")) {
+        dlgEl("dlgFibBgOp").addEventListener("input", function () {
+          if (dlgEl("dlgFibBgOpLab")) dlgEl("dlgFibBgOpLab").textContent = dlgEl("dlgFibBgOp").value + "%";
+        });
+      }
       if (dlgEl("dlgFillOp")) {
         dlgEl("dlgFillOp").addEventListener("input", function () {
           if (dlgEl("dlgFillOpLab")) dlgEl("dlgFillOpLab").textContent = dlgEl("dlgFillOp").value + "%";
@@ -1327,6 +1761,7 @@
 
     load();
     syncToolbar();
+    padRight();
     prim.requestUpdate();
 
     return {
@@ -1340,7 +1775,7 @@
         bump();
         return d;
       },
-      refresh: function () { prim.requestUpdate(); },
+      refresh: function () { padRight(); prim.requestUpdate(); },
       openSettings: openDialog,
     };
   }
@@ -1355,5 +1790,6 @@
     snapTf: snapTf,
     posValid: posValid,
     rrRatio: rrRatio,
+    fibPrice: fibPrice,
   };
 })(window);

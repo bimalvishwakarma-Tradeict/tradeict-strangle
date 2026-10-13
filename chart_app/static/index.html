@@ -113,6 +113,9 @@
     #drawDialog .swatch { width: 22px; height: 22px; padding: 0; border-radius: 4px; }
     #drawDialog #dlgErr { color: #f85149; min-height: 16px; font-size: 12px; }
     #drawDialog .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+    #dlgFibGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; margin-top: 8px; max-height: 220px; overflow: auto; }
+    #dlgFibGrid .fib-lv { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+    #dlgFibGrid input[type="number"] { width: 64px; }
   </style>
 </head>
 <body>
@@ -163,6 +166,7 @@
       <button type="button" data-tool="text" title="Text note">T</button>
       <button type="button" data-tool="long" title="Long position">L▲</button>
       <button type="button" data-tool="short" title="Short position">S▼</button>
+      <button type="button" data-tool="fib" title="Fib retracement">Φ</button>
       <hr />
       <button type="button" id="drawMagnet" title="Magnet OHLC">M</button>
       <button type="button" id="drawHide" title="Hide all">H</button>
@@ -278,7 +282,9 @@
     <div class="dlg">
       <div class="dlg-tabs">
         <button type="button" id="tabStyle" class="active">Style</button>
+        <button type="button" id="tabInputs">Inputs</button>
         <button type="button" id="tabCoords">Coordinates</button>
+        <button type="button" id="tabVis">Visibility</button>
       </div>
       <div id="dlgStyle">
         <div class="row" id="gLine">Line color
@@ -314,6 +320,61 @@
         <div class="row" id="gMeas">
           <label><input type="checkbox" id="dlgShowMeas" /> Show measurement</label>
         </div>
+        <div class="row" id="gPosLab">
+          <label><input type="checkbox" id="dlgShowPosLab" checked /> Show labels</label>
+        </div>
+        <div id="gFib">
+          <div class="row">
+            <label><input type="checkbox" id="dlgFibTrend" checked /> Trend line</label>
+            Color <input id="dlgFibTrendCol" type="color" value="#787b86" />
+          </div>
+          <div class="row">Extend
+            <select id="dlgFibExtend">
+              <option value="none">Don't extend</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="both">Both</option>
+            </select>
+          </div>
+          <div class="row">
+            <label><input type="checkbox" id="dlgFibOneColor" /> Use one color</label>
+            <label><input type="checkbox" id="dlgFibBg" checked /> Background</label>
+            Opacity <input id="dlgFibBgOp" type="range" min="0" max="100" value="20" />
+            <span id="dlgFibBgOpLab">20%</span>
+          </div>
+          <div class="row">Labels
+            <select id="dlgFibLabelMode">
+              <option value="percent">Percent</option>
+              <option value="price">Price</option>
+              <option value="both">Both</option>
+            </select>
+            Side
+            <select id="dlgFibLabelSide">
+              <option value="right">Right</option>
+              <option value="left">Left</option>
+            </select>
+            <label><input type="checkbox" id="dlgFibReverse" /> Reverse</label>
+          </div>
+          <div id="dlgFibGrid"></div>
+        </div>
+      </div>
+      <div id="dlgInputs" hidden>
+        <div class="row" id="gPosIn">
+          <label>Account $</label><input id="dlgAcct" type="number" step="1" value="1000" />
+        </div>
+        <div class="row">
+          Risk
+          <select id="dlgRiskMode">
+            <option value="usd">$</option>
+            <option value="pct">%</option>
+          </select>
+          <input id="dlgRiskVal" type="number" step="0.1" value="250" />
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="dlgQtyAuto" checked /> Auto qty</label>
+          Qty <input id="dlgQty" type="number" step="0.01" value="0" />
+          Lot <input id="dlgLot" type="number" step="0.01" value="0.01" />
+        </div>
       </div>
       <div id="dlgCoords" hidden>
         <div class="row" id="cPrice"><label>Price</label><input id="dlgPrice" type="number" step="0.1" /></div>
@@ -334,10 +395,15 @@
         <div class="row" id="cEnd"><label>End time</label><input id="dlgEnd" type="text" placeholder="DD-MM-YYYY HH:MM" /></div>
         <div class="row" id="cRr">R:R <span id="dlgRr">—</span> · target pts <span id="dlgRew">—</span> · SL pts <span id="dlgRisk">—</span></div>
       </div>
+      <div id="dlgVis" hidden>
+        <div class="row"><label><input type="checkbox" id="dlgAlwaysOn" checked /> Show on all charts</label></div>
+      </div>
       <div id="dlgErr"></div>
       <div class="dlg-actions">
+        <button type="button" id="dlgSaveDef">Save as default</button>
+        <button type="button" id="dlgResetDef">Reset</button>
         <button type="button" id="dlgCancel">Cancel</button>
-        <button type="button" id="dlgApply">Apply</button>
+        <button type="button" id="dlgApply">Ok</button>
       </div>
     </div>
   </div>
@@ -369,8 +435,8 @@
   </div>
   <input id="drawTextInput" hidden placeholder="Note…" />
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/drawings.js?v=draw2"></script>
+  <script src="/static/drawings.js?v=draw3"></script>
   <script src="/static/indicators.js?v=ind1"></script>
-  <script src="/static/app.js?v=ind1"></script>
+  <script src="/static/app.js?v=draw3"></script>
 </body>
 </html>
