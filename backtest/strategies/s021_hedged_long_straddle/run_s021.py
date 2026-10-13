@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""S021 Hedged Long Straddle backtest.
+"""S021 Hedged Long Straddle backtest (mark cache + cycle memo).
 
 python backtest/strategies/s021_hedged_long_straddle/run_s021.py --month 2025-06 --max-days 3 --m 2 --tgt 400 --sl 400 --a1 50 --a2 50 --baselines
+python backtest/strategies/s021_hedged_long_straddle/run_s021.py --month 2025-06 --stage1
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import json
 import logging
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -26,7 +28,7 @@ for _p in (str(_ROOT), str(_BACKTEST)):
         sys.path.insert(0, _p)
 
 from backtest.fees_sim import OPTIONS_CONTRACT_VALUE  # noqa: E402
-from backtest.harness.data import MarksStore, ist_dt, load_symbol_series, to_unix  # noqa: E402
+from backtest.harness.data import MarksStore, ist_dt, to_unix  # noqa: E402
 from backtest.harness.mark_cache import reset_mark_cache  # noqa: E402
 from backtest.harness.run_archive import (  # noqa: E402
     CONFIG_COLS,
@@ -66,6 +68,12 @@ ADJ_COLS = (
     "realized_pnl", "fee", "slip",
 )
 S021_TRADE_COLS = tuple(list(TRADE_COLS) + list(TRADE_EXTRA))
+
+_BOOK: "MarkBook | None" = None
+_CHAIN_S021: dict[tuple[str, int], Any] = {}
+_MEMO: dict[tuple[Any, ...], Any] = {}
+_MEMO_HIT = 0
+_MEMO_MISS = 0
 
 
 class S021Archive(RunArchive):
@@ -128,6 +136,82 @@ class LegPos:
     series: dict[int, float] = field(default_factory=dict)
     open: bool = True
     iv0: float = float("nan")
+    opened_ts: int = 0
+    closed_ts: int = 0
+
+
+class MarkBook:
+    """Minute-indexed mark arrays for the run window (no look-ahead)."""
+
+    def __init__(self, t_lo: int, t_hi: int) -> None:
+        self.t0 = (int(t_lo) // 60) * 60
+        self.t1 = (int(t_hi) // 60) * 60
+        self.n = max(1, (self.t1 - self.t0) // 60 + 1)
+        self.arr: dict[str, np.ndarray] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def ensure(self, store: Any, symbol: str, expiry: date) -> np.ndarray:
+        hit = self.arr.get(symbol)
+        if hit is not None:
+            return hit
+        a = np.full(self.n, np.nan, dtype=np.float64)
+        conn = store.conn(expiry)
+        if conn is not None:
+            rows = conn.execute(
+                """
+                SELECT ts, close FROM marks
+                WHERE symbol=? AND ts BETWEEN ? AND ?
+                  AND close IS NOT NULL AND close>0
+                """,
+                (symbol, self.t0 - s018.STALE_SEC, self.t1 + 60),
+            ).fetchall()
+            for ts, c in rows:
+                i = (int(ts) // 60 * 60 - self.t0) // 60
+                if 0 <= i < self.n:
+                    a[i] = float(c)
+        self.arr[symbol] = a
+        return a
+
+    def quote(self, symbol: str, t: int) -> s018.Quote | None:
+        a = self.arr.get(symbol)
+        if a is None:
+            self.misses += 1
+            return None
+        minute = (int(t) // 60) * 60
+        i = (minute - self.t0) // 60
+        if 0 <= i < self.n and np.isfinite(a[i]):
+            self.hits += 1
+            return s018.Quote(ts=minute, px=float(a[i]), src="real")
+        for age in range(60, s018.STALE_SEC + 1, 60):
+            j = i - age // 60
+            if 0 <= j < self.n and np.isfinite(a[j]):
+                self.hits += 1
+                return s018.Quote(ts=minute - age, px=float(a[j]), src="stale")
+        self.misses += 1
+        return None
+
+
+@dataclass
+class PathSim:
+    t0: int
+    exp_ts: int
+    e0: date
+    e1: date | None
+    legs: list[LegPos]
+    path_ts: list[int]
+    path_gp: list[float]
+    path_real: list[float]
+    path_fees: list[float]
+    path_slip: list[float]
+    path_spot: list[float]
+    path_nadj: list[int]
+    path_state: list[str]
+    adjs: list[dict[str, Any]]
+    n_fb: int
+    entry_event: str
+    spot0: float
+    snaps_entry: dict[str, Any]
 
 
 def cell_key(month: str, m: int, tgt: int, slv: int, a1: str, a2: str) -> str:
@@ -172,6 +256,55 @@ def work_cells(
                             "a1": -1, "a2": -1, "mode": "noadj",
                         }
                     )
+    return out
+
+
+def stage1_cells() -> list[dict[str, Any]]:
+    seen: set[tuple[Any, ...]] = set()
+    out: list[dict[str, Any]] = []
+
+    def add(w: dict[str, Any]) -> None:
+        k = (w["m"], w["tgt"], w["sl"], w["a1"], w["a2"], w["mode"])
+        if k in seen:
+            return
+        seen.add(k)
+        out.append(w)
+
+    for m in M_GRID:
+        for a1 in A_GRID:
+            for a2 in A_GRID:
+                add(
+                    {
+                        "m": int(m), "tgt": 400, "sl": 400,
+                        "a1": int(a1), "a2": int(a2), "mode": "adj",
+                    }
+                )
+    for m in M_GRID:
+        for tgt in TSL:
+            for slv in TSL:
+                add(
+                    {
+                        "m": int(m), "tgt": int(tgt), "sl": int(slv),
+                        "a1": 50, "a2": 50, "mode": "adj",
+                    }
+                )
+    for tgt in TSL:
+        for slv in TSL:
+            add(
+                {
+                    "m": 0, "tgt": int(tgt), "sl": int(slv),
+                    "a1": 0, "a2": 0, "mode": "m0",
+                }
+            )
+    for m in M_GRID:
+        for tgt in TSL:
+            for slv in TSL:
+                add(
+                    {
+                        "m": int(m), "tgt": int(tgt), "sl": int(slv),
+                        "a1": -1, "a2": -1, "mode": "noadj",
+                    }
+                )
     return out
 
 
@@ -236,7 +369,19 @@ def resolve_e0_e1(store: Any, t: int) -> tuple[date, date | None]:
     return e0, e1
 
 
+def load_chain_cached(store: Any, exp: date, t: int) -> Any:
+    minute = (int(t) // 60) * 60
+    key = (exp.isoformat(), minute)
+    if key in _CHAIN_S021:
+        return _CHAIN_S021[key]
+    packed = s018.load_chain(store, exp, t)
+    _CHAIN_S021[key] = packed
+    return packed
+
+
 def quote_at(leg: LegPos, t: int) -> s018.Quote | None:
+    if _BOOK is not None:
+        return _BOOK.quote(leg.symbol, t)
     return s018.series_le(leg.series, t)
 
 
@@ -247,7 +392,11 @@ def dte_of(exp: date, t: int) -> int:
 def open_long(
     store: Any, row: dict[str, Any], exp: date, t: int, spot: float, role: str
 ) -> LegPos | None:
-    q = s018.mark_le(store, exp, str(row["symbol"]), t)
+    if _BOOK is not None:
+        _BOOK.ensure(store, str(row["symbol"]), exp)
+        q = _BOOK.quote(str(row["symbol"]), t)
+    else:
+        q = s018.mark_le(store, exp, str(row["symbol"]), t)
     if q is None:
         return None
     fill, _ = s018.buy_fill(q.px, dte_of(exp, t))
@@ -259,14 +408,18 @@ def open_long(
         role=role, symbol=str(row["symbol"]), strike=float(row["strike"]),
         is_call=bool(row["is_call"]), expiry=exp, long_short="long",
         mark0=q.px, fill=fill, fee=fee, slip=slip, qty=QTY, ref=q.px,
-        iv0=float(g["iv"]),
+        iv0=float(g["iv"]), opened_ts=int(t),
     )
 
 
 def open_short(
     store: Any, row: dict[str, Any], exp: date, t: int, spot: float, role: str
 ) -> LegPos | None:
-    q = s018.mark_le(store, exp, str(row["symbol"]), t)
+    if _BOOK is not None:
+        _BOOK.ensure(store, str(row["symbol"]), exp)
+        q = _BOOK.quote(str(row["symbol"]), t)
+    else:
+        q = s018.mark_le(store, exp, str(row["symbol"]), t)
     if q is None:
         return None
     fill, _ = s018.sell_fill(q.px, dte_of(exp, t))
@@ -278,7 +431,7 @@ def open_short(
         role=role, symbol=str(row["symbol"]), strike=float(row["strike"]),
         is_call=bool(row["is_call"]), expiry=exp, long_short="short",
         mark0=q.px, fill=fill, fee=fee, slip=slip, qty=QTY, ref=q.px,
-        iv0=float(g["iv"]),
+        iv0=float(g["iv"]), opened_ts=int(t),
     )
 
 
@@ -337,21 +490,36 @@ def pick_otm(
     return best, False
 
 
-def load_series(store: Any, lg: LegPos, t0: int, t1: int) -> None:
-    lg.series = load_symbol_series(store, lg.symbol, t0, t1)
-
-
 def reset_short_refs(legs: list[LegPos], t: int) -> None:
     for lg in legs:
-        if not lg.open or lg.long_short != "short":
+        if lg.closed_ts > 0 or lg.long_short != "short":
+            continue
+        if lg.opened_ts > t:
             continue
         q = quote_at(lg, t)
         if q is not None:
             lg.ref = float(q.px)
 
 
-def shorts_open(legs: list[LegPos]) -> list[LegPos]:
-    return [lg for lg in legs if lg.open and lg.long_short == "short"]
+def shorts_live(legs: list[LegPos], t: int) -> list[LegPos]:
+    out: list[LegPos] = []
+    for lg in legs:
+        if lg.long_short != "short":
+            continue
+        if lg.opened_ts > t:
+            continue
+        if lg.closed_ts > 0 and lg.closed_ts <= t:
+            continue
+        out.append(lg)
+    return out
+
+
+def live_at(lg: LegPos, t: int) -> bool:
+    if lg.opened_ts > t:
+        return False
+    if lg.closed_ts > 0 and lg.closed_ts <= t:
+        return False
+    return True
 
 
 def pick_basket(
@@ -362,7 +530,7 @@ def pick_basket(
     cov: dict[str, int],
 ) -> tuple[list[LegPos], date, date | None, int] | None:
     e0, e1 = resolve_e0_e1(store, t)
-    packed0 = s018.load_chain(store, e0, t)
+    packed0 = load_chain_cached(store, e0, t)
     if packed0 is None:
         cov["e0_miss"] += 1
         return None
@@ -395,7 +563,7 @@ def pick_basket(
     if e1 is None:
         cov["e1_miss"] += 1
         return None
-    packed1 = s018.load_chain(store, e1, t)
+    packed1 = load_chain_cached(store, e1, t)
     if packed1 is None:
         cov["e1_miss"] += 1
         return None
@@ -437,15 +605,8 @@ def try_adjust(
     a2: float,
     cov: dict[str, int],
 ) -> tuple[str, dict[str, Any] | None]:
-    ss = shorts_open(legs)
+    ss = [lg for lg in legs if lg.long_short == "short" and lg.closed_ts == 0]
     if len(ss) < 2:
-        return state, None
-    packed = s018.load_chain(store, e1, t)
-    if packed is None:
-        return state, None
-    rows1, _ = packed
-    atm = d.atm_strike_of(rows1, spot)
-    if atm is None:
         return state, None
     ratios: list[tuple[float, LegPos, float]] = []
     for lg in ss:
@@ -458,6 +619,13 @@ def try_adjust(
     trig = float(a1) / 100.0 if state == "strangle" else float(a2) / 100.0
     hits = [x for x in ratios if x[0] <= trig]
     if not hits:
+        return state, None
+    packed = load_chain_cached(store, e1, t)
+    if packed is None:
+        return state, None
+    rows1, _ = packed
+    atm = d.atm_strike_of(rows1, spot)
+    if atm is None:
         return state, None
     hits.sort(key=lambda x: x[0])
     win_ratio, win, win_px = hits[0]
@@ -478,8 +646,8 @@ def try_adjust(
             cov["adj_miss"] += 1
             return "strangle", None
         pnl, fee, slip, _xf = close_leg(win, t, win_px, spot, False)
+        win.closed_ts = int(t)
         win.open = False
-        load_series(store, newbie, t, s018.expiry_unix(e1))
         legs.append(newbie)
         reset_short_refs(legs, t)
         ev = {
@@ -502,8 +670,8 @@ def try_adjust(
     pnl, fee, slip, _xf = close_leg(
         lose_lg, t, lose_px if np.isfinite(lose_px) else win_px, spot, False
     )
+    lose_lg.closed_ts = int(t)
     lose_lg.open = False
-    load_series(store, newbie, t, s018.expiry_unix(e1))
     legs.append(newbie)
     reset_short_refs(legs, t)
     ev = {
@@ -527,7 +695,9 @@ def snapshot_greeks(
     }
     bd = bg = bt = bv = 0.0
     nfin = 0
-    opened = [lg for lg in legs if lg.open][:3]
+    opened = [lg for lg in legs if live_at(lg, t) or (kind == "entry" and lg.opened_ts == t)][:3]
+    if kind == "entry":
+        opened = [lg for lg in legs if lg.opened_ts == t][:3]
     for k, lg in enumerate(opened):
         q = quote_at(lg, t)
         mk = float(q.px) if q is not None else float(lg.mark0)
@@ -553,14 +723,25 @@ def snapshot_greeks(
     return row
 
 
-def run_cycle(
+def _basket_gp(legs: list[LegPos], realized: float, tt: int) -> float | None:
+    mp = 0.0
+    for lg in legs:
+        if lg.closed_ts > 0:
+            continue
+        q = quote_at(lg, tt)
+        if q is None:
+            return None
+        mp += mark_pnl(lg, float(q.px))
+    return realized + mp
+
+
+def simulate_hold(
     store: Any,
     spot_c: dict[int, float],
     t0: int,
     w: dict[str, Any],
     cov: dict[str, int],
-    smoke: bool,
-) -> dict[str, Any] | None:
+) -> PathSim | None:
     spot = float(spot_c.get(int(t0), 0.0))
     if spot <= 0:
         return None
@@ -569,79 +750,48 @@ def run_cycle(
         return None
     legs, e0, e1, n_fb = picked
     exp_ts = s018.expiry_unix(e0)
-    e1_ts = s018.expiry_unix(e1) if e1 is not None else exp_ts
-    for lg in legs:
-        load_series(store, lg, t0, max(exp_ts, e1_ts))
+    parts = [
+        f"{lg.role} {lg.long_short} {lg.expiry} k={lg.strike:.0f} "
+        f"mark={lg.mark0:.2f} fill={lg.fill:.2f} iv={lg.iv0:.3f}"
+        for lg in legs
+    ]
+    entry_event = "ENTRY " + " | ".join(parts)
+    state = "strangle" if int(w["m"]) > 0 and str(w["mode"]) != "m0" else "naked"
+    do_adj = str(w["mode"]) == "adj" and int(w["m"]) > 0
     fees = sum(lg.fee for lg in legs)
     slip = sum(lg.slip for lg in legs)
     realized = 0.0
     adjs: list[dict[str, Any]] = []
-    events: list[str] = []
-    if smoke:
-        parts = [
-            f"{lg.role} {lg.long_short} {lg.expiry} k={lg.strike:.0f} "
-            f"mark={lg.mark0:.2f} fill={lg.fill:.2f} iv={lg.iv0:.3f}"
-            for lg in legs
-        ]
-        events.append("ENTRY " + " | ".join(parts))
-    state = "strangle" if int(w["m"]) > 0 and str(w["mode"]) != "m0" else "naked"
-    do_adj = str(w["mode"]) == "adj" and int(w["m"]) > 0
-    mfe = float("-inf")
-    mae = float("inf")
-    mfe_ts = t0
-    mae_ts = t0
-    snaps: list[dict[str, Any]] = [snapshot_greeks(legs, t0, spot, "entry", 0.0)]
-    last_snap = t0
-    exit_reason = ""
-    exit_ts = exp_ts
-    gp = 0.0
-    spot_x = spot
-
-    def basket_gp(tt: int) -> tuple[float | None, float]:
-        sp = float(spot_c.get(int(tt), 0.0))
-        mp = 0.0
-        for lg in legs:
-            if not lg.open:
-                continue
-            q = quote_at(lg, tt)
-            if q is None:
-                return None, sp
-            mp += mark_pnl(lg, float(q.px))
-        return realized + mp, sp
-
+    path_ts: list[int] = []
+    path_gp: list[float] = []
+    path_real: list[float] = []
+    path_fees: list[float] = []
+    path_slip: list[float] = []
+    path_spot: list[float] = []
+    path_nadj: list[int] = []
+    path_state: list[str] = []
     a1 = float(w["a1"]) if int(w["a1"]) > 0 else 50.0
     a2 = float(w["a2"]) if int(w["a2"]) > 0 else 50.0
-    tgt = float(w["tgt"])
-    slv = float(w["sl"])
-
+    snaps_entry = snapshot_greeks(legs, t0, spot, "entry", 0.0)
     t = int(t0) + 60
+    spot_x = spot
     while t <= exp_ts:
-        gp_now, sp = basket_gp(t)
+        gp_now = _basket_gp(legs, realized, t)
         if gp_now is None:
             t += 60
             continue
-        gp = gp_now
-        spot_x = sp if sp > 0 else spot_x
-        if gp > mfe:
-            mfe = gp
-            mfe_ts = t
-        if gp < mae:
-            mae = gp
-            mae_ts = t
-        if t - last_snap >= 15 * 60:
-            snaps.append(snapshot_greeks(legs, t, spot_x, "15m", gp))
-            last_snap = t
-        if gp >= tgt:
-            exit_reason = "TARGET"
-            exit_ts = t
-            break
-        if gp <= -slv:
-            exit_reason = "SL"
-            exit_ts = t
-            break
+        sp = float(spot_c.get(int(t), 0.0))
+        if sp > 0:
+            spot_x = sp
+        path_ts.append(t)
+        path_gp.append(float(gp_now))
+        path_real.append(float(realized))
+        path_fees.append(float(fees))
+        path_slip.append(float(slip))
+        path_spot.append(float(spot_x))
+        path_nadj.append(len(adjs))
+        path_state.append(state)
         if t == exp_ts:
-            exit_reason = "EXPIRY_1730"
-            exit_ts = t
             break
         if do_adj and e1 is not None:
             new_state, ev = try_adjust(store, legs, t, spot_x, e1, state, a1, a2, cov)
@@ -651,10 +801,19 @@ def run_cycle(
                 slip += float(ev["slip"])
                 state = new_state
                 n = len(adjs) + 1
-                sc = next((x.ref for x in shorts_open(legs) if x.is_call), float("nan"))
-                spu = next((x.ref for x in shorts_open(legs) if not x.is_call), float("nan"))
+                sc = next(
+                    (x.ref for x in legs
+                     if x.long_short == "short" and x.closed_ts == 0 and x.is_call),
+                    float("nan"),
+                )
+                spu = next(
+                    (x.ref for x in legs
+                     if x.long_short == "short" and x.closed_ts == 0 and not x.is_call),
+                    float("nan"),
+                )
                 rec = {
                     "adj_no": n,
+                    "ts": int(t),
                     "ts_ist": s018.ist_str(t),
                     "kind": ev["kind"],
                     "state_from": ev["state_from"],
@@ -670,46 +829,126 @@ def run_cycle(
                     "realized_pnl": ev["realized_pnl"],
                     "fee": ev["fee"],
                     "slip": ev["slip"],
-                }
-                adjs.append(rec)
-                if smoke:
-                    events.append(
+                    "ratio": ev["ratio"],
+                    "event_line": (
                         f"{ev['kind']} {s018.ist_str(t)} close {ev['closed_role']} "
                         f"k={ev['closed_strike']:.0f} px={ev['closed_prem']:.2f} "
                         f"ratio={ev['ratio']:.3f} open {ev['opened_role']} "
                         f"k={ev['opened_strike']:.0f} px={ev['opened_prem']:.2f} "
                         f"realized={ev['realized_pnl']:.2f} {ev['state_from']}->{ev['state_to']}"
-                    )
+                    ),
+                }
+                adjs.append(rec)
         t += 60
+    return PathSim(
+        t0=int(t0), exp_ts=int(exp_ts), e0=e0, e1=e1, legs=legs,
+        path_ts=path_ts, path_gp=path_gp, path_real=path_real,
+        path_fees=path_fees, path_slip=path_slip, path_spot=path_spot,
+        path_nadj=path_nadj, path_state=path_state, adjs=adjs, n_fb=n_fb,
+        entry_event=entry_event, spot0=spot, snaps_entry=snaps_entry,
+    )
 
-    snaps.append(snapshot_greeks(legs, exit_ts, spot_x, "exit", gp))
+
+def _open_at_exit(lg: LegPos, t0: int, exit_ts: int) -> bool:
+    if lg.opened_ts > t0 and lg.opened_ts >= exit_ts:
+        return False
+    if lg.closed_ts > 0 and lg.closed_ts < exit_ts:
+        return False
+    return True
+
+
+def apply_tsl(sim: PathSim, w: dict[str, Any], smoke: bool) -> dict[str, Any]:
+    tgt = float(w["tgt"])
+    slv = float(w["sl"])
+    mfe = float("-inf")
+    mae = float("inf")
+    mfe_ts = sim.t0
+    mae_ts = sim.t0
+    exit_reason = ""
+    exit_i = -1
+    for i, (ts, gp) in enumerate(zip(sim.path_ts, sim.path_gp)):
+        if gp > mfe:
+            mfe = gp
+            mfe_ts = ts
+        if gp < mae:
+            mae = gp
+            mae_ts = ts
+        if gp >= tgt:
+            exit_reason = "TARGET"
+            exit_i = i
+            break
+        if gp <= -slv:
+            exit_reason = "SL"
+            exit_i = i
+            break
+        if ts == sim.exp_ts:
+            exit_reason = "EXPIRY_1730"
+            exit_i = i
+            break
+    if exit_i < 0:
+        if sim.path_ts:
+            exit_i = len(sim.path_ts) - 1
+            if sim.path_ts[exit_i] == sim.exp_ts:
+                exit_reason = "EXPIRY_1730"
+        else:
+            exit_reason = ""
+    if sim.path_ts and exit_i >= 0:
+        exit_ts = int(sim.path_ts[exit_i])
+        gp = float(sim.path_gp[exit_i])
+        realized = float(sim.path_real[exit_i])
+        fees = float(sim.path_fees[exit_i])
+        slip = float(sim.path_slip[exit_i])
+        spot_x = float(sim.path_spot[exit_i])
+        state = str(sim.path_state[exit_i])
+        n_adj = int(sim.path_nadj[exit_i])
+    else:
+        exit_ts = int(sim.exp_ts)
+        gp = 0.0
+        realized = 0.0
+        fees = sum(lg.fee for lg in sim.legs if lg.opened_ts == sim.t0)
+        slip = sum(lg.slip for lg in sim.legs if lg.opened_ts == sim.t0)
+        spot_x = float(sim.spot0)
+        state = "strangle" if int(w["m"]) > 0 and str(w["mode"]) != "m0" else "naked"
+        n_adj = 0
     settle = exit_reason == "EXPIRY_1730"
     exit_pxs: dict[str, float] = {}
-    for lg in legs:
-        if not lg.open:
+    for lg in sim.legs:
+        if not _open_at_exit(lg, sim.t0, exit_ts):
             continue
         q = quote_at(lg, exit_ts)
         mk = float(q.px) if q is not None else float(lg.mark0)
         if settle and lg.long_short == "long":
             mk = intrinsic(lg.is_call, lg.strike, spot_x)
-        pnl, fee, slp, xf = close_leg(lg, exit_ts, mk, spot_x, settle and lg.long_short == "long")
+        pnl, fee, slp, xf = close_leg(
+            lg, exit_ts, mk, spot_x, settle and lg.long_short == "long"
+        )
         realized += pnl
         fees += fee
         slip += slp
         exit_pxs[lg.role + str(id(lg))] = xf
-        lg.open = False
     gross = realized
     net = gross - fees
-    snaps.append(snapshot_greeks(legs, mfe_ts, float(spot_c.get(mfe_ts, spot_x)), "mfe", mfe))
-    snaps.append(snapshot_greeks(legs, mae_ts, float(spot_c.get(mae_ts, spot_x)), "mae", mae))
+    adjs = [a for a in sim.adjs if int(a["ts"]) < exit_ts]
+    n_adj = len(adjs)
+    events: list[str] = []
     if smoke:
+        events.append(sim.entry_event)
+        for a in adjs:
+            events.append(str(a.get("event_line", "")))
         events.append(
             f"EXIT {exit_reason} {s018.ist_str(exit_ts)} gross={gross:.2f} "
             f"fees={fees:.2f} slip={slip:.2f} net={net:.2f}"
         )
-    wd = datetime.fromtimestamp(int(t0), tz=s018.UTC).astimezone(s018.IST)
+    legs_view = [lg for lg in sim.legs if lg.opened_ts < exit_ts or lg.opened_ts == sim.t0]
+    snaps = [sim.snaps_entry]
+    snaps.append(snapshot_greeks(legs_view, exit_ts, spot_x, "exit", gp))
+    snaps.append(
+        snapshot_greeks(legs_view, mfe_ts, float(sim.spot0 if mfe_ts == sim.t0 else spot_x), "mfe", mfe)
+    )
+    snaps.append(snapshot_greeks(legs_view, mae_ts, spot_x, "mae", mae))
+    wd = datetime.fromtimestamp(int(sim.t0), tz=s018.UTC).astimezone(s018.IST)
     return {
-        "entry_ts": t0,
+        "entry_ts": sim.t0,
         "exit_ts": exit_ts,
         "reason": exit_reason,
         "exit_reason": exit_reason,
@@ -721,18 +960,18 @@ def run_cycle(
         "mae": mae if mae != float("inf") else float("nan"),
         "mfe_ts": mfe_ts,
         "mae_ts": mae_ts,
-        "hold_hrs": (int(exit_ts) - int(t0)) / 3600.0,
-        "hrs_to_exp": (exp_ts - int(t0)) / 3600.0,
-        "spot": spot,
+        "hold_hrs": (int(exit_ts) - int(sim.t0)) / 3600.0,
+        "hrs_to_exp": (sim.exp_ts - int(sim.t0)) / 3600.0,
+        "spot": sim.spot0,
         "spot_exit": spot_x,
-        "legs": legs,
-        "e0": e0.isoformat(),
-        "e1": e1.isoformat() if e1 else "",
-        "n_adj": len(adjs),
+        "legs": legs_view,
+        "e0": sim.e0.isoformat(),
+        "e1": sim.e1.isoformat() if sim.e1 else "",
+        "n_adj": n_adj,
         "adjs": adjs,
         "events": events,
         "snaps": snaps,
-        "n_fb": n_fb,
+        "n_fb": sim.n_fb,
         "state": state,
         "weekday": "weekend" if int(wd.weekday()) >= 5 else "weekday",
         "exit_pxs": exit_pxs,
@@ -828,54 +1067,18 @@ def emit_trade(
     archive.add_adjustments(tid, list(r.get("adjs") or []))
 
 
-def run_cell(
-    store: Any,
-    spot_c: dict[int, float],
-    w: dict[str, Any],
-    month: str,
-    start_entry: int,
-    cutoff: int,
-    win_from: date,
-    win_to: date,
-    archive: S021Archive | None,
-    cov: dict[str, int],
-    smoke: bool,
-) -> tuple[dict[str, Any], list[dict[str, Any]], float]:
-    a1s, a2s = a_label(w)
-    key = cell_key(month, int(w["m"]), int(w["tgt"]), int(w["sl"]), a1s, a2s)
-    t0c = time.perf_counter()
-    rows: list[dict[str, Any]] = []
-    t = int(start_entry)
-    while t < cutoff:
-        if ist_date(t) > win_to:
-            break
-        if t not in spot_c:
-            t += 60
-            continue
-        rec = run_cycle(store, spot_c, t, w, cov, smoke and len(rows) < 2)
-        if rec is None:
-            t += 60
-            continue
-        rec["key"] = key
-        rows.append(rec)
-        if archive is not None:
-            emit_trade(
-                archive,
-                {
-                    "key": key, "month": month, "tgt": w["tgt"], "sl": w["sl"],
-                    "m": w["m"], "arm": f"m{w['m']}_{w['mode']}_{a1s}_{a2s}",
-                },
-                rec,
-                a1s,
-                a2s,
-            )
-        t = int(rec["exit_ts"]) + 60
-    elapsed = time.perf_counter() - t0c
+def _summarize(
+    key: str, month: str, w: dict[str, Any], a1s: str, a2s: str,
+    rows: list[dict[str, Any]], elapsed: float,
+) -> dict[str, Any]:
     nets = [float(r["net"]) for r in rows]
     fees = [float(r["fees"]) for r in rows]
     slips = [float(r["slip"]) for r in rows]
     nadj = [int(r["n_adj"]) for r in rows]
-    stt = {
+    reasons: dict[str, int] = {}
+    for r in rows:
+        reasons[str(r["reason"])] = reasons.get(str(r["reason"]), 0) + 1
+    return {
         "key": key,
         "month": month,
         "m": int(w["m"]),
@@ -894,17 +1097,84 @@ def run_cell(
         "fee": float(np.mean(fees)) if fees else float("nan"),
         "slip": float(np.mean(slips)) if slips else float("nan"),
         "gross": float(np.mean([r["gross"] for r in rows])) if rows else float("nan"),
-        "exits": {},
+        "exits": reasons,
         "cell_sec": elapsed,
+        "nets": [float(r["net"]) for r in rows],
+        "entry_ts": [int(r["entry_ts"]) for r in rows],
     }
-    reasons: dict[str, int] = {}
-    for r in rows:
-        reasons[str(r["reason"])] = reasons.get(str(r["reason"]), 0) + 1
-    stt["exits"] = reasons
-    return stt, rows, elapsed
+
+
+def run_group(
+    store: Any,
+    spot_c: dict[int, float],
+    ws: list[dict[str, Any]],
+    month: str,
+    start_entry: int,
+    cutoff: int,
+    win_to: date,
+    archive: S021Archive | None,
+    cov: dict[str, int],
+    smoke: bool,
+) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]], float]:
+    global _MEMO_HIT, _MEMO_MISS
+    t0c = time.perf_counter()
+    n = len(ws)
+    rows_per: list[list[dict[str, Any]]] = [[] for _ in range(n)]
+    pending: dict[int, list[int]] = {int(start_entry): list(range(n))}
+    while pending:
+        t = min(pending)
+        idxs = pending.pop(t)
+        if t >= cutoff or ist_date(t) > win_to:
+            continue
+        if t not in spot_c:
+            pending.setdefault(t + 60, []).extend(idxs)
+            continue
+        w0 = ws[idxs[0]]
+        mk = (int(t), int(w0["m"]), str(w0["mode"]), int(w0["a1"]), int(w0["a2"]))
+        if mk in _MEMO:
+            _MEMO_HIT += len(idxs)
+            sim = _MEMO[mk]
+        else:
+            _MEMO_MISS += 1
+            _MEMO_HIT += max(0, len(idxs) - 1)
+            sim = simulate_hold(store, spot_c, t, w0, cov)
+            _MEMO[mk] = sim
+        if sim is None:
+            pending.setdefault(t + 60, []).extend(idxs)
+            continue
+        for i in idxs:
+            w = ws[i]
+            a1s, a2s = a_label(w)
+            rec = apply_tsl(sim, w, smoke and len(rows_per[i]) < 2)
+            key = cell_key(month, int(w["m"]), int(w["tgt"]), int(w["sl"]), a1s, a2s)
+            rec["key"] = key
+            rows_per[i].append(rec)
+            if archive is not None:
+                emit_trade(
+                    archive,
+                    {
+                        "key": key, "month": month, "tgt": w["tgt"], "sl": w["sl"],
+                        "m": w["m"], "arm": f"m{w['m']}_{w['mode']}_{a1s}_{a2s}",
+                    },
+                    rec,
+                    a1s,
+                    a2s,
+                )
+            nxt = int(rec["exit_ts"]) + 60
+            if nxt < cutoff:
+                pending.setdefault(nxt, []).append(i)
+    elapsed = time.perf_counter() - t0c
+    stts: list[dict[str, Any]] = []
+    share = elapsed / max(1, n)
+    for i, w in enumerate(ws):
+        a1s, a2s = a_label(w)
+        key = cell_key(month, int(w["m"]), int(w["tgt"]), int(w["sl"]), a1s, a2s)
+        stts.append(_summarize(key, month, w, a1s, a2s, rows_per[i], share))
+    return stts, rows_per, elapsed
 
 
 def main() -> None:
+    global _BOOK, _CHAIN_S021, _MEMO, _MEMO_HIT, _MEMO_MISS
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default=s018.SPOT_CSV)
     ap.add_argument("--month", default="2025-06")
@@ -915,6 +1185,7 @@ def main() -> None:
     ap.add_argument("--a1", type=int, default=-1)
     ap.add_argument("--a2", type=int, default=-1)
     ap.add_argument("--baselines", action="store_true")
+    ap.add_argument("--stage1", action="store_true")
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--cache-gb", type=float, default=1.0)
     args = ap.parse_args()
@@ -941,13 +1212,17 @@ def main() -> None:
         print("start_entry after cutoff", flush=True)
         sys.exit(2)
 
-    ms = list(M_GRID) if int(args.m) < 0 else [int(args.m)]
-    tgts = list(TSL) if int(args.tgt) < 0 else [int(args.tgt)]
-    sls = list(TSL) if int(args.sl) < 0 else [int(args.sl)]
-    a1s = list(A_GRID) if int(args.a1) < 0 else [int(args.a1)]
-    a2s = list(A_GRID) if int(args.a2) < 0 else [int(args.a2)]
-    baselines = bool(args.baselines) or (int(args.m) < 0)
-    work = work_cells(ms, tgts, sls, a1s, a2s, baselines)
+    if args.stage1:
+        work = stage1_cells()
+        baselines = True
+    else:
+        ms = list(M_GRID) if int(args.m) < 0 else [int(args.m)]
+        tgts = list(TSL) if int(args.tgt) < 0 else [int(args.tgt)]
+        sls = list(TSL) if int(args.sl) < 0 else [int(args.sl)]
+        a1s = list(A_GRID) if int(args.a1) < 0 else [int(args.a1)]
+        a2s = list(A_GRID) if int(args.a2) < 0 else [int(args.a2)]
+        baselines = bool(args.baselines) or (int(args.m) < 0)
+        work = work_cells(ms, tgts, sls, a1s, a2s, baselines)
     smoke = bool(max_days)
     print(f"cells={len(work)} month={month} entry0={s018.ist_str(start_entry)}", flush=True)
 
@@ -960,18 +1235,25 @@ def main() -> None:
     spot_c = {int(t): float(x) for t, x in zip(ts, c)}
     inner = MarksStore()
     store = d.MonthGuardStore(inner, win_from - timedelta(days=1), win_to + timedelta(days=14))
+    _BOOK = MarkBook(start_ts - 86400, cutoff + 14 * 86400)
+    _CHAIN_S021 = {}
+    _MEMO = {}
+    _MEMO_HIT = 0
+    _MEMO_MISS = 0
     done = {} if args.fresh else s020.load_ckpt(CKPT)
     archive = S021Archive(
         "s021",
-        "smoke" if smoke else "grid",
+        "smoke" if smoke else ("stage1" if args.stage1 else "grid"),
         args,
         month=month,
-        prereg_note="S021 hedged long straddle; settlement_fee_assumed_0",
+        prereg_note="S021 hedged long straddle; settlement_fee_assumed_0; mark_cache+cycle_memo",
     )
     meta_p = archive.folder / "run_meta.json"
     meta = json.loads(meta_p.read_text(encoding="utf-8"))
     meta["settlement_fee_assumed_0"] = True
     meta["settlement_fee"] = "fees_sim has no expiry/settlement fee; assumed 0"
+    meta["mark_cache"] = True
+    meta["cycle_memo"] = True
     meta_p.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     ARCHIVE_PTR.write_text(str(archive.folder), encoding="utf-8")
     print(f"archive folder={archive.folder}", flush=True)
@@ -981,53 +1263,72 @@ def main() -> None:
         "itm_need": 0, "itm_ok": 0, "adj_miss": 0,
     }
     t_all = time.perf_counter()
-    cell_secs: list[float] = []
-    sample_rows: list[dict[str, Any]] = []
-    n_work = len(work)
-    for i, w in enumerate(work, start=1):
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for w in work:
         a1s_, a2s_ = a_label(w)
         key = cell_key(month, int(w["m"]), int(w["tgt"]), int(w["sl"]), a1s_, a2s_)
         if key in done:
             print(f"done SKIP {key}", flush=True)
             continue
-        print(f"[{i}/{n_work}] {key}", flush=True)
-        stt, rows, elapsed = run_cell(
-            store, spot_c, w, month, start_entry, cutoff, win_from, win_to,
+        groups[(int(w["m"]), str(w["mode"]), int(w["a1"]), int(w["a2"]))].append(w)
+
+    cell_secs: list[float] = []
+    sample_rows: list[dict[str, Any]] = []
+    n_work = len(work)
+    gi = 0
+    for _gk, ws in groups.items():
+        gi += 1
+        print(
+            f"[group {gi}/{len(groups)} n_tsl={len(ws)} m={ws[0]['m']} "
+            f"mode={ws[0]['mode']} a1={ws[0]['a1']} a2={ws[0]['a2']}]",
+            flush=True,
+        )
+        stts, rows_per, elapsed = run_group(
+            store, spot_c, ws, month, start_entry, cutoff, win_to,
             archive, cov, smoke,
         )
         cell_secs.append(elapsed)
-        if smoke and not sample_rows:
-            sample_rows = rows
-        s020.append_ckpt(CKPT, stt)
-        done[key] = stt
-        if archive is not None:
-            archive.add_config_result(
-                {
-                    "month": month, "tf": "1m", "variant": "S021",
-                    "band": w["tgt"], "band_mode": w["sl"],
-                    "arm": f"m{w['m']}_{w['mode']}", "n_legs": 2 if int(w["m"]) == 0 else 4,
-                    "dte": 0, "tgt": w["tgt"], "sl": w["sl"],
-                    "n": stt["n"], "mean": stt["mean"], "gross": stt["gross"],
-                    "brokerage": stt["fee"], "slippage": stt["slip"],
-                    "win": stt["win"], "C2": "-", "C3": "-",
-                    "n_sig": stt["n"], "n_stale": 0, "avg_net_delta": "",
-                    "key": key,
-                }
+        for stt, rows, w in zip(stts, rows_per, ws):
+            if smoke and not sample_rows and str(w["mode"]) == "adj":
+                sample_rows = rows
+            elif smoke and not sample_rows:
+                sample_rows = rows
+            s020.append_ckpt(CKPT, {k: v for k, v in stt.items() if k not in ("nets", "entry_ts")})
+            done[stt["key"]] = stt
+            if archive is not None:
+                archive.add_config_result(
+                    {
+                        "month": month, "tf": "1m", "variant": "S021",
+                        "band": w["tgt"], "band_mode": w["sl"],
+                        "arm": f"m{w['m']}_{w['mode']}",
+                        "n_legs": 2 if int(w["m"]) == 0 else 4,
+                        "dte": 0, "tgt": w["tgt"], "sl": w["sl"],
+                        "n": stt["n"], "mean": stt["mean"], "gross": stt["gross"],
+                        "brokerage": stt["fee"], "slippage": stt["slip"],
+                        "win": stt["win"], "C2": "-", "C3": "-",
+                        "n_sig": stt["n"], "n_stale": 0, "avg_net_delta": "",
+                        "key": stt["key"],
+                    }
+                )
+            print(
+                f"  {stt['key']} n={stt['n']} mean={s020._fnum(stt['mean'], 2)} "
+                f"total={s020._fnum(stt['month_total'], 2)} adj={stt['avg_adj']:.2f}",
+                flush=True,
             )
-        print(
-            f"  n={stt['n']} mean={s020._fnum(stt['mean'], 2)} "
-            f"total={s020._fnum(stt['month_total'], 2)} adj={stt['avg_adj']:.2f} "
-            f"sec={elapsed:.1f}",
-            flush=True,
-        )
-        s018._CHAIN.clear()
+        print(f"  group_sec={elapsed:.1f} memo hit={_MEMO_HIT} miss={_MEMO_MISS}", flush=True)
 
     e1_need = max(1, int(cov["e1_need"]))
     itm_need = max(1, int(cov["itm_need"]))
     e1_miss_pct = 100.0 * float(cov["e1_miss"]) / float(e1_need)
     itm_ok_pct = 100.0 * float(cov["itm_ok"]) / float(itm_need)
-    mean_cell = float(np.mean(cell_secs)) if cell_secs else float("nan")
-    proj_h = (mean_cell * (3675 + 196) / 3600.0) if np.isfinite(mean_cell) else float("nan")
+    tot_hit = _MEMO_HIT + _MEMO_MISS
+    print(
+        f"memo hit={_MEMO_HIT} miss={_MEMO_MISS} "
+        f"rate={(_MEMO_HIT / tot_hit * 100) if tot_hit else 0:.1f}% "
+        f"book_symbols={len(_BOOK.arr) if _BOOK else 0} "
+        f"book_hits={_BOOK.hits if _BOOK else 0} book_miss={_BOOK.misses if _BOOK else 0}",
+        flush=True,
+    )
 
     if smoke and sample_rows:
         print("=== first 2 cycles ===", flush=True)
@@ -1042,11 +1343,12 @@ def main() -> None:
                     f"see ratio in event line",
                     flush=True,
                 )
+            print(f"  NET={float(rec['net']):.6f} entry={rec['entry_ts']}", flush=True)
 
     report = [
         f"S021 month={month} {win_from}..{win_to}",
-        f"cells_run={len(done)} work={len(work)}",
-        f"settlement_fee_assumed_0=True (fees_sim has no expiry fee)",
+        f"cells_run={len(done)} work={n_work} stage1={bool(args.stage1)}",
+        "settlement_fee_assumed_0=True (fees_sim has no expiry fee)",
         (
             f"coverage E1 need={cov['e1_need']} ok={cov['e1_ok']} "
             f"miss={cov['e1_miss']} ({e1_miss_pct:.1f}%)"
@@ -1055,7 +1357,8 @@ def main() -> None:
             f"coverage ITM exact ATM±1000 ok={cov['itm_ok']}/{cov['itm_need']} "
             f"({itm_ok_pct:.1f}%)"
         ),
-        f"cell_runtime_s={mean_cell:.2f} projected_3871_hours={proj_h:.1f}",
+        f"memo_hit={_MEMO_HIT} memo_miss={_MEMO_MISS}",
+        f"group_runtime_s={float(np.mean(cell_secs)) if cell_secs else float('nan'):.2f}",
     ]
     for k, st in done.items():
         report.append(
@@ -1066,6 +1369,8 @@ def main() -> None:
             f"brokerage/t={s020._fnum(st.get('fee'), 2)} slip/t={s020._fnum(st.get('slip'), 2)} "
             f"exits={st.get('exits')}"
         )
+        if st.get("nets"):
+            report.append("  nets=" + ",".join(f"{x:.4f}" for x in st["nets"]))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     txtp = OUT_DIR / f"s021_{month}_{stamp}.txt"
     txtp.write_text("\n".join(report) + "\n", encoding="utf-8")
