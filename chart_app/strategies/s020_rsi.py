@@ -8,7 +8,7 @@ import numpy as np
 
 from backtest.strategies.s020_vwap_touch import run_s020_dev as s020_dev
 from backtest.strategies.s020_vwap_touch.rsi_div import detect_rsi_div, rsi_wilder
-from indicators.htf import resample_tf_partial
+from indicators.htf import resample_tf_partial, split_htf_complete
 from strategies import register
 
 LINE_TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800}
@@ -65,19 +65,41 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
     tf_sec = LINE_TF_SEC.get(sig_tf, 900)
     chart_tf = str(params.get("chart_tf") or params.get("tf") or "1m")
     chart_sec = LINE_TF_SEC.get(chart_tf, 60)
-    tts, to_, th, tl, tc, tv = resample_tf_partial(ts, o, h, l, c, vol, tf_sec)
-    if len(tts) == 0:
+    cap_1m = int(to_ts)
+    tts_all, to_all, th_all, tl_all, tc_all, tv_all = resample_tf_partial(ts, o, h, l, c, vol, tf_sec)
+    if len(tts_all) == 0:
         return {"lines": [], "markers": [], "series": [], "rsi": []}
-    sigs, zones = detect_rsi_div(
-        tts, to_, th, tl, tc, tf_sec, n=n, ob=ob, os=os_,
-        exp_obh=exp_obh, exp_obl=exp_obl,
+    (tts, to_, th, tl, tc, tv), partial = split_htf_complete(
+        tts_all, to_all, th_all, tl_all, tc_all, tv_all, tf_sec, cap_1m,
     )
-    rsi = rsi_wilder(tc, n)
-    rsi_pts = [
-        {"time": int(tts[i]) + int(tf_sec), "value": float(rsi[i])}
-        for i in range(len(tts))
-        if np.isfinite(rsi[i])
-    ]
+    sigs: list[dict[str, Any]] = []
+    zones: list[dict[str, Any]] = []
+    if len(tts) > 0:
+        sigs, zones = detect_rsi_div(
+            tts, to_, th, tl, tc, tf_sec, n=n, ob=ob, os=os_,
+            exp_obh=exp_obh, exp_obl=exp_obl,
+        )
+    pending_sigs: list[dict[str, Any]] = []
+    if partial is not None:
+        sigs_all, _zones_all = detect_rsi_div(
+            tts_all, to_all, th_all, tl_all, tc_all, tf_sec, n=n, ob=ob, os=os_,
+            exp_obh=exp_obh, exp_obl=exp_obl,
+        )
+        confirmed = {int(s["ts"]) for s in sigs}
+        pending_sigs = [s for s in sigs_all if int(s["ts"]) not in confirmed]
+    rsi_src = tc_all if len(tc_all) else tc
+    rsi_ts = tts_all if len(tts_all) else tts
+    rsi = rsi_wilder(rsi_src, n)
+    rsi_pts: list[dict[str, Any]] = []
+    last_complete_i = len(tts) - 1
+    for i in range(len(rsi_ts)):
+        if not np.isfinite(rsi[i]):
+            continue
+        complete_i = i <= last_complete_i if last_complete_i >= 0 else False
+        if complete_i:
+            rsi_pts.append({"time": int(rsi_ts[i]) + int(tf_sec), "value": float(rsi[i])})
+        else:
+            rsi_pts.append({"time": cap_1m, "value": float(rsi[i])})
     last_ts = int(ts[-1])
     lines: list[dict[str, Any]] = []
     if show_levels:
@@ -158,6 +180,28 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
                     "ob_rsi": float(s.get("ob_rsi") or 0.0),
                     "sig_rsi": float(s.get("sig_rsi") or 0.0),
                     "signal_close_ts": close_ts,
+                    "pending": False,
+                }
+            )
+        for s in pending_sigs:
+            close_ts = int(s["ts"])
+            open_ts = close_ts - int(tf_sec)
+            t = _snap_bar_start(open_ts, chart_sec)
+            if t < cutoff or t > to_ts:
+                continue
+            markers.append(
+                {
+                    "time": t,
+                    "side": str(s["side"]),
+                    "text": "SHORT" if s["side"] == "short" else "LONG",
+                    "size": "large",
+                    "level": float(s.get("ob_level") or 0.0),
+                    "entry_allowed": False,
+                    "reason": "pending_bar",
+                    "ob_rsi": float(s.get("ob_rsi") or 0.0),
+                    "sig_rsi": float(s.get("sig_rsi") or 0.0),
+                    "signal_close_ts": close_ts,
+                    "pending": True,
                 }
             )
     markers.sort(key=lambda m: (int(m["time"]), _marker_rank(str(m.get("text") or ""))))

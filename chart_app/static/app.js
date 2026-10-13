@@ -49,6 +49,12 @@
   let replayBarOpen = null;
   let replayTimer = null;
   let lastOverlaySigClose = -1;
+  let lastOverlayTo = null;
+  let lastOverlayTf = "";
+  let lastOverlayMs = 0;
+  let lastOverlayCacheHit = false;
+  let lastIndMs = 0;
+  let lastIndCacheHit = false;
   let replaySigs = [];
   let overlayGen = 0;
   let lastSigTfOpen = 0;
@@ -615,13 +621,10 @@
     const to = replayOn && replayBarOpen != null
       ? Number(replayBarOpen)
       : (capOpen != null ? capOpen : Number(vis[vis.length - 1].time));
-    if (replayOn && !force) {
-      const sigClose = completedSigClose(cursorClose);
-      if (sigClose <= lastOverlaySigClose) {
-        paintOverlay(overlayPayload);
-        scheduleIndicators();
-        return;
-      }
+    if (replayOn && !force && lastOverlayTo === to && lastOverlayTf === tf) {
+      paintOverlay(overlayPayload);
+      scheduleIndicators();
+      return;
     }
     const gen = ++overlayGen;
     if (overlayAbort) {
@@ -636,10 +639,15 @@
       if (!visible.length) {
         overlayPayload = { lines: [], markers: [] };
         lastOverlaySigClose = completedSigClose(cursorClose);
+        lastOverlayTo = to;
+        lastOverlayTf = tf;
         paintOverlay(overlayPayload);
         scheduleIndicators();
         return;
       }
+      const tFetch = performance.now();
+      let maxServer = 0;
+      let allHit = true;
       await Promise.all(visible.map(async (it) => {
         const q = new URLSearchParams({
           strategy: it.id,
@@ -651,10 +659,17 @@
         const r = await fetch("/api/overlay?" + q.toString(), signal ? { signal: signal } : {});
         const j = await r.json();
         it._payload = j;
+        const sms = Number(j && j.server_ms);
+        if (Number.isFinite(sms) && sms > maxServer) maxServer = sms;
+        if (!(j && j.cache_hit)) allHit = false;
       }));
+      lastOverlayMs = maxServer > 0 ? maxServer : (performance.now() - tFetch);
+      lastOverlayCacheHit = visible.length > 0 && allHit;
       if (gen !== overlayGen) return;
       overlayPayload = mergeStratPayloads();
       lastOverlaySigClose = completedSigClose(cursorClose);
+      lastOverlayTo = to;
+      lastOverlayTf = tf;
       paintOverlay(overlayPayload);
       if (replayOn) ingestReplaySignals(overlayPayload);
       else scanLiveAlerts(overlayPayload);
@@ -808,6 +823,7 @@
           .filter((m) => inRange(m.time))
           .map((m) => {
           const large = m.size === "large" || m.text === "SHORT" || m.text === "LONG";
+          const pending = Boolean(m.pending) || m.reason === "pending_bar";
           const skipped = Boolean(m.reason) || m.entry_allowed === false;
           const longish = m.text === "OBL" || m.text === "LONG" || m.side === "long";
           const hot = longish ? "#22c55e" : "#ef4444";
@@ -815,8 +831,8 @@
           return {
             time: snap(m.time),
             position: longish ? "belowBar" : "aboveBar",
-            color: skipped ? faded : hot,
-            shape: longish ? "arrowUp" : "arrowDown",
+            color: (skipped || pending) ? faded : hot,
+            shape: pending ? "circle" : (longish ? "arrowUp" : "arrowDown"),
             text: m.text || "",
             size: large ? 2 : 0,
           };
@@ -1034,6 +1050,7 @@
     (j.markers || []).forEach((m) => {
       const side = String(m.text || "").toUpperCase();
       if (side !== "LONG" && side !== "SHORT") return;
+      if (m.pending || m.reason === "pending_bar") return;
       if (isSkippedMarker(m) && !includeSkipped) return;
       const ts = Number(m.signal_close_ts != null ? m.signal_close_ts : m.time);
       if (!Number.isFinite(ts) || ts <= pageLoadTs) return;
@@ -1262,6 +1279,7 @@
     (j.markers || []).forEach((m) => {
       const txt = String(m.text || "");
       if (txt !== "SHORT" && txt !== "LONG") return;
+      if (m.pending || m.reason === "pending_bar") return;
       const t = Number(m.time);
       if (!Number.isFinite(t) || (cap != null && t > replayBarOpen)) return;
       const id = txt + "@" + t;
@@ -1411,9 +1429,7 @@
     paintOverlay(overlayPayload);
     updateHistStatus();
     renderReplayStats();
-    const sigClose = completedSigClose(replayCursorClose());
-    if (sigClose > lastOverlaySigClose) scheduleOverlay(false);
-    else scheduleIndicators();
+    scheduleOverlay(false);
     view.request("replay-step");
     lastStepMs = performance.now() - t0;
     window.__caStepMs = lastStepMs;
@@ -1671,6 +1687,10 @@
           lastOverlaySigClose = -1;
           reloadOverlay(true);
         }
+      },
+      onIndTiming: function (ms, hit) {
+        lastIndMs = Number(ms) || 0;
+        lastIndCacheHit = Boolean(hit);
       },
     });
   }
@@ -2121,6 +2141,7 @@
     if (d.cmd === "addInd" && indApi && indApi.add) void indApi.add(d.id || "ULP");
     if (d.cmd === "removeInd" && indApi && indApi.removeLast) indApi.removeLast();
     if (d.cmd === "addStrat") addStrat(d.id || "S020_RSI");
+    if (d.cmd === "overlayReload") void reloadOverlay(true);
     if (d.cmd === "draw" && drawingsApi) {
       const item = d.item || {};
       drawingsApi.add(item);
@@ -2169,6 +2190,25 @@
         lastIdx: vis.length ? vis.length - 1 : null,
         leak: leakCheck("snap"),
         stepMs: lastStepMs,
+        overlayMs: lastOverlayMs,
+        overlayCacheHit: lastOverlayCacheHit,
+        indMs: lastIndMs,
+        indCacheHit: lastIndCacheHit,
+        confirmedSigs: (overlayPayload.markers || []).filter(function (m) {
+          const t = String(m.text || "");
+          return (t === "LONG" || t === "SHORT") && !m.pending && m.reason !== "pending_bar";
+        }).map(function (m) {
+          return {
+            time: Number(m.time),
+            closeTs: Number(m.signal_close_ts != null ? m.signal_close_ts : m.time),
+            side: String(m.side || ""),
+            text: String(m.text || ""),
+            pending: false,
+          };
+        }),
+        pendingSigs: (overlayPayload.markers || []).filter(function (m) {
+          return m.pending || m.reason === "pending_bar";
+        }).length,
         subs: subCount,
         m1n: m1Map.size,
         lastPartial: last && replayOn ? last : null,

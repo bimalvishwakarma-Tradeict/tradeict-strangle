@@ -291,8 +291,12 @@ async def api_overlay(
     cache_key = (strategy, tf, json.dumps(extra, sort_keys=True), from_u, to_u)
     hit = _OVERLAY_CACHE.get(cache_key)
     if hit is not None:
-        logger.info("overlay %s cache-hit ms=%.1f", strategy, (time.perf_counter() - t0) * 1000.0)
-        return hit
+        ms = (time.perf_counter() - t0) * 1000.0
+        logger.info("overlay %s cache-hit ms=%.1f", strategy, ms)
+        out_hit = dict(hit)
+        out_hit["server_ms"] = round(ms, 2)
+        out_hit["cache_hit"] = True
+        return out_hit
     warmup = 10 * 86400
     bars = await _candles("1m", from_u - warmup, to_u)
     bars = [b for b in bars if from_u - warmup <= int(b["time"]) <= to_u]
@@ -323,13 +327,12 @@ async def api_overlay(
         **data,
     }
     _cache_put(_OVERLAY_CACHE, cache_key, out)
-    logger.info(
-        "overlay %s bars=%s ms=%.1f",
-        strategy,
-        len(bars),
-        (time.perf_counter() - t0) * 1000.0,
-    )
-    return out
+    ms = (time.perf_counter() - t0) * 1000.0
+    logger.info("overlay %s bars=%s ms=%.1f", strategy, len(bars), ms)
+    timed = dict(out)
+    timed["server_ms"] = round(ms, 2)
+    timed["cache_hit"] = False
+    return timed
 
 
 @app.get("/api/strategies")
@@ -369,8 +372,12 @@ async def api_indicator(
     cache_key = (ind_id, tf, pkey, from_u, to_u)
     hit = _IND_CACHE.get(cache_key)
     if hit is not None:
-        logger.info("indicator %s cache-hit ms=%.1f", ind_id, (time.perf_counter() - t0) * 1000.0)
-        return hit
+        ms = (time.perf_counter() - t0) * 1000.0
+        logger.info("indicator %s cache-hit ms=%.1f", ind_id, ms)
+        out_hit = dict(hit)
+        out_hit["server_ms"] = round(ms, 2)
+        out_hit["cache_hit"] = True
+        return out_hit
     warmup = max(500, 3000) * res
     bars = await _candles_no_lookahead(tf, from_u - warmup, to_u)
     data = compute_indicator(ind_id, bars, raw_p)
@@ -385,13 +392,12 @@ async def api_indicator(
         **data,
     }
     _cache_put(_IND_CACHE, cache_key, out)
-    logger.info(
-        "indicator %s bars=%s ms=%.1f",
-        ind_id,
-        len(bars),
-        (time.perf_counter() - t0) * 1000.0,
-    )
-    return out
+    ms = (time.perf_counter() - t0) * 1000.0
+    logger.info("indicator %s bars=%s ms=%.1f", ind_id, len(bars), ms)
+    timed = dict(out)
+    timed["server_ms"] = round(ms, 2)
+    timed["cache_hit"] = False
+    return timed
 
 
 def _runs_root() -> Path:

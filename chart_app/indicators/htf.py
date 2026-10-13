@@ -95,3 +95,49 @@ def resample_tf_partial(
         np.asarray(cc, dtype=np.float64),
         np.asarray(vv, dtype=np.float64),
     )
+
+
+def htf_bar_complete(open_t: int, tf_sec: int, cap_1m: int) -> bool:
+    """True if the last 1m of this HTF bucket is included in cap_1m (bar open)."""
+    o = int(open_t)
+    sec = int(tf_sec)
+    cap = int(cap_1m)
+    if sec <= 60:
+        return cap >= o
+    return cap >= o + sec - 60
+
+
+def split_htf_complete(
+    tts: np.ndarray,
+    oo: np.ndarray,
+    hh: np.ndarray,
+    ll: np.ndarray,
+    cc: np.ndarray,
+    vv: np.ndarray,
+    tf_sec: int,
+    cap_1m: int,
+) -> tuple[tuple[np.ndarray, ...], dict[str, Any] | None]:
+    """Return (complete arrays, last partial bar or None)."""
+    empty = (
+        np.asarray([], dtype=np.int64),
+        np.asarray([], dtype=np.float64),
+        np.asarray([], dtype=np.float64),
+        np.asarray([], dtype=np.float64),
+        np.asarray([], dtype=np.float64),
+        np.asarray([], dtype=np.float64),
+    )
+    if tts is None or len(tts) == 0:
+        return empty, None
+    if htf_bar_complete(int(tts[-1]), tf_sec, cap_1m):
+        return (tts, oo, hh, ll, cc, vv), None
+    partial = {
+        "time": int(tts[-1]),
+        "open": float(oo[-1]),
+        "high": float(hh[-1]),
+        "low": float(ll[-1]),
+        "close": float(cc[-1]),
+        "volume": float(vv[-1]),
+    }
+    if len(tts) == 1:
+        return empty, partial
+    return (tts[:-1], oo[:-1], hh[:-1], ll[:-1], cc[:-1], vv[:-1]), partial

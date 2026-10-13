@@ -8,7 +8,7 @@ import numpy as np
 
 from backtest.strategies.s020_vwap_touch import run_s020 as s020
 from backtest.strategies.s020_vwap_touch import run_s020_dev as s020_dev
-from indicators.htf import resample_tf_partial
+from indicators.htf import resample_tf_partial, split_htf_complete
 from strategies import register
 
 LINE_TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900}
@@ -97,7 +97,17 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
             vwap_pts.append({"time": t, "value": float(vwap_1m[i])})
 
     tf_sec = LINE_TF_SEC.get(line_tf, 60)
-    tts, to_, th, tl, tc, tv = resample_tf_partial(ts, o, h, l, c, vol, tf_sec)
+    cap_1m = int(to_ts)
+    tts_all, to_all, th_all, tl_all, tc_all, tv_all = resample_tf_partial(ts, o, h, l, c, vol, tf_sec)
+    if len(tts_all) == 0:
+        return {
+            "lines": [{"id": "vwap", "kind": "vwap", "active": True, "points": vwap_pts}],
+            "markers": [],
+            "series": [],
+        }
+    (tts, to_, th, tl, tc, tv), _partial = split_htf_complete(
+        tts_all, to_all, th_all, tl_all, tc_all, tv_all, tf_sec, cap_1m,
+    )
     if len(tts) == 0:
         return {
             "lines": [{"id": "vwap", "kind": "vwap", "active": True, "points": vwap_pts}],
@@ -119,7 +129,16 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
         )
         for x in dlines
     ]
-    sigs, _ = s020_dev.collect_signals(ts, o, h, l, c, work, variant)
+    if tf_sec > 60:
+        cap_sig = int(tts[-1]) + int(tf_sec) - 60
+        mask = ts <= cap_sig
+        sigs, _ = s020_dev.collect_signals(ts[mask], o[mask], h[mask], l[mask], c[mask], work, variant)
+        sigs_all, _ = s020_dev.collect_signals(ts, o, h, l, c, work, variant)
+        confirmed_t = {int(s["ts"]) for s in sigs}
+        pending_vwap = [s for s in sigs_all if int(s["ts"]) not in confirmed_t]
+    else:
+        sigs, _ = s020_dev.collect_signals(ts, o, h, l, c, work, variant)
+        pending_vwap = []
     last_ts = int(ts[-1])
     raw_by_cross: dict[int, Any] = {}
     for rl in raw_lines:
@@ -186,6 +205,23 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
                 "create_ts": create_ts,
                 "entry_allowed": allowed,
                 "reason": reason,
+                "pending": False,
+            }
+        )
+    for s in pending_vwap:
+        t = int(s["ts"])
+        if t < cutoff or t > to_ts:
+            continue
+        markers.append(
+            {
+                "time": t,
+                "side": str(s["side"]),
+                "text": "L" if s["side"] == "long" else "S",
+                "level": float(s.get("level") or 0.0),
+                "create_ts": 0,
+                "entry_allowed": False,
+                "reason": "pending_bar",
+                "pending": True,
             }
         )
     return {"lines": out_lines, "markers": markers, "series": []}

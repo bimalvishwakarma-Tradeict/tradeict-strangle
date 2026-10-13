@@ -1,9 +1,11 @@
 """chart_app view + replay e2e (Playwright)."""
 from __future__ import annotations
 
+import sys
 import time
 import json
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import quote, urlparse
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
@@ -14,6 +16,13 @@ IST = ZoneInfo("Asia/Kolkata")
 BASE = "http://127.0.0.1:8700/?v=view1"
 REPLAY_TS = int(datetime(2026, 10, 5, 9, 30, tzinfo=IST).timestamp())
 REPLAY_0937 = int(datetime(2026, 10, 5, 9, 37, tzinfo=IST).timestamp())
+REPLAY_0945 = int(datetime(2026, 10, 5, 9, 45, tzinfo=IST).timestamp())
+CLOSE_0930 = int(datetime(2026, 10, 5, 9, 30, tzinfo=IST).timestamp())
+DAY0 = int(datetime(2026, 10, 5, 0, 0, tzinfo=IST).timestamp())
+DAY1 = int(datetime(2026, 10, 6, 0, 0, tzinfo=IST).timestamp())
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600}
 
 
@@ -63,6 +72,94 @@ def no_console_errors(errors):
 
 def tf_sec(s):
     return TF_SEC.get((s or {}).get("tf") or "1m", 60)
+
+
+def rsi_params_q():
+    return quote(json.dumps({
+        "signal_tf": "15m",
+        "rsi_len": 14,
+        "ob": 70,
+        "os": 30,
+        "exp_obh": 40,
+        "exp_obl": 60,
+        "show_signals": True,
+        "show_obh": True,
+        "show_obl": True,
+        "show_levels": True,
+        "show_rsi_pane": True,
+        "hours": 24,
+    }))
+
+
+def confirmed_overlay_sigs(j):
+    out = []
+    for m in (j or {}).get("markers") or []:
+        txt = str(m.get("text") or "")
+        if txt not in ("LONG", "SHORT"):
+            continue
+        if m.get("pending") or m.get("reason") == "pending_bar":
+            continue
+        close_ts = int(m.get("signal_close_ts") or 0)
+        out.append((close_ts, str(m.get("side") or ("long" if txt == "LONG" else "short"))))
+    out.sort()
+    return out
+
+
+def fetch_1m_range(origin, start, end):
+    rows = []
+    t = int(start)
+    end = int(end)
+    seen = set()
+    while t <= end:
+        j = http_json("%s/api/candles?tf=1m&start=%s&limit=4000" % (origin, t), timeout=120)
+        chunk = j.get("candles") or []
+        if not chunk:
+            break
+        last = t
+        for c in chunk:
+            ts = int(c["time"])
+            if ts < start or ts > end or ts in seen:
+                continue
+            seen.add(ts)
+            rows.append(c)
+            last = ts
+        nxt = int(chunk[-1]["time"]) + 60
+        if nxt <= t:
+            break
+        t = nxt
+        if last >= end:
+            break
+    rows.sort(key=lambda x: int(x["time"]))
+    return rows
+
+
+def backtest_rsi_div_day(bars_1m):
+    import numpy as np
+    from backtest.strategies.s020_vwap_touch.rsi_div import detect_rsi_div
+    from backtest.strategies.s020_vwap_touch.run_s020_dev import resample_tf
+
+    ts = np.array([int(b["time"]) for b in bars_1m], dtype=np.int64)
+    o = np.array([float(b["open"]) for b in bars_1m], dtype=np.float64)
+    h = np.array([float(b["high"]) for b in bars_1m], dtype=np.float64)
+    l = np.array([float(b["low"]) for b in bars_1m], dtype=np.float64)
+    c = np.array([float(b["close"]) for b in bars_1m], dtype=np.float64)
+    v = np.array([float(b.get("volume") or 0.0) for b in bars_1m], dtype=np.float64)
+    tts, to_, th, tl, tc, _tv = resample_tf(ts, o, h, l, c, v, 900)
+    sigs, _z = detect_rsi_div(tts, to_, th, tl, tc, 900, n=14, ob=70, os=30, exp_obh=40, exp_obl=60)
+    day = []
+    for s in sigs:
+        t = int(s["ts"])
+        if DAY0 <= t < DAY1:
+            day.append((t, str(s["side"])))
+    day.sort()
+    return day
+
+
+def timed_get(url):
+    t0 = time.perf_counter()
+    j = http_json(url, timeout=120)
+    wall = (time.perf_counter() - t0) * 1000.0
+    return j, wall
 
 
 def assert_no_leak(s, label):
@@ -341,6 +438,103 @@ def run(base_url: str) -> list[dict]:
             )
         except Exception as e:
             rec("10 Replay 15m 09:37 EMA+ULP partial last bar", False, str(e))
+
+        # 11. Closed-bar RSI Div signals + chart==backtest
+        try:
+            parsed = urlparse(base_url)
+            origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+            cmd(page, cmd="addStrat", id="S020_RSI")
+            page.wait_for_timeout(2500)
+            cmd(page, cmd="overlayReload")
+            page.wait_for_timeout(2000)
+            from_ts = REPLAY_0937 - 2 * 86400
+            pq = rsi_params_q()
+            ov_url = "%s/api/overlay?strategy=S020_RSI&tf=15m&from=%s&to=%s&params=%s" % (
+                origin, from_ts, REPLAY_0937, pq,
+            )
+            j37, _w1 = timed_get(ov_url)
+            j37b, w37_hit = timed_get(ov_url)
+            sigs37 = confirmed_overlay_sigs(j37)
+            leak37 = [s for s in sigs37 if s[0] > CLOSE_0930]
+            s37 = snap(page)
+            ui37 = [(int(x["closeTs"]), str(x.get("side") or "")) for x in (s37.get("confirmedSigs") or [])]
+            ui_leak = [s for s in ui37 if s[0] > CLOSE_0930]
+            n_step = 0
+            while n_step < 20:
+                cur = snap(page).get("replayBarOpen") or 0
+                if cur >= REPLAY_0945:
+                    break
+                cmd(page, cmd="step")
+                page.wait_for_timeout(220)
+                n_step += 1
+            page.wait_for_timeout(1800)
+            cmd(page, cmd="overlayReload")
+            page.wait_for_timeout(1500)
+            ov45_url = "%s/api/overlay?strategy=S020_RSI&tf=15m&from=%s&to=%s&params=%s" % (
+                origin, from_ts, REPLAY_0945, pq,
+            )
+            j45, _ = timed_get(ov45_url)
+            sigs45 = confirmed_overlay_sigs(j45)
+            new45 = [s for s in sigs45 if s[0] > CLOSE_0930]
+            future45 = [s for s in sigs45 if s[0] > REPLAY_0945]
+            s45 = snap(page)
+            # full day vs backtest
+            end_day = DAY1 - 60
+            from_day = DAY0 - 10 * 86400
+            ov_day_url = "%s/api/overlay?strategy=S020_RSI&tf=1m&from=%s&to=%s&params=%s" % (
+                origin, DAY0 - 3600, end_day, pq,
+            )
+            jday, _ = timed_get(ov_day_url)
+            chart_day = [s for s in confirmed_overlay_sigs(jday) if DAY0 <= s[0] < DAY1]
+            bars = fetch_1m_range(origin, from_day, end_day)
+            bt_day = backtest_rsi_div_day(bars)
+            match = chart_day == bt_day
+            rows = []
+            keys = sorted(set(chart_day) | set(bt_day))
+            for t, side in keys:
+                ch = "yes" if (t, side) in set(chart_day) else "no"
+                bt = "yes" if (t, side) in set(bt_day) else "no"
+                ist = datetime.fromtimestamp(t, IST).strftime("%H:%M")
+                rows.append("%s %s chart=%s bt=%s" % (ist, side, ch, bt))
+            # timing after exact-to cache: 15m then 1m
+            pem = quote('{"length":9}')
+            iu15 = "%s/api/indicator/EMA?tf=15m&from=%s&to=%s&params=%s" % (origin, from_ts, REPLAY_0937, pem)
+            timed_get(iu15)
+            _je, ind15_hit = timed_get(iu15)
+            timed_get(ov_url)
+            _jo, ov15_hit = timed_get(ov_url)
+            cmd(page, cmd="tf", tf="1m")
+            page.wait_for_timeout(1800)
+            cmd(page, cmd="overlayReload")
+            page.wait_for_timeout(1200)
+            cmd(page, cmd="overlayReload")
+            page.wait_for_timeout(800)
+            s1m = snap(page)
+            iu1 = "%s/api/indicator/EMA?tf=1m&from=%s&to=%s&params=%s" % (origin, from_ts, REPLAY_0937, pem)
+            ov1 = "%s/api/overlay?strategy=S020_RSI&tf=1m&from=%s&to=%s&params=%s" % (
+                origin, from_ts, REPLAY_0937, pq,
+            )
+            timed_get(iu1)
+            _j, ind1_hit = timed_get(iu1)
+            timed_get(ov1)
+            _j, ov1_hit = timed_get(ov1)
+            ok = (
+                len(leak37) == 0
+                and len(ui_leak) == 0
+                and len(future45) == 0
+                and match
+            )
+            rec(
+                "11 RSI Div closed-bar + chart==backtest",
+                ok,
+                "leak37=%s new45=%s future45=%s match=%s n_chart=%s n_bt=%s table=%s ov15_hit_ms=%.1f ind15_hit_ms=%.1f ov1_hit_ms=%.1f ind1_hit_ms=%.1f ui_ov=%s ui_ind=%s steps=%s" % (
+                    leak37, new45, future45, match, len(chart_day), len(bt_day),
+                    rows, ov15_hit, ind15_hit, ov1_hit, ind1_hit,
+                    s1m.get("overlayMs"), s1m.get("indMs"), n_step,
+                ),
+            )
+        except Exception as e:
+            rec("11 RSI Div closed-bar + chart==backtest", False, str(e))
 
         # 9. Jump to real-time
         try:

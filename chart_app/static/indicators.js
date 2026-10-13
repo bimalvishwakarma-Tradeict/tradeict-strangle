@@ -747,6 +747,7 @@
       const pjson = JSON.stringify(it.params || {});
       if (it._cached && it._cached.params === pjson && Number(it._cached.to) === Number(range.to) && Number(it._cached.from) <= Number(range.from) && it._cached.tf === tf) {
         applyVisuals(it);
+        if (opts.onIndTiming) opts.onIndTiming(it._cached.server_ms || 0, true);
         return;
       }
       const q = new URLSearchParams({ tf: String(tf), params: JSON.stringify(it.params || {}) });
@@ -765,7 +766,14 @@
         const j = await r.json();
         if (my !== it._gen) return;
         it.data = j;
-        it._cached = { from: Number(range.from), to: Number(range.to), tf: tf, params: pjson };
+        it._cached = {
+          from: Number(range.from),
+          to: Number(range.to),
+          tf: tf,
+          params: pjson,
+          server_ms: Number(j.server_ms) || 0,
+        };
+        if (opts.onIndTiming) opts.onIndTiming(Number(j.server_ms) || 0, Boolean(j.cache_hit));
         if (j.short_name) it.short_name = j.short_name;
         const rec = catalogById(it.id);
         if (rec) it.overlay = rec.overlay !== false;
