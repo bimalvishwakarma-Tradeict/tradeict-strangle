@@ -10,6 +10,7 @@ import asyncio
 import csv
 import json
 import logging
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -19,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 APP_DIR = Path(__file__).resolve().parent
@@ -59,6 +60,28 @@ RES_SEC = {
 }
 logger = logging.getLogger("chart_app")
 
+
+def _build_id() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(ROOT),
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+        if out:
+            return out
+    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+        pass
+    try:
+        return str(int((APP_DIR / "static" / "app.js").stat().st_mtime))
+    except OSError:
+        return "dev"
+
+
+BUILD_ID = _build_id()
+
 app = FastAPI(title="chart_app")
 load_plugins()
 load_indicators()
@@ -67,8 +90,10 @@ app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
 @app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+async def index() -> HTMLResponse:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    html = html.replace("__BUILD__", BUILD_ID)
+    return HTMLResponse(html)
 
 
 def _norm_row(raw: dict[str, Any]) -> dict[str, Any] | None:

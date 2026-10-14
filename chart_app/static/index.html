@@ -166,6 +166,7 @@
     #rangeBar button { padding: 2px 7px; }
     #histStatus { color: var(--mut); font-size: 11px; margin-left: auto; }
     #liveClock { color: var(--tx); font-variant-numeric: tabular-nums; }
+    #buildVer { color: var(--mut); font-size: 10px; }
     .pane { display: none; }
     .pane.show { display: block; }
     #stratSettingsHost .st-set { border-bottom: 1px solid var(--bd); padding-bottom: 8px; margin-bottom: 8px; }
@@ -323,6 +324,7 @@
       <div id="dot"></div>
       <span id="histStatus" title="">LIVE · 0</span>
       <span id="liveClock">—</span>
+      <span id="buildVer">build __BUILD__</span>
       <div id="ohlc" hidden></div>
       <div id="markTip"></div>
     </footer>
@@ -519,10 +521,10 @@
     </div>
   </div>
   <input id="drawTextInput" hidden placeholder="Note…" />
-  <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/view.js?v=view1"></script>
-  <script src="/static/drawings.js?v=view1"></script>
-  <script src="/static/indicators.js?v=view2"></script>
-  <script src="/static/app.js?v=view2"></script>
+  <script src="/static/vendor/lightweight-charts.standalone.production.js?v=__BUILD__"></script>
+  <script src="/static/view.js?v=__BUILD__"></script>
+  <script src="/static/drawings.js?v=__BUILD__"></script>
+  <script src="/static/indicators.js?v=__BUILD__"></script>
+  <script src="/static/app.js?v=__BUILD__"></script>
 </body>
 </html>

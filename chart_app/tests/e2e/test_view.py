@@ -14,6 +14,7 @@ from playwright.sync_api import sync_playwright
 
 IST = ZoneInfo("Asia/Kolkata")
 BASE = "http://127.0.0.1:8700/?v=view1"
+REPLAY_0500 = int(datetime(2026, 10, 5, 5, 0, tzinfo=IST).timestamp())
 REPLAY_TS = int(datetime(2026, 10, 5, 9, 30, tzinfo=IST).timestamp())
 REPLAY_0937 = int(datetime(2026, 10, 5, 9, 37, tzinfo=IST).timestamp())
 REPLAY_0945 = int(datetime(2026, 10, 5, 9, 45, tzinfo=IST).timestamp())
@@ -49,13 +50,25 @@ def wait_ready(page, timeout=45000):
     raise RuntimeError("chart did not load candles: %s" % last)
 
 
-def wait_replay(page, timeout=40000):
+def wait_replay(page, timeout=40000, at_ts=None):
     t0 = time.time()
     last = None
     while (time.time() - t0) * 1000 < timeout:
         last = snap(page)
         if last and last.get("replayOn") and last.get("replayBarOpen") and (last.get("n") or 0) > 10:
-            return last
+            if at_ts is None:
+                return last
+            vr = last.get("vr") or {}
+            wide = False
+            try:
+                wide = (float(vr.get("to")) - float(vr.get("from"))) >= 40 * tf_sec(last)
+            except (TypeError, ValueError):
+                wide = False
+            cur = int(last.get("replayBarOpen") or 0)
+            last_t = int(last.get("lastTime") or 0)
+            near = abs(cur - int(at_ts)) <= 6 * 60 or abs(last_t - int(at_ts)) <= 6 * 60
+            if near and wide:
+                return last
         page.wait_for_timeout(200)
     raise RuntimeError("replay did not start: %s" % last)
 
@@ -536,6 +549,194 @@ def run(base_url: str) -> list[dict]:
         except Exception as e:
             rec("11 RSI Div closed-bar + chart==backtest", False, str(e))
 
+        # 12. Replay step view stability
+        try:
+            def Number_or(x):
+                try:
+                    return float(x)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            def vr_pair(s):
+                vr = s.get("vr") or {}
+                return (vr.get("from"), vr.get("to"), s.get("barSpacing"))
+
+            def run_follow_off_on(tfv):
+                cmd(page, cmd="tf", tf="1m")
+                t_1m = time.time()
+                while time.time() - t_1m < 15:
+                    st = snap(page)
+                    if st.get("tf") == "1m":
+                        break
+                    page.wait_for_timeout(200)
+                cmd(page, cmd="start", ts=REPLAY_0500)
+                try:
+                    wait_replay(page, at_ts=REPLAY_0500)
+                except RuntimeError:
+                    page.wait_for_timeout(2000)
+                    cmd(page, cmd="start", ts=REPLAY_0500)
+                    wait_replay(page, at_ts=REPLAY_0500)
+                page.wait_for_timeout(800)
+                if tfv != "1m":
+                    cmd(page, cmd="tf", tf=tfv)
+                    t_tf = time.time()
+                    layout_w = 80 * TF_SEC.get(tfv, 60)
+                    while time.time() - t_tf < 20:
+                        st = snap(page)
+                        vr = st.get("vr") or {}
+                        laid_out = False
+                        try:
+                            w = float(vr.get("to")) - float(vr.get("from"))
+                            laid_out = abs(w - layout_w) <= 16 * TF_SEC.get(tfv, 60)
+                        except (TypeError, ValueError):
+                            laid_out = False
+                        if st.get("tf") == tfv and (st.get("n") or 0) > 10 and laid_out:
+                            break
+                        page.wait_for_timeout(250)
+                    page.wait_for_timeout(500)
+                cmd(page, cmd="follow")
+                page.wait_for_timeout(400)
+                cmd(page, cmd="followOff")
+                page.wait_for_timeout(300)
+                s0 = snap(page)
+                a0 = vr_pair(s0)
+                off_ok = True
+                for _ in range(20):
+                    cmd(page, cmd="step")
+                    page.wait_for_timeout(140)
+                page.wait_for_timeout(400)
+                s1 = snap(page)
+                a1 = vr_pair(s1)
+                sec_off = TF_SEC.get(tfv, 60)
+                if abs(Number_or(a0[0]) - Number_or(a1[0])) > 2 * sec_off:
+                    off_ok = False
+                if a0[2] is not None and a1[2] is not None and abs(Number_or(a0[2]) - Number_or(a1[2])) > 0.5:
+                    off_ok = False
+                cmd(page, cmd="follow")
+                page.wait_for_timeout(400)
+                prev = snap(page)
+                pvr = prev.get("vr") or {}
+                max_shift = 0.0
+                hold_fail = False
+                lock_fail = False
+                sec = TF_SEC.get(tfv, 60)
+                bs0 = prev.get("barSpacing")
+                bs_ok = True
+                for _ in range(40):
+                    last_before = prev.get("lastTime")
+                    gap_before = None
+                    if last_before is not None and pvr.get("to") is not None:
+                        gap_before = (Number_or(pvr.get("to")) - Number_or(last_before)) / sec
+                    cmd(page, cmd="step")
+                    page.wait_for_timeout(140)
+                    cur = snap(page)
+                    cvr = cur.get("vr") or {}
+                    last = cur.get("lastTime")
+                    dfrom = abs(Number_or(cvr.get("from")) - Number_or(pvr.get("from")))
+                    dto = abs(Number_or(cvr.get("to")) - Number_or(pvr.get("to")))
+                    max_shift = max(max_shift, dfrom / sec, dto / sec)
+                    if gap_before is not None and gap_before >= 10.5:
+                        if dfrom / sec > 0.35 or dto / sec > 0.35:
+                            hold_fail = True
+                    if gap_before is not None and gap_before < 9.5:
+                        if last is not None and cvr.get("to") is not None:
+                            gap_after = (Number_or(cvr.get("to")) - Number_or(last)) / sec
+                            if abs(gap_after - gap_before) > 1.01:
+                                lock_fail = True
+                    if bs0 is not None and cur.get("barSpacing") is not None:
+                        if abs(Number_or(cur.get("barSpacing")) - Number_or(bs0)) > 0.5:
+                            bs_ok = False
+                    prev = cur
+                    pvr = cvr
+                on_ok = max_shift <= 1.01 and (not hold_fail) and (not lock_fail)
+                return off_ok, on_ok, a0, a1, max_shift, hold_fail, lock_fail, bs_ok
+
+            r1 = run_follow_off_on("1m")
+            r5 = run_follow_off_on("5m")
+            r15 = run_follow_off_on("15m")
+            ok = all(r[0] and r[1] for r in (r1, r5, r15))
+            rec(
+                "12 Replay step view Follow OFF/ON 1m-5m-15m",
+                ok,
+                "1m off=%s on=%s shift=%.3f hold/lock=%s/%s 5m off=%s on=%s a0=%s a1=%s 15m off=%s on=%s a0=%s a1=%s" % (
+                    r1[0], r1[1], r1[4], r1[5], r1[6], r5[0], r5[1], r5[2], r5[3], r15[0], r15[1], r15[2], r15[3],
+                ),
+            )
+        except Exception as e:
+            rec("12 Replay step view Follow OFF/ON 1m-5m-15m", False, str(e))
+
+        # 13. VWAP 05:30 IST session reset break
+        try:
+            parsed = urlparse(base_url)
+            origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+            windows = []
+            for day in (4, 5):
+                t0 = int(datetime(2026, 10, day, 5, 27, tzinfo=IST).timestamp())
+                t1 = int(datetime(2026, 10, day, 5, 33, tzinfo=IST).timestamp())
+                windows.append((day, t0, t1))
+            from_ts = int(datetime(2026, 10, 4, 0, 0, tzinfo=IST).timestamp()) - 3600
+            to_ts = int(datetime(2026, 10, 5, 6, 0, tzinfo=IST).timestamp())
+            pq = quote(json.dumps({"line_tf": "1m", "hours": 48, "show_vwap": True}))
+            jov = http_json(
+                "%s/api/overlay?strategy=S020&tf=1m&from=%s&to=%s&params=%s" % (origin, from_ts, to_ts, pq),
+                timeout=120,
+            )
+            vline = None
+            for ln in (jov.get("lines") or []):
+                if ln.get("kind") == "vwap":
+                    vline = ln
+                    break
+            pts = (vline or {}).get("points") or []
+            table = []
+            ok13 = True
+            import numpy as np
+            from backtest.strategies.s020_vwap_touch.run_s020 import session_vwap as bt_vwap
+
+            bars = fetch_1m_range(origin, from_ts, to_ts)
+            ts = np.array([int(b["time"]) for b in bars], dtype=np.int64)
+            h = np.array([float(b["high"]) for b in bars], dtype=np.float64)
+            l = np.array([float(b["low"]) for b in bars], dtype=np.float64)
+            c = np.array([float(b["close"]) for b in bars], dtype=np.float64)
+            v = np.array([float(b.get("volume") or 0.0) for b in bars], dtype=np.float64)
+            bt = bt_vwap(ts, h, l, c, v)
+            bt_map = {int(ts[i]): float(bt[i]) if np.isfinite(bt[i]) else None for i in range(len(ts))}
+            pt_map = {}
+            breaks = []
+            prev_val = None
+            prev_t = None
+            for p in pts:
+                t = int(p.get("time") or 0)
+                if "value" not in p or p.get("value") is None:
+                    breaks.append(t)
+                    prev_val = None
+                    prev_t = t
+                    continue
+                val = float(p["value"])
+                pt_map[t] = val
+                if prev_val is not None and prev_t is not None and abs(val - prev_val) > abs(prev_val) * 0.01:
+                    has_break = any(prev_t < b <= t for b in breaks)
+                    if not has_break:
+                        ok13 = False
+                prev_val = val
+                prev_t = t
+            for day, t0, t1 in windows:
+                for t in range(t0, t1 + 1, 60):
+                    ist = datetime.fromtimestamp(t, IST).strftime("%d %H:%M")
+                    cv = pt_map.get(t)
+                    bv = bt_map.get(t)
+                    table.append("%s chart=%s bt=%s" % (ist, cv, bv))
+                    if cv is not None and (not np.isfinite(cv) or abs(cv) < 1 or abs(cv) > 1e7):
+                        ok13 = False
+            reset_t = int(datetime(2026, 10, 5, 5, 30, tzinfo=IST).timestamp())
+            has_gap = any(abs(b - reset_t) <= 60 for b in breaks)
+            rec(
+                "13 VWAP 05:30 reset break",
+                ok13 and has_gap,
+                "gap=%s breaks=%s table=%s" % (has_gap, breaks[:8], table),
+            )
+        except Exception as e:
+            rec("13 VWAP 05:30 reset break", False, str(e))
+
         # 9. Jump to real-time
         try:
             cmd(page, cmd="live")
@@ -559,5 +760,6 @@ if __name__ == "__main__":
     failed = [r for r in rows if not r["ok"]]
     print("\n--- summary ---")
     for r in rows:
-        print("%s  %s  %s" % ("PASS" if r["ok"] else "FAIL", r["scenario"], r["detail"]))
+        line = "%s  %s  %s" % ("PASS" if r["ok"] else "FAIL", r["scenario"], r["detail"])
+        print(line.encode("ascii", "replace").decode("ascii"))
     sys.exit(1 if failed else 0)

@@ -89,9 +89,7 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
         day = int(ts[i]) // 86400
         t = int(ts[i])
         if prev_day is not None and day != prev_day:
-            vwap_pts.append({"time": t})
-            prev_day = day
-            continue
+            vwap_pts.append({"time": int(t) - 1})
         prev_day = day
         if np.isfinite(vwap_1m[i]):
             vwap_pts.append({"time": t, "value": float(vwap_1m[i])})

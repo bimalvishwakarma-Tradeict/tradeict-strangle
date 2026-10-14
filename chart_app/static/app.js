@@ -114,6 +114,7 @@
   const LS_STRAT = "chart_app.strategies.BTCUSD";
   const LS_PANEL = "chart_app.rightPanel";
   const vwapSeries = chart.addLineSeries({ color: "#58a6ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+  const vwapSegSeries = [];
   const extraSeries = [];
   const paneCharts = [];
   function paneList() {
@@ -153,6 +154,7 @@
       const vis = visibleCandles();
       return vis.length ? Number(vis[vis.length - 1].time) : null;
     },
+    getBarCount: function () { return visibleCandles().length; },
     getOldestTime: function () { return oldestCandleTime(); },
     isReplay: function () { return replayOn; },
     isFollow: function () { return replayFollow; },
@@ -729,9 +731,7 @@
       const day = Math.floor(Number(t) / 86400);
       while (i + 1 < src.length && Number(src[i + 1].time) <= t) i += 1;
       if (prevDay != null && day !== prevDay) {
-        out.push({ time: t });
-        prevDay = day;
-        continue;
+        out.push({ time: Number(t) - 1 });
       }
       prevDay = day;
       const srcT = Number(src[i].time);
@@ -741,6 +741,22 @@
       out.push({ time: t, value: srcVal });
     }
     return out;
+  }
+
+  function splitLineSegs(pts) {
+    const segs = [];
+    let cur = [];
+    (pts || []).forEach(function (p) {
+      const v = p && p.value;
+      if (p == null || p.time == null || v == null || v === "" || !Number.isFinite(Number(v))) {
+        if (cur.length) segs.push(cur);
+        cur = [];
+        return;
+      }
+      cur.push({ time: Number(p.time), value: Number(v) });
+    });
+    if (cur.length) segs.push(cur);
+    return segs;
   }
 
   function clipLinePoints(ln, oldest, newest) {
@@ -772,7 +788,26 @@
     const vwap = (j.lines || []).find((x) => x.kind === "vwap");
     vwapSeries.applyOptions({ visible: showVwap });
     const vwapPts = showVwap && vwap && oldest != null ? clipLinePoints(vwap, oldest, newest) : [];
-    vwapSeries.setData(vwapPts.filter((p) => p.time == null || canShowTime(p.time)));
+    const vwapKeep = vwapPts.filter((p) => p.time == null || canShowTime(p.time));
+    const vwapSegs = splitLineSegs(vwapKeep);
+    vwapSeries.setData(vwapSegs[0] || []);
+    const extraNeed = Math.max(0, vwapSegs.length - 1);
+    while (vwapSegSeries.length > extraNeed) {
+      const s = vwapSegSeries.pop();
+      try { chart.removeSeries(s); } catch (e) {}
+    }
+    for (let i = 1; i < vwapSegs.length; i += 1) {
+      if (!vwapSegSeries[i - 1]) {
+        vwapSegSeries[i - 1] = chart.addLineSeries({
+          color: "#58a6ff",
+          lineWidth: 2,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+      }
+      vwapSegSeries[i - 1].applyOptions({ visible: showVwap });
+      vwapSegSeries[i - 1].setData(vwapSegs[i]);
+    }
     const wanted = [];
     (j.lines || []).forEach((ln) => {
       if (ln.kind === "vwap") return;
@@ -1404,8 +1439,8 @@
     updateHistStatus();
     renderReplayStats();
     syncFollowBtn();
-    await reloadOverlay(true);
     view.request("replay-start");
+    await reloadOverlay(true);
     void fetchCandlesTf("1m", {
       start: Number(replayBarOpen) + 60,
       limit: 1500,
@@ -1425,6 +1460,7 @@
     }
     replayBarOpen = Number(nxt.time);
     applyingRange = true;
+    view.request("replay-step-before");
     rebuildReplayCandles("step");
     paintOverlay(overlayPayload);
     updateHistStatus();
@@ -2123,9 +2159,13 @@
       viewModeSync();
     }
     if (d.cmd === "follow") {
-      replayFollow = true;
+      replayFollow = d.on !== false;
       syncFollowBtn();
-      view.request("follow");
+      if (replayFollow) view.request("follow");
+    }
+    if (d.cmd === "followOff") {
+      replayFollow = false;
+      syncFollowBtn();
     }
     if (d.cmd === "shift") view.request("shift", { delta: d.delta });
     if (d.cmd === "zoom") view.request("zoom");
@@ -2164,6 +2204,8 @@
       const last = vis.length ? vis[vis.length - 1] : null;
       const lr = chart.timeScale().getVisibleLogicalRange();
       const vr = chart.timeScale().getVisibleRange();
+      let barSpacing = null;
+      try { barSpacing = chart.timeScale().options().barSpacing; } catch (e) {}
       const rr = paneCharts[0] ? paneCharts[0].chart.timeScale().getVisibleLogicalRange() : null;
       const host = el("chart");
       const cx = host ? host.clientWidth / 2 : 0;
@@ -2178,6 +2220,12 @@
         lr,
         vr,
         rr,
+        barSpacing,
+        viewLog: typeof view.getLog === "function" ? view.getLog().slice(-12) : [],
+        build: (function () {
+          const n = document.getElementById("buildVer");
+          return n ? n.textContent : "";
+        })(),
         replayBarOpen,
         replayFollow,
         replayOn,
