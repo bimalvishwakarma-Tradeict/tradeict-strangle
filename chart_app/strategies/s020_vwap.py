@@ -12,6 +12,37 @@ from indicators.htf import resample_tf_partial, split_htf_complete
 from strategies import register
 
 LINE_TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900}
+CHART_TF_SEC = {
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400,
+}
+
+
+def _downsample_vwap_points(pts: list[dict[str, Any]], tf_sec: int) -> list[dict[str, Any]]:
+    """Keep last VWAP value per chart-TF bucket; preserve session-break whitespace."""
+    if tf_sec <= 60 or not pts:
+        return pts
+    out: list[dict[str, Any]] = []
+    cur_b: int | None = None
+    last_val: dict[str, Any] | None = None
+    for p in pts:
+        if not isinstance(p, dict) or p.get("time") is None:
+            continue
+        t = int(p["time"])
+        if "value" not in p:
+            if last_val is not None:
+                out.append(last_val)
+                last_val = None
+            cur_b = None
+            out.append(p)
+            continue
+        b = (t // tf_sec) * tf_sec
+        if cur_b is not None and b != cur_b and last_val is not None:
+            out.append(last_val)
+        last_val = {"time": b, "value": float(p["value"])}
+        cur_b = b
+    if last_val is not None:
+        out.append(last_val)
+    return out
 
 
 def _extreme_ts(
@@ -93,6 +124,8 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
         prev_day = day
         if np.isfinite(vwap_1m[i]):
             vwap_pts.append({"time": t, "value": float(vwap_1m[i])})
+    chart_sec = CHART_TF_SEC.get(str(params.get("chart_tf") or "1m"), 60)
+    vwap_pts = _downsample_vwap_points(vwap_pts, chart_sec)
 
     tf_sec = LINE_TF_SEC.get(line_tf, 60)
     cap_1m = int(to_ts)
@@ -252,6 +285,10 @@ META: dict[str, Any] = {
         {
             "key": "hours", "label": "Last hours", "type": "int", "default": 24,
             "min": 1, "max": 168, "step": 1, "tab": "inputs",
+        },
+        {
+            "key": "max_days", "label": "1m window days", "type": "int", "default": 7,
+            "min": 1, "max": 30, "step": 1, "tab": "inputs",
         },
         {"key": "show_vwap", "label": "VWAP", "type": "bool", "default": True, "tab": "inputs"},
         {"key": "show_active", "label": "Active lines", "type": "bool", "default": True, "tab": "inputs"},

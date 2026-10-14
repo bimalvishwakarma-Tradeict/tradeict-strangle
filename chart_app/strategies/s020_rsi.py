@@ -271,6 +271,10 @@ META: dict[str, Any] = {
         {"key": "show_levels", "label": "Show OBH/OBL Levels", "type": "bool", "default": True, "tab": "inputs"},
         {"key": "show_signals", "label": "Show Signals", "type": "bool", "default": True, "tab": "inputs"},
         {"key": "show_rsi_pane", "label": "RSI pane", "type": "bool", "default": True, "tab": "inputs"},
+        {
+            "key": "max_days", "label": "1m window days", "type": "int", "default": 7,
+            "min": 1, "max": 30, "step": 1, "tab": "inputs",
+        },
     ],
 }
 

@@ -6,6 +6,8 @@ python chart_app\\server.py
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import csv
 import json
 import logging
@@ -47,6 +49,9 @@ MAX_BARS = 1500
 DELTA_PAGE_CAP = 4000
 _CANDLE_CACHE: dict[tuple[str, int], list[dict[str, Any]]] = {}
 _OVERLAY_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_OVERLAY_FLIGHT: dict[tuple[Any, ...], asyncio.Task[dict[str, Any]]] = {}
+_OVERLAY_FAMILY_GEN: dict[tuple[Any, ...], int] = {}
+_OVERLAY_CPU: dict[tuple[Any, ...], dict[str, Any]] = {}
 _IND_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _CACHE_CAP = 48
 _LAST_CANDLE_META: dict[str, Any] = {"pages": 0, "fetch": 0, "ms": 0.0, "tf": ""}
@@ -163,6 +168,95 @@ def _slice_payload_to(data: dict[str, Any], to_u: int) -> dict[str, Any]:
     return out
 
 
+def _slice_payload_from(data: dict[str, Any], from_u: int) -> dict[str, Any]:
+    out = dict(data)
+    lo = int(from_u)
+
+    def _keep_pts(pts: Any) -> Any:
+        if not isinstance(pts, list):
+            return pts
+        kept: list[Any] = []
+        for p in pts:
+            if not isinstance(p, dict) or p.get("time") is None:
+                kept.append(p)
+                continue
+            if int(p["time"]) >= lo:
+                kept.append(p)
+        return kept
+
+    if isinstance(out.get("series"), list):
+        series = []
+        for sp in out["series"]:
+            if not isinstance(sp, dict):
+                series.append(sp)
+                continue
+            item = dict(sp)
+            item["points"] = _keep_pts(item.get("points"))
+            series.append(item)
+        out["series"] = series
+    if isinstance(out.get("lines"), list):
+        lines = []
+        for ln in out["lines"]:
+            if not isinstance(ln, dict):
+                lines.append(ln)
+                continue
+            item = dict(ln)
+            item["points"] = _keep_pts(item.get("points"))
+            if item.get("points"):
+                lines.append(item)
+        out["lines"] = lines
+    for key in ("markers", "rsi", "boxes", "labels", "bands"):
+        if isinstance(out.get(key), list):
+            out[key] = _keep_pts(out[key])
+    return out
+
+
+def _overlay_cpu(
+    strategy: str,
+    bars: list[dict[str, Any]],
+    merged: dict[str, Any],
+    tf: str,
+    to_u: int,
+    capped_from: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    slim = {k: merged[k] for k in merged if k != "chart_tf"}
+    cpu_key = (
+        strategy,
+        json.dumps(slim, sort_keys=True, default=str),
+        int(bars[0]["time"]) if bars else 0,
+        int(bars[-1]["time"]) if bars else 0,
+        len(bars),
+    )
+    data = _OVERLAY_CPU.get(cpu_key)
+    if data is None:
+        merged_1m = dict(merged)
+        merged_1m["chart_tf"] = "1m"
+        data = compute(strategy, bars, merged_1m)
+        _cache_put(_OVERLAY_CPU, cpu_key, data)
+    else:
+        data = copy.deepcopy(data)
+    sec = int(RES_SEC.get(tf, 60))
+    if sec > 60:
+        from strategies.s020_vwap import _downsample_vwap_points
+
+        lines = []
+        for ln in data.get("lines") or []:
+            if not isinstance(ln, dict):
+                lines.append(ln)
+                continue
+            item = dict(ln)
+            kind = str(item.get("kind") or item.get("id") or "")
+            if "vwap" in kind.lower():
+                item["points"] = _downsample_vwap_points(list(item.get("points") or []), sec)
+            lines.append(item)
+        data = dict(data)
+        data["lines"] = lines
+    data = _slice_payload_to(data, to_u)
+    data = _slice_payload_from(data, capped_from)
+    htf = aggregate_1m(bars, tf, to_u)
+    return data, htf
+
+
 async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
     if tf not in RES_SEC:
         raise HTTPException(400, f"bad tf {tf}")
@@ -176,54 +270,45 @@ async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
     now = chart_now()
     closed_before = now - res
     by_ts: dict[int, dict[str, Any]] = {}
-    pages = 0
-    fetched = 0
-    empty_streak = 0
     span = DELTA_PAGE_CAP * res
-    # Align pages to a fixed grid so replay stepping reuses the same closed-page cache.
     aligned_end = ((want_end // span) + 1) * span
+    specs: list[tuple[int, int]] = []
     page_end = aligned_end
     while page_end > want_start:
         page_start = page_end - span
-        pages += 1
+        specs.append((int(page_start), int(page_end)))
+        if page_start <= want_start:
+            break
+        page_end = page_start
+    pages = len(specs)
+    fetched = 0
+
+    async def _one_page(page_start: int, page_end: int) -> list[dict[str, Any]]:
+        nonlocal fetched
         cache_key = (tf, int(page_start))
         chunk_closed = page_end <= closed_before
+        if chunk_closed and cache_key in _CANDLE_CACHE:
+            return list(_CANDLE_CACHE[cache_key])
+        fetched += 1
+        raw = await fetch_history_candles(SYMBOL, tf, int(page_start), int(page_end))
         rows_chunk: list[dict[str, Any]] = []
-        hit = chunk_closed and cache_key in _CANDLE_CACHE
-        if hit:
-            rows_chunk = _CANDLE_CACHE[cache_key]
-        else:
-            fetched += 1
-            raw = await fetch_history_candles(
-                SYMBOL,
-                tf,
-                int(page_start),
-                int(page_end),
-            )
-            for item in raw:
-                row = _norm_row(item) if isinstance(item, dict) else item
-                if row is not None:
-                    rows_chunk.append(row)
-            if chunk_closed:
-                closed_rows = [r for r in rows_chunk if int(r["time"]) < closed_before]
-                _CANDLE_CACHE[cache_key] = closed_rows
-                rows_chunk = closed_rows
-        got = 0
+        for item in raw:
+            row = _norm_row(item) if isinstance(item, dict) else item
+            if row is not None:
+                rows_chunk.append(row)
+        if chunk_closed:
+            closed_rows = [r for r in rows_chunk if int(r["time"]) < closed_before]
+            _CANDLE_CACHE[cache_key] = closed_rows
+            return closed_rows
+        return rows_chunk
+
+    chunks = await asyncio.gather(*[_one_page(ps, pe) for ps, pe in specs])
+    for rows_chunk in chunks:
         for row in rows_chunk:
             ts = int(row["time"])
             if ts < want_start or ts > want_end:
                 continue
             by_ts[ts] = row
-            got += 1
-        if got == 0 and page_end < want_start + span:
-            empty_streak += 1
-        else:
-            empty_streak = 0
-        if empty_streak >= 3:
-            break
-        if page_start <= want_start:
-            break
-        page_end = page_start
     rows = [by_ts[k] for k in sorted(by_ts)]
     ms = (time.perf_counter() - t0) * 1000.0
     _LAST_CANDLE_META.update({"pages": pages, "fetch": fetched, "ms": round(ms, 1), "tf": tf})
@@ -363,7 +448,20 @@ async def api_overlay(
     to_u = int(to_ts) if to_ts is not None else now
     hrs = float(extra.get("hours", hours))
     from_u = int(from_ts) if from_ts is not None else to_u - int(hrs * 3600)
-    cache_key = (strategy, tf, json.dumps(extra, sort_keys=True), from_u, to_u)
+    try:
+        max_days = int(extra.get("max_days", 7))
+    except (TypeError, ValueError):
+        max_days = 7
+    max_days = max(1, min(30, max_days))
+    warmup = 2 * 86400
+    live_to = _is_live_to(to_u)
+    fetch_to = int(now) if live_to else int(to_u)
+    cap_start = int(fetch_to) - max_days * 86400 - warmup
+    fetch_from = max(int(from_u) - warmup, cap_start)
+    capped_from = fetch_from + warmup
+    params_json = json.dumps(extra, sort_keys=True)
+    family = (strategy, tf, params_json)
+    cache_key = (strategy, tf, params_json, from_u, to_u, max_days)
     hit = _OVERLAY_CACHE.get(cache_key)
     if hit is not None:
         ms = (time.perf_counter() - t0) * 1000.0
@@ -371,46 +469,70 @@ async def api_overlay(
         out_hit = dict(hit)
         out_hit["server_ms"] = round(ms, 2)
         out_hit["cache_hit"] = True
+        out_hit["capped_from"] = int(hit.get("capped_from") or capped_from)
         return out_hit
-    sess0 = (int(from_u) // 86400) * 86400
-    warmup = 2 * 86400
-    fetch_from = min(sess0, int(from_u) - warmup)
-    bars = await _candles("1m", fetch_from, to_u)
-    bars = [b for b in bars if fetch_from <= int(b["time"]) <= to_u]
-    merged = {
-        "line_tf": extra.get("line_tf", line_tf),
-        "hours": hrs,
-        "from": from_u,
-        "to": to_u,
-        "chart_tf": tf,
-        "variant": extra.get("variant", variant),
-        "signal_tf": extra.get("signal_tf", signal_tf),
-        "rsi_len": extra.get("rsi_len", rsi_len),
-        "ob": extra.get("ob", ob),
-        "os": extra.get("os", os),
-        "exp_obh": extra.get("exp_obh", exp_obh),
-        "exp_obl": extra.get("exp_obl", exp_obl),
-        "show_obh": extra.get("show_obh", show_obh),
-        "show_obl": extra.get("show_obl", show_obl),
-        "show_levels": extra.get("show_levels", show_levels),
-        "show_signals": extra.get("show_signals", show_signals),
-    }
-    data = compute(strategy, bars, merged)
-    data = _slice_payload_to(data, to_u)
-    htf = aggregate_1m(bars, tf, to_u)
-    out = {
-        "strategy": strategy,
-        "bars_used": len(bars),
-        "last_bar": htf[-1] if htf else None,
-        **data,
-    }
-    _cache_put(_OVERLAY_CACHE, cache_key, out)
-    ms = (time.perf_counter() - t0) * 1000.0
-    logger.info("overlay %s bars=%s ms=%.1f", strategy, len(bars), ms)
-    timed = dict(out)
-    timed["server_ms"] = round(ms, 2)
-    timed["cache_hit"] = False
-    return timed
+    existing = _OVERLAY_FLIGHT.get(cache_key)
+    if existing is not None:
+        return await existing
+    _OVERLAY_FAMILY_GEN[family] = int(_OVERLAY_FAMILY_GEN.get(family, 0)) + 1
+    my_gen = _OVERLAY_FAMILY_GEN[family]
+
+    async def _run_overlay() -> dict[str, Any]:
+        bars = await _candles("1m", fetch_from, fetch_to)
+        cap_bar = int(to_u) if not live_to else int(fetch_to)
+        bars = [b for b in bars if fetch_from <= int(b["time"]) <= cap_bar]
+        if live_to and cap_start < fetch_from:
+            asyncio.create_task(_candles("1m", cap_start, fetch_to))
+        merged = {
+            "line_tf": extra.get("line_tf", line_tf),
+            "hours": hrs,
+            "from": from_u,
+            "to": to_u,
+            "capped_from": capped_from,
+            "max_days": max_days,
+            "chart_tf": tf,
+            "variant": extra.get("variant", variant),
+            "signal_tf": extra.get("signal_tf", signal_tf),
+            "rsi_len": extra.get("rsi_len", rsi_len),
+            "ob": extra.get("ob", ob),
+            "os": extra.get("os", os),
+            "exp_obh": extra.get("exp_obh", exp_obh),
+            "exp_obl": extra.get("exp_obl", exp_obl),
+            "show_obh": extra.get("show_obh", show_obh),
+            "show_obl": extra.get("show_obl", show_obl),
+            "show_levels": extra.get("show_levels", show_levels),
+            "show_signals": extra.get("show_signals", show_signals),
+        }
+        data, htf = await asyncio.to_thread(
+            _overlay_cpu, strategy, bars, merged, tf, to_u, capped_from,
+        )
+        out = {
+            "strategy": strategy,
+            "bars_used": len(bars),
+            "last_bar": htf[-1] if htf else None,
+            "capped_from": capped_from,
+            "fetch_from": fetch_from,
+            **data,
+        }
+        if _OVERLAY_FAMILY_GEN.get(family) == my_gen:
+            _cache_put(_OVERLAY_CACHE, cache_key, out)
+        ms_inner = (time.perf_counter() - t0) * 1000.0
+        logger.info(
+            "overlay %s bars=%s capped_from=%s ms=%.1f gen=%s current=%s",
+            strategy, len(bars), capped_from, ms_inner, my_gen, _OVERLAY_FAMILY_GEN.get(family),
+        )
+        timed = dict(out)
+        timed["server_ms"] = round(ms_inner, 2)
+        timed["cache_hit"] = False
+        return timed
+
+    task = asyncio.create_task(_run_overlay())
+    _OVERLAY_FLIGHT[cache_key] = task
+    try:
+        return await task
+    finally:
+        if _OVERLAY_FLIGHT.get(cache_key) is task:
+            _OVERLAY_FLIGHT.pop(cache_key, None)
 
 
 @app.get("/api/strategies")
@@ -462,7 +584,7 @@ async def api_indicator(
         bars = await _candles(tf, fetch_from, to_u)
     else:
         bars = await _candles_replay(tf, fetch_from, to_u)
-    data = compute_indicator(ind_id, bars, raw_p)
+    data = await asyncio.to_thread(compute_indicator, ind_id, bars, raw_p)
     data = _slice_payload_to(data, to_u)
     out = {
         "id": ind_id,

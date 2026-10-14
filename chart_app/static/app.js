@@ -1398,6 +1398,7 @@
       if (indApi) void indApi.reload();
     }
     lastBarClose = t;
+    if (!sameBar && !replayOn) view.request("live-bar");
   }
 
   async function fillLiveGap() {
@@ -2503,6 +2504,7 @@
       view.request("pin-view");
     }
     if (d.cmd === "shift") view.request("shift", { delta: d.delta });
+    if (d.cmd === "lastMid") view.request("last-mid");
     if (d.cmd === "goRt") {
       const b = el("btnGoRt");
       if (b) b.click();
@@ -2603,6 +2605,13 @@
         tfBusy: (function () {
           const n = document.getElementById("tfBusy");
           return Boolean(n && n.classList.contains("show"));
+        })(),
+        overlayBusy: overlayBusy,
+        lastX: (function () {
+          try {
+            if (!last) return null;
+            return chart.timeScale().timeToCoordinate(last.time);
+          } catch (e) { return null; }
         })(),
         seriesMax: (function () {
           const cap = maxShowTime();

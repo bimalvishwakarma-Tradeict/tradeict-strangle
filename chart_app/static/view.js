@@ -583,19 +583,48 @@
           break;
         case "live-bar":
           if (opts.isReplay && opts.isReplay()) break;
-          if (opts.isHistory && opts.isHistory()) break;
-          if (leftTime != null && rightTime != null) {
-            const liveLast = opts.getLastTime && opts.getLastTime();
-            if (liveLast != null && Number(rightTime) < Number(liveLast) - 2 * barSec()) break;
+          captureLogical();
+          const lastL = lastLogical();
+          const holdFrom = leftLogical;
+          const holdTo = rightLogical;
+          const atEdge = lastL != null && holdTo != null
+            && Number(lastL) >= Number(holdTo) - LIVE_PAD - 2;
+          if (atEdge && !(opts.isHistory && opts.isHistory())) {
+            scrollLive();
+            lastFollowedBar = opts.getLastTime && opts.getLastTime();
+            break;
           }
-          scrollLive();
+          const liveLast = opts.getLastTime && opts.getLastTime();
+          const grew = lastFollowedBar != null && liveLast != null
+            && Number(liveLast) > Number(lastFollowedBar);
+          if (lastFollowedBar == null) {
+            lastFollowedBar = liveLast;
+            break;
+          }
+          lastFollowedBar = liveLast;
+          if (!grew) break;
+          if (lastL == null || holdFrom == null || holdTo == null) break;
+          if (Number(lastL) < Number(holdFrom) - 2 || Number(lastL) > Number(holdTo) + 2) break;
+          applyLogical(Number(holdFrom) + 1, Number(holdTo) + 1);
+          captureTime();
           break;
         case "jump-live":
           mode = "LIVE";
           leftTime = null;
           rightTime = null;
           scrollLive();
+          lastFollowedBar = opts.getLastTime && opts.getLastTime();
           break;
+        case "last-mid": {
+          captureLogical();
+          const midL = lastLogical();
+          if (midL == null || leftLogical == null || rightLogical == null) break;
+          const midW = Number(rightLogical) - Number(leftLogical);
+          if (!(midW > 4)) break;
+          applyLogical(Number(midL) - midW / 2, Number(midL) + midW / 2);
+          lastFollowedBar = opts.getLastTime && opts.getLastTime();
+          break;
+        }
         case "history-pad":
           applyPad();
           captureTime();

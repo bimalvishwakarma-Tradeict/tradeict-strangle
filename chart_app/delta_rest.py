@@ -120,6 +120,19 @@ def _row_from_any(item: Any) -> dict[str, Any] | None:
     return None
 
 
+def _parse_candles_body(raw: bytes) -> list[dict[str, Any]]:
+    payload = json.loads(raw.decode("utf-8"))
+    result = payload.get("result") or []
+    if not isinstance(result, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in result:
+        row = _row_from_any(item) if isinstance(item, dict) else None
+        if row is not None:
+            out.append(row)
+    return out
+
+
 def _cache_path(symbol: str, resolution: str, start: int, end: int) -> Path:
     return CACHE_DIR / f"{symbol}_{resolution}_{int(start)}_{int(end)}.json"
 
@@ -190,7 +203,7 @@ async def fetch_history_candles(
     page_closed = end_i <= closed_before
     path = _cache_path(symbol, resolution, start_i, end_i)
     if page_closed:
-        cached = _read_disk(path)
+        cached = await asyncio.to_thread(_read_disk, path)
         if cached is not None:
             logger.info(
                 "delta cache-hit %s %s %s..%s n=%s",
@@ -205,7 +218,7 @@ async def fetch_history_candles(
     rows = await _http_candles(symbol, resolution, start_i, end_i)
     if page_closed:
         closed_rows = [r for r in rows if int(r["time"]) < closed_before]
-        _write_disk(path, closed_rows)
+        await asyncio.to_thread(_write_disk, path, closed_rows)
         return closed_rows
     return rows
 
@@ -282,14 +295,7 @@ async def _http_candles(
                 continue
             if resp.status_code >= 400:
                 raise RuntimeError(f"delta {resp.status_code} {url}")
-            payload = resp.json()
-            result = payload.get("result") or []
-            if not isinstance(result, list):
-                return []
-            out: list[dict[str, Any]] = []
-            for item in result:
-                row = _row_from_any(item) if isinstance(item, dict) else None
-                if row is not None:
-                    out.append(row)
+            raw = resp.content
+            out = await asyncio.to_thread(_parse_candles_body, raw)
             return out
     raise RuntimeError(f"candles fetch failed start={start} end={end}: {last_err}")

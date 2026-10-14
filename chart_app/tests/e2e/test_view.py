@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import sync_playwright
@@ -77,6 +77,192 @@ def wait_replay(page, timeout=40000, at_ts=None):
 def http_json(url, timeout=120):
     with urlopen(url, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+def http_post_json(url, body, timeout=30):
+    req = Request(url, data=json.dumps(body).encode("utf-8"), method="POST")
+    req.add_header("Content-Type", "application/json")
+    with urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _ws_status_ms(origin: str) -> float:
+    t0 = time.time()
+    http_json("%s/api/ws/status" % origin, timeout=2)
+    return (time.time() - t0) * 1000.0
+
+
+def overlay_fetch(origin, tf, to_ts, from_ts=None, timeout=120):
+    if from_ts is None:
+        from_ts = int(to_ts) - 3 * 86400
+    params = quote(json.dumps({"max_days": 7, "hours": 72, "show_vwap": True, "line_tf": "1m"}))
+    url = "%s/api/overlay?strategy=S020&tf=%s&from=%s&to=%s&params=%s" % (
+        origin, tf, int(from_ts), int(to_ts), params,
+    )
+    t0 = time.time()
+    with urlopen(url, timeout=timeout) as r:
+        raw = r.read()
+    sec = time.time() - t0
+    payload = json.loads(raw.decode("utf-8"))
+    return {
+        "sec": sec,
+        "mb": len(raw) / (1024.0 * 1024.0),
+        "server_ms": payload.get("server_ms"),
+        "capped_from": payload.get("capped_from"),
+        "bars_used": payload.get("bars_used"),
+        "n_lines": len(payload.get("lines") or []),
+        "n_marks": len(payload.get("markers") or []),
+        "payload": payload,
+        "bytes": len(raw),
+    }
+
+
+def run_overlay_perf_tests(page, rec) -> None:
+    parsed = urlparse(page.url)
+    origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+
+    def wait_tf_local(tfv, timeout=25):
+        t0 = time.time()
+        last = None
+        need = 40 if tfv in ("1h", "4h") else 100
+        while time.time() - t0 < timeout:
+            last = snap(page)
+            if last.get("tf") == tfv and (last.get("n") or 0) > need and not last.get("tfBusy"):
+                return last
+            page.wait_for_timeout(150)
+        return last
+
+    try:
+        cmd(page, cmd="live")
+        page.wait_for_timeout(800)
+        cmd(page, cmd="tf", tf="1m")
+        wait_tf_local("1m", timeout=20)
+        cmd(page, cmd="addStrat", id="S020")
+        cmd(page, cmd="addInd", id="ULP")
+        cmd(page, cmd="addInd", id="ST")
+        page.wait_for_timeout(400)
+        cmd(page, cmd="overlayReload")
+        t_ov = time.time()
+        while time.time() - t_ov < 20:
+            st = snap(page)
+            if not st.get("overlayBusy"):
+                break
+            ws_ms = min(_ws_status_ms(origin) for _ in range(2))
+            if ws_ms >= 300:
+                rec("19 LIVE S020+ULP+ST TF overlay", False, "ws/status blocked ms=%.0f" % ws_ms)
+                raise RuntimeError("blocked")
+            page.wait_for_timeout(150)
+        page.wait_for_timeout(12000)
+        rows19 = []
+        ok19 = True
+        blocked = False
+        for tfv in ("1m", "15m", "1h", "4h", "1m"):
+            t0 = time.time()
+            cmd(page, cmd="tf", tf=tfv)
+            saw_busy = False
+            while time.time() - t0 < 20:
+                st = snap(page)
+                if st.get("overlayBusy"):
+                    saw_busy = True
+                    ws_ms = min(_ws_status_ms(origin) for _ in range(2))
+                    if ws_ms >= 300:
+                        ok19 = False
+                        blocked = True
+                        rows19.append("%s ws_block=%.0f" % (tfv, ws_ms))
+                        break
+                candle_ready = st.get("tf") == tfv and (st.get("n") or 0) > 40 and not st.get("tfBusy")
+                ov_ready = not st.get("overlayBusy")
+                if candle_ready and ov_ready:
+                    break
+                page.wait_for_timeout(120)
+            dt = time.time() - t0
+            st = snap(page)
+            ov_ms = float(st.get("overlayMs") or dt * 1000.0)
+            candle_ms = float(st.get("tfMs") or dt * 1000.0)
+            step_ok = candle_ms < 2000 and ov_ms < 3000 and st.get("tf") == tfv
+            if not step_ok:
+                ok19 = False
+            rows19.append(
+                "%s candle_ms=%.0f ov_ms=%.0f n=%s busy_seen=%s" % (
+                    tfv, candle_ms, ov_ms, st.get("n"), saw_busy,
+                )
+            )
+        rec("19 LIVE S020+ULP+ST TF overlay", ok19 and not blocked, str(rows19))
+    except RuntimeError:
+        pass
+    except Exception as e:
+        rec("19 LIVE S020+ULP+ST TF overlay", False, str(e))
+
+    try:
+        cmd(page, cmd="live")
+        page.wait_for_timeout(800)
+        cmd(page, cmd="tf", tf="1m")
+        wait_tf_local("1m", timeout=20)
+        cmd(page, cmd="lastMid")
+        page.wait_for_timeout(500)
+        s0 = snap(page)
+        x0 = s0.get("lastX")
+        last0 = int(s0.get("lastTime") or 0)
+        px = float(s0.get("lastClose") or 100000)
+        bs = float(s0.get("barSpacing") or 14)
+        lr0 = dict(s0.get("lr") or {})
+        wpx = float(page.evaluate("() => (document.getElementById('chart')||{}).clientWidth || 1400"))
+        mid_ok = x0 is not None and (0.22 * wpx) <= float(x0) <= (0.78 * wpx)
+        for i in (1, 2):
+            ts = last0 + i * 60
+            http_post_json("%s/api/test/tick" % origin, {"price": px + i, "ts": ts})
+            t_wait = time.time()
+            while time.time() - t_wait < 4:
+                cur = snap(page)
+                if int(cur.get("lastTime") or 0) >= ts:
+                    break
+                page.wait_for_timeout(120)
+            page.wait_for_timeout(200)
+        s1 = snap(page)
+        x1 = s1.get("lastX")
+        lr1 = dict(s1.get("lr") or {})
+        dx = abs(float(x1 or 0) - float(x0 or 0)) if x0 is not None and x1 is not None else 999
+        try:
+            to_l = float(lr1.get("to"))
+            from_l = float(lr1.get("from"))
+            last_frac = (float(x1) / wpx) if x1 is not None and wpx else 1
+            snapped = last_frac >= 0.88
+            grew = (to_l - float(lr0.get("to") or 0)) >= 0.9
+        except (TypeError, ValueError):
+            snapped = True
+            grew = False
+        ok20 = mid_ok and dx <= bs + 2 and not snapped and grew
+        rec(
+            "20 last-bar x stable on new 1m bars",
+            ok20,
+            "x0=%s x1=%s dx=%.2f bs=%.2f w=%s mid=%s last=%s->%s lr0=%s lr1=%s snapped=%s grew=%s" % (
+                x0, x1, dx, bs, wpx, mid_ok, last0, s1.get("lastTime"), lr0, lr1, snapped, grew,
+            ),
+        )
+    except Exception as e:
+        rec("20 last-bar x stable on new 1m bars", False, str(e))
+
+    try:
+        s = snap(page)
+        last_t = int(s.get("lastTime") or 0)
+        if last_t < 1e9:
+            last_t = int(http_json("%s/api/ws/status" % origin, timeout=5).get("last_tick_ts") or 0)
+        rows21 = []
+        ok21 = True
+        for tfv in ("15m", "1h", "4h"):
+            info = overlay_fetch(origin, tfv, last_t)
+            mb = info["mb"]
+            if mb >= 1.5:
+                ok21 = False
+            rows21.append(
+                "%s sec=%.2f mb=%.3f server_ms=%s bars=%s lines=%s marks=%s capped_from=%s" % (
+                    tfv, info["sec"], mb, info["server_ms"], info["bars_used"],
+                    info["n_lines"], info["n_marks"], info["capped_from"],
+                )
+            )
+        rec("21 1h/4h overlay payload <1.5MB", ok21, str(rows21))
+    except Exception as e:
+        rec("21 1h/4h overlay payload <1.5MB", False, str(e))
 
 
 def no_console_errors(errors):
@@ -1132,6 +1318,8 @@ def run(base_url: str) -> list[dict]:
         except Exception as e:
             rec("18 TF cycle LIVE+replay native HTF", False, str(e))
 
+        run_overlay_perf_tests(page, rec)
+
         cons = no_console_errors(errors)
         rec("console no errors", len(cons) == 0, str(cons[:5]))
         browser.close()
@@ -1190,6 +1378,7 @@ def run_live_smoke(base_url: str) -> list[dict]:
             )
         except Exception as e:
             rec("live 60s real feed", False, str(e))
+        run_overlay_perf_tests(page, rec)
         browser.close()
     return results
 
