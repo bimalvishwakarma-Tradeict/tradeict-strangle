@@ -138,6 +138,14 @@
       if (it.overlay === false) return false;
       return true;
     }
+    function capTime() {
+      if (typeof opts.getCapTime === "function") {
+        const c = opts.getCapTime();
+        if (c != null && Number.isFinite(Number(c))) return Number(c);
+      }
+      const range = getRange ? getRange() : null;
+      return range && range.to != null ? Number(range.to) : null;
+    }
     function t2x(t) {
       const x = chart.timeScale().timeToCoordinate(Number(t));
       return x == null ? null : x;
@@ -154,13 +162,16 @@
       });
     }
     function drawFills(ctx, w, h, data, tx, py) {
+      const cap = capTime();
       (data.boxes || []).forEach(function (b) {
+        if (cap != null && Number(b.t1) > cap) return;
         const y1 = py(b.top);
         const y2 = py(b.bottom);
         let x1 = tx(b.t1);
         if (y1 == null || y2 == null) return;
         if (x1 == null) x1 = 0;
-        let x2 = b.extend_right ? w : tx(b.t2 != null ? b.t2 : b.t1);
+        const t2raw = (b.t2 != null && cap != null) ? Math.min(Number(b.t2), cap) : b.t2;
+        let x2 = b.extend_right ? w : tx(t2raw != null ? t2raw : b.t1);
         if (x2 == null) x2 = w;
         const left = Math.min(x1, x2);
         const right = Math.max(x1, x2);
@@ -173,6 +184,7 @@
         ctx.strokeRect(left + 0.5, top + 0.5, Math.max(1, right - left), Math.max(1, bot - top));
       });
       (data.labels || []).forEach(function (lb) {
+        if (cap != null && Number(lb.t) > cap) return;
         const x = tx(lb.t);
         const y = py(lb.price);
         if (x == null || y == null) return;
@@ -191,6 +203,7 @@
         let started = false;
         up.forEach(function (p) {
           if (!p || p.value == null || byT[p.time] == null) return;
+          if (cap != null && Number(p.time) > cap) return;
           const x = tx(p.time);
           const y = py(p.value);
           if (x == null || y == null) return;
@@ -218,6 +231,7 @@
         for (let i = 0; i < stf.length - 1; i += 1) {
           const a = stf[i];
           const b = stf[i + 1];
+          if (cap != null && (Number(a.time) > cap || Number(b.time) > cap)) continue;
           const x1 = tx(a.time);
           const x2 = tx(b.time);
           const y1c = py(a.close);
@@ -258,14 +272,23 @@
         };
         if (!it._lwc[key]) it._lwc[key] = hostChart.addLineSeries(opts);
         else it._lwc[key].applyOptions(opts);
-        const range = getRange ? getRange() : null;
-        const capTo = range && range.to != null ? Number(range.to) : null;
+        const capTo = capTime();
         const pts = (sp.points || []).filter(function (p) {
           if (!p || p.time == null) return false;
           if (capTo != null && Number(p.time) > capTo) return false;
           return true;
         });
-        it._lwc[key].setData(pts);
+        const prev = it._lastPts && it._lastPts[key];
+        const last = pts.length ? pts[pts.length - 1] : null;
+        let usedUpdate = false;
+        if (prev && last && last.value != null && prev.length && Number(prev[prev.length - 1].time) <= Number(last.time)) {
+          if (pts.length === prev.length || pts.length === prev.length + 1) {
+            try { it._lwc[key].update(last); usedUpdate = true; } catch (e) { usedUpdate = false; }
+          }
+        }
+        if (!usedUpdate) it._lwc[key].setData(pts);
+        if (!it._lastPts) it._lastPts = {};
+        it._lastPts[key] = pts;
         if (sp.markers) {
           try { it._lwc[key].setMarkers(sp.markers); } catch (e) {}
         }
@@ -866,6 +889,48 @@
       });
     }
 
+    function applyCap() {
+      instances.concat(Object.keys(aux).map(function (k) { return aux[k]; })).forEach(function (it) {
+        if (it.visible === false) return;
+        if (it._lwc && it._lwcHost) applyLineSeries(it, it._lwcHost);
+      });
+      prim.requestUpdate();
+    }
+
+    function invalidate() {
+      instances.forEach(function (it) {
+        it._cached = null;
+        it._lastPts = null;
+        it._gen = (it._gen || 0) + 1;
+        if (it._abort) {
+          try { it._abort.abort(); } catch (e) {}
+        }
+      });
+    }
+
+    function maxTimes() {
+      const cap = capTime();
+      const out = {};
+      function walk(it, label) {
+        const specs = ((it.data || {}).series) || [];
+        let mx = null;
+        let leak = false;
+        specs.forEach(function (sp) {
+          (sp.points || []).forEach(function (p) {
+            if (!p || p.time == null) return;
+            const t = Number(p.time);
+            if (p.value == null || p.value === "") return;
+            if (cap != null && t > cap) return;
+            if (mx == null || t > mx) mx = t;
+          });
+        });
+        out[label] = { max: mx, leak: leak, id: it.id };
+      }
+      instances.forEach(function (it) { walk(it, it.id + ":" + it.uid); });
+      Object.keys(aux).forEach(function (k) { walk(aux[k], "aux:" + k); });
+      return out;
+    }
+
     const legendHost = document.getElementById("indLegend");
     if (legendHost) {
       ["pointerdown", "pointerup", "click", "dblclick", "contextmenu"].forEach(function (evn) {
@@ -890,6 +955,9 @@
     return {
       reload: reloadAll,
       refresh: refresh,
+      applyCap: applyCap,
+      invalidate: invalidate,
+      maxTimes: maxTimes,
       list: function () { return instances; },
       paneCharts: paneCharts,
       setAuxPane: setAuxPane,

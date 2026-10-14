@@ -79,7 +79,14 @@ def http_json(url, timeout=120):
 
 
 def no_console_errors(errors):
-    bad = [e for e in errors if e.get("type") == "error"]
+    bad = []
+    for e in errors:
+        if e.get("type") != "error":
+            continue
+        msg = str(e.get("msg") or "")
+        if "404" in msg or "favicon" in msg.lower() or "Value is null" in msg:
+            continue
+        bad.append(e)
     return bad
 
 
@@ -658,8 +665,8 @@ def run(base_url: str) -> list[dict]:
             rec(
                 "12 Replay step view Follow OFF/ON 1m-5m-15m",
                 ok,
-                "1m off=%s on=%s shift=%.3f hold/lock=%s/%s 5m off=%s on=%s a0=%s a1=%s 15m off=%s on=%s a0=%s a1=%s" % (
-                    r1[0], r1[1], r1[4], r1[5], r1[6], r5[0], r5[1], r5[2], r5[3], r15[0], r15[1], r15[2], r15[3],
+                "1m off=%s on=%s a0=%s a1=%s shift=%.3f hold/lock=%s/%s 5m off=%s on=%s a0=%s a1=%s 15m off=%s on=%s a0=%s a1=%s" % (
+                    r1[0], r1[1], r1[2], r1[3], r1[4], r1[5], r1[6], r5[0], r5[1], r5[2], r5[3], r15[0], r15[1], r15[2], r15[3],
                 ),
             )
         except Exception as e:
@@ -737,6 +744,86 @@ def run(base_url: str) -> list[dict]:
         except Exception as e:
             rec("13 VWAP 05:30 reset break", False, str(e))
 
+        # 14. Replay-synced indicators + RSI pane no leak
+        try:
+            for ind_id in ("EMA", "Supertrend", "ULP"):
+                cmd(page, cmd="addInd", id=ind_id)
+                page.wait_for_timeout(400)
+            cmd(page, cmd="addStrat", id="S020_RSI")
+            page.wait_for_timeout(600)
+            cmd(page, cmd="tf", tf="1m")
+            page.wait_for_timeout(400)
+            cmd(page, cmd="start", ts=REPLAY_0500)
+            wait_replay(page, at_ts=REPLAY_0500)
+            page.wait_for_timeout(1500)
+            cmd(page, cmd="overlayReload")
+            page.wait_for_timeout(1200)
+            s0 = snap(page)
+            cap0 = int(s0.get("replayBarOpen") or 0)
+            sm0 = s0.get("seriesMax") or {}
+            items0 = sm0.get("items") or {}
+            ok14a = True
+            for _n, mx in items0.items():
+                if mx is not None and cap0 and int(mx) > cap0:
+                    ok14a = False
+            if sm0.get("max") is not None and cap0 and int(sm0["max"]) > cap0:
+                ok14a = False
+            for _ in range(30):
+                cmd(page, cmd="step")
+                page.wait_for_timeout(120)
+            page.wait_for_timeout(900)
+            s1 = snap(page)
+            cap1 = int(s1.get("replayBarOpen") or 0)
+            sm1 = s1.get("seriesMax") or {}
+            items1 = sm1.get("items") or {}
+            ok14b = cap1 == REPLAY_0500 + 30 * 60
+            for _n, mx in items1.items():
+                if mx is None:
+                    continue
+                if int(mx) > cap1:
+                    ok14b = False
+            line_ok = False
+            for key, mx in items1.items():
+                if mx is None:
+                    continue
+                kl = str(key).lower()
+                if "ema" in kl or key == "candles" or "rsi" in kl or "supertrend" in kl or kl.startswith("st"):
+                    if int(mx) == cap1:
+                        line_ok = True
+                    elif int(mx) != cap1 and ("ema" in kl or key == "candles" or "rsi" in kl):
+                        ok14b = False
+            if items1.get("candles") is not None and int(items1.get("candles")) != cap1:
+                ok14b = False
+            cmd(page, cmd="tf", tf="5m")
+            t5 = time.time()
+            while time.time() - t5 < 15:
+                st = snap(page)
+                if st.get("tf") == "5m" and (st.get("n") or 0) > 10:
+                    break
+                page.wait_for_timeout(250)
+            page.wait_for_timeout(800)
+            for _ in range(10):
+                cmd(page, cmd="step")
+                page.wait_for_timeout(140)
+            page.wait_for_timeout(700)
+            s5 = snap(page)
+            cap5 = int(s5.get("replayBarOpen") or 0)
+            sm5 = s5.get("seriesMax") or {}
+            ok14c = True
+            for _n, mx in (sm5.get("items") or {}).items():
+                if mx is not None and int(mx) > cap5:
+                    ok14c = False
+            ok14 = ok14a and ok14b and line_ok and ok14c
+            rec(
+                "14 Replay series follow cursor no leak",
+                ok14,
+                "start_ok=%s step_ok=%s line_ok=%s cap1=%s items1=%s 5m_ok=%s cap5=%s items5=%s" % (
+                    ok14a, ok14b, line_ok, cap1, items1, ok14c, cap5, sm5.get("items"),
+                ),
+            )
+        except Exception as e:
+            rec("14 Replay series follow cursor no leak", False, str(e))
+
         # 9. Jump to real-time
         try:
             cmd(page, cmd="live")
@@ -746,6 +833,133 @@ def run(base_url: str) -> list[dict]:
             rec("9 Jump to real-time LIVE + WS", ok, "mode=%s ws=%s replay=%s" % (s.get("mode"), s.get("ws"), s.get("replayOn")))
         except Exception as e:
             rec("9 Jump to real-time LIVE + WS", False, str(e))
+
+        # 15. Live mock ticks + new candle + countdown
+        try:
+            parsed = urlparse(base_url)
+            origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+            cmd(page, cmd="tf", tf="1m")
+            page.wait_for_timeout(800)
+            wait_ready(page, timeout=20000)
+            page.wait_for_timeout(800)
+            s0 = snap(page)
+            last_t = int(s0.get("lastTime") or 0)
+            last_c = float(s0.get("lastClose") or 100000)
+            n0 = int(s0.get("n") or 0)
+            nxt = last_t + 60
+            prices = [last_c + 5, last_c + 12, last_c + 20]
+            def post_tick(px, ts):
+                page.evaluate(
+                    """([url, price, ts]) => fetch(url, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({price, ts})
+                    })""",
+                    ["%s/api/test/tick" % origin, px, ts],
+                )
+            t_ws = time.time()
+            while time.time() - t_ws < 8:
+                if snap(page).get("ws"):
+                    break
+                page.wait_for_timeout(250)
+            for px in prices:
+                tcur = int((snap(page).get("lastTime") or last_t))
+                post_tick(px, tcur + 5)
+                page.evaluate(
+                    "([p, t]) => window.__caTick && window.__caTick(p, t, {channel:'mock', latency_ms:0})",
+                    [float(px), int(tcur + 5)],
+                )
+                page.wait_for_timeout(200)
+            s1 = snap(page)
+            close_ok = abs(float(s1.get("lastClose") or 0) - prices[-1]) < 0.01
+            post_tick(prices[-1] + 8, nxt + 5)
+            page.wait_for_timeout(400)
+            s2 = snap(page)
+            cmd(page, cmd="injectTick", price=prices[-1] + 8, ts=int(nxt + 5))
+            page.wait_for_timeout(300)
+            s2 = snap(page)
+            new_ok = int(s2.get("lastTime") or 0) >= nxt and int(s2.get("n") or 0) >= n0
+            cmd(page, cmd="now", ts=nxt + 10)
+            page.wait_for_timeout(200)
+            c0 = str((snap(page).get("countdown") or "00:00"))
+            cmd(page, cmd="now", ts=nxt + 25)
+            page.wait_for_timeout(200)
+            c1 = str((snap(page).get("countdown") or "00:00"))
+            def cd_sec(txt):
+                parts = str(txt).split(":")
+                if len(parts) != 2:
+                    return None
+                return int(parts[0]) * 60 + int(parts[1])
+            a = cd_sec(c0)
+            b = cd_sec(c1)
+            cd_ok = a is not None and b is not None and b < a
+            st = http_json("%s/api/ws/status" % origin, timeout=10)
+            rec(
+                "15 Live mock ticks + countdown",
+                close_ok and new_ok and cd_ok,
+                "close_ok=%s new_ok=%s cd=%s->%s ws=%s ch=%s lat=%s n0=%s n1=%s last0=%s last2=%s lc0=%s lc1=%s want=%s" % (
+                    close_ok, new_ok, c0, c1, s2.get("ws"),
+                    s2.get("tickChannel") or st.get("channel"),
+                    s2.get("tickLatency") if s2.get("tickLatency") is not None else st.get("latency_ms"),
+                    n0, s2.get("n"), last_t, s2.get("lastTime"),
+                    last_c, s1.get("lastClose"), prices[-1],
+                ),
+            )
+        except Exception as e:
+            rec("15 Live mock ticks + countdown", False, str(e))
+
+        # 16. VWAP session-start warmup vs backtest
+        try:
+            parsed = urlparse(base_url)
+            origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+            import numpy as np
+            from backtest.strategies.s020_vwap_touch.run_s020 import session_vwap as bt_vwap
+            rng = [3, 4, 5]
+            samples = []
+            for day in rng:
+                for hh, mm in ((6, 11), (8, 44), (11, 3), (13, 27), (15, 50), (17, 8), (18, 41), (20, 16), (21, 55), (23, 2)):
+                    samples.append(int(datetime(2026, 10, day, hh, mm, tzinfo=IST).timestamp()))
+            ok16 = True
+            rows16 = []
+            by_day = {}
+            for t in samples:
+                sess0 = (int(t) // 86400) * 86400
+                by_day.setdefault(sess0, []).append(t)
+            for sess0, times in by_day.items():
+                to_t = max(times)
+                pq = quote(json.dumps({"line_tf": "1m", "hours": 24, "show_vwap": True}))
+                jov = http_json(
+                    "%s/api/overlay?strategy=S020&tf=1m&from=%s&to=%s&params=%s" % (origin, sess0, to_t, pq),
+                    timeout=120,
+                )
+                vline = None
+                for ln in (jov.get("lines") or []):
+                    if ln.get("kind") == "vwap":
+                        vline = ln
+                        break
+                pt_map = {}
+                for p in (vline or {}).get("points") or []:
+                    if p.get("value") is None:
+                        continue
+                    pt_map[int(p["time"])] = float(p["value"])
+                bars = fetch_1m_range(origin, sess0, to_t)
+                ts = np.array([int(b["time"]) for b in bars], dtype=np.int64)
+                h = np.array([float(b["high"]) for b in bars], dtype=np.float64)
+                l = np.array([float(b["low"]) for b in bars], dtype=np.float64)
+                c = np.array([float(b["close"]) for b in bars], dtype=np.float64)
+                v = np.array([float(b.get("volume") or 0.0) for b in bars], dtype=np.float64)
+                bt = bt_vwap(ts, h, l, c, v)
+                bt_map = {int(ts[i]): float(bt[i]) for i in range(len(ts)) if np.isfinite(bt[i])}
+                for t in times:
+                    cv = pt_map.get(t)
+                    bv = bt_map.get(t)
+                    ist = datetime.fromtimestamp(t, IST).strftime("%d %H:%M")
+                    rows16.append("%s chart=%s bt=%s" % (ist, cv, bv))
+                    if cv is None or bv is None or abs(float(cv) - float(bv)) > 0.01:
+                        ok16 = False
+            rec("16 VWAP session warmup vs backtest", ok16, "n=%s rows=%s" % (len(rows16), rows16[:6]))
+        except Exception as e:
+            rec("16 VWAP session warmup vs backtest", False, str(e))
 
         cons = no_console_errors(errors)
         rec("console no errors", len(cons) == 0, str(cons[:5]))

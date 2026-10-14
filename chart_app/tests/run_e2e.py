@@ -48,6 +48,7 @@ def main() -> int:
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
     env = os.environ.copy()
     env["CHART_APP_PORT"] = str(PORT)
+    env["CHART_APP_WS_MOCK"] = "1"
     proc = None
     started = False
     if not _port_up():

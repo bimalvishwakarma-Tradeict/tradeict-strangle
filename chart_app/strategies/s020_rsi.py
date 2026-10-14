@@ -96,10 +96,10 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
         if not np.isfinite(rsi[i]):
             continue
         complete_i = i <= last_complete_i if last_complete_i >= 0 else False
-        if complete_i:
-            rsi_pts.append({"time": int(rsi_ts[i]) + int(tf_sec), "value": float(rsi[i])})
-        else:
-            rsi_pts.append({"time": cap_1m, "value": float(rsi[i])})
+        t_out = int(rsi_ts[i]) + int(tf_sec) if complete_i else cap_1m
+        if t_out > cap_1m:
+            t_out = cap_1m
+        rsi_pts.append({"time": t_out, "value": float(rsi[i])})
     last_ts = int(ts[-1])
     lines: list[dict[str, Any]] = []
     if show_levels:

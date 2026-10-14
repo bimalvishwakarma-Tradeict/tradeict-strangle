@@ -1,7 +1,7 @@
 /* Delta India BTCUSD chart. History via local API; live via public WS candlestick_{tf}. */
 (function () {
   const IST = "Asia/Kolkata";
-  const WS_URL = "wss://socket.india.delta.exchange";
+  const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/live";
   const SYMBOL = "BTCUSD";
   const WS_CH = {
     "1m": "candlestick_1m",
@@ -74,6 +74,11 @@
   let overlayBusy = false;
   let lastStepMs = 0;
   let subCount = 0;
+  let lastTickLatency = null;
+  let lastTickChannel = "";
+  let wsConnected = false;
+  let wsNeedGapFill = false;
+  let liveNowOverride = null;
 
   const chart = LightweightCharts.createChart(el("chart"), {
     layout: { background: { color: "#131722" }, textColor: "#787b86" },
@@ -115,6 +120,7 @@
   const LS_PANEL = "chart_app.rightPanel";
   const vwapSeries = chart.addLineSeries({ color: "#58a6ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
   const vwapSegSeries = [];
+  let lastVwapPts = null;
   const extraSeries = [];
   const paneCharts = [];
   function paneList() {
@@ -256,7 +262,7 @@
       });
     }
     if (drawingsApi) drawingsApi.refresh();
-    if (indApi) indApi.refresh();
+    if (indApi && mode !== "step") indApi.refresh();
     paintOhlcLegend(last);
     updateGoRtBtn();
     leakCheck("applyCandles");
@@ -275,8 +281,8 @@
       dot.classList.add("live");
       lab.textContent = "live";
     } else {
-      dot.classList.add("reconnecting");
-      lab.textContent = "reconnecting";
+      dot.classList.add("off");
+      lab.textContent = "disconnected";
     }
   }
 
@@ -584,11 +590,23 @@
     extraSeries.length = 0;
   }
 
+  function overlayFetchTo() {
+    if (!replayOn || replayBarOpen == null) {
+      const vis = visibleCandles();
+      return vis.length ? Number(vis[vis.length - 1].time) : null;
+    }
+    let mx = Number(replayBarOpen);
+    m1Map.forEach(function (c) {
+      const t = Number(c.time);
+      if (t > mx) mx = t;
+    });
+    return mx;
+  }
   function indicatorRange() {
     const vis = visibleCandles();
     if (!vis.length) return null;
     const cap = maxShowTime();
-    const to = cap != null ? cap : Number(vis[vis.length - 1].time);
+    const to = replayOn ? overlayFetchTo() : (cap != null ? cap : Number(vis[vis.length - 1].time));
     return { from: Number(vis[0].time), to: to };
   }
 
@@ -620,12 +638,13 @@
     const cursorClose = replayOn && replayBarOpen != null
       ? replayCursorClose()
       : (capOpen != null ? Number(capOpen) + barSecNow() : Number(vis[vis.length - 1].time));
-    const to = replayOn && replayBarOpen != null
+    const paintTo = replayOn && replayBarOpen != null
       ? Number(replayBarOpen)
       : (capOpen != null ? capOpen : Number(vis[vis.length - 1].time));
-    if (replayOn && !force && lastOverlayTo === to && lastOverlayTf === tf) {
+    const to = replayOn ? (overlayFetchTo() || paintTo) : paintTo;
+    if (replayOn && !force && lastOverlayTo != null && Number(to) <= Number(lastOverlayTo) && lastOverlayTf === tf) {
       paintOverlay(overlayPayload);
-      scheduleIndicators();
+      if (indApi && typeof indApi.applyCap === "function") indApi.applyCap();
       return;
     }
     const gen = ++overlayGen;
@@ -790,7 +809,18 @@
     const vwapPts = showVwap && vwap && oldest != null ? clipLinePoints(vwap, oldest, newest) : [];
     const vwapKeep = vwapPts.filter((p) => p.time == null || canShowTime(p.time));
     const vwapSegs = splitLineSegs(vwapKeep);
-    vwapSeries.setData(vwapSegs[0] || []);
+    const v0 = vwapSegs[0] || [];
+    let usedVwapUpdate = false;
+    if (lastVwapPts && v0.length && lastVwapPts.length) {
+      const last = v0[v0.length - 1];
+      const prevLast = lastVwapPts[lastVwapPts.length - 1];
+      if (last && last.value != null && prevLast && Number(prevLast.time) <= Number(last.time)
+          && (v0.length === lastVwapPts.length || v0.length === lastVwapPts.length + 1)) {
+        try { vwapSeries.update(last); usedVwapUpdate = true; } catch (e) { usedVwapUpdate = false; }
+      }
+    }
+    if (!usedVwapUpdate) vwapSeries.setData(v0);
+    lastVwapPts = v0;
     const extraNeed = Math.max(0, vwapSegs.length - 1);
     while (vwapSegSeries.length > extraNeed) {
       const s = vwapSegSeries.pop();
@@ -885,17 +915,19 @@
       if (!useRsi) indApi.setAuxPane("s020rsi", { visible: false });
       else {
         const candles = visibleCandles();
-        const rsiByT = new Map();
-        (j.rsi || []).forEach((p) => {
-          const t = Number(p.time);
-          const v = Number(p.value);
-          if (!Number.isFinite(t) || !Number.isFinite(v)) return;
-          if (cursorClose != null && t > cursorClose) return;
-          rsiByT.set(t, v);
-        });
+        const rsiSrc = (j.rsi || [])
+          .map((p) => ({ t: Number(p.time), v: Number(p.value) }))
+          .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v) && canShowTime(p.t))
+          .sort((a, b) => a.t - b.t);
+        let ri = 0;
+        let lastR = null;
         const rsiPts = candles.map((c) => {
           const t = Number(c.time);
-          return rsiByT.has(t) ? { time: t, value: rsiByT.get(t) } : { time: t };
+          while (ri < rsiSrc.length && rsiSrc[ri].t <= t) {
+            lastR = rsiSrc[ri].v;
+            ri += 1;
+          }
+          return lastR != null ? { time: t, value: lastR } : { time: t };
         });
         const ob = Number(j.rsi_ob != null ? j.rsi_ob : 70);
         const os = Number(j.rsi_os != null ? j.rsi_os : 30);
@@ -1163,6 +1195,11 @@
     return t;
   }
 
+  function nowSec() {
+    if (liveNowOverride != null) return Number(liveNowOverride);
+    return Math.floor(Date.now() / 1000);
+  }
+
   function applyLiveBar(raw) {
     if (historyMode || replayOn) return;
     const t = wsCandleTime(raw);
@@ -1175,15 +1212,62 @@
       close: Number(raw.close),
       volume: Number(raw.volume || 0),
     };
-    const prev = candleMap.get(t);
+    applyLiveCandle(bar);
+  }
+
+  function applyLiveTick(price, ts, meta) {
+    if (historyMode || replayOn) return;
+    const px = Number(price);
+    if (!Number.isFinite(px) || px <= 0) return;
+    const t = Number(ts) || nowSec();
+    const sec = barSecNow();
+    const open = bucketOpen(t, sec);
+    let bar = candleMap.get(open);
+    if (!bar) {
+      bar = { time: open, open: px, high: px, low: px, close: px, volume: 0 };
+      applyLiveCandle(bar, false);
+    } else {
+      bar.high = Math.max(Number(bar.high), px);
+      bar.low = Math.min(Number(bar.low), px);
+      bar.close = px;
+      applyLiveCandle(bar, true);
+    }
+    if (meta) {
+      if (meta.latency_ms != null) lastTickLatency = Number(meta.latency_ms);
+      if (meta.channel) lastTickChannel = String(meta.channel);
+    }
+    placeCountdown();
+  }
+  window.__caTick = applyLiveTick;
+
+  function applyLiveCandle(bar, sameBar) {
+    const t = Number(bar.time);
     candleMap.set(t, bar);
-    series.update(bar);
+    try { series.update(bar); }
+    catch (e) {
+      try { series.setData(visibleCandles()); }
+      catch (e2) {}
+    }
+    paintOhlcLegend(bar);
     updateHistStatus();
-    if (lastBarClose && t > lastBarClose) {
+    if (!sameBar && lastBarClose && t > lastBarClose) {
       scheduleLiveOverlayOnSigClose(lastBarClose + barSecNow());
       if (indApi) void indApi.reload();
     }
     lastBarClose = t;
+  }
+
+  async function fillLiveGap() {
+    if (historyMode || replayOn) return;
+    const last = newestCandleTime();
+    if (last == null) return;
+    try {
+      const j = await fetchCandles({ start: last, limit: 500 });
+      mergeRows(j.candles || []);
+      applyCandles();
+      if (indApi) void indApi.reload();
+      await reloadOverlay(true);
+    } catch (e) {}
   }
 
   function onSigTfCandle(raw) {
@@ -1216,33 +1300,44 @@
       }
     } catch (e) {}
     ws = null;
+    wsConnected = false;
+    setStatus("off");
     const lab = el("statusLabel");
-    if (lab) lab.textContent = "history";
-    el("dot").className = "";
+    if (lab && (historyMode || replayOn)) lab.textContent = "history";
   }
 
   function connectWs() {
     if (historyMode || replayOn) return;
-    setStatus("reconnecting");
+    setStatus("off");
     try {
       if (ws) ws.close();
     } catch (e) {}
     ws = new WebSocket(WS_URL);
     ws.onopen = () => {
       backoff = 1000;
+      wsConnected = true;
       setStatus("live");
-      const ch = WS_CH[tf] || "candlestick_1m";
-      const sigTf = sigTfValue();
-      const sigCh = WS_CH[sigTf];
-      const channels = [{ name: ch, symbols: [SYMBOL] }];
-      if (sigCh && sigCh !== ch) channels.push({ name: sigCh, symbols: [SYMBOL] });
-      ws.send(JSON.stringify({ type: "subscribe", payload: { channels } }));
-      ws.send(JSON.stringify({ type: "enable_heartbeat" }));
+      try { ws.send(JSON.stringify({ cmd: "status" })); } catch (e) {}
+      if (wsNeedGapFill) {
+        wsNeedGapFill = false;
+        void fillLiveGap();
+      }
     };
     ws.onmessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
       const typ = String(msg.type || "");
+      if (typ === "status") {
+        wsConnected = Boolean(msg.connected);
+        setStatus(wsConnected ? "live" : "off");
+        if (msg.latency_ms != null) lastTickLatency = Number(msg.latency_ms);
+        if (msg.channel) lastTickChannel = String(msg.channel);
+        return;
+      }
+      if (typ === "tick") {
+        applyLiveTick(msg.price, msg.ts, msg);
+        return;
+      }
       const chartCh = WS_CH[tf] || "candlestick_1m";
       const sigTf = sigTfValue();
       const sigCh = WS_CH[sigTf];
@@ -1250,8 +1345,10 @@
       else if (sigCh && typ === sigCh) onSigTfCandle(msg);
     };
     ws.onclose = () => {
+      wsConnected = false;
+      wsNeedGapFill = true;
       if (historyMode || replayOn) return;
-      setStatus("reconnecting");
+      setStatus("off");
       scheduleReconnect();
     };
     ws.onerror = () => {
@@ -1440,12 +1537,16 @@
     renderReplayStats();
     syncFollowBtn();
     view.request("replay-start");
+    try {
+      const ahead = await fetchCandlesTf("1m", {
+        start: Number(replayBarOpen) + 60,
+        limit: 1500,
+        allowAhead: true,
+      });
+      mergeM1(ahead.candles || []);
+    } catch (e) {}
+    if (indApi && typeof indApi.invalidate === "function") indApi.invalidate();
     await reloadOverlay(true);
-    void fetchCandlesTf("1m", {
-      start: Number(replayBarOpen) + 60,
-      limit: 1500,
-      allowAhead: true,
-    }).then((j) => { mergeM1(j.candles || []); }).catch(function () {});
   }
 
   async function replayStep() {
@@ -1462,14 +1563,21 @@
     applyingRange = true;
     view.request("replay-step-before");
     rebuildReplayCandles("step");
+    view.request("mute", { ms: 320 });
     paintOverlay(overlayPayload);
+    if (indApi && typeof indApi.applyCap === "function") indApi.applyCap();
     updateHistStatus();
     renderReplayStats();
-    scheduleOverlay(false);
+    const needFetch = lastOverlayTo == null || Number(replayBarOpen) > Number(lastOverlayTo) || lastOverlayTf !== tf;
+    if (needFetch) scheduleOverlay(false);
+    else if (indApi && typeof indApi.applyCap === "function") indApi.applyCap();
     view.request("replay-step");
     lastStepMs = performance.now() - t0;
     window.__caStepMs = lastStepMs;
-    requestAnimationFrame(() => { applyingRange = false; });
+    requestAnimationFrame(() => {
+      view.request("replay-step");
+      applyingRange = false;
+    });
     viewModeSync();
   }
 
@@ -1708,6 +1816,7 @@
       series: series,
       getTf: function () { return tf; },
       getRange: function () { return indicatorRange(); },
+      getCapTime: function () { return maxShowTime(); },
       paneHost: el("paneHost"),
       priceScaleW: PRICE_SCALE_W,
       registerPane: upsertPane,
@@ -1998,11 +2107,37 @@
   }
   function tickClock() {
     const n = el("liveClock");
-    if (!n) return;
-    const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: IST, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-    }).format(new Date());
-    n.textContent = parts + " UTC+5:30";
+    if (n) {
+      const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: IST, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+      }).format(new Date());
+      n.textContent = parts + " UTC+5:30";
+    }
+    placeCountdown();
+  }
+  function placeCountdown() {
+    const box = el("barCountdown");
+    if (!box) return;
+    if (replayOn || historyMode) {
+      box.hidden = true;
+      return;
+    }
+    const last = newestCandleTime();
+    const vis = last != null ? candleMap.get(last) : null;
+    const sec = barSecNow();
+    const now = nowSec();
+    const open = last != null ? Number(last) : bucketOpen(now, sec);
+    const remain = Math.max(0, open + sec - now);
+    const mm = String(Math.floor(remain / 60)).padStart(2, "0");
+    const ss = String(remain % 60).padStart(2, "0");
+    box.textContent = mm + ":" + ss;
+    box.hidden = false;
+    if (vis) {
+      try {
+        const y = series.priceToCoordinate(Number(vis.close));
+        if (y != null) box.style.top = Math.max(8, Number(y) + 16) + "px";
+      } catch (e) {}
+    }
   }
   async function initShell() {
     try {
@@ -2166,6 +2301,7 @@
     if (d.cmd === "followOff") {
       replayFollow = false;
       syncFollowBtn();
+      view.request("pin-view");
     }
     if (d.cmd === "shift") view.request("shift", { delta: d.delta });
     if (d.cmd === "zoom") view.request("zoom");
@@ -2182,6 +2318,14 @@
     if (d.cmd === "removeInd" && indApi && indApi.removeLast) indApi.removeLast();
     if (d.cmd === "addStrat") addStrat(d.id || "S020_RSI");
     if (d.cmd === "overlayReload") void reloadOverlay(true);
+    if (d.cmd === "injectTick") {
+      liveNowOverride = d.ts != null ? Number(d.ts) : liveNowOverride;
+      applyLiveTick(d.price, d.ts, { latency_ms: 0, channel: "mock" });
+    }
+    if (d.cmd === "now") {
+      liveNowOverride = d.ts != null ? Number(d.ts) : null;
+      placeCountdown();
+    }
     if (d.cmd === "draw" && drawingsApi) {
       const item = d.item || {};
       drawingsApi.add(item);
@@ -2232,7 +2376,48 @@
         replayPlaying,
         historyMode,
         mode: view.mode(),
-        ws: Boolean(ws),
+        ws: Boolean(ws) && wsConnected,
+        wsConnected,
+        tickLatency: lastTickLatency,
+        tickChannel: lastTickChannel,
+        countdown: (function () {
+          const n = document.getElementById("barCountdown");
+          return n && !n.hidden ? n.textContent : "";
+        })(),
+        seriesMax: (function () {
+          const cap = maxShowTime();
+          const out = { cap: cap, leak: false, items: {} };
+          function add(name, pts) {
+            let mx = null;
+            (pts || []).forEach(function (p) {
+              if (!p || p.time == null) return;
+              if (p.value == null || p.value === "") return;
+              const t = Number(p.time);
+              if (cap != null && t > cap) return;
+              if (mx == null || t > mx) mx = t;
+            });
+            out.items[name] = mx;
+          }
+          add("candles", vis);
+          (overlayPayload.lines || []).forEach(function (ln) { add(ln.id || ln.kind, ln.points); });
+          add("overlayRsi", overlayPayload.rsi);
+          if (indApi && typeof indApi.maxTimes === "function") {
+            const mt = indApi.maxTimes();
+            Object.keys(mt).forEach(function (k) {
+              out.items[k] = mt[k].max;
+              if (mt[k].max != null && cap != null && mt[k].max > cap) out.leak = true;
+            });
+          }
+          let allMax = null;
+          Object.keys(out.items).forEach(function (k) {
+            const v = out.items[k];
+            if (v == null) return;
+            if (allMax == null || v > allMax) allMax = v;
+          });
+          out.max = allMax;
+          if (cap != null && allMax != null && allMax > cap) out.leak = true;
+          return out;
+        })(),
         mid: vr ? (Number(vr.from) + Number(vr.to)) / 2 : null,
         tCenter: tCenter != null ? Number(tCenter) : null,
         lastIdx: vis.length ? vis.length - 1 : null,

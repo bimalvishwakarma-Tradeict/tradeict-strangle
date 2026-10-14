@@ -19,9 +19,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT = APP_DIR.parent
@@ -38,6 +39,7 @@ from indicators import (  # noqa: E402
     short_name_for,
 )
 from indicators.htf import aggregate_1m  # noqa: E402
+from live_hub import HUB, client_loop  # noqa: E402
 from strategies import PLUGINS, compute, list_strategies, load_plugins  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -85,6 +87,16 @@ BUILD_ID = _build_id()
 app = FastAPI(title="chart_app")
 load_plugins()
 load_indicators()
+
+
+@app.on_event("startup")
+async def _start_live() -> None:
+    await HUB.start()
+
+
+@app.on_event("shutdown")
+async def _stop_live() -> None:
+    await HUB.stop()
 STATIC = APP_DIR / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
@@ -322,9 +334,11 @@ async def api_overlay(
         out_hit["server_ms"] = round(ms, 2)
         out_hit["cache_hit"] = True
         return out_hit
+    sess0 = (int(from_u) // 86400) * 86400
     warmup = 10 * 86400
-    bars = await _candles("1m", from_u - warmup, to_u)
-    bars = [b for b in bars if from_u - warmup <= int(b["time"]) <= to_u]
+    fetch_from = min(sess0, int(from_u) - warmup)
+    bars = await _candles("1m", fetch_from, to_u)
+    bars = [b for b in bars if fetch_from <= int(b["time"]) <= to_u]
     merged = {
         "line_tf": extra.get("line_tf", line_tf),
         "hours": hrs,
@@ -344,6 +358,7 @@ async def api_overlay(
         "show_signals": extra.get("show_signals", show_signals),
     }
     data = compute(strategy, bars, merged)
+    data = _slice_payload_to(data, to_u)
     htf = aggregate_1m(bars, tf, to_u)
     out = {
         "strategy": strategy,
@@ -406,6 +421,7 @@ async def api_indicator(
     warmup = max(500, 3000) * res
     bars = await _candles_no_lookahead(tf, from_u - warmup, to_u)
     data = compute_indicator(ind_id, bars, raw_p)
+    data = _slice_payload_to(data, to_u)
     out = {
         "id": ind_id,
         "tf": tf,
@@ -488,6 +504,29 @@ async def api_trades(file: str = Query(...)) -> dict[str, Any]:
                 }
             )
     return {"file": rel, "trades": rows}
+
+
+@app.websocket("/ws/live")
+async def ws_live(ws: WebSocket) -> None:
+    await client_loop(ws)
+
+
+class TickIn(BaseModel):
+    price: float = Field(..., gt=0)
+    ts: int | None = None
+
+
+@app.post("/api/test/tick")
+async def api_test_tick(body: TickIn) -> dict[str, Any]:
+    out = await HUB.inject_tick(body.price, body.ts)
+    return {"ok": True, **out}
+
+
+@app.get("/api/ws/status")
+async def api_ws_status() -> dict[str, Any]:
+    st = HUB._status()
+    st["clients"] = len(HUB.clients)
+    return st
 
 
 if __name__ == "__main__":

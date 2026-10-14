@@ -17,6 +17,8 @@
     let freezeUntil = 0;
     let leftLogical = null;
     let rightLogical = null;
+    let pinTimeFrom = null;
+    let pinTimeTo = null;
     const viewLog = [];
     const FOLLOW_EDGE = 10;
 
@@ -134,7 +136,18 @@
         } catch (e) {}
       });
       endMute();
-      requestAnimationFrame(function () { captureTime(); });
+      requestAnimationFrame(function () {
+        if (pinTimeFrom != null) return;
+        captureTime();
+      });
+    }
+
+    function restorePinned() {
+      if (pinTimeFrom != null && pinTimeTo != null) {
+        applyTime(pinTimeFrom, pinTimeTo);
+        return true;
+      }
+      return false;
     }
 
     function lastLogical() {
@@ -206,8 +219,8 @@
         return;
       }
       if (!follow) {
-        applyLogical(holdFrom, holdTo);
-        logView("replay-step:follow-off", { logFrom: holdFrom, logTo: holdTo });
+        if (!restorePinned()) applyLogical(holdFrom, holdTo);
+        logView("replay-step:follow-off", { logFrom: holdFrom, logTo: holdTo, pinFrom: pinTimeFrom, pinTo: pinTimeTo });
         lastFollowedBar = last;
         return;
       }
@@ -349,6 +362,20 @@
         case "set-mode":
           if (payload.mode) mode = payload.mode;
           break;
+        case "mute": {
+          const ms = Number(payload.ms) || 220;
+          freezeUntil = Date.now() + ms;
+          beginMute();
+          setTimeout(function () {
+            if (opts.isReplay && opts.isReplay()) {
+              if (!restorePinned() && leftLogical != null && rightLogical != null) {
+                applyLogical(leftLogical, rightLogical);
+              }
+            }
+            endMute();
+          }, ms);
+          break;
+        }
         case "capture":
           captureTime();
           break;
@@ -398,8 +425,24 @@
           if (payload.center != null) centerOn(payload.center);
           break;
         case "replay-start":
-        case "follow":
+          pinTimeFrom = null;
+          pinTimeTo = null;
           layoutReplay(true);
+          break;
+        case "follow":
+          pinTimeFrom = null;
+          pinTimeTo = null;
+          layoutReplay(true);
+          break;
+        case "pin-view":
+          captureTime();
+          captureLogical();
+          pinTimeFrom = leftTime;
+          pinTimeTo = rightTime;
+          break;
+        case "unpin-view":
+          pinTimeFrom = null;
+          pinTimeTo = null;
           break;
         case "replay-step-before":
           freezeUntil = Date.now() + 180;
@@ -413,7 +456,10 @@
           break;
         case "indicator":
           if (opts.isReplay && opts.isReplay()) {
-            syncPanes();
+            if (!restorePinned()) {
+              if (leftLogical != null && rightLogical != null) applyLogical(leftLogical, rightLogical);
+              else syncPanes();
+            }
             break;
           }
           restoreTime();

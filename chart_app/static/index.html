@@ -158,9 +158,15 @@
     #trades .long { color: #3fb950; }
     #trades .short { color: #f85149; }
     footer { grid-column: 1 / -1; grid-row: 3; display: flex; align-items: center; gap: 10px; padding: 0 10px; font-size: 12px; background: var(--panel); border-top: 1px solid var(--bd); }
-    #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mut); }
+    #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dn); }
     #dot.live { background: var(--up); }
-    #dot.reconnecting { background: #e2a917; }
+    #dot.off { background: var(--dn); }
+    #dot.reconnecting { background: var(--dn); }
+    #barCountdown {
+      position: absolute; right: 8px; z-index: 5; pointer-events: none;
+      font-size: 10px; color: var(--mut); font-variant-numeric: tabular-nums;
+      text-align: right; min-width: 44px; line-height: 1.2;
+    }
     .ohlc span { margin-right: 10px; }
     #rangeBar { display: flex; gap: 2px; }
     #rangeBar button { padding: 2px 7px; }
@@ -258,6 +264,7 @@
             <div id="indLegend"></div>
           </div>
         </div>
+        <div id="barCountdown" hidden>00:00</div>
         <button type="button" id="btnGoRt" title="Scroll to realtime">&gt;&gt;</button>
         <div id="replayBar">
           <button id="btnSelectBar" type="button">Select bar</button>
