@@ -38,8 +38,11 @@ def _unix(v: Any) -> int | None:
 
 
 def _price(msg: dict[str, Any]) -> float | None:
-    for key in ("price", "mark_price", "close", "spot_price", "last"):
+    quotes = msg.get("quotes") if isinstance(msg.get("quotes"), dict) else {}
+    for key in ("last_price", "price", "close", "mark_price", "spot_price", "last"):
         raw = msg.get(key)
+        if raw is None:
+            raw = quotes.get(key)
         if raw is None and isinstance(msg.get("symbol_data"), dict):
             raw = msg["symbol_data"].get(key)
         try:
@@ -57,6 +60,12 @@ class LiveHub:
         self.connected = False
         self.last_latency_ms: float | None = None
         self.channel = TICKER_CH
+        self.subscribed: list[str] = [TICKER_CH, TRADES_CH]
+        self.tick_count = 0
+        self.last_tick_ts: int | None = None
+        self.last_tick_price: float | None = None
+        self.last_error: str | None = None
+        self.last_close_code: int | None = None
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
@@ -81,10 +90,16 @@ class LiveHub:
     def _status(self) -> dict[str, Any]:
         return {
             "type": "status",
-            "connected": self.connected or _ws_mock(),
+            "connected": bool(self.connected) if not _ws_mock() else True,
             "channel": self.channel,
+            "subscribed": list(self.subscribed),
             "latency_ms": self.last_latency_ms,
             "mock": _ws_mock(),
+            "tick_count": self.tick_count,
+            "last_tick_ts": self.last_tick_ts,
+            "last_tick_price": self.last_tick_price,
+            "last_error": self.last_error,
+            "last_close_code": self.last_close_code,
         }
 
     async def _send(self, ws: WebSocket, msg: dict[str, Any]) -> bool:
@@ -119,6 +134,9 @@ class LiveHub:
             "latency_ms": 0.0,
         }
         self.last_latency_ms = 0.0
+        self.tick_count += 1
+        self.last_tick_ts = ts_sec
+        self.last_tick_price = float(price)
         await self.broadcast(out)
         return out
 
@@ -128,10 +146,18 @@ class LiveHub:
         if isinstance(msg.get("data"), dict):
             payload = dict(msg["data"])
             payload.setdefault("type", typ)
+        sym = str(payload.get("symbol") or msg.get("symbol") or "")
+        if sym and sym != SYMBOL:
+            return None
         px = _price(payload) or _price(msg)
         if px is None:
             return None
-        ts = _unix(payload.get("timestamp") or payload.get("time") or msg.get("timestamp"))
+        ts = _unix(
+            payload.get("timestamp")
+            or payload.get("time")
+            or payload.get("created_at")
+            or msg.get("timestamp")
+        )
         now_ms = int(time.time() * 1000)
         ts_sec = ts if ts is not None else int(now_ms / 1000)
         lat = max(0.0, now_ms - ts_sec * 1000) if ts is not None else 0.0
@@ -139,8 +165,11 @@ class LiveHub:
             lat = 0.0
         self.last_latency_ms = lat
         ch = typ if typ else TICKER_CH
-        if typ in (TICKER_CH, TRADES_CH) or "trade" in typ or typ == TICKER_CH:
+        if typ in (TICKER_CH, TRADES_CH) or "trade" in typ:
             self.channel = typ or TICKER_CH
+        self.tick_count += 1
+        self.last_tick_ts = ts_sec
+        self.last_tick_price = px
         return {
             "type": "tick",
             "channel": ch,
@@ -167,6 +196,8 @@ class LiveHub:
             try:
                 async with websockets.connect(DELTA_WS, ping_interval=20, ping_timeout=20) as ws:
                     self.connected = True
+                    self.last_error = None
+                    self.last_close_code = None
                     backoff = 1.0
                     await self.broadcast(self._status())
                     await ws.send(json.dumps(sub))
@@ -188,6 +219,9 @@ class LiveHub:
                 self.connected = False
                 raise
             except Exception as e:
+                code = getattr(e, "code", None)
+                self.last_close_code = int(code) if isinstance(code, int) else None
+                self.last_error = str(e)
                 logger.warning("delta ws disconnect: %s", e)
                 self.connected = False
                 await self.broadcast(self._status())

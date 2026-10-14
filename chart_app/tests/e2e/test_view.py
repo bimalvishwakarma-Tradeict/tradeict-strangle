@@ -22,9 +22,10 @@ CLOSE_0930 = int(datetime(2026, 10, 5, 9, 30, tzinfo=IST).timestamp())
 DAY0 = int(datetime(2026, 10, 5, 0, 0, tzinfo=IST).timestamp())
 DAY1 = int(datetime(2026, 10, 6, 0, 0, tzinfo=IST).timestamp())
 ROOT = Path(__file__).resolve().parents[3]
+OUT_DIR = ROOT / "chart_app" / "tests" / "out"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600}
+TF_SEC = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
 
 
 def cmd(page, **detail):
@@ -134,7 +135,10 @@ def fetch_1m_range(origin, start, end):
         j = http_json("%s/api/candles?tf=1m&start=%s&limit=4000" % (origin, t), timeout=120)
         chunk = j.get("candles") or []
         if not chunk:
-            break
+            t += 4000 * 60
+            if t > end:
+                break
+            continue
         last = t
         for c in chunk:
             ts = int(c["time"])
@@ -200,6 +204,21 @@ def run(base_url: str) -> list[dict]:
         results.append({"scenario": name, "ok": ok, "detail": detail})
         line = ("PASS" if ok else "FAIL") + " " + name + " " + str(detail)
         print(line.encode("ascii", "replace").decode("ascii"))
+        if ok:
+            return
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        slug = "".join(ch if ch.isalnum() else "_" for ch in name)[:40]
+        try:
+            page.screenshot(path=str(OUT_DIR / ("fail_%s.png" % slug)), full_page=True)
+        except Exception:
+            pass
+        slog = OUT_DIR / "server.log"
+        if slog.is_file():
+            try:
+                tail = slog.read_text(encoding="utf-8", errors="replace")[-12000:]
+                (OUT_DIR / ("fail_%s_server_tail.txt" % slug)).write_text(tail, encoding="utf-8")
+            except OSError:
+                pass
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -253,6 +272,8 @@ def run(base_url: str) -> list[dict]:
             cmd(page, cmd="tf", tf="1m")
             page.wait_for_timeout(1500)
             wait_ready(page, timeout=20000)
+            cmd(page, cmd="goRt")
+            page.wait_for_timeout(800)
             s0 = snap(page)
             n0 = s0.get("n") or 0
             sec = tf_sec(s0)
@@ -584,23 +605,50 @@ def run(base_url: str) -> list[dict]:
                     cmd(page, cmd="start", ts=REPLAY_0500)
                     wait_replay(page, at_ts=REPLAY_0500)
                 page.wait_for_timeout(800)
+                s_1m = snap(page)
+                bs_1m = s_1m.get("barSpacing")
+                vr_1m = s_1m.get("vr") or {}
+                try:
+                    w_1m = float(vr_1m.get("to")) - float(vr_1m.get("from"))
+                    vis_bars = max(8.0, w_1m / 60.0)
+                except (TypeError, ValueError):
+                    vis_bars = 80.0
+                spacing_ok = True
                 if tfv != "1m":
                     cmd(page, cmd="tf", tf=tfv)
                     t_tf = time.time()
-                    layout_w = 80 * TF_SEC.get(tfv, 60)
-                    while time.time() - t_tf < 20:
+                    sec_tf = TF_SEC.get(tfv, 60)
+                    want_w = vis_bars * sec_tf
+                    while time.time() - t_tf < 25:
                         st = snap(page)
-                        vr = st.get("vr") or {}
-                        laid_out = False
+                        last = st.get("lastTime")
+                        bucket = st.get("lastTfBucket")
+                        spaced = True
+                        if bs_1m is not None and st.get("barSpacing") is not None:
+                            spaced = abs(Number_or(st.get("barSpacing")) - Number_or(bs_1m)) <= 1.0
+                        laid = False
                         try:
-                            w = float(vr.get("to")) - float(vr.get("from"))
-                            laid_out = abs(w - layout_w) <= 16 * TF_SEC.get(tfv, 60)
+                            w = float((st.get("vr") or {}).get("to")) - float((st.get("vr") or {}).get("from"))
+                            laid = abs(w - want_w) <= max(8 * sec_tf, 0.2 * want_w)
                         except (TypeError, ValueError):
-                            laid_out = False
-                        if st.get("tf") == tfv and (st.get("n") or 0) > 10 and laid_out:
+                            laid = False
+                        aligned = (
+                            last is not None
+                            and bucket is not None
+                            and int(last) == int(bucket)
+                            and int(last) % sec_tf == 0
+                        )
+                        busy = bool(st.get("tfBusy"))
+                        if st.get("tf") == tfv and (st.get("n") or 0) > 10 and spaced and laid and aligned and not busy:
                             break
                         page.wait_for_timeout(250)
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(400)
+                    st_tf = snap(page)
+                    if bs_1m is not None and st_tf.get("barSpacing") is not None:
+                        if abs(Number_or(st_tf.get("barSpacing")) - Number_or(bs_1m)) > 1.0:
+                            spacing_ok = False
+                    if st_tf.get("tf") != tfv:
+                        spacing_ok = False
                 cmd(page, cmd="follow")
                 page.wait_for_timeout(400)
                 cmd(page, cmd="followOff")
@@ -629,6 +677,11 @@ def run(base_url: str) -> list[dict]:
                 sec = TF_SEC.get(tfv, 60)
                 bs0 = prev.get("barSpacing")
                 bs_ok = True
+                bucket_ok = True
+                last_vis = prev.get("lastTime")
+                bucket = prev.get("lastTfBucket")
+                if last_vis is None or bucket is None or int(last_vis) != int(bucket):
+                    bucket_ok = False
                 for _ in range(40):
                     last_before = prev.get("lastTime")
                     gap_before = None
@@ -655,8 +708,17 @@ def run(base_url: str) -> list[dict]:
                             bs_ok = False
                     prev = cur
                     pvr = cvr
-                on_ok = max_shift <= 1.01 and (not hold_fail) and (not lock_fail)
-                return off_ok, on_ok, a0, a1, max_shift, hold_fail, lock_fail, bs_ok
+                    if cur.get("lastTime") is not None and cur.get("lastTfBucket") is not None:
+                        if int(cur.get("lastTime")) != int(cur.get("lastTfBucket")):
+                            bucket_ok = False
+                on_ok = (
+                    max_shift <= 1.01
+                    and (not hold_fail)
+                    and (not lock_fail)
+                    and spacing_ok
+                    and bucket_ok
+                )
+                return off_ok, on_ok, a0, a1, max_shift, hold_fail, lock_fail, bs_ok, spacing_ok, bucket_ok
 
             r1 = run_follow_off_on("1m")
             r5 = run_follow_off_on("5m")
@@ -665,8 +727,10 @@ def run(base_url: str) -> list[dict]:
             rec(
                 "12 Replay step view Follow OFF/ON 1m-5m-15m",
                 ok,
-                "1m off=%s on=%s a0=%s a1=%s shift=%.3f hold/lock=%s/%s 5m off=%s on=%s a0=%s a1=%s 15m off=%s on=%s a0=%s a1=%s" % (
-                    r1[0], r1[1], r1[2], r1[3], r1[4], r1[5], r1[6], r5[0], r5[1], r5[2], r5[3], r15[0], r15[1], r15[2], r15[3],
+                "1m off=%s on=%s sp/bk=%s/%s a0=%s a1=%s shift=%.3f hold/lock=%s/%s 5m off=%s on=%s sp/bk=%s/%s a0=%s a1=%s 15m off=%s on=%s sp/bk=%s/%s a0=%s a1=%s" % (
+                    r1[0], r1[1], r1[8], r1[9], r1[2], r1[3], r1[4], r1[5], r1[6],
+                    r5[0], r5[1], r5[8], r5[9], r5[2], r5[3],
+                    r15[0], r15[1], r15[8], r15[9], r15[2], r15[3],
                 ),
             )
         except Exception as e:
@@ -961,8 +1025,171 @@ def run(base_url: str) -> list[dict]:
         except Exception as e:
             rec("16 VWAP session warmup vs backtest", False, str(e))
 
+        def wait_tf(page, tfv, timeout=25):
+            t0 = time.time()
+            last = None
+            need = 40 if tfv in ("1h", "4h") else 100
+            while time.time() - t0 < timeout:
+                last = snap(page)
+                if last.get("tf") == tfv and (last.get("n") or 0) > need and not last.get("tfBusy"):
+                    return last
+                page.wait_for_timeout(150)
+            return last
+
+        # 17. LIVE drag stays, >> then jump-live
+        try:
+            parsed = urlparse(base_url)
+            origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+            cmd(page, cmd="live")
+            page.wait_for_timeout(1500)
+            cmd(page, cmd="tf", tf="1m")
+            page.wait_for_timeout(800)
+            wait_ready(page, timeout=20000)
+            cmd(page, cmd="shift", delta=-50)
+            page.wait_for_timeout(500)
+            s0 = snap(page)
+            vr0 = dict(s0.get("vr") or {})
+            px = float(s0.get("lastClose") or 100000)
+            tcur = int(s0.get("lastTime") or 0)
+            t_end = time.time() + 10
+            i = 0
+            while time.time() < t_end:
+                i += 1
+                page.evaluate(
+                    "([p, t]) => window.__caTick && window.__caTick(p, t, {channel:'mock', latency_ms:0})",
+                    [px + i, tcur + 5],
+                )
+                page.wait_for_timeout(900)
+            s1 = snap(page)
+            vr1 = dict(s1.get("vr") or {})
+            same = abs(float(vr0.get("from") or 0) - float(vr1.get("from") or 0)) <= 5
+            same = same and abs(float(vr0.get("to") or 0) - float(vr1.get("to") or 0)) <= 5
+            go = bool(s1.get("goRt") or s1.get("historyMode"))
+            cmd(page, cmd="goRt")
+            page.wait_for_timeout(700)
+            s2 = snap(page)
+            last = float(s2.get("lastTime") or 0)
+            to = float((s2.get("vr") or {}).get("to") or 0)
+            sec = 60.0
+            offset_bars = (to - last) / sec if last else 0
+            back = (not s2.get("historyMode")) and last and to >= last - 2 * sec
+            pad_ok = 3 <= offset_bars <= 12 or back
+            rec(
+                "17 LIVE drag 50 bars history + goRt",
+                same and go and pad_ok,
+                "same=%s goRt=%s hist=%s off=%.2f back=%s vr0=%s vr1=%s" % (
+                    same, s1.get("goRt"), s1.get("historyMode"), offset_bars, back, vr0, vr1,
+                ),
+            )
+        except Exception as e:
+            rec("17 LIVE drag 50 bars history + goRt", False, str(e))
+
+        # 18. TF cycle LIVE then replay
+        try:
+            cmd(page, cmd="live")
+            page.wait_for_timeout(1200)
+            for ind_id in ("ULP", "Supertrend"):
+                cmd(page, cmd="addInd", id=ind_id)
+            cycle = ["1m", "5m", "1h", "4h", "15m", "1m", "4h", "1m"]
+            rows18 = []
+            ok18 = True
+            stale0 = int(snap(page).get("stale") or 0)
+            for tfv in cycle:
+                t0 = time.time()
+                cmd(page, cmd="tf", tf=tfv)
+                st = wait_tf(page, tfv, timeout=20)
+                dt = (time.time() - t0) * 1000.0
+                client_ms = float(st.get("tfMs") or dt)
+                legend = str(st.get("legendTf") or "")
+                n = int(st.get("n") or 0)
+                need = 40 if tfv in ("1h", "4h") else 100
+                step_ok = legend == tfv and n > need and client_ms < 2000
+                if not step_ok:
+                    ok18 = False
+                rows18.append("%s n=%s ms=%.0f legend=%s" % (tfv, n, client_ms, legend))
+            stale1 = int(snap(page).get("stale") or 0)
+            if stale1 > stale0:
+                ok18 = False
+            cmd(page, cmd="live")
+            page.wait_for_timeout(600)
+            cmd(page, cmd="tf", tf="1m")
+            wait_tf(page, "1m", timeout=20)
+            cmd(page, cmd="start", ts=REPLAY_0500)
+            wait_replay(page, at_ts=REPLAY_0500)
+            for tfv in ["1m", "5m", "15m", "1h"]:
+                cmd(page, cmd="tf", tf=tfv)
+                st = wait_tf(page, tfv, timeout=20)
+                sm = st.get("seriesMax") or {}
+                cap = int(st.get("replayBarOpen") or 0)
+                leak = False
+                for _n, mx in (sm.get("items") or {}).items():
+                    if mx is not None and cap and int(mx) > cap:
+                        leak = True
+                if leak or (st.get("n") or 0) < 10:
+                    ok18 = False
+                rows18.append("replay %s n=%s leak=%s" % (tfv, st.get("n"), leak))
+            rec("18 TF cycle LIVE+replay native HTF", ok18, "stale=%s/%s %s" % (stale0, stale1, rows18))
+        except Exception as e:
+            rec("18 TF cycle LIVE+replay native HTF", False, str(e))
+
         cons = no_console_errors(errors)
         rec("console no errors", len(cons) == 0, str(cons[:5]))
+        browser.close()
+    return results
+
+
+def run_live_smoke(base_url: str) -> list[dict]:
+    results = []
+    errors = []
+
+    def rec(name, ok, detail=""):
+        results.append({"scenario": name, "ok": ok, "detail": detail})
+        line = ("PASS" if ok else "FAIL") + " " + name + " " + str(detail)
+        print(line.encode("ascii", "replace").decode("ascii"))
+        if ok:
+            return
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        slug = "".join(ch if ch.isalnum() else "_" for ch in name)[:40]
+        try:
+            page.screenshot(path=str(OUT_DIR / ("fail_%s.png" % slug)), full_page=True)
+        except Exception:
+            pass
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        page.on("pageerror", lambda exc: errors.append({"type": "error", "msg": str(exc)}))
+        page.goto(base_url, wait_until="domcontentloaded")
+        parsed = urlparse(base_url)
+        origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+        try:
+            s = wait_ready(page, timeout=60000)
+            rec("live smoke candles load", (s.get("n") or 0) > 50, "n=%s last=%s" % (s.get("n"), s.get("lastTime")))
+        except Exception as e:
+            rec("live smoke candles load", False, str(e))
+            browser.close()
+            return results
+        try:
+            cmd(page, cmd="live")
+            page.wait_for_timeout(1000)
+            c0 = str(snap(page).get("countdown") or "")
+            t0 = time.time()
+            n0 = int(snap(page).get("tickCount") or 0)
+            while time.time() - t0 < 60:
+                page.wait_for_timeout(2000)
+            s = snap(page)
+            st = http_json("%s/api/ws/status" % origin, timeout=10)
+            n1 = int(s.get("tickCount") or 0)
+            ticks = max(n1 - n0, int(st.get("tick_count") or 0))
+            c1 = str(s.get("countdown") or "")
+            ok_l = ticks >= 10 and c1 != ""
+            rec(
+                "live 60s real feed",
+                ok_l,
+                "ticks=%s cd=%s->%s status=%s" % (ticks, c0, c1, st),
+            )
+        except Exception as e:
+            rec("live 60s real feed", False, str(e))
         browser.close()
     return results
 
@@ -970,7 +1197,7 @@ def run(base_url: str) -> list[dict]:
 if __name__ == "__main__":
     import sys
     url = sys.argv[1] if len(sys.argv) > 1 else BASE
-    rows = run(url)
+    rows = run_live_smoke(url) if "--live" in sys.argv else run(url)
     failed = [r for r in rows if not r["ok"]]
     print("\n--- summary ---")
     for r in rows:

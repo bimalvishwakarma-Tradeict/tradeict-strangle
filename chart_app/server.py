@@ -6,7 +6,6 @@ python chart_app\\server.py
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import json
 import logging
@@ -18,7 +17,6 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import httpx
 from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,7 +28,7 @@ for _p in (str(APP_DIR), str(ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from backtest.download_candles import _fetch_page  # noqa: E402
+from delta_rest import chart_now, fetch_history_candles  # noqa: E402
 from indicators import (  # noqa: E402
     INDICATORS,
     compute_indicator,
@@ -51,6 +49,7 @@ _CANDLE_CACHE: dict[tuple[str, int], list[dict[str, Any]]] = {}
 _OVERLAY_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _IND_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _CACHE_CAP = 48
+_LAST_CANDLE_META: dict[str, Any] = {"pages": 0, "fetch": 0, "ms": 0.0, "tf": ""}
 RES_SEC = {
     "1m": 60,
     "3m": 180,
@@ -174,7 +173,7 @@ async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
         logger.info("tf=%s range=%s..%s pages=0 rows=0", tf, want_start, want_end)
         return []
     t0 = time.perf_counter()
-    now = int(time.time())
+    now = chart_now()
     closed_before = now - res
     by_ts: dict[int, dict[str, Any]] = {}
     pages = 0
@@ -184,52 +183,50 @@ async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
     # Align pages to a fixed grid so replay stepping reuses the same closed-page cache.
     aligned_end = ((want_end // span) + 1) * span
     page_end = aligned_end
-    async with httpx.AsyncClient() as client:
-        while page_end > want_start:
-            page_start = page_end - span
-            pages += 1
-            cache_key = (tf, int(page_start))
-            chunk_closed = page_end <= closed_before
-            rows_chunk: list[dict[str, Any]] = []
-            hit = chunk_closed and cache_key in _CANDLE_CACHE
-            if hit:
-                rows_chunk = _CANDLE_CACHE[cache_key]
-            else:
-                fetched += 1
-                raw = await _fetch_page(
-                    client,
-                    symbol=SYMBOL,
-                    resolution=tf,
-                    start=int(page_start),
-                    end=int(page_end),
-                )
-                for item in raw:
-                    row = _norm_row(item) if isinstance(item, dict) else None
-                    if row is not None:
-                        rows_chunk.append(row)
-                if chunk_closed:
-                    closed_rows = [r for r in rows_chunk if int(r["time"]) < closed_before]
-                    _CANDLE_CACHE[cache_key] = closed_rows
-                    rows_chunk = closed_rows
-            got = 0
-            for row in rows_chunk:
-                ts = int(row["time"])
-                if ts < want_start or ts > want_end:
-                    continue
-                by_ts[ts] = row
-                got += 1
-            if got == 0 and page_end < want_start + span:
-                empty_streak += 1
-            else:
-                empty_streak = 0
-            if empty_streak >= 3:
-                break
-            if page_start <= want_start:
-                break
-            page_end = page_start
-            if not hit:
-                await asyncio.sleep(0.15)
+    while page_end > want_start:
+        page_start = page_end - span
+        pages += 1
+        cache_key = (tf, int(page_start))
+        chunk_closed = page_end <= closed_before
+        rows_chunk: list[dict[str, Any]] = []
+        hit = chunk_closed and cache_key in _CANDLE_CACHE
+        if hit:
+            rows_chunk = _CANDLE_CACHE[cache_key]
+        else:
+            fetched += 1
+            raw = await fetch_history_candles(
+                SYMBOL,
+                tf,
+                int(page_start),
+                int(page_end),
+            )
+            for item in raw:
+                row = _norm_row(item) if isinstance(item, dict) else item
+                if row is not None:
+                    rows_chunk.append(row)
+            if chunk_closed:
+                closed_rows = [r for r in rows_chunk if int(r["time"]) < closed_before]
+                _CANDLE_CACHE[cache_key] = closed_rows
+                rows_chunk = closed_rows
+        got = 0
+        for row in rows_chunk:
+            ts = int(row["time"])
+            if ts < want_start or ts > want_end:
+                continue
+            by_ts[ts] = row
+            got += 1
+        if got == 0 and page_end < want_start + span:
+            empty_streak += 1
+        else:
+            empty_streak = 0
+        if empty_streak >= 3:
+            break
+        if page_start <= want_start:
+            break
+        page_end = page_start
     rows = [by_ts[k] for k in sorted(by_ts)]
+    ms = (time.perf_counter() - t0) * 1000.0
+    _LAST_CANDLE_META.update({"pages": pages, "fetch": fetched, "ms": round(ms, 1), "tf": tf})
     logger.info(
         "tf=%s range=%s..%s pages=%s fetch=%s rows=%s ms=%.1f",
         tf,
@@ -238,20 +235,45 @@ async def _candles(tf: str, start: int, end: int) -> list[dict[str, Any]]:
         pages,
         fetched,
         len(rows),
-        (time.perf_counter() - t0) * 1000.0,
+        ms,
     )
     return rows
 
 
-async def _candles_no_lookahead(tf: str, start: int, to_u: int) -> list[dict[str, Any]]:
-    """HTF bars with no future 1m inside the last bucket. 1m is passed through."""
+async def _candles_replay(tf: str, start: int, to_u: int) -> list[dict[str, Any]]:
+    """Closed native HTF bars + last partial bucket from 1m (no lookahead)."""
     cap = int(to_u)
     want_start = int(start)
-    rows_1m = await _candles("1m", want_start, cap)
-    rows_1m = [b for b in rows_1m if want_start <= int(b["time"]) <= cap]
-    if tf == "1m":
-        return rows_1m
-    return aggregate_1m(rows_1m, tf, cap)
+    if tf == "1m" or RES_SEC.get(tf, 60) <= 60:
+        rows = await _candles("1m", want_start, cap)
+        return [b for b in rows if want_start <= int(b["time"]) <= cap]
+    res = RES_SEC[tf]
+    bucket = (cap // res) * res
+    closed: list[dict[str, Any]] = []
+    if bucket > want_start:
+        native = await _candles(tf, want_start, bucket - 1)
+        closed = [b for b in native if want_start <= int(b["time"]) < bucket]
+    m1 = await _candles("1m", bucket, cap)
+    m1 = [b for b in m1 if bucket <= int(b["time"]) <= cap]
+    partial = aggregate_1m(m1, tf, cap)
+    extra = [p for p in partial if int(p["time"]) >= bucket]
+    logger.info(
+        "replay-htf tf=%s closed=%s partial_1m=%s last_partial=%s",
+        tf,
+        len(closed),
+        len(m1),
+        extra[-1]["time"] if extra else None,
+    )
+    return closed + extra
+
+
+async def _candles_no_lookahead(tf: str, start: int, to_u: int) -> list[dict[str, Any]]:
+    """HTF bars with no future 1m inside the last bucket. Uses native closed + 1m tail."""
+    return await _candles_replay(tf, start, to_u)
+
+
+def _is_live_to(to_u: int) -> bool:
+    return int(to_u) >= chart_now() - 5
 
 
 @app.get("/api/candles")
@@ -260,20 +282,32 @@ async def api_candles(
     end: int | None = None,
     start: int | None = None,
     limit: int = Query(MAX_BARS),
+    replay: bool = Query(False),
 ) -> dict[str, Any]:
     limit = max(50, min(int(limit), 4000))
     res = RES_SEC[tf] if tf in RES_SEC else 60
-    now = int(time.time())
+    now = chart_now()
+    use_replay = bool(replay)
     if start is not None:
         start_ts = int(start)
-        end_ts = min(start_ts + limit * res, now)
-        rows = await _candles(tf, start_ts, end_ts)
+        end_ts = int(end) if end is not None else min(start_ts + limit * res, now)
+        if not replay:
+            end_ts = min(end_ts, now)
+        if replay or not _is_live_to(end_ts):
+            use_replay = True
+            rows = await _candles_replay(tf, start_ts, end_ts)
+        else:
+            rows = await _candles(tf, start_ts, end_ts)
         if len(rows) > limit:
             rows = rows[:limit]
     else:
         end_ts = int(end) if end is not None else now
         start_ts = end_ts - limit * res
-        rows = await _candles(tf, start_ts, end_ts)
+        if replay or not _is_live_to(end_ts):
+            use_replay = True
+            rows = await _candles_replay(tf, start_ts, end_ts)
+        else:
+            rows = await _candles(tf, start_ts, end_ts)
         if len(rows) > limit:
             rows = rows[-limit:]
     first = int(rows[0]["time"]) if rows else None
@@ -287,6 +321,10 @@ async def api_candles(
         "first": first,
         "last": last,
         "reached_now": reached_now,
+        "replay": use_replay,
+        "pages": _LAST_CANDLE_META.get("pages"),
+        "server_ms": _LAST_CANDLE_META.get("ms"),
+        "server_now": now,
     }
 
 
@@ -321,7 +359,7 @@ async def api_overlay(
             extra = raw_p
     except json.JSONDecodeError:
         extra = {}
-    now = int(time.time())
+    now = chart_now()
     to_u = int(to_ts) if to_ts is not None else now
     hrs = float(extra.get("hours", hours))
     from_u = int(from_ts) if from_ts is not None else to_u - int(hrs * 3600)
@@ -335,7 +373,7 @@ async def api_overlay(
         out_hit["cache_hit"] = True
         return out_hit
     sess0 = (int(from_u) // 86400) * 86400
-    warmup = 10 * 86400
+    warmup = 2 * 86400
     fetch_from = min(sess0, int(from_u) - warmup)
     bars = await _candles("1m", fetch_from, to_u)
     bars = [b for b in bars if fetch_from <= int(b["time"]) <= to_u]
@@ -399,7 +437,7 @@ async def api_indicator(
         raise HTTPException(400, f"bad tf {tf}")
     t0 = time.perf_counter()
     res = RES_SEC[tf]
-    now = int(time.time())
+    now = chart_now()
     to_u = int(to_ts) if to_ts is not None else now
     from_u = int(from_ts) if from_ts is not None else to_u - 24 * 3600
     try:
@@ -418,8 +456,12 @@ async def api_indicator(
         out_hit["server_ms"] = round(ms, 2)
         out_hit["cache_hit"] = True
         return out_hit
-    warmup = max(500, 3000) * res
-    bars = await _candles_no_lookahead(tf, from_u - warmup, to_u)
+    warmup = 500 * res
+    fetch_from = from_u - warmup
+    if _is_live_to(to_u) and not (to_ts is not None and int(to_ts) < chart_now() - 5):
+        bars = await _candles(tf, fetch_from, to_u)
+    else:
+        bars = await _candles_replay(tf, fetch_from, to_u)
     data = compute_indicator(ind_id, bars, raw_p)
     data = _slice_payload_to(data, to_u)
     out = {

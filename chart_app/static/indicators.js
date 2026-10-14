@@ -776,6 +776,7 @@
       const q = new URLSearchParams({ tf: String(tf), params: JSON.stringify(it.params || {}) });
       if (range.from != null) q.set("from", String(range.from));
       if (range.to != null) q.set("to", String(range.to));
+      if (opts.isReplay && opts.isReplay()) q.set("replay", "1");
       it._gen = (it._gen || 0) + 1;
       const my = it._gen;
       if (it._abort) {

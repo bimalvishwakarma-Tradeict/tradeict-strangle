@@ -97,6 +97,13 @@
       width: 28px; height: 22px; padding: 0; font-size: 12px;
     }
     #btnGoRt.show { display: block; }
+    #tfBusy {
+      display: none; position: absolute; left: 50%; top: 48px; transform: translateX(-50%);
+      z-index: 14; width: 18px; height: 18px; border: 2px solid #58a6ff; border-top-color: transparent;
+      border-radius: 50%; animation: caSpin 0.7s linear infinite;
+    }
+    #tfBusy.show { display: block; }
+    @keyframes caSpin { to { transform: translateX(-50%) rotate(360deg); } }
     #replayBar {
       display: none; position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
       z-index: 16; gap: 6px; align-items: center; padding: 6px 10px;
@@ -265,6 +272,7 @@
           </div>
         </div>
         <div id="barCountdown" hidden>00:00</div>
+        <div id="tfBusy" hidden></div>
         <button type="button" id="btnGoRt" title="Scroll to realtime">&gt;&gt;</button>
         <div id="replayBar">
           <button id="btnSelectBar" type="button">Select bar</button>
