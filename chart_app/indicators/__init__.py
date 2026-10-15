@@ -64,6 +64,7 @@ def compute_indicator(
 
 
 def load_indicators() -> None:
+    from indicators import adx  # noqa: F401
     from indicators import bollinger  # noqa: F401
     from indicators import ema  # noqa: F401
     from indicators import rsi  # noqa: F401

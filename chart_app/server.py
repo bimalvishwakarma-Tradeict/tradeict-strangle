@@ -67,6 +67,65 @@ RES_SEC = {
 logger = logging.getLogger("chart_app")
 
 
+def overlay_warmup_sec(
+    strategy: str, extra: dict[str, Any], signal_tf_q: str = "15m",
+) -> int:
+    """Base overlay warmup is 2d. S022F needs 500+60 Pine ADX bars on signal_tf."""
+    warmup = 2 * 86400
+    if str(strategy) == "S022F":
+        sig = str(extra.get("signal_tf") or signal_tf_q or "15m")
+        sec = int(RES_SEC.get(sig, 900))
+        warmup = max(2 * 86400, (500 + 60) * sec)
+    return int(warmup)
+
+
+def overlay_merged_params(
+    extra: dict[str, Any],
+    *,
+    tf: str,
+    line_tf: str,
+    variant: str,
+    signal_tf: str,
+    rsi_len: int,
+    ob: float,
+    os: float,
+    exp_obh: float,
+    exp_obl: float,
+    show_obh: bool,
+    show_obl: bool,
+    show_levels: bool,
+    show_signals: bool,
+    hrs: float,
+    from_u: int,
+    to_u: int,
+    capped_from: int,
+    max_days: int,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {
+        "line_tf": extra.get("line_tf", line_tf),
+        "hours": hrs,
+        "from": from_u,
+        "to": to_u,
+        "capped_from": capped_from,
+        "max_days": max_days,
+        "chart_tf": tf,
+        "variant": extra.get("variant", variant),
+        "signal_tf": extra.get("signal_tf", signal_tf),
+        "rsi_len": extra.get("rsi_len", rsi_len),
+        "ob": extra.get("ob", ob),
+        "os": extra.get("os", os),
+        "exp_obh": extra.get("exp_obh", exp_obh),
+        "exp_obl": extra.get("exp_obl", exp_obl),
+        "show_obh": extra.get("show_obh", show_obh),
+        "show_obl": extra.get("show_obl", show_obl),
+        "show_levels": extra.get("show_levels", show_levels),
+        "show_signals": extra.get("show_signals", show_signals),
+    }
+    for k, v in extra.items():
+        merged.setdefault(k, v)
+    return merged
+
+
 def _build_id() -> str:
     try:
         out = subprocess.check_output(
@@ -453,7 +512,7 @@ async def api_overlay(
     except (TypeError, ValueError):
         max_days = 7
     max_days = max(1, min(30, max_days))
-    warmup = 2 * 86400
+    warmup = overlay_warmup_sec(strategy, extra, signal_tf)
     live_to = _is_live_to(to_u)
     fetch_to = int(now) if live_to else int(to_u)
     cap_start = int(fetch_to) - max_days * 86400 - warmup
@@ -483,26 +542,27 @@ async def api_overlay(
         bars = [b for b in bars if fetch_from <= int(b["time"]) <= cap_bar]
         if live_to and cap_start < fetch_from:
             asyncio.create_task(_candles("1m", cap_start, fetch_to))
-        merged = {
-            "line_tf": extra.get("line_tf", line_tf),
-            "hours": hrs,
-            "from": from_u,
-            "to": to_u,
-            "capped_from": capped_from,
-            "max_days": max_days,
-            "chart_tf": tf,
-            "variant": extra.get("variant", variant),
-            "signal_tf": extra.get("signal_tf", signal_tf),
-            "rsi_len": extra.get("rsi_len", rsi_len),
-            "ob": extra.get("ob", ob),
-            "os": extra.get("os", os),
-            "exp_obh": extra.get("exp_obh", exp_obh),
-            "exp_obl": extra.get("exp_obl", exp_obl),
-            "show_obh": extra.get("show_obh", show_obh),
-            "show_obl": extra.get("show_obl", show_obl),
-            "show_levels": extra.get("show_levels", show_levels),
-            "show_signals": extra.get("show_signals", show_signals),
-        }
+        merged = overlay_merged_params(
+            extra,
+            tf=tf,
+            line_tf=line_tf,
+            variant=variant,
+            signal_tf=signal_tf,
+            rsi_len=rsi_len,
+            ob=ob,
+            os=os,
+            exp_obh=exp_obh,
+            exp_obl=exp_obl,
+            show_obh=show_obh,
+            show_obl=show_obl,
+            show_levels=show_levels,
+            show_signals=show_signals,
+            hrs=hrs,
+            from_u=from_u,
+            to_u=to_u,
+            capped_from=capped_from,
+            max_days=max_days,
+        )
         data, htf = await asyncio.to_thread(
             _overlay_cpu, strategy, bars, merged, tf, to_u, capped_from,
         )
