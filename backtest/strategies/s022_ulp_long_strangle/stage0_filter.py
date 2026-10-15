@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""S022-F Stage0F: ULP fresh + RSI-div (dir-matched) + Pine ADX rising vs VOLCTRL/C2.
+"""S022-F Stage0F-2: ULP + RSI-div + Pine ADX vs VOLCTRL/C2, RSI len/level grid.
 
-Indicators computed once on the full TF series (no month reseed). Causal: bars <= j.
-OOS months excluded from event output. Spot only.
+Default CLI (rsi-len=14, levels=70/30, all TFs) matches 89a69c8 event logic.
+Expiry 40/60 fixed. ADX Pine v4, k=5. Spot only.
 
 python backtest/strategies/s022_ulp_long_strangle/stage0_filter.py \\
   --from 2024-07 --to 2026-09 --exclude 2025-08,2025-09
@@ -15,7 +15,6 @@ import csv
 import math
 import sys
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,7 +26,12 @@ _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backtest.strategies.s020_vwap_touch.rsi_div import detect_rsi_div
+from backtest.strategies.s020_vwap_touch.rsi_div import (
+    RSI_EXP_OBH,
+    RSI_EXP_OBL,
+    detect_from_rsi,
+    rsi_wilder,
+)
 from backtest.strategies.s022_ulp_long_strangle.adx_pine import adx_pine_v4, adx_rising
 from backtest.strategies.s022_ulp_long_strangle.signals import iter_ulp_signals
 from backtest.strategies.s022_ulp_long_strangle.stage0_move_edge import (
@@ -54,6 +58,8 @@ RUNS_DIR = PKG_DIR / "runs"
 TFS = ("5m", "15m", "30m")
 MODES = ("wick", "full")
 N_WINS = (3, 6, 12)
+RSI_LENS_ALL = (2, 3, 5, 7, 10, 12, 14)
+LEVELS_ALL = ((70.0, 30.0), (75.0, 25.0), (80.0, 20.0), (85.0, 15.0))
 H_SEC = {"1h": 3600, "2h": 7200, "4h": 14400}
 ADX_LEN = 14
 ADX_WARMUP = 500
@@ -63,6 +69,10 @@ GATE_RATIO = 1.10
 GATE_T = 2.0
 GATE_PCT = 60.0
 GATE_N_JUNJUL = 30
+EXP_OBH = float(RSI_EXP_OBH)
+EXP_OBL = float(RSI_EXP_OBL)
+DEFAULT_RSI_LEN = 14
+DEFAULT_LEVEL = (70.0, 30.0)
 
 
 def ist_str(ts: int) -> str:
@@ -77,6 +87,46 @@ def parse_ym(s: str) -> int:
         y, m = p.split("-", 1)
         return int(y) * 100 + int(m)
     return int(p)
+
+
+def parse_tf_list(s: str) -> list[str]:
+    out: list[str] = []
+    for part in str(s).split(","):
+        tf = part.strip()
+        if not tf:
+            continue
+        if tf not in TFS:
+            raise ValueError(f"unknown tf {tf!r}; want {TFS}")
+        if tf not in out:
+            out.append(tf)
+    return out or list(TFS)
+
+
+def parse_rsi_lens(s: str) -> list[int]:
+    out: list[int] = []
+    for part in str(s).split(","):
+        p = part.strip()
+        if not p:
+            continue
+        n = int(p)
+        if n < 2:
+            raise ValueError(f"rsi-len {n} < 2")
+        if n not in out:
+            out.append(n)
+    return out or [DEFAULT_RSI_LEN]
+
+
+def parse_levels(s: str) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    for part in str(s).split(","):
+        p = part.strip()
+        if not p:
+            continue
+        a, b = p.split("/", 1)
+        pair = (float(a), float(b))
+        if pair not in out:
+            out.append(pair)
+    return out or [DEFAULT_LEVEL]
 
 
 def month_list(ym_lo: int, ym_hi: int, exclude: set[int]) -> list[int]:
@@ -207,12 +257,13 @@ def match_arm_f(
         i = close_to_i.get(int(s["signal_ts"]))
         if i is None:
             continue
-        j = first_qualifying_j(
-            i, n_win, str(s.get("zone_kind") or ""), rsi_short, rsi_long, adx,
-        )
+        kind = str(s.get("zone_kind") or "")
+        j = first_qualifying_j(i, n_win, kind, rsi_short, rsi_long, adx)
         if j is None:
             continue
         used_zones.add(zk)
+        try_high = kind in ("high", "both")
+        match_side = "short" if (try_high and bool(rsi_short[j])) else "long"
         sig_t = int(tts[j]) + int(tf_sec)
         touch_t = int(s["signal_ts"])
         entry_t = sig_t + ENTRY_LAG
@@ -222,7 +273,8 @@ def match_arm_f(
                 "tf": str(s.get("tf") or ""),
                 "mode": str(s.get("mode") or ""),
                 "N": int(n_win),
-                "zone_kind": str(s.get("zone_kind") or ""),
+                "zone_kind": kind,
+                "match_side": match_side,
                 "touch_time": touch_t,
                 "signal_time": sig_t,
                 "entry_time": entry_t,
@@ -445,11 +497,6 @@ def _mean(xs: list[float]) -> float:
     return float(np.mean(a)) if a.size else float("nan")
 
 
-def _median(xs: list[float]) -> float:
-    a = _finite(xs)
-    return float(np.median(a)) if a.size else float("nan")
-
-
 def welch_t(a: list[float], b: list[float]) -> float:
     aa = _finite(a)
     bb = _finite(b)
@@ -477,6 +524,84 @@ def _fmt(x: Any) -> str:
             return "nan"
         return f"{x:.4f}"
     return str(x)
+
+
+def cell_key(c: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(c["tf"]),
+        str(c["mode"]),
+        int(c["N"]),
+        int(c["rsi_len"]),
+        float(c["ob"]),
+        float(c["os"]),
+    )
+
+
+def neighbour_keys(
+    tf: str,
+    mode: str,
+    n_win: int,
+    rsi_len: int,
+    ob: float,
+    os: float,
+    lens: list[int],
+    levels: list[tuple[float, float]],
+) -> list[tuple[Any, ...]]:
+    """Axis neighbours: rsi_len ±1 step, level ±1 step, same tf/mode/N."""
+    out: list[tuple[Any, ...]] = []
+    try:
+        i_len = lens.index(int(rsi_len))
+    except ValueError:
+        return out
+    try:
+        i_lv = levels.index((float(ob), float(os)))
+    except ValueError:
+        return out
+    if i_len > 0:
+        out.append((tf, mode, int(n_win), int(lens[i_len - 1]), float(ob), float(os)))
+    if i_len < len(lens) - 1:
+        out.append((tf, mode, int(n_win), int(lens[i_len + 1]), float(ob), float(os)))
+    if i_lv > 0:
+        o2, s2 = levels[i_lv - 1]
+        out.append((tf, mode, int(n_win), int(rsi_len), float(o2), float(s2)))
+    if i_lv < len(levels) - 1:
+        o2, s2 = levels[i_lv + 1]
+        out.append((tf, mode, int(n_win), int(rsi_len), float(o2), float(s2)))
+    return out
+
+
+def mark_robust(
+    cells: list[dict[str, Any]],
+    lens: list[int],
+    levels: list[tuple[float, float]],
+) -> None:
+    by: dict[tuple[Any, ...], dict[str, Any]] = {cell_key(c): c for c in cells}
+    for c in cells:
+        neigh = neighbour_keys(
+            str(c["tf"]), str(c["mode"]), int(c["N"]),
+            int(c["rsi_len"]), float(c["ob"]), float(c["os"]),
+            lens, levels,
+        )
+        n_pass = 0
+        for k in neigh:
+            nb = by.get(k)
+            if nb is not None and str(nb.get("gate") or "").startswith("GATE PASS"):
+                n_pass += 1
+        c["n_neighbours"] = len(neigh)
+        c["n_neighbours_pass"] = n_pass
+        gate_ok = str(c.get("gate") or "").startswith("GATE PASS")
+        c["robust"] = "ROBUST PASS" if (gate_ok and n_pass >= 2) else "ROBUST FAIL"
+
+
+def f_split_kind(e: dict[str, Any]) -> str:
+    k = str(e.get("zone_kind") or "")
+    if k == "high":
+        return "high"
+    if k == "low":
+        return "low"
+    if k == "both":
+        return "high" if str(e.get("match_side") or "") == "short" else "low"
+    return k
 
 
 def gate_line(cell: dict[str, Any]) -> str:
@@ -507,30 +632,22 @@ def gate_line(cell: dict[str, Any]) -> str:
     return "GATE FAIL: " + "; ".join(fails)
 
 
-def summarize_cell(
-    tf: str,
-    mode: str,
-    n_win: int,
+def _arm_ratios(
+    cell: dict[str, Any],
+    f_rows: list[dict[str, Any]],
+    v_rows: list[dict[str, Any]],
+    u_rows: list[dict[str, Any]],
+    r_rows: list[dict[str, Any]],
     months: list[int],
-    by_arm: dict[str, list[dict[str, Any]]],
-) -> dict[str, Any]:
-    f_rows = by_arm.get("F", [])
-    v_rows = by_arm.get("VOLCTRL", [])
-    u_rows = by_arm.get("U", [])
-    r_rows = by_arm.get("R", [])
+) -> None:
     n_by_m: dict[int, int] = {ym: 0 for ym in months}
     for e in f_rows:
         n_by_m[int(e["ym"])] = n_by_m.get(int(e["ym"]), 0) + 1
     counts = [n_by_m[ym] for ym in months] if months else [0]
-    cell: dict[str, Any] = {
-        "tf": tf,
-        "mode": mode,
-        "N": n_win,
-        "n_F_total": len(f_rows),
-        "n_F_2025-06": n_by_m.get(202506, 0),
-        "n_F_2025-07": n_by_m.get(202507, 0),
-        "median_n_F_per_month": float(np.median(np.asarray(counts, dtype=np.float64))),
-    }
+    cell["n_F_total"] = len(f_rows)
+    cell["n_F_2025-06"] = n_by_m.get(202506, 0)
+    cell["n_F_2025-07"] = n_by_m.get(202507, 0)
+    cell["median_n_F_per_month"] = float(np.median(np.asarray(counts, dtype=np.float64)))
     for met, col in (("mfe", "mfe"), ("absmove", "absmove")):
         for hk in ("1h", "2h", "4h"):
             key = f"{col}_{hk}"
@@ -559,8 +676,68 @@ def summarize_cell(
             cell[f"pct_months_gt1_{met}_{hk}"] = (
                 100.0 * n_ok / n_m if n_m else float("nan")
             )
+
+
+def _side_split(
+    cell: dict[str, Any],
+    f_rows: list[dict[str, Any]],
+    v_rows: list[dict[str, Any]],
+) -> None:
+    for side in ("high", "low"):
+        idx = [i for i, e in enumerate(f_rows) if f_split_kind(e) == side]
+        fv = [f_rows[i] for i in idx]
+        vv = [v_rows[i] for i in idx if i < len(v_rows)]
+        njj = sum(1 for e in fv if int(e["ym"]) in (202506, 202507))
+        cell[f"n_{side}"] = len(fv)
+        cell[f"n_{side}_2025-06+07"] = njj
+        for hk in ("2h", "4h"):
+            fa = [float(e.get(f"mfe_{hk}", float("nan"))) for e in fv]
+            va = [float(e.get(f"mfe_{hk}", float("nan"))) for e in vv]
+            cell[f"F_VOLCTRL_mfe_{hk}_{side}"] = ratio_means(fa, va)
+            cell[f"t_mfe_{hk}_{side}"] = welch_t(fa, va)
+
+
+def summarize_cell(
+    tf: str,
+    mode: str,
+    n_win: int,
+    months: list[int],
+    by_arm: dict[str, list[dict[str, Any]]],
+    rsi_len: int = DEFAULT_RSI_LEN,
+    ob: float = 70.0,
+    os: float = 30.0,
+) -> dict[str, Any]:
+    f_rows = by_arm.get("F", [])
+    v_rows = by_arm.get("VOLCTRL", [])
+    u_rows = by_arm.get("U", [])
+    r_rows = by_arm.get("R", [])
+    c2_rows = by_arm.get("C2", [])
+    cell: dict[str, Any] = {
+        "tf": tf,
+        "mode": mode,
+        "N": n_win,
+        "rsi_len": int(rsi_len),
+        "ob": float(ob),
+        "os": float(os),
+    }
+    _arm_ratios(cell, f_rows, v_rows, u_rows, r_rows, months)
+    _side_split(cell, f_rows, v_rows)
     cell["gate"] = gate_line(cell)
+    null: dict[str, Any] = {
+        "tf": tf, "mode": mode, "N": n_win,
+        "rsi_len": int(rsi_len), "ob": float(ob), "os": float(os),
+    }
+    _arm_ratios(null, c2_rows, v_rows, [], [], months)
+    ng = gate_line(null)
+    cell["null_gate"] = "NULL_PASS" if ng == "GATE PASS" else ("NULL_FAIL: " + ng[len("GATE FAIL: "):] if ng.startswith("GATE FAIL: ") else "NULL_FAIL")
     return cell
+
+
+def _stamp_rsi(rows: list[dict[str, Any]], rsi_len: int, ob: float, os: float) -> None:
+    for e in rows:
+        e["rsi_len"] = int(rsi_len)
+        e["ob"] = float(ob)
+        e["os"] = float(os)
 
 
 def _row_csv(e: dict[str, Any]) -> dict[str, Any]:
@@ -569,6 +746,9 @@ def _row_csv(e: dict[str, Any]) -> dict[str, Any]:
         "tf": e.get("tf") or "",
         "mode": e.get("mode") or "",
         "N": e.get("N") if e.get("N") != "" else "",
+        "rsi_len": e.get("rsi_len", ""),
+        "ob": e.get("ob", ""),
+        "os": e.get("os", ""),
         "zone_kind": e.get("zone_kind") or "",
         "touch_time_ist": ist_str(int(e["touch_time"])) if e.get("touch_time") else "",
         "signal_time_ist": ist_str(int(e["signal_time"])) if e.get("signal_time") else "",
@@ -583,6 +763,20 @@ def _row_csv(e: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _write_events(path: Path, rows: list[dict[str, Any]]) -> None:
+    ev_cols = [
+        "arm", "tf", "mode", "N", "rsi_len", "ob", "os", "zone_kind",
+        "touch_time_ist", "signal_time_ist", "entry_time_ist", "adx_j",
+        "mfe_1h", "mfe_2h", "mfe_4h",
+        "absmove_1h", "absmove_2h", "absmove_4h",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=ev_cols, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow(_row_csv(r))
+
+
 def main() -> None:
     t_run = time.perf_counter()
     ap = argparse.ArgumentParser()
@@ -590,6 +784,9 @@ def main() -> None:
     ap.add_argument("--from", dest="ym_from", default="2024-07")
     ap.add_argument("--to", dest="ym_to", default="2026-09")
     ap.add_argument("--exclude", default="2025-08,2025-09")
+    ap.add_argument("--rsi-len", dest="rsi_len", default=str(DEFAULT_RSI_LEN))
+    ap.add_argument("--levels", default="70/30")
+    ap.add_argument("--tf", dest="tf_list", default="5m,15m,30m")
     args = ap.parse_args()
 
     from backtest.harness.run_archive import RunArchive
@@ -601,21 +798,30 @@ def main() -> None:
     ym_hi = parse_ym(str(args.ym_to))
     exclude = {parse_ym(x) for x in str(args.exclude).split(",") if x.strip()}
     months = month_list(ym_lo, ym_hi, exclude)
+    tfs = parse_tf_list(str(args.tf_list))
+    rsi_lens = parse_rsi_lens(str(args.rsi_len))
+    levels = parse_levels(str(args.levels))
+    write_all_events = len(rsi_lens) * len(levels) == 1
 
     csv_path = str(args.csv or s018.SPOT_CSV)
     args.csv = csv_path
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    folder = _unique_folder(RUNS_DIR, stamp, "stage0f")
+    folder = _unique_folder(RUNS_DIR, stamp, "stage0f2")
     archive = RunArchive(
         "s022",
-        "stage0f",
+        "stage0f2",
         args,
         month=f"{args.ym_from}_{args.ym_to}",
-        prereg_note="Stage0F ULP+RSI-div+ADX vs VOLCTRL/C2; OOS 2025-08/09 excluded",
+        prereg_note="Stage0F-2 ULP+RSI-div grid + ADX vs VOLCTRL/C2; OOS 2025-08/09 excluded",
         folder=folder,
     )
     print(f"archive folder={archive.folder}", flush=True)
+    print(
+        f"grid tf={tfs} rsi_len={rsi_lens} levels={levels} "
+        f"n_cells={len(tfs)*len(MODES)*len(N_WINS)*len(rsi_lens)*len(levels)}",
+        flush=True,
+    )
 
     spot = s018.load_spot_1m(csv_path)
     ts, o, h, l, c, vol = s020.bars_1m_vol(spot)
@@ -627,30 +833,22 @@ def main() -> None:
     bins, _edges = assign_quantile_bins(pre, N_VOL_BINS)
     hod_g = ist_hod_arr(grid)
     ym_g = ist_ym_arr(grid)
-    cell = np.full(grid.shape, -1, dtype=np.int32)
+    vol_cell = np.full(grid.shape, -1, dtype=np.int32)
     okb = bins >= 0
-    cell[okb] = bins[okb].astype(np.int32) * 24 + hod_g[okb].astype(np.int32)
+    vol_cell[okb] = bins[okb].astype(np.int32) * 24 + hod_g[okb].astype(np.int32)
     rng = np.random.default_rng(SEED)
 
     event_rows: list[dict[str, Any]] = []
     cells: list[dict[str, Any]] = []
 
-    for tf in TFS:
+    for tf in tfs:
         tf_sec = int(d.LINE_TF[tf])
         tts, to_, th, tl, tc, _tv = d.resample_tf(ts, o, h, l, c, vol, tf_sec)
         bars = _bars_from_ohlc(tts, to_, th, tl, tc)
-        print(f"{tf}: bars={len(bars)} indicators once", flush=True)
-        rsi_sigs, _zones = detect_rsi_div(tts, to_, th, tl, tc, tf_sec)
-        rsi_short, rsi_long = rsi_masks(rsi_sigs, tts, tf_sec)
+        print(f"{tf}: bars={len(bars)} ULP+ADX once", flush=True)
         _dip, _dim, adx = adx_pine_v4(th, tl, tc, ADX_LEN, warmup=ADX_WARMUP)
-        r_all = keep_in_range(arm_r_events(rsi_short, rsi_long, adx, tts, tf_sec, tf), ym_lo, ym_hi, exclude)
-        for e in r_all:
-            px = _entry_px(entry_close, int(e["entry_time"]))
-            if not math.isfinite(px):
-                continue
-            attach_metrics(e, ts, h, l, c, px)
-        print(f"  R events={len(r_all)} rsi_sigs={len(rsi_sigs)}", flush=True)
-
+        ulp_by_mode: dict[str, list[dict[str, Any]]] = {}
+        u_by_mode: dict[str, list[dict[str, Any]]] = {}
         for mode in MODES:
             raw = [s for s in iter_ulp_signals(bars, mode, tf) if s["rule"] == "fresh"]
             u_all = keep_in_range(arm_u_events(raw), ym_lo, ym_hi, exclude)
@@ -659,82 +857,152 @@ def main() -> None:
                 if not math.isfinite(px):
                     continue
                 attach_metrics(e, ts, h, l, c, px)
+            ulp_by_mode[mode] = raw
+            u_by_mode[mode] = u_all
             print(f"  {mode} ULP fresh={len(raw)} U={len(u_all)}", flush=True)
 
-            for n_win in N_WINS:
-                f_raw = match_arm_f(raw, rsi_short, rsi_long, adx, tts, tf_sec, n_win)
-                f_ev = keep_in_range(f_raw, ym_lo, ym_hi, exclude)
-                for e in f_ev:
-                    e["tf"] = tf
-                    e["mode"] = mode
-                    e["N"] = int(n_win)
+        for rsi_len in rsi_lens:
+            rsi_arr = rsi_wilder(tc, int(rsi_len))
+            print(f"  rsi_len={rsi_len} computed", flush=True)
+            for ob, os in levels:
+                rsi_sigs, _z = detect_from_rsi(
+                    tts, to_, th, tl, tc, rsi_arr, tf_sec,
+                    float(ob), float(os), EXP_OBH, EXP_OBL,
+                )
+                rsi_short, rsi_long = rsi_masks(rsi_sigs, tts, tf_sec)
+                r_all = keep_in_range(
+                    arm_r_events(rsi_short, rsi_long, adx, tts, tf_sec, tf),
+                    ym_lo, ym_hi, exclude,
+                )
+                for e in r_all:
                     px = _entry_px(entry_close, int(e["entry_time"]))
                     if not math.isfinite(px):
                         continue
                     attach_metrics(e, ts, h, l, c, px)
-                f_times = np.array([int(e["entry_time"]) for e in f_ev], dtype=np.int64)
-                near = forbidden_mask(grid, f_times, MIN_SEP)
-                v_ev = sample_volctrl(
-                    f_ev, grid, cell, hod_g, ym_g, rng, near,
-                    ym_lo, ym_hi, exclude, tf, mode, n_win,
-                )
-                c2_ev = sample_c2(
-                    f_ev, grid, hod_g, ym_g, rng, near,
-                    ym_lo, ym_hi, exclude, tf, mode, n_win,
-                )
-                for e in v_ev + c2_ev:
-                    px = _entry_px(entry_close, int(e["entry_time"]))
-                    if not math.isfinite(px):
-                        continue
-                    attach_metrics(e, ts, h, l, c, px)
-                by_arm = {
-                    "F": f_ev,
-                    "U": u_all,
-                    "R": r_all,
-                    "VOLCTRL": v_ev,
-                    "C2": c2_ev,
-                }
-                for arm_rows in by_arm.values():
-                    event_rows.extend(arm_rows)
-                cell_s = summarize_cell(tf, mode, n_win, months, by_arm)
-                cells.append(cell_s)
                 print(
-                    f"  {tf} {mode} N={n_win} n_F={cell_s['n_F_total']} {cell_s['gate']}",
+                    f"    {ob:g}/{os:g} rsi_sigs={len(rsi_sigs)} R={len(r_all)}",
                     flush=True,
                 )
+                for mode in MODES:
+                    raw = ulp_by_mode[mode]
+                    u_all = u_by_mode[mode]
+                    for n_win in N_WINS:
+                        f_raw = match_arm_f(
+                            raw, rsi_short, rsi_long, adx, tts, tf_sec, n_win,
+                        )
+                        f_ev = keep_in_range(f_raw, ym_lo, ym_hi, exclude)
+                        for e in f_ev:
+                            e["tf"] = tf
+                            e["mode"] = mode
+                            e["N"] = int(n_win)
+                            px = _entry_px(entry_close, int(e["entry_time"]))
+                            if not math.isfinite(px):
+                                continue
+                            attach_metrics(e, ts, h, l, c, px)
+                        f_times = np.array(
+                            [int(e["entry_time"]) for e in f_ev], dtype=np.int64,
+                        )
+                        near = forbidden_mask(grid, f_times, MIN_SEP)
+                        v_ev = sample_volctrl(
+                            f_ev, grid, vol_cell, hod_g, ym_g, rng, near,
+                            ym_lo, ym_hi, exclude, tf, mode, n_win,
+                        )
+                        c2_ev = sample_c2(
+                            f_ev, grid, hod_g, ym_g, rng, near,
+                            ym_lo, ym_hi, exclude, tf, mode, n_win,
+                        )
+                        for e in v_ev + c2_ev:
+                            px = _entry_px(entry_close, int(e["entry_time"]))
+                            if not math.isfinite(px):
+                                continue
+                            attach_metrics(e, ts, h, l, c, px)
+                        _stamp_rsi(f_ev, rsi_len, ob, os)
+                        _stamp_rsi(u_all, rsi_len, ob, os)
+                        _stamp_rsi(r_all, rsi_len, ob, os)
+                        _stamp_rsi(v_ev, rsi_len, ob, os)
+                        _stamp_rsi(c2_ev, rsi_len, ob, os)
+                        by_arm = {
+                            "F": f_ev,
+                            "U": u_all,
+                            "R": r_all,
+                            "VOLCTRL": v_ev,
+                            "C2": c2_ev,
+                        }
+                        if write_all_events:
+                            for arm_rows in by_arm.values():
+                                event_rows.extend(arm_rows)
+                        else:
+                            event_rows.extend(f_ev)
+                        cell_s = summarize_cell(
+                            tf, mode, n_win, months, by_arm, rsi_len, ob, os,
+                        )
+                        cells.append(cell_s)
+                        print(
+                            f"    {tf} {mode} N={n_win} rsi={rsi_len} "
+                            f"{ob:g}/{os:g} n_F={cell_s['n_F_total']} {cell_s['gate']}",
+                            flush=True,
+                        )
 
-    ev_cols = [
-        "arm", "tf", "mode", "N", "zone_kind",
-        "touch_time_ist", "signal_time_ist", "entry_time_ist", "adx_j",
-        "mfe_1h", "mfe_2h", "mfe_4h",
-        "absmove_1h", "absmove_2h", "absmove_4h",
+    mark_robust(cells, rsi_lens, levels)
+    n_f_pass = sum(1 for r in cells if str(r.get("gate") or "").startswith("GATE PASS"))
+    n_null = sum(1 for r in cells if str(r.get("null_gate") or "").startswith("NULL_PASS"))
+    n_rob = sum(1 for r in cells if r.get("robust") == "ROBUST PASS")
+    robust_keys = {cell_key(r) for r in cells if r.get("robust") == "ROBUST PASS"}
+    robust_events = [
+        e for e in event_rows
+        if e.get("arm") == "F"
+        and (
+            str(e.get("tf")),
+            str(e.get("mode")),
+            int(e.get("N") or 0),
+            int(e.get("rsi_len") or 0),
+            float(e.get("ob") or 0),
+            float(e.get("os") or 0),
+        ) in robust_keys
     ]
-    ev_path = archive.folder / "events.csv"
-    with ev_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=ev_cols, extrasaction="ignore")
-        w.writeheader()
-        for r in event_rows:
-            w.writerow(_row_csv(r))
+
+    if write_all_events:
+        _write_events(archive.folder / "events.csv", event_rows)
+    _write_events(archive.folder / "events_robust.csv", robust_events)
 
     st_cols = list(cells[0].keys()) if cells else ["tf", "mode", "N", "gate"]
-    st_path = archive.folder / "summary.csv"
-    with st_path.open("w", newline="", encoding="utf-8") as f:
+    with (archive.folder / "summary.csv").open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=st_cols, extrasaction="ignore")
         w.writeheader()
         for r in cells:
             w.writerow(r)
 
-    txt = archive.folder / "summary.txt"
     lines: list[str] = [
-        "S022-F stage0F  ULP + RSI-div + Pine ADX rising",
+        "S022-F stage0F-2  ULP + RSI-div grid + Pine ADX rising",
         f"range {args.ym_from}..{args.ym_to}  exclude={sorted(exclude)}",
+        f"tf={tfs} rsi_len={rsi_lens} levels={levels}",
         f"csv={csv_path}",
         f"folder={archive.folder}",
         "",
+        f"total_cells={len(cells)}  F_PASS={n_f_pass}  NULL_PASS={n_null}  ROBUST={n_rob}",
+        "ROBUST cells:",
     ]
     for r in cells:
+        if r.get("robust") != "ROBUST PASS":
+            continue
+        n_is = int(r["n_F_2025-06"]) + int(r["n_F_2025-07"])
         lines.append(
-            f"=== {r['tf']} {r['mode']} N={r['N']} ==="
+            f"  {r['tf']} {r['mode']} N={r['N']} rsi={r['rsi_len']} "
+            f"{r['ob']:g}/{r['os']:g}  "
+            f"F/V mfe2h={_fmt(r['F_VOLCTRL_mfe_2h'])} t2={_fmt(r['t_mfe_2h'])}  "
+            f"mfe4h={_fmt(r['F_VOLCTRL_mfe_4h'])} t4={_fmt(r['t_mfe_4h'])}  "
+            f"n_IS={n_is}  high n={r['n_high']} n_IS={r['n_high_2025-06+07']} "
+            f"2h={_fmt(r['F_VOLCTRL_mfe_2h_high'])} 4h={_fmt(r['F_VOLCTRL_mfe_4h_high'])}  "
+            f"low n={r['n_low']} n_IS={r['n_low_2025-06+07']} "
+            f"2h={_fmt(r['F_VOLCTRL_mfe_2h_low'])} 4h={_fmt(r['F_VOLCTRL_mfe_4h_low'])}"
+        )
+    if n_rob == 0:
+        lines.append("  (none)")
+    lines.append("")
+    for r in cells:
+        lines.append(
+            f"=== {r['tf']} {r['mode']} N={r['N']} rsi={r['rsi_len']} "
+            f"{r['ob']:g}/{r['os']:g} ==="
         )
         lines.append(
             f"  n_F_total={r['n_F_total']}  n_F_2025-06={r['n_F_2025-06']}  "
@@ -767,11 +1035,23 @@ def main() -> None:
             f"abs2h={_fmt(r['pct_months_gt1_absmove_2h'])}%  "
             f"abs4h={_fmt(r['pct_months_gt1_absmove_4h'])}%"
         )
+        lines.append(
+            f"  side high: n={r['n_high']} n_06+07={r['n_high_2025-06+07']} "
+            f"mfe2h={_fmt(r['F_VOLCTRL_mfe_2h_high'])} t={_fmt(r['t_mfe_2h_high'])} "
+            f"mfe4h={_fmt(r['F_VOLCTRL_mfe_4h_high'])} t={_fmt(r['t_mfe_4h_high'])}"
+        )
+        lines.append(
+            f"  side low:  n={r['n_low']} n_06+07={r['n_low_2025-06+07']} "
+            f"mfe2h={_fmt(r['F_VOLCTRL_mfe_2h_low'])} t={_fmt(r['t_mfe_2h_low'])} "
+            f"mfe4h={_fmt(r['F_VOLCTRL_mfe_4h_low'])} t={_fmt(r['t_mfe_4h_low'])}"
+        )
+        lines.append(f"  {r['null_gate']}")
         lines.append(f"  {r['gate']}")
+        lines.append(f"  {r['robust']}")
         lines.append("")
     elapsed = time.perf_counter() - t_run
     lines.append(f"elapsed_sec={elapsed:.1f}")
-    txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (archive.folder / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("".join(x + "\n" for x in lines), flush=True)
     print(f"done folder={archive.folder} elapsed={elapsed:.1f}s", flush=True)
 
