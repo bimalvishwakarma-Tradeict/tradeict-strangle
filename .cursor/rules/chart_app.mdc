@@ -1,0 +1,49 @@
+---
+description: chart_app (Delta BTCUSD chart) — view, grid, e2e, no backend
+globs: chart_app/**
+alwaysApply: false
+---
+
+# chart_app Cursor rules
+
+Read `chart_app/docs/VIEW_STATE.md` and `chart_app/docs/DECISIONS.md` before
+changing view, overlays, replay, or live WS.
+
+## Never touch
+
+- `backend/` (live options bot) — read-only from chart work
+- `.env` (API keys)
+- Strategy **signal logic** in `backtest/` — chart imports it. Do not copy,
+  fork, or “simplify” detect_swings / collect_signals / RSI div into
+  `chart_app/`. Overlay is display + the same functions (parity).
+
+## Time on the chart
+
+- Every new series / overlay / marker / live candle **time** must go through
+  `snapToGrid` and must not exceed the last candle (`capToLastCandle`).
+- Call `assertGrid`. Off-grid times = phantom LWC indices.
+- Do not insert dummy `t-1` points to break a line (VWAP uses extra series).
+
+## View / camera
+
+- Time scale owner is `chart_app/static/view.js`. Other files use
+  `view.request(...)`.
+- Do **not** add `setVisibleRange` or `applyOptions({ timeScale: { rightOffset } })`
+  in new code. Allowed `rightOffset` spots only (see VIEW_STATE.md): chart
+  create, `jump-live` / `scrollLive` in `view.js`.
+- Camera is **logical**: `setVisibleLogicalRange`. Future pad =
+  `lastIndex + (t - lastTime) / barSec`.
+
+## Server
+
+- Heavy CPU (overlay, indicators, gzip cache) → `asyncio.to_thread`.
+- Delta REST only through `chart_app/delta_rest.py` (cap 2, 429 backoff,
+  disk cache). Do not add raw `httpx`/`requests` to Delta from other modules.
+
+## Commit gate
+
+- After a chart_app behavior change: e2e **fixtures** (`python chart_app/tests/run_e2e.py`)
+  must pass, then `--live` if the change touches live WS / last-bar follow.
+- Do not commit failing fixtures. Do not `git add -A` (leave unrelated dirty
+  files). Do not revert in-progress `view.js` / `app.js` / e2e work unless
+  the task says so.
