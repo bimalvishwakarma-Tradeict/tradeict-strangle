@@ -36,7 +36,10 @@ MODES = ("wick", "full")
 H_KEYS = ("1h", "2h", "4h", "8h", "1730")
 H_SEC = {"1h": 3600, "2h": 7200, "4h": 14400, "8h": 28800}
 METRICS = ("mfe_abs", "end_abs", "rv", "hit_1000", "hit_1500", "hit_2000", "zone_crossed")
+VOL_METRICS = ("mfe_abs", "end_abs", "rv", "hit_1000", "hit_1500", "hit_2000")
 RV_ANN = math.sqrt(365.25 * 24.0 * 60.0)
+N_VOL_BINS = 20
+H_MINUTES = {"1h": 60, "2h": 120, "4h": 240, "8h": 480}
 PKG_DIR = Path(__file__).resolve().parent
 RUNS_DIR = PKG_DIR / "runs"
 RANGE_YM_LO = 202407
@@ -239,6 +242,354 @@ def _median(xs: list[float]) -> float:
     return float(np.median(v)) if v else float("nan")
 
 
+def ffill_1m_grid(
+    ts: np.ndarray,
+    o: np.ndarray,
+    h: np.ndarray,
+    l: np.ndarray,
+    c: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Regular 1m grid; OHLC forward-filled across missing minutes."""
+    t = np.asarray(ts, dtype=np.int64)
+    t0 = int(t[0])
+    t1 = int(t[-1])
+    grid = np.arange(t0, t1 + 1, 60, dtype=np.int64)
+    n = int(grid.size)
+    oo = np.full(n, np.nan)
+    hh = np.full(n, np.nan)
+    ll = np.full(n, np.nan)
+    cc = np.full(n, np.nan)
+    pos = ((t - t0) // 60).astype(np.int64)
+    pos = np.clip(pos, 0, n - 1)
+    oo[pos] = o
+    hh[pos] = h
+    ll[pos] = l
+    cc[pos] = c
+
+    def _ffill(a: np.ndarray) -> np.ndarray:
+        good = np.isfinite(a)
+        if not np.any(good):
+            return a
+        idx = np.where(good, np.arange(n), 0)
+        np.maximum.accumulate(idx, out=idx)
+        out = a.copy()
+        first = int(np.argmax(good))
+        out[first:] = a[idx[first:]]
+        return out
+
+    return grid, _ffill(oo), _ffill(hh), _ffill(ll), _ffill(cc)
+
+
+def rolling_pre_range_60(high: np.ndarray, low: np.ndarray) -> np.ndarray:
+    """max(high[i-59..i]) - min(low[i-59..i]); nan until 60 bars exist."""
+    n = int(high.size)
+    out = np.full(n, np.nan, dtype=np.float64)
+    if n < 60:
+        return out
+    from collections import deque
+
+    def _roll(a: np.ndarray, op_ge: bool) -> np.ndarray:
+        dq: deque[int] = deque()
+        r = np.empty(n, dtype=np.float64)
+        for i in range(n):
+            if op_ge:
+                while dq and a[dq[-1]] <= a[i]:
+                    dq.pop()
+            else:
+                while dq and a[dq[-1]] >= a[i]:
+                    dq.pop()
+            dq.append(i)
+            if dq[0] <= i - 60:
+                dq.popleft()
+            r[i] = a[dq[0]] if i >= 59 else np.nan
+        return r
+
+    hx = _roll(high.astype(np.float64), True)
+    ln = _roll(low.astype(np.float64), False)
+    out[59:] = hx[59:] - ln[59:]
+    return out
+
+
+def assign_quantile_bins(pre_range: np.ndarray, n_bins: int = N_VOL_BINS) -> tuple[np.ndarray, np.ndarray]:
+    valid = pre_range[np.isfinite(pre_range)]
+    if valid.size < n_bins:
+        edges = np.linspace(0.0, 1.0, n_bins + 1)
+        bins = np.full(pre_range.shape, -1, dtype=np.int16)
+        return bins, edges
+    edges = np.quantile(valid, np.linspace(0.0, 1.0, n_bins + 1))
+    edges[0] = -np.inf
+    edges[-1] = np.inf
+    bins = np.full(pre_range.shape, -1, dtype=np.int16)
+    ok = np.isfinite(pre_range)
+    bins[ok] = np.digitize(pre_range[ok], edges[1:-1], right=True).astype(np.int16)
+    bins[ok] = np.clip(bins[ok], 0, n_bins - 1)
+    return bins, edges
+
+
+def rolling_max(a: np.ndarray, w: int) -> np.ndarray:
+    n = int(a.size)
+    out = np.full(n, np.nan, dtype=np.float64)
+    if w <= 0 or n == 0:
+        return out
+    from collections import deque
+
+    dq: deque[int] = deque()
+    x = a.astype(np.float64)
+    for i in range(n):
+        while dq and x[dq[-1]] <= x[i]:
+            dq.pop()
+        dq.append(i)
+        if dq[0] <= i - w:
+            dq.popleft()
+        if i >= w - 1:
+            out[i] = x[dq[0]]
+    return out
+
+
+def rolling_min(a: np.ndarray, w: int) -> np.ndarray:
+    n = int(a.size)
+    out = np.full(n, np.nan, dtype=np.float64)
+    if w <= 0 or n == 0:
+        return out
+    from collections import deque
+
+    dq: deque[int] = deque()
+    x = a.astype(np.float64)
+    for i in range(n):
+        while dq and x[dq[-1]] >= x[i]:
+            dq.pop()
+        dq.append(i)
+        if dq[0] <= i - w:
+            dq.popleft()
+        if i >= w - 1:
+            out[i] = x[dq[0]]
+    return out
+
+
+def fwd_mfe_end(high: np.ndarray, low: np.ndarray, close: np.ndarray, w: int) -> tuple[np.ndarray, np.ndarray]:
+    """Forward max(high)-style MFE and |end-entry| using bars i+1..i+w (entry = close[i])."""
+    n = int(high.size)
+    mfe = np.full(n, np.nan)
+    end_abs = np.full(n, np.nan)
+    if n < 2 or w <= 0:
+        return mfe, end_abs
+    rmax = rolling_max(high, w)
+    rmin = rolling_min(low, w)
+    j = np.arange(n) + w
+    ok = j < n
+    jj = np.clip(j, 0, n - 1)
+    fh = rmax[jj]
+    fl = rmin[jj]
+    entry = close.astype(np.float64)
+    mfe[ok] = np.maximum(fh[ok] - entry[ok], entry[ok] - fl[ok])
+    end_abs[ok] = np.abs(close[jj][ok] - entry[ok])
+    # last w-1 indices: use remaining bars only
+    for i in range(max(0, n - w), n - 1):
+        sl = slice(i + 1, n)
+        mx = float(np.max(high[sl]))
+        mn = float(np.min(low[sl]))
+        en = float(close[i])
+        mfe[i] = max(mx - en, en - mn)
+        end_abs[i] = abs(float(close[-1]) - en)
+    return mfe, end_abs
+
+
+def _sparse_max(a: np.ndarray) -> np.ndarray:
+    n = int(a.size)
+    if n <= 0:
+        return np.zeros((1, 0), dtype=np.float64)
+    k = int(np.floor(np.log2(n))) + 1
+    st = np.empty((k, n), dtype=np.float64)
+    st[0] = a.astype(np.float64)
+    for i in range(1, k):
+        half = 1 << (i - 1)
+        span = 1 << i
+        lim = n - span + 1
+        st[i, :lim] = np.maximum(st[i - 1, :lim], st[i - 1, half:half + lim])
+        if lim < n:
+            st[i, lim:] = st[i - 1, lim:]
+    return st
+
+
+def _sparse_min(a: np.ndarray) -> np.ndarray:
+    n = int(a.size)
+    if n <= 0:
+        return np.zeros((1, 0), dtype=np.float64)
+    k = int(np.floor(np.log2(n))) + 1
+    st = np.empty((k, n), dtype=np.float64)
+    st[0] = a.astype(np.float64)
+    for i in range(1, k):
+        half = 1 << (i - 1)
+        span = 1 << i
+        lim = n - span + 1
+        st[i, :lim] = np.minimum(st[i - 1, :lim], st[i - 1, half:half + lim])
+        if lim < n:
+            st[i, lim:] = st[i - 1, lim:]
+    return st
+
+
+def _rmq_max(st: np.ndarray, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    length = np.maximum(right - left + 1, 1)
+    i = np.floor(np.log2(length)).astype(np.int32)
+    p2 = np.left_shift(1, i)
+    a = st[i, left]
+    b = st[i, right - p2 + 1]
+    return np.maximum(a, b)
+
+
+def _rmq_min(st: np.ndarray, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    length = np.maximum(right - left + 1, 1)
+    i = np.floor(np.log2(length)).astype(np.int32)
+    p2 = np.left_shift(1, i)
+    a = st[i, left]
+    b = st[i, right - p2 + 1]
+    return np.minimum(a, b)
+
+
+def fwd_mfe_until(high: np.ndarray, low: np.ndarray, close: np.ndarray, ts: np.ndarray, end_ts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    n = int(high.size)
+    mfe = np.full(n, np.nan)
+    end_abs = np.full(n, np.nan)
+    if n < 2:
+        return mfe, end_abs
+    end_i = np.searchsorted(ts, end_ts, side="right") - 1
+    left = np.arange(n, dtype=np.int64) + 1
+    right = end_i.astype(np.int64)
+    ok = (left < n) & (right >= left) & (right < n)
+    sth = _sparse_max(high)
+    stl = _sparse_min(low)
+    mx = _rmq_max(sth, left[ok], right[ok])
+    mn = _rmq_min(stl, left[ok], right[ok])
+    en = close.astype(np.float64)[ok]
+    mfe[ok] = np.maximum(mx - en, en - mn)
+    end_abs[ok] = np.abs(close[right[ok]] - en)
+    return mfe, end_abs
+
+
+def next_1730_arr(ts: np.ndarray) -> np.ndarray:
+    t = ts.astype(np.int64)
+    ist_sec = (t + IST_OFF) % 86400
+    target = 17 * 3600 + 30 * 60
+    delta = (target - ist_sec) % 86400
+    delta = np.where(delta == 0, 86400, delta)
+    return t + delta
+
+
+def percentile_ranks(pre_range: np.ndarray, xs: np.ndarray) -> np.ndarray:
+    valid = np.sort(pre_range[np.isfinite(pre_range)])
+    if valid.size == 0:
+        return np.full(xs.shape, np.nan)
+    return 100.0 * np.searchsorted(valid, xs, side="left") / float(valid.size)
+
+
+def hour_matched_mfe_ratio(
+    ts: np.ndarray,
+    hod: np.ndarray,
+    mfe: np.ndarray,
+    signal_idx: np.ndarray,
+    rng: np.random.Generator,
+    n_ctrl: int = N_CTRL,
+    min_sep: int = MIN_SEP,
+) -> float:
+    """Hour-only control mean vs signal mean (for tests; one metric array)."""
+    sig_ts = ts[np.asarray(signal_idx, dtype=np.int64)]
+    near = forbidden_mask(ts, sig_ts, min_sep)
+    svals = mfe[np.asarray(signal_idx, dtype=np.int64)]
+    svals = svals[np.isfinite(svals)]
+    if svals.size == 0:
+        return float("nan")
+    ctrl: list[float] = []
+    for i in np.asarray(signal_idx, dtype=np.int64):
+        pool = np.where((hod == hod[i]) & (~near) & np.isfinite(mfe))[0]
+        if pool.size == 0:
+            continue
+        pick = sample_control_times(pool.astype(np.int64), n_ctrl, rng)
+        ctrl.extend(float(mfe[int(k)]) for k in pick)
+    sm = float(np.mean(svals))
+    cm = float(np.mean(ctrl)) if ctrl else float("nan")
+    if not math.isfinite(cm) or cm == 0:
+        return float("nan")
+    return sm / cm
+
+
+def grouped_cell_indices(
+    cell: np.ndarray,
+    valid: np.ndarray,
+    ncell: int = N_VOL_BINS * 24,
+) -> list[np.ndarray]:
+    ix = np.flatnonzero(valid & (cell >= 0) & (cell < ncell))
+    empty = [np.zeros(0, dtype=np.int64) for _ in range(ncell)]
+    if ix.size == 0:
+        return empty
+    cid = cell[ix].astype(np.int32)
+    order = np.argsort(cid, kind="mergesort")
+    ix = ix[order]
+    cid = cid[order]
+    starts = np.searchsorted(cid, np.arange(ncell), side="left")
+    ends = np.searchsorted(cid, np.arange(ncell), side="right")
+    return [ix[int(starts[c]): int(ends[c])] for c in range(ncell)]
+
+
+def volmatch_expected_perm(
+    event_idx: np.ndarray,
+    cell: np.ndarray,
+    metric: np.ndarray,
+    groups: list[np.ndarray],
+    rng: np.random.Generator,
+    n_perm: int = N_PERM,
+) -> dict[str, float]:
+    """Expected = mean of ALL valid minutes in each event's (bin, hour) cell.
+
+    Perm: 10k draws; each draw takes one random minute from that event's cell.
+    """
+    nan = {
+        "n_events": 0, "signal_mean": float("nan"), "expected_mean": float("nan"),
+        "ratio": float("nan"), "p_ge": float("nan"), "p_le": float("nan"),
+    }
+    ev = np.asarray(event_idx, dtype=np.int64)
+    if ev.size == 0:
+        return nan
+    ok = np.isfinite(metric[ev]) & (cell[ev] >= 0)
+    ev = ev[ok]
+    if ev.size == 0:
+        return nan
+    smn = float(np.mean(metric[ev]))
+    pools: list[np.ndarray] = []
+    exp_parts: list[float] = []
+    for i in ev:
+        g = groups[int(cell[i])]
+        pool = metric[g]
+        pool = pool[np.isfinite(pool)]
+        if pool.size == 0:
+            continue
+        pools.append(pool)
+        exp_parts.append(float(np.mean(pool)))
+    if not pools:
+        nan["n_events"] = int(ev.size)
+        nan["signal_mean"] = smn
+        return nan
+    expected = float(np.mean(exp_parts))
+    ratio = (smn / expected) if expected != 0 else float("nan")
+    n_e = len(pools)
+    sizes = np.array([p.size for p in pools], dtype=np.int64)
+    maxlen = int(np.max(sizes))
+    pad = np.zeros((n_e, maxlen), dtype=np.float64)
+    for k, p in enumerate(pools):
+        pad[k, : p.size] = p
+    u = rng.random((n_e, int(n_perm)))
+    idx = np.minimum((u * sizes[:, None].astype(np.float64)).astype(np.int64), sizes[:, None] - 1)
+    draws = np.take_along_axis(pad, idx, axis=1)
+    dmean = draws.mean(axis=0)
+    return {
+        "n_events": n_e,
+        "signal_mean": smn,
+        "expected_mean": expected,
+        "ratio": ratio,
+        "p_ge": float(np.mean(dmean >= smn)),
+        "p_le": float(np.mean(dmean <= smn)),
+    }
+
+
 def perm_pvalue(
     signal_mean: float,
     control_vals: np.ndarray,
@@ -264,13 +615,137 @@ def _fmt(x: Any) -> str:
     return str(x)
 
 
-def _unique_folder(root: Path, stamp: str) -> Path:
-    folder = root / f"{stamp}_stage0"
+def _unique_folder(root: Path, stamp: str, tag: str = "stage0") -> Path:
+    folder = root / f"{stamp}_{tag}"
     n = 0
     while folder.exists():
         n += 1
-        folder = root / f"{stamp}_stage0_{n}"
+        folder = root / f"{stamp}_{tag}_{n}"
     return folder
+
+
+def _hits_from_mfe(mfe: np.ndarray, thr: float) -> np.ndarray:
+    out = np.full(mfe.shape, np.nan, dtype=np.float64)
+    ok = np.isfinite(mfe)
+    out[ok] = (mfe[ok] >= float(thr)).astype(np.float64)
+    return out
+
+
+def compute_volmatch(
+    grid: np.ndarray,
+    gh: np.ndarray,
+    gl: np.ndarray,
+    gc: np.ndarray,
+    event_rows: list[dict[str, Any]],
+    rng: np.random.Generator,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    print("VOLMATCH: rolling pre_range_60 + quantile bins", flush=True)
+    pre = rolling_pre_range_60(gh, gl)
+    bins, _edges = assign_quantile_bins(pre, N_VOL_BINS)
+    hod = ist_hod_arr(grid)
+    cell = np.full(grid.shape, -1, dtype=np.int32)
+    okb = bins >= 0
+    cell[okb] = bins[okb].astype(np.int32) * 24 + hod[okb].astype(np.int32)
+    t0 = int(grid[0])
+    ngrid = int(grid.size)
+
+    def to_i(t: int) -> int:
+        i = (int(t) - t0) // 60
+        if 0 <= i < ngrid:
+            return i
+        return -1
+
+    print("VOLMATCH: forward MFE on 1m grid", flush=True)
+    fwd: dict[str, dict[str, np.ndarray]] = {}
+    for hk, w in H_MINUTES.items():
+        mfe, end = fwd_mfe_end(gh, gl, gc, w)
+        fwd[hk] = {
+            "mfe_abs": mfe,
+            "end_abs": end,
+            "hit_1000": _hits_from_mfe(mfe, 1000.0),
+            "hit_1500": _hits_from_mfe(mfe, 1500.0),
+            "hit_2000": _hits_from_mfe(mfe, 2000.0),
+        }
+        print(f"  fwd {hk} done", flush=True)
+    m1730, e1730 = fwd_mfe_until(gh, gl, gc, grid, next_1730_arr(grid))
+    fwd["1730"] = {
+        "mfe_abs": m1730,
+        "end_abs": e1730,
+        "hit_1000": _hits_from_mfe(m1730, 1000.0),
+        "hit_1500": _hits_from_mfe(m1730, 1500.0),
+        "hit_2000": _hits_from_mfe(m1730, 2000.0),
+    }
+    print("  fwd 1730 done", flush=True)
+
+    by: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for r in event_rows:
+        by[(str(r["tf"]), str(r["mode"]))].append(r)
+
+    stats_rows: list[dict[str, Any]] = []
+    month_rows: list[dict[str, Any]] = []
+    pre_rows: list[dict[str, Any]] = []
+    for tf in TFS:
+        for mode in MODES:
+            recs = by.get((tf, mode), [])
+            eidx: list[int] = []
+            eym: list[int] = []
+            for r in recs:
+                i = to_i(int(r["signal_ts"]))
+                if i < 0 or not np.isfinite(pre[i]) or int(cell[i]) < 0:
+                    continue
+                eidx.append(i)
+                eym.append(int(r["ym"]))
+            eidx_a = np.asarray(eidx, dtype=np.int64)
+            eym_a = np.asarray(eym, dtype=np.int32)
+            pr_e = pre[eidx_a] if eidx_a.size else np.zeros(0)
+            pct = percentile_ranks(pre, pr_e) if pr_e.size else np.zeros(0)
+            pre_rows.append({
+                "tf": tf,
+                "mode": mode,
+                "n": int(eidx_a.size),
+                "pre_range_60_mean": float(np.mean(pr_e)) if pr_e.size else float("nan"),
+                "pre_range_60_median": float(np.median(pr_e)) if pr_e.size else float("nan"),
+                "pre_range_60_mean_percentile": float(np.mean(pct)) if pct.size else float("nan"),
+            })
+            print(
+                f"VOLMATCH {tf} {mode}: n={eidx_a.size} "
+                f"pre_range_median={pre_rows[-1]['pre_range_60_median']:.1f} "
+                f"mean_pct={pre_rows[-1]['pre_range_60_mean_percentile']:.1f}",
+                flush=True,
+            )
+            sig_ts = np.array([int(r["signal_ts"]) for r in recs], dtype=np.int64)
+            near = forbidden_mask(grid, sig_ts, MIN_SEP)
+            valid = np.isfinite(pre) & (~near) & (cell >= 0)
+            groups = grouped_cell_indices(cell, valid)
+            for hk in H_KEYS:
+                for mk in ("mfe_abs", "end_abs", "hit_1000", "hit_1500", "hit_2000"):
+                    st = volmatch_expected_perm(
+                        eidx_a, cell, fwd[hk][mk], groups, rng, N_PERM,
+                    )
+                    stats_rows.append({
+                        "tf": tf, "mode": mode, "H": hk, "metric": mk,
+                        "n_events": st["n_events"],
+                        "signal_mean": st["signal_mean"],
+                        "expected_mean": st["expected_mean"],
+                        "ratio": st["ratio"],
+                        "p_ge_signal_mean": st["p_ge"],
+                        "p_le_signal_mean": st["p_le"],
+                    })
+                if hk in ("2h", "4h") and mode == "wick" and tf in ("15m", "30m"):
+                    mfe = fwd[hk]["mfe_abs"]
+                    for ym in sorted(set(int(x) for x in eym_a.tolist())):
+                        evm = eidx_a[eym_a == ym]
+                        st = volmatch_expected_perm(evm, cell, mfe, groups, rng, N_PERM)
+                        month_rows.append({
+                            "ym": ym, "tf": tf, "mode": mode, "H": hk,
+                            "n_signal": st["n_events"],
+                            "signal_mean_mfe": st["signal_mean"],
+                            "expected_mean_mfe": st["expected_mean"],
+                            "ratio": st["ratio"],
+                            "p_ge": st["p_ge"],
+                            "p_le": st["p_le"],
+                        })
+    return stats_rows, month_rows, pre_rows
 
 
 def _bars_from_ohlc(
@@ -292,6 +767,8 @@ def main() -> None:
     t_run = time.perf_counter()
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default=None)
+    ap.add_argument("--volmatch", action="store_true", default=True)
+    ap.add_argument("--no-volmatch", dest="volmatch", action="store_false")
     args = ap.parse_args()
 
     from backtest.harness.run_archive import RunArchive
@@ -304,13 +781,14 @@ def main() -> None:
     args.csv = csv_path
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    folder = _unique_folder(RUNS_DIR, stamp)
+    tag = "stage0_volmatch" if bool(args.volmatch) else "stage0"
+    folder = _unique_folder(RUNS_DIR, stamp, tag)
     archive = RunArchive(
         "s022",
-        "stage0",
+        tag,
         args,
         month="2024-07_2026-09",
-        prereg_note="Stage 0 move-edge vs hour-matched random control; spot only",
+        prereg_note="Stage 0 move-edge vs hour-matched random + VOLMATCH control; spot only",
         folder=folder,
     )
     print(f"archive folder={archive.folder}", flush=True)
@@ -523,6 +1001,50 @@ def main() -> None:
         for r in hr_rows:
             w.writerow(r)
 
+    vm_stats: list[dict[str, Any]] = []
+    vm_month: list[dict[str, Any]] = []
+    vm_pre: list[dict[str, Any]] = []
+    if bool(args.volmatch):
+        print("VOLMATCH: ffill 1m grid", flush=True)
+        grid, _go, gh, gl, gc = ffill_1m_grid(ts, o, h, l, c)
+        print(f"VOLMATCH: grid bars={len(grid)}", flush=True)
+        vol_rng = np.random.default_rng(SEED)
+        vm_stats, vm_month, vm_pre = compute_volmatch(grid, gh, gl, gc, event_rows, vol_rng)
+        vm_cols = [
+            "tf", "mode", "H", "metric", "n_events",
+            "signal_mean", "expected_mean", "ratio",
+            "p_ge_signal_mean", "p_le_signal_mean",
+        ]
+        vm_path = archive.folder / "stats_volmatch.csv"
+        with vm_path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=vm_cols)
+            w.writeheader()
+            for r in vm_stats:
+                w.writerow(r)
+        vm_mo_cols = [
+            "ym", "tf", "mode", "H", "n_signal",
+            "signal_mean_mfe", "expected_mean_mfe", "ratio", "p_ge", "p_le",
+        ]
+        vm_mo_path = archive.folder / "per_month_volmatch.csv"
+        with vm_mo_path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=vm_mo_cols)
+            w.writeheader()
+            for r in vm_month:
+                w.writerow(r)
+        pre_path = archive.folder / "pre_range_volmatch.csv"
+        with pre_path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "tf", "mode", "n", "pre_range_60_mean",
+                    "pre_range_60_median", "pre_range_60_mean_percentile",
+                ],
+            )
+            w.writeheader()
+            for r in vm_pre:
+                w.writerow(r)
+        print(f"wrote {vm_path}", flush=True)
+
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -539,7 +1061,34 @@ def main() -> None:
     _sheet("per_month", month_rows, ["ym", "tf", "mode", "H", "n_signal", "signal_mean_mfe", "control_mean_mfe", "ratio"])
     _sheet("hours", hr_rows, ["tf", "mode", "hod_ist", "n"])
     _sheet("events", event_rows, ev_cols)
-    xlsx_path = archive.folder / "stage0.xlsx"
+    if vm_stats:
+        _sheet(
+            "stats_volmatch",
+            vm_stats,
+            [
+                "tf", "mode", "H", "metric", "n_events",
+                "signal_mean", "expected_mean", "ratio",
+                "p_ge_signal_mean", "p_le_signal_mean",
+            ],
+        )
+        _sheet(
+            "per_month_volmatch",
+            vm_month,
+            [
+                "ym", "tf", "mode", "H", "n_signal",
+                "signal_mean_mfe", "expected_mean_mfe", "ratio", "p_ge", "p_le",
+            ],
+        )
+        _sheet(
+            "pre_range",
+            vm_pre,
+            [
+                "tf", "mode", "n", "pre_range_60_mean",
+                "pre_range_60_median", "pre_range_60_mean_percentile",
+            ],
+        )
+    xlsx_name = "stage0_volmatch.xlsx" if vm_stats else "stage0.xlsx"
+    xlsx_path = archive.folder / xlsx_name
     wb.save(xlsx_path)
 
     elapsed = time.perf_counter() - t_run
@@ -594,6 +1143,50 @@ def main() -> None:
         n = hour_hist.get(("15m", "wick", hod), 0)
         lines.append(f"  hod={hod:02d} n={n}")
     lines.append("")
+    if vm_stats:
+        lines.append("======== VOLMATCH (pre_range_60 quantile bin × IST hour) ========")
+        lines.append("ratio = signal_mean / cell expected mean. p_ge = P(draw mean >= sig); p_le = P(draw mean <= sig).")
+        lines.append("Cell minutes exclude ±60 min of that tf/mode's signals. 20 quantile bins on full-file pre_range_60.")
+        lines.append("")
+        for r in vm_pre:
+            lines.append(
+                f"pre_range_60 {r['tf']} {r['mode']}: n={r['n']} "
+                f"median={_fmt(r['pre_range_60_median'])} mean={_fmt(r['pre_range_60_mean'])} "
+                f"mean_percentile={_fmt(r['pre_range_60_mean_percentile'])}"
+            )
+        lines.append("")
+        for tf in TFS:
+            for mode in MODES:
+                lines.append(f"=== VOLMATCH {tf} {mode} ===")
+                for hk in H_KEYS:
+                    block = [
+                        r for r in vm_stats
+                        if r["tf"] == tf and r["mode"] == mode and r["H"] == hk
+                    ]
+                    by_m = {r["metric"]: r for r in block}
+                    mfe = by_m.get("mfe_abs", {})
+                    end = by_m.get("end_abs", {})
+                    h1 = by_m.get("hit_1000", {})
+                    lines.append(
+                        f"  [{hk}] mfe_abs sig={_fmt(mfe.get('signal_mean', float('nan')))} "
+                        f"exp={_fmt(mfe.get('expected_mean', float('nan')))} "
+                        f"ratio={_fmt(mfe.get('ratio', float('nan')))} "
+                        f"p_ge={_fmt(mfe.get('p_ge_signal_mean', float('nan')))} "
+                        f"p_le={_fmt(mfe.get('p_le_signal_mean', float('nan')))}"
+                    )
+                    lines.append(
+                        f"        end_abs ratio={_fmt(end.get('ratio', float('nan')))} "
+                        f"hit_1000 sig={_fmt(h1.get('signal_mean', float('nan')))} "
+                        f"exp={_fmt(h1.get('expected_mean', float('nan')))}"
+                    )
+                lines.append("")
+        lines.append("--- VOLMATCH mfe_abs ratio by month (2h / 4h), 15m wick + 30m wick ---")
+        for r in vm_month:
+            lines.append(
+                f"  {r['ym']} {r['tf']} {r['mode']} H={r['H']} n={r['n_signal']} "
+                f"ratio={_fmt(r['ratio'])} p_ge={_fmt(r['p_ge'])} p_le={_fmt(r['p_le'])}"
+            )
+        lines.append("")
     text = "\n".join(lines)
     sum_path = archive.folder / "summary.txt"
     sum_path.write_text(text + "\n", encoding="utf-8")
