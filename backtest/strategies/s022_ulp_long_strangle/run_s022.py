@@ -49,6 +49,7 @@ from backtest.strategies.s022_ulp_long_strangle.sim import (  # noqa: E402
     T_GRID,
     X_ITM,
     expiry_date,
+    filter_traded_events,
     map_src,
     simulate_path,
     sl_level,
@@ -319,6 +320,67 @@ def _cell_stats(taken: list[dict[str, Any]], n_skipped: int, reasons: dict[str, 
     }
 
 
+def _chain_gap_windows(
+    store: Any,
+    expiries: list[Any],
+    t_lo: int,
+    t_hi: int,
+) -> list[dict[str, Any]]:
+    """Contiguous 1-minute windows with no marks for an expiry. Reporting only."""
+    t_lo = (int(t_lo) // 60) * 60
+    t_hi = (int(t_hi) // 60) * 60
+    n = (t_hi - t_lo) // 60 + 1
+    out: list[dict[str, Any]] = []
+    if n <= 0:
+        return out
+    for exp in sorted(set(expiries), key=lambda x: str(x)):
+        have = np.zeros(n, dtype=bool)
+        conn = None
+        try:
+            conn = store.conn(exp)
+        except Exception:
+            conn = None
+        rows: list[Any] = []
+        if conn is not None:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT ts FROM marks
+                    WHERE expiry=? AND ts BETWEEN ? AND ?
+                      AND close IS NOT NULL AND close>0
+                    """,
+                    (str(exp)[:10], t_lo, t_hi),
+                ).fetchall()
+            except Exception:
+                rows = []
+        for (ts,) in rows:
+            i = (int(ts) // 60 * 60 - t_lo) // 60
+            if 0 <= i < n:
+                have[i] = True
+        i = 0
+        while i < n:
+            if bool(have[i]):
+                i += 1
+                continue
+            j = i
+            while j < n and not bool(have[j]):
+                j += 1
+            ts0 = t_lo + i * 60
+            ts1 = t_lo + (j - 1) * 60
+            out.append(
+                {
+                    "expiry": str(exp)[:10],
+                    "ts_start": int(ts0),
+                    "ts_end": int(ts1),
+                    "ist_start": s018.ist_str(int(ts0)),
+                    "ist_end": s018.ist_str(int(ts1)),
+                    "minutes": int(j - i),
+                }
+            )
+            i = j
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", default="2025-06")
@@ -429,9 +491,24 @@ def main() -> None:
                 n_ev_table.append({"arm": "volctrl", "tf": tf, "mode": mode, "n": len(vc)})
                 events_by_arm["volctrl"].extend(vc)
 
+    n_before_clip = {a: len(events_by_arm[a]) for a in arms}
+    for a in arms:
+        events_by_arm[a] = filter_traded_events(events_by_arm[a], start_ts, cutoff)
+    n_ev_table = []
+    for tf in tfs:
+        for mode in modes:
+            for arm in arms:
+                n_keep = sum(
+                    1
+                    for e in events_by_arm[arm]
+                    if str(e.get("tf")) == tf and str(e.get("mode")) == mode
+                )
+                n_ev_table.append({"arm": arm, "tf": tf, "mode": mode, "n": n_keep})
+
     cfgs = _strike_cfgs()
     n_combo = len(cfgs) * len(DTE_GRID) * len(A_GRID)
     work_events = [e for a in arms for e in events_by_arm[a]]
+    n_clipped = {a: int(n_before_clip[a]) - len(events_by_arm[a]) for a in arms}
     print(
         f"events smoke={len(work_events)} ulp_month={n_ulp_month} "
         f"combos_per_event={n_combo} (X={len(cfgs)} dte={len(DTE_GRID)} a={len(A_GRID)})",
@@ -464,6 +541,8 @@ def main() -> None:
     dump_spec = ("ulp", "15m", "wick", "itm", 1000, 1, 125)
     miss_exp_ev: dict[int, int] = {1: 0, 2: 0}
     miss_exp_dates: dict[int, set[str]] = {1: set(), 2: set()}
+    mark_none_by_date: dict[str, int] = {}
+    traded_exps: set[Any] = set()
 
     DUMP_T, DUMP_SL = 200, 200
 
@@ -503,10 +582,15 @@ def main() -> None:
                         src_tot[k] = src_tot.get(k, 0) + int(v)
                         src_by_x[bx][k] = src_by_x[bx].get(k, 0) + int(v)
                         src_by_dte[int(dte)][k] = src_by_dte[int(dte)].get(k, 0) + int(v)
+                    if ed not in traded_exps and ed in exp_set:
+                        traded_exps.add(ed)
                     if not p.ok:
                         reason = p.skip_reason or "other"
                         skip[reason] = skip.get(reason, 0) + 1
                         skip_by_key[key] = reason
+                        if reason == "path_mark_none":
+                            day = around.isoformat()
+                            mark_none_by_date[day] = mark_none_by_date.get(day, 0) + 1
                     else:
                         n_ok += 1
                         exits_by_key[key] = list(p.exits)
@@ -519,6 +603,8 @@ def main() -> None:
             )
 
     sim_s = time.perf_counter() - t_sim
+    gap_hi = int(s018.expiry_unix(max(traded_exps))) if traded_exps else cutoff
+    gap_rows = _chain_gap_windows(store, list(traded_exps), start_ts, gap_hi)
     per_path = (sim_s / n_paths) if n_paths else float("nan")
     n_month_events = n_ulp_month * len(arms)
     n_month_paths = n_month_events * n_combo
@@ -594,6 +680,12 @@ def main() -> None:
         w = csv.DictWriter(fp, fieldnames=cell_cols, extrasaction="ignore")
         w.writeheader()
         w.writerows(cell_rows)
+    gap_path = archive.folder / "gaps.csv"
+    gap_cols = ["expiry", "ist_start", "ist_end", "minutes", "ts_start", "ts_end"]
+    with gap_path.open("w", newline="", encoding="utf-8") as fp:
+        w = csv.DictWriter(fp, fieldnames=gap_cols, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(gap_rows)
 
     db_exps = _db_expiries(store, date_cls(2025, 5, 30), date_cls(2025, 6, 6))
     n_ulp_smoke = sum(1 for e in work_events if e.get("arm") == "ulp")
@@ -650,6 +742,7 @@ def main() -> None:
             basket_text.append("  (path series not retained)")
             continue
         slv = float(DUMP_SL)
+        x_ts = int(rec.get("exit_ts") or 0)
         for fr in p.fills:
             t = int(fr["ts"])
             idx = 0
@@ -663,7 +756,8 @@ def main() -> None:
             fr2["net"] = net
             fr2["peak"] = pk
             fr2["sl_level"] = sl_level(pk, slv) if pk == pk else float("nan")
-            fr2["exit_reason"] = rec.get("reason", "")
+            after = bool(x_ts) and t > x_ts
+            fr2["exit_reason"] = "PATH_ONLY (after exit)" if after else rec.get("reason", "")
             basket_rows.append(fr2)
             basket_text.append(
                 f"  {fr2['ist']} spot={fr2['spot']:.1f} K={fr2['strike']:.0f} "
@@ -749,6 +843,25 @@ def main() -> None:
                 else "no 2DTE missing_expiry events in this smoke window."
             )
         ),
+        f"warmup_signals_dropped (not traded): {n_clipped}",
+        "",
+        "--- option-chain mark gaps (reporting only; handling unchanged) ---",
+        f"gaps.csv n_windows={len(gap_rows)} expiries={sorted(str(x)[:10] for x in traded_exps)}",
+    ]
+    shown = gap_rows[:40]
+    for g in shown:
+        lines.append(
+            f"  exp={g['expiry']} {g['ist_start']} -> {g['ist_end']} minutes={g['minutes']}"
+        )
+    if len(gap_rows) > 40:
+        lines.append(f"  ... {len(gap_rows) - 40} more windows in gaps.csv")
+    lines.append("path_mark_none paths by signal IST date:")
+    if mark_none_by_date:
+        for day in sorted(mark_none_by_date):
+            lines.append(f"  {day} n={mark_none_by_date[day]}")
+    else:
+        lines.append("  (none)")
+    lines += [
         "",
         dump_note,
         "",
@@ -794,6 +907,7 @@ def main() -> None:
     print(text, flush=True)
     print("\n".join(basket_text[:80]), flush=True)
     print(f"wrote {cell_path}", flush=True)
+    print(f"wrote {gap_path}", flush=True)
     print(f"wrote {xlsx_path}", flush=True)
     sys.stdout = archive._orig_stdout
     archive._log_fp.close()

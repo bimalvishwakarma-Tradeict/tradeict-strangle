@@ -6,12 +6,15 @@ from datetime import date, timedelta
 
 from backtest.strategies.s012_trend_follow.engine import ist_date
 from backtest.strategies.s018_4h_trend import run_s018 as s018
+from backtest.harness.data import ist_dt, to_unix
 from backtest.strategies.s022_ulp_long_strangle.sim import (
     QTY,
     SLIP_PTS,
     buy_fill,
     cash_conservation_net,
+    filter_traded_events,
     first_exit,
+    in_trade_window,
     sell_fill,
     simulate_path,
     sl_level,
@@ -76,6 +79,21 @@ def _fill_flat(
         mkt.spots[t] = float(spot)
         mkt.marks.setdefault(c_sym, {})[t] = float(c_px)
         mkt.marks.setdefault(p_sym, {})[t] = float(p_px)
+
+
+def test_event_one_minute_before_month_start_is_never_traded() -> None:
+    month_start = to_unix(ist_dt(date(2025, 6, 1), 0, 0))
+    month_end = to_unix(ist_dt(date(2025, 7, 1), 0, 0))
+    before = month_start - 60
+    assert not in_trade_window(before, month_start, month_end)
+    assert in_trade_window(month_start, month_start, month_end)
+    evs = [
+        {"signal_ts": before, "event_id": "warmup"},
+        {"signal_ts": month_start, "event_id": "in"},
+        {"signal_ts": month_end, "event_id": "next"},
+    ]
+    kept = filter_traded_events(evs, month_start, month_end)
+    assert [e["event_id"] for e in kept] == ["in"]
 
 
 def test_sl_ratchet_levels() -> None:

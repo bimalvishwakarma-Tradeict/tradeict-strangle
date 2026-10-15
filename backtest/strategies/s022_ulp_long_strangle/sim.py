@@ -66,6 +66,20 @@ def expiry_date(entry_ts: int, dte: int) -> date:
     return ist_date(int(entry_ts)) + timedelta(days=int(dte))
 
 
+def in_trade_window(signal_ts: int, month_start: int, month_end: int) -> bool:
+    """True iff month_start <= signal_ts < month_end. Warmup signals are not traded."""
+    t = int(signal_ts)
+    return int(month_start) <= t < int(month_end)
+
+
+def filter_traded_events(
+    events: list[dict[str, Any]],
+    month_start: int,
+    month_end: int,
+) -> list[dict[str, Any]]:
+    return [e for e in events if in_trade_window(int(e["signal_ts"]), month_start, month_end)]
+
+
 def map_src(raw: str) -> str:
     s = str(raw).strip().lower()
     if s == "real":
