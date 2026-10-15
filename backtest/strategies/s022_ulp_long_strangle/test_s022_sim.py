@@ -15,6 +15,7 @@ from backtest.strategies.s022_ulp_long_strangle.sim import (
     filter_traded_events,
     first_exit,
     in_trade_window,
+    resolve_slip_pts,
     sell_fill,
     simulate_path,
     sl_level,
@@ -381,3 +382,44 @@ def test_time_exit_posthoc_equals_brute() -> None:
     assert abs(
         float(brute.tsl_net) - cash_conservation_net(brute.legs, brute.fees, brute.slips)
     ) < 1e-6
+
+
+def test_table_slip_premium_1100_dte1_m32_about_20pts() -> None:
+    from backtest.slippage_model import load_slip_table
+
+    load_slip_table()
+    pts = resolve_slip_pts(1100.0, 1, "table", 20.0, 3.2)
+    assert abs(pts - 20.0) < 0.05
+
+
+def test_table_slip_premium_150_dte1_m32_about_5p7pts() -> None:
+    from backtest.slippage_model import load_slip_table
+
+    load_slip_table()
+    pts = resolve_slip_pts(150.0, 1, "table", 20.0, 3.2)
+    expect = 150.0 * 1.189 / 100.0 * 3.2
+    assert abs(pts - expect) < 0.05
+    assert abs(pts - 5.7) < 0.15
+
+
+def test_fixed_slip_model_identical_to_legacy_default() -> None:
+    t0 = 1_700_000_040
+    exp = ist_date(t0) + timedelta(days=1)
+    mkt = MemMkt()
+    mkt.rows = _chain_atm100k()
+    minutes = [t0 + i * 60 for i in range(12)]
+    _fill_flat(mkt, t0, 12, 100_000.0, 80.0, 80.0)
+    legacy = simulate_path(mkt, t0, exp, 400, "itm", 150.0, minutes)
+    fixed = simulate_path(
+        mkt, t0, exp, 400, "itm", 150.0, minutes,
+        slip_model="fixed", slip_pts=SLIP_PTS, slip_mult=9.9,
+    )
+    assert legacy.ok and fixed.ok
+    assert abs(float(legacy.slips) - float(fixed.slips)) < 1e-12
+    assert abs(float(legacy.fees) - float(fixed.fees)) < 1e-12
+    assert len(legacy.net) == len(fixed.net)
+    for a, b in zip(legacy.net, fixed.net):
+        assert abs(float(a) - float(b)) < 1e-9
+    for la, lb in zip(legacy.legs, fixed.legs):
+        assert abs(float(la.fill) - float(lb.fill)) < 1e-12
+        assert abs(float(la.slip_pts_entry) - 20.0) < 1e-12

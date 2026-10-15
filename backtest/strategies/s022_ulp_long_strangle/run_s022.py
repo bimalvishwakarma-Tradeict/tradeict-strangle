@@ -7,6 +7,7 @@ python backtest/strategies/s022_ulp_long_strangle/run_s022.py --month 2025-06 --
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import sys
@@ -45,14 +46,18 @@ from backtest.strategies.s022_ulp_long_strangle.stage0_move_edge import (  # noq
 )
 from backtest.strategies.s022_ulp_long_strangle.sim import (  # noqa: E402
     A_GRID,
+    A_GRID_P5,
     A_GRID_REDUCED,
     DTE_GRID,
+    DTE_GRID_P5,
     DTE_GRID_REDUCED,
     H_GRID,
+    H_GRID_P5,
     H_GRID_REDUCED,
     SL_GRID,
     T_GRID,
     X_ITM,
+    X_P5,
     X_REDUCED,
     expiry_date,
     filter_traded_events,
@@ -430,6 +435,40 @@ def _mean_ok(r: dict[str, Any]) -> float:
     return v if v == v else -1e18
 
 
+def _patch_legs_csv(folder: Path) -> None:
+    """Add slip_pts_entry/exit columns (archive schema ignores extras on write)."""
+    src = folder / "legs.csv"
+    if not src.exists():
+        return
+    with src.open("r", encoding="utf-8", newline="") as fp:
+        rows = list(csv.DictReader(fp))
+    if not rows:
+        return
+    cols = list(rows[0].keys())
+    for extra in ("slip_pts_entry", "slip_pts_exit"):
+        if extra not in cols:
+            cols.append(extra)
+    for r in rows:
+        try:
+            em = float(r.get("entry_mark") or "nan")
+            ef = float(r.get("entry_fill") or "nan")
+            xm = float(r.get("exit_mark") or "nan")
+            xf = float(r.get("exit_fill") or "nan")
+            se = float(r.get("slip_exit") or 0.0)
+            fe = float(r.get("fee_exit") or 0.0)
+        except (TypeError, ValueError):
+            em = ef = xm = xf = se = fe = float("nan")
+        r["slip_pts_entry"] = abs(ef - em) if em == em and ef == ef else ""
+        if se == 0.0 and fe == 0.0:
+            r["slip_pts_exit"] = 0.0
+        else:
+            r["slip_pts_exit"] = abs(xm - xf) if xm == xm and xf == xf else ""
+    with src.open("w", encoding="utf-8", newline="") as fp:
+        w = csv.DictWriter(fp, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
 def _add_taken_trade(
     archive: RunArchive,
     rec: dict[str, Any],
@@ -499,6 +538,8 @@ def _add_taken_trade(
                 "fee_exit": lg.exit_fee,
                 "slip_entry": lg.slip,
                 "slip_exit": lg.exit_slip,
+                "slip_pts_entry": getattr(lg, "slip_pts_entry", float("nan")),
+                "slip_pts_exit": getattr(lg, "slip_pts_exit", float("nan")),
                 "iv_entry": g0.get("iv"),
                 "delta_entry": g0.get("delta"),
                 "gamma_entry": g0.get("gamma"),
@@ -589,9 +630,10 @@ def _chain_gap_windows(
     return out
 
 
-def main() -> None:
+def _parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", default="2025-06")
+    ap.add_argument("--months", nargs="+", default=None)
     ap.add_argument("--days", type=int, default=0)
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--arms", default="all")
@@ -600,10 +642,25 @@ def main() -> None:
     ap.add_argument("--csv", default=None)
     ap.add_argument("--cache-gb", type=float, default=1.0)
     ap.add_argument("--slip", type=float, default=20.0)
+    ap.add_argument("--slip-model", dest="slip_model", choices=("fixed", "table"), default="fixed")
+    ap.add_argument("--slip-mult", dest="slip_mult", type=float, default=1.0)
     ap.add_argument("--reduced", action="store_true")
-    args = ap.parse_args()
+    ap.add_argument("--p5", action="store_true")
+    return ap.parse_args()
 
-    month = str(args.month)
+
+def main() -> None:
+    args = _parse_args()
+    months = [str(x) for x in (args.months if args.months else [args.month])]
+    if str(args.slip_model) == "table":
+        from backtest.slippage_model import load_slip_table
+
+        load_slip_table()
+    for month in months:
+        run_month(args, month)
+
+
+def run_month(args: Any, month: str) -> None:
     days = int(args.days or 0)
     if bool(args.smoke) and days <= 0:
         days = 3
@@ -632,17 +689,30 @@ def main() -> None:
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     slip_pts = float(args.slip)
+    slip_model = str(args.slip_model)
+    slip_mult = float(args.slip_mult)
     reduced = bool(args.reduced)
-    a_grid: tuple[Any, ...] = A_GRID_REDUCED if reduced else A_GRID
-    dte_grid = DTE_GRID_REDUCED if reduced else DTE_GRID
-    h_grid: tuple[int | None, ...] = H_GRID_REDUCED if reduced else H_GRID
-    cfgs = list(X_REDUCED) if reduced else _strike_cfgs()
-    if days or args.smoke:
-        tag = "smoke"
+    p5 = bool(args.p5)
+    if p5:
+        a_grid = A_GRID_P5
+        dte_grid = DTE_GRID_P5
+        h_grid = H_GRID_P5
+        cfgs = list(X_P5)
+        tag = "p5"
     elif reduced:
+        a_grid = A_GRID_REDUCED
+        dte_grid = DTE_GRID_REDUCED
+        h_grid = H_GRID_REDUCED
+        cfgs = list(X_REDUCED)
         tag = "reduced"
     else:
+        a_grid = A_GRID
+        dte_grid = DTE_GRID
+        h_grid = H_GRID
+        cfgs = _strike_cfgs()
         tag = "grid"
+    if days or args.smoke:
+        tag = "smoke"
     folder = RUNS_DIR / f"{stamp}_s022_{tag}_{month}"
     n = 0
     while folder.exists():
@@ -654,8 +724,8 @@ def main() -> None:
         args,
         month=month,
         prereg_note=(
-            f"S022 ULP rolling ITM long strangle; slip={slip_pts}pt; "
-            f"reduced={reduced}; settle intrinsic 0 fee"
+            f"S022 ULP long strangle; slip_model={slip_model} slip={slip_pts} "
+            f"slip_mult={slip_mult}; p5={p5} reduced={reduced}; settle intrinsic 0 fee"
         ),
         folder=folder,
     )
@@ -663,7 +733,10 @@ def main() -> None:
     meta_p = archive.folder / "run_meta.json"
     meta = json.loads(meta_p.read_text(encoding="utf-8"))
     meta["slip_pts"] = slip_pts
+    meta["slip_model"] = slip_model
+    meta["slip_mult"] = slip_mult
     meta["reduced"] = reduced
+    meta["p5"] = p5
     meta["grid"] = {
         "X": [list(c) for c in cfgs],
         "dte": list(dte_grid),
@@ -788,6 +861,8 @@ def main() -> None:
     dump_spec = ("ulp", "15m", "wick", "itm", 1000, 1, 125)
     miss_exp_ev: dict[int, int] = {1: 0, 2: 0}
     miss_exp_dates: dict[int, set[str]] = {1: set(), 2: set()}
+    x_prem: dict[tuple[str, int], list[float]] = {}
+    x_spts: dict[tuple[str, int], list[float]] = {}
     mark_none_by_date: dict[str, int] = {}
     traded_exps: set[Any] = set()
 
@@ -821,6 +896,7 @@ def main() -> None:
                         mkt, t0, ed, int(x), style, _a_pct(a), minutes,
                         compact=True, record_fills=False,
                         slip_pts=slip_pts, h_grid=h_grid,
+                        slip_model=slip_model, slip_mult=slip_mult, dte=int(dte),
                     )
                     n_paths += 1
                     key = (e["event_id"], style, int(x), int(dte), a)
@@ -842,6 +918,14 @@ def main() -> None:
                     else:
                         n_ok += 1
                         exits_by_key[key] = list(p.exits)
+                        xp = x_prem.setdefault(bx, [])
+                        xs = x_spts.setdefault(bx, [])
+                        for lg in p.legs:
+                            if int(lg.opened_ts) == int(t0):
+                                xp.append(float(lg.mark0))
+                                xs.append(float(lg.slip_pts_entry))
+                            if not lg.settled and lg.slip_pts_exit == lg.slip_pts_exit:
+                                xs.append(float(lg.slip_pts_exit))
         if (ei + 1) % 10 == 0 or ei + 1 == n_work:
             elapsed = time.perf_counter() - t_sim
             print(
@@ -987,6 +1071,7 @@ def main() -> None:
             mkt, t0, ed, int(x), str(style), _a_pct(a), minutes,
             compact=False, record_fills=True,
             slip_pts=slip_pts, h_grid=h_grid,
+            slip_model=slip_model, slip_mult=slip_mult, dte=int(dte),
         )
 
     basket_rows: list[dict[str, Any]] = []
@@ -1072,7 +1157,8 @@ def main() -> None:
         f"month={month} days={days} arms={arms} tfs={tfs} modes={modes}",
         f"grid X={list(cfgs)} a={grid_a} T={list(T_GRID)} SL={list(SL_GRID)} "
         f"dte={list(dte_grid)} H={grid_h}",
-        f"slip_pts={slip_pts} qty={1000} seed={SEED} reduced={reduced}",
+        f"slip_model={slip_model} slip_pts={slip_pts} slip_mult={slip_mult} "
+        f"qty={1000} seed={SEED} reduced={reduced} p5={p5}",
         "SL_basis=GROSS TARGET_basis=NET (exit P&L is NET); TIME at H minutes after entry",
         "",
         "n events per arm/tf/mode:",
@@ -1184,27 +1270,38 @@ def main() -> None:
                 f"  {tf} {mode} ULP-C2 n={n_p} med={med_p:.4f} pct={pct_p:.1f}% | "
                 f"ULP-VOL n={n_v} med={med_v:.4f} pct={pct_v:.1f}%"
             )
-    lines.append("--- ULP median gross / cost / net per (a, H) (cell means) ---")
-    ah_keys: list[tuple[Any, Any]] = []
-    seen_ah: set[tuple[Any, Any]] = set()
+    lines.append("--- ULP median gross / cost / net per (X, H) (cell means) ---")
+    xh_keys: list[tuple[Any, Any, Any]] = []
+    seen_xh: set[tuple[Any, Any, Any]] = set()
     for r in cell_rows:
         if r["arm"] != "ulp":
             continue
-        k = (r.get("a"), r.get("H"))
-        if k not in seen_ah:
-            seen_ah.add(k)
-            ah_keys.append(k)
-    for a_k, h_k in ah_keys:
+        k = (r.get("style"), r.get("X"), r.get("H"))
+        if k not in seen_xh:
+            seen_xh.add(k)
+            xh_keys.append(k)
+    for st_k, x_k, h_k in xh_keys:
         rs = [
             r for r in cell_rows
-            if r["arm"] == "ulp" and r.get("a") == a_k and r.get("H") == h_k and int(r["n"]) > 0
+            if r["arm"] == "ulp" and r.get("style") == st_k and r.get("X") == x_k
+            and r.get("H") == h_k and int(r["n"]) > 0
         ]
         g = [float(r["mean_gross"]) for r in rs if r.get("mean_gross") == r.get("mean_gross")]
         c = [float(r["mean_cost"]) for r in rs if r.get("mean_cost") == r.get("mean_cost")]
         nts = [float(r["mean"]) for r in rs if r.get("mean") == r.get("mean")]
         lines.append(
-            f"  a={a_k} H={h_k} n_cells={len(rs)} median_gross={_median(g):.3f} "
+            f"  {st_k} X={x_k} H={h_k} n_cells={len(rs)} median_gross={_median(g):.3f} "
             f"median_cost={_median(c):.3f} median_net={_median(nts):.3f}"
+        )
+    lines.append("--- avg entry premium per leg and avg slip_pts per fill by X ---")
+    for (st_k, x_k) in sorted(set(list(x_prem.keys()) + list(x_spts.keys()))):
+        prems = x_prem.get((st_k, x_k), [])
+        spts = x_spts.get((st_k, x_k), [])
+        lines.append(
+            f"  {st_k} X={x_k} n_entry_legs={len(prems)} avg_entry_prem="
+            f"{(sum(prems) / len(prems) if prems else float('nan')):.4f} "
+            f"n_fills={len(spts)} avg_slip_pts="
+            f"{(sum(spts) / len(spts) if spts else float('nan')):.4f}"
         )
     lines.append("--- best 10 ULP cells (C2 / VOLCTRL same cell side-by-side) ---")
     for r in best10:
@@ -1219,6 +1316,76 @@ def main() -> None:
             f"fee={r['avg_fee']:.2f} slip={r['avg_slip']:.2f} "
             f"| C2 mean={c2['mean'] if c2 else float('nan')} n={c2['n'] if c2 else 0} "
             f"| VOL mean={vc['mean'] if vc else float('nan')} n={vc['n'] if vc else 0}"
+        )
+    lines.append("--- ULP net>0 cells: +-1 step neighbours in T, SL, H, X ---")
+    t_vals = list(T_GRID)
+    sl_vals = list(SL_GRID)
+    h_vals = list(h_grid)
+    x_vals = list(cfgs)
+    ulp_idx = {
+        (
+            r.get("tf"), r.get("mode"), r.get("style"), int(r["X"]), int(r["dte"]),
+            r.get("a"), r.get("H"), int(r["T"]), int(r["SL"]),
+        ): r
+        for r in cell_rows if r["arm"] == "ulp"
+    }
+    pos_ulp = [
+        r for r in cell_rows
+        if r["arm"] == "ulp" and int(r["n"]) > 0 and float(r["mean"]) > 0
+    ]
+
+    def _nb_ok(r0: dict[str, Any], axis: str, delta: int) -> str:
+        style, xv = str(r0["style"]), int(r0["X"])
+        hv, tv, slv = r0.get("H"), int(r0["T"]), int(r0["SL"])
+        if axis == "T":
+            i = t_vals.index(tv) if tv in t_vals else -1
+            j = i + delta
+            if i < 0 or j < 0 or j >= len(t_vals):
+                return f"T{delta:+d}=edge"
+            tv = int(t_vals[j])
+        elif axis == "SL":
+            i = sl_vals.index(slv) if slv in sl_vals else -1
+            j = i + delta
+            if i < 0 or j < 0 or j >= len(sl_vals):
+                return f"SL{delta:+d}=edge"
+            slv = int(sl_vals[j])
+        elif axis == "H":
+            i = h_vals.index(hv) if hv in h_vals else -1
+            j = i + delta
+            if i < 0 or j < 0 or j >= len(h_vals):
+                return f"H{delta:+d}=edge"
+            hv = h_vals[j]
+        else:
+            i = x_vals.index((style, xv)) if (style, xv) in x_vals else -1
+            j = i + delta
+            if i < 0 or j < 0 or j >= len(x_vals):
+                return f"X{delta:+d}=edge"
+            style, xv = x_vals[j]
+        key = (
+            r0.get("tf"), r0.get("mode"), style, int(xv), int(r0["dte"]),
+            r0.get("a"), hv, int(tv), int(slv),
+        )
+        nb = ulp_idx.get(key)
+        if nb is None or int(nb.get("n") or 0) <= 0:
+            return f"{axis}{delta:+d}=missing"
+        ok = float(nb["mean"]) > 0
+        return f"{axis}{delta:+d}={'net>0' if ok else 'net<=0'}"
+
+    if not pos_ulp:
+        lines.append("  (no ULP cells with mean > 0)")
+    for r in pos_ulp:
+        bits = []
+        all_ok = True
+        for axis in ("T", "SL", "H", "X"):
+            for delta in (-1, 1):
+                lab = _nb_ok(r, axis, delta)
+                bits.append(lab)
+                if lab.endswith("net<=0") or lab.endswith("missing"):
+                    all_ok = False
+        lines.append(
+            f"  {r['tf']} {r['mode']} {r['style']} X={r['X']} H={r.get('H')} "
+            f"T={r['T']} SL={r['SL']} mean={r['mean']:.3f} all_nb={all_ok} | "
+            + " ".join(bits)
         )
     lines.append("--- best cell per (tf, mode) by arm ---")
     for tf in tfs:
@@ -1275,7 +1442,10 @@ def main() -> None:
                 "db_expiries": db_exps,
                 "dump_cell": list(dump_cell_used),
                 "slip_pts": slip_pts,
+                "slip_model": slip_model,
+                "slip_mult": slip_mult,
                 "reduced": reduced,
+                "p5": p5,
                 "grid": {
                     "X": [list(c) for c in cfgs],
                     "dte": list(dte_grid),
@@ -1339,10 +1509,12 @@ def main() -> None:
                         mkt, t0, ed, int(x), str(style), _a_pct(a), minutes,
                         compact=False, record_fills=True,
                         slip_pts=slip_pts, h_grid=h_grid,
+                        slip_model=slip_model, slip_mult=slip_mult, dte=int(dte),
                     )
                     if pth.ok:
                         _add_taken_trade(archive, rec, pth, cell, month, mkt)
         archive.finalize()
+        _patch_legs_csv(archive.folder)
         mo = int(str(month).split("-")[1])
         mnames = (
             "", "january", "february", "march", "april", "may", "june",

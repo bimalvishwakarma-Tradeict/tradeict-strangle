@@ -28,6 +28,17 @@ A_GRID_REDUCED: tuple[float | None, ...] = (None, 150)
 H_GRID: tuple[int | None, ...] = (None,)
 H_GRID_REDUCED: tuple[int | None, ...] = (None, 60, 120, 240)
 X_REDUCED: tuple[tuple[str, int], ...] = (("itm", 600), ("itm", 1000), ("otm", 1000))
+A_GRID_P5: tuple[float | None, ...] = (None,)
+DTE_GRID_P5 = (1,)
+H_GRID_P5: tuple[int | None, ...] = (None, 240, 360, 480, 720)
+X_P5: tuple[tuple[str, int], ...] = (
+    ("itm", 1000),
+    ("otm", 600),
+    ("otm", 800),
+    ("otm", 1000),
+    ("otm", 1200),
+    ("otm", 1500),
+)
 T_GRID = (150, 200, 250, 300, 350, 400)
 SL_GRID = (50, 100, 150, 200)
 DTE_GRID = (1, 2)
@@ -46,6 +57,39 @@ class Market(Protocol):
 
 def slip_usd(qty: int = QTY, slip_pts: float = SLIP_PTS) -> float:
     return float(slip_pts) * float(qty) * float(OPTIONS_CONTRACT_VALUE)
+
+
+def resolve_slip_pts(
+    premium: float,
+    dte: int,
+    slip_model: str = "fixed",
+    slip_pts: float = SLIP_PTS,
+    slip_mult: float = 1.0,
+) -> float:
+    """Fixed: --slip points. Table: mark * slip_pct(mark, dte)/100 * M."""
+    if str(slip_model) != "table":
+        return float(slip_pts)
+    from backtest import slippage_model as _sm
+
+    if _sm._TABLE is None:
+        _sm.load_slip_table()
+    pct = float(_sm.slip_pct(float(premium), int(dte)))
+    return float(premium) * pct / 100.0 * float(slip_mult)
+
+
+def resolve_slip_pts_vec(
+    prem: np.ndarray,
+    dte: int,
+    slip_model: str = "fixed",
+    slip_pts: float = SLIP_PTS,
+    slip_mult: float = 1.0,
+) -> np.ndarray:
+    if str(slip_model) != "table":
+        return np.full(prem.shape, float(slip_pts), dtype=np.float64)
+    out = np.empty(prem.shape, dtype=np.float64)
+    for i, p in enumerate(np.asarray(prem, dtype=np.float64).tolist()):
+        out[i] = resolve_slip_pts(float(p), int(dte), "table", slip_pts, slip_mult)
+    return out
 
 
 def buy_fill(mark: float, slip_pts: float = SLIP_PTS) -> float:
@@ -137,6 +181,8 @@ class SimLeg:
     exit_fee: float = 0.0
     exit_slip: float = 0.0
     settled: bool = False
+    slip_pts_entry: float = SLIP_PTS
+    slip_pts_exit: float = float("nan")
 
 
 @dataclass
@@ -285,6 +331,9 @@ def _open_leg(
     rows: list[dict[str, Any]] | None = None,
     src_counts: dict[str, int] | None = None,
     slip_pts: float = SLIP_PTS,
+    slip_model: str = "fixed",
+    slip_mult: float = 1.0,
+    dte: int = 1,
 ) -> SimLeg | None:
     sym = str(row["symbol"])
     is_call = bool(row["is_call"])
@@ -297,8 +346,9 @@ def _open_leg(
     if q is None:
         return None
     px, src = q
+    pts = resolve_slip_pts(float(px), int(dte), slip_model, slip_pts, slip_mult)
     fee = fee_at(px, spot, QTY)
-    sl = slip_usd(QTY, slip_pts)
+    sl = slip_usd(QTY, pts)
     return SimLeg(
         role=role,
         symbol=sym,
@@ -306,7 +356,7 @@ def _open_leg(
         is_call=is_call,
         expiry=exp,
         mark0=float(px),
-        fill=buy_fill(px, slip_pts),
+        fill=buy_fill(px, pts),
         fee=fee,
         slip=sl,
         qty=QTY,
@@ -314,6 +364,7 @@ def _open_leg(
         src=src,
         opened_ts=int(t),
         opp_symbol=opp,
+        slip_pts_entry=float(pts),
     )
 
 
@@ -364,19 +415,31 @@ def _fill_rec(
         "peak_gross": float(peak_gross),
         "sl_level": float("nan"),
         "reason": reason,
+        "slip_pts": float(slip_pts),
         "symbol": lg.symbol,
         "iv": gk.get("iv", float("nan")),
         "delta": gk.get("delta", float("nan")),
     }
 
 
-def _close_live(lg: SimLeg, t: int, mark: float, spot: float, slip_pts: float = SLIP_PTS) -> None:
+def _close_live(
+    lg: SimLeg,
+    t: int,
+    mark: float,
+    spot: float,
+    slip_pts: float = SLIP_PTS,
+    slip_model: str = "fixed",
+    slip_mult: float = 1.0,
+    dte: int = 1,
+) -> None:
+    pts = resolve_slip_pts(float(mark), int(dte), slip_model, slip_pts, slip_mult)
     lg.open = False
     lg.closed_ts = int(t)
     lg.exit_mark = float(mark)
-    lg.exit_fill = sell_fill(mark, slip_pts)
+    lg.exit_fill = sell_fill(mark, pts)
     lg.exit_fee = fee_at(mark, spot, lg.qty)
-    lg.exit_slip = slip_usd(lg.qty, slip_pts)
+    lg.exit_slip = slip_usd(lg.qty, pts)
+    lg.slip_pts_exit = float(pts)
     lg.settled = False
 
 
@@ -388,6 +451,7 @@ def _settle(lg: SimLeg, t: int, spot: float) -> None:
     lg.exit_fill = xf
     lg.exit_fee = 0.0
     lg.exit_slip = 0.0
+    lg.slip_pts_exit = 0.0
     lg.settled = True
 
 
@@ -501,6 +565,9 @@ def _adjust_one(
     style: str,
     src_counts: dict[str, int],
     slip_pts: float = SLIP_PTS,
+    slip_model: str = "fixed",
+    slip_mult: float = 1.0,
+    dte: int = 1,
 ) -> SimLeg | None:
     packed = mkt.chain(exp, t)
     if packed is None:
@@ -514,6 +581,7 @@ def _adjust_one(
     role = "C" if lg.is_call else "P"
     return _open_leg(
         mkt, row, exp, t, spot, role, rows=rows, src_counts=src_counts, slip_pts=slip_pts,
+        slip_model=slip_model, slip_mult=slip_mult, dte=dte,
     )
 
 
@@ -531,11 +599,14 @@ def simulate_path(
     slip_pts: float = SLIP_PTS,
     hold_min: int | None = None,
     h_grid: tuple[int | None, ...] | None = None,
+    slip_model: str = "fixed",
+    slip_mult: float = 1.0,
+    dte: int | None = None,
 ) -> PathResult:
     """Run adjustments to expiry; record per-minute pre-adj net (T/SL/H view).
 
     a_pct=None: no rolls. hold_min: brute TIME exit (minutes since entry). Defaults
-    match the Stage-1 baseline (a% on, H off, 20pt slip).
+    match the Stage-1 baseline (a% on, H off, 20pt fixed slip).
     """
     src_counts = {"real": 0, "stale": 0, "parity": 0, "none": 0}
     out = PathResult(ok=False, skip_reason="", t0=int(t0), exp_ts=int(s018.expiry_unix(exp)))
@@ -555,13 +626,15 @@ def simulate_path(
         return out
     c_row, p_row, d_c, d_p, _atm = picked
     out.strike_dev = [abs(d_c), abs(d_p)]
+    dte_n = int(dte) if dte is not None else max(0, (exp - ist_date(int(t0))).days)
+    sm, smult = str(slip_model), float(slip_mult)
     call = _open_leg(
         mkt, c_row, exp, int(t0), float(spot0), "C", rows=rows, src_counts=src_counts,
-        slip_pts=slip_pts,
+        slip_pts=slip_pts, slip_model=sm, slip_mult=smult, dte=dte_n,
     )
     put = _open_leg(
         mkt, p_row, exp, int(t0), float(spot0), "P", rows=rows, src_counts=src_counts,
-        slip_pts=slip_pts,
+        slip_pts=slip_pts, slip_model=sm, slip_mult=smult, dte=dte_n,
     )
     if call is None or put is None:
         out.skip_reason = "entry_mark_none"
@@ -576,13 +649,13 @@ def simulate_path(
         out.fills.append(
             _fill_rec(
                 int(t0), float(spot0), call, "buy", call.mark0, call.src, True, 0.0, 0.0, "ENTRY",
-                gross=0.0, peak_gross=0.0, slip_pts=slip_pts,
+                gross=0.0, peak_gross=0.0, slip_pts=call.slip_pts_entry,
             )
         )
         out.fills.append(
             _fill_rec(
                 int(t0), float(spot0), put, "buy", put.mark0, put.src, True, 0.0, 0.0, "ENTRY",
-                gross=0.0, peak_gross=0.0, slip_pts=slip_pts,
+                gross=0.0, peak_gross=0.0, slip_pts=put.slip_pts_entry,
             )
         )
     realized = 0.0
@@ -610,7 +683,10 @@ def simulate_path(
             if got is None:
                 out.skip_reason = "exit_mark_none"
                 return out
-            _close_live(lg, t, got[0], float(spx), slip_pts=slip_pts)
+            _close_live(
+                lg, t, got[0], float(spx), slip_pts=slip_pts,
+                slip_model=sm, slip_mult=smult, dte=dte_n,
+            )
             if record_fills:
                 gv = float(out.gross[-1]) if out.gross else 0.0
                 pg = float(out.peak_gross[-1]) if out.peak_gross else 0.0
@@ -619,7 +695,7 @@ def simulate_path(
                 out.fills.append(
                     _fill_rec(
                         t, float(spx), lg, "sell", got[0], got[1], False, nv, pk, "",
-                        gross=gv, peak_gross=pg, slip_pts=slip_pts,
+                        gross=gv, peak_gross=pg, slip_pts=lg.slip_pts_exit,
                     )
                 )
             realized += _cash_mark_closed(lg)
@@ -695,7 +771,8 @@ def simulate_path(
         for lg, px in zip(live, pxs):
             sl = px[:end]
             open_pnl += (sl - float(lg.mark0)) * MULT
-            est += _vec_fee(sl, spots[:end]) + slip_usd(lg.qty, slip_pts)
+            pts_v = resolve_slip_pts_vec(sl, dte_n, sm, slip_pts, smult)
+            est += _vec_fee(sl, spots[:end]) + pts_v * MULT
         grosses = realized + open_pnl
         nets = grosses - float(fees) - float(slips) - est
         nets = np.where(at_exp[:end], grosses - float(fees) - float(slips), nets)
@@ -727,8 +804,11 @@ def simulate_path(
             if stop_j is not None:
                 end = stop_j + 1
 
-        n_live = len(live)
-        est_slip_one = slip_usd(QTY) * float(n_live)
+        est_slip_arr = np.zeros(end, dtype=np.float64)
+        for lg, px in zip(live, pxs):
+            pts_v = resolve_slip_pts_vec(px[:end], dte_n, sm, slip_pts, smult)
+            est_slip_arr += pts_v * MULT
+        est_fee_arr = est[:end] - est_slip_arr
         for j in range(end):
             nv = float(nets[j])
             gv = float(grosses[j])
@@ -742,8 +822,8 @@ def simulate_path(
             out.n_adj.append(int(n_adj))
             out.fees_m.append(float(fees))
             out.slip_m.append(float(slips))
-            out.est_fee_m.append(float(est[j]) - est_slip_one)
-            out.est_slip_m.append(est_slip_one)
+            out.est_fee_m.append(float(est_fee_arr[j]))
+            out.est_slip_m.append(float(est_slip_arr[j]))
         last_t = int(seg[end - 1])
 
         if stop_j is not None:
@@ -766,7 +846,7 @@ def simulate_path(
                             "EXPIRY",
                             gross=float(out.gross[-1]) if out.gross else 0.0,
                             peak_gross=float(out.peak_gross[-1]) if out.peak_gross else 0.0,
-                            slip_pts=slip_pts,
+                            slip_pts=0.0,
                         )
                     )
             live = []
@@ -796,12 +876,18 @@ def simulate_path(
                     break
                 ranked.sort(key=lambda z: z[0], reverse=True)
                 _ratio, lg, mk = ranked[0]
-                _close_live(lg, t, mk, sp, slip_pts=slip_pts)
+                _close_live(
+                    lg, t, mk, sp, slip_pts=slip_pts,
+                    slip_model=sm, slip_mult=smult, dte=dte_n,
+                )
                 realized += _cash_mark_closed(lg)
                 fees += lg.exit_fee
                 slips += lg.exit_slip
                 live = [x for x in live if x.open]
-                neu = _adjust_one(mkt, lg, t, sp, exp, int(x), style, src_counts, slip_pts=slip_pts)
+                neu = _adjust_one(
+                    mkt, lg, t, sp, exp, int(x), style, src_counts, slip_pts=slip_pts,
+                    slip_model=sm, slip_mult=smult, dte=dte_n,
+                )
                 if neu is None:
                     out.skip_reason = "adj_entry_none"
                     return out
@@ -818,13 +904,13 @@ def simulate_path(
                     out.fills.append(
                         _fill_rec(
                             t, sp, lg, "sell", mk, "real", False, nv, pk, "ADJ", a_pct,
-                            gross=gv, peak_gross=pg, slip_pts=slip_pts,
+                            gross=gv, peak_gross=pg, slip_pts=lg.slip_pts_exit,
                         )
                     )
                     out.fills.append(
                         _fill_rec(
                             t, sp, neu, "buy", neu.mark0, neu.src, True, nv, pk, "ADJ", a_pct,
-                            gross=gv, peak_gross=pg, slip_pts=slip_pts,
+                            gross=gv, peak_gross=pg, slip_pts=neu.slip_pts_entry,
                         )
                     )
                 out.adjs.append(
