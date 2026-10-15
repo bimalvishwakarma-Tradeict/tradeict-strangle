@@ -28,6 +28,37 @@
       hour: "2-digit",
       minute: "2-digit",
     });
+  function caTickFmt(time, tickMarkType) {
+    const raw = time && typeof time === "object" && time.timestamp != null ? time.timestamp : time;
+    const t = Number(raw);
+    if (!Number.isFinite(t)) return "";
+    const d = new Date(t * 1000);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: IST,
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(d);
+    const get = (type) => {
+      const p = parts.find((x) => x.type === type);
+      return p ? p.value : "";
+    };
+    const kind = Number(tickMarkType);
+    if (kind === 0) return get("year");
+    if (kind === 1) return get("month");
+    if (kind === 2) return String(parseInt(get("day"), 10) || get("day"));
+    const hh = String(get("hour")).padStart(2, "0");
+    const mm = String(get("minute")).padStart(2, "0");
+    const ss = String(get("second")).padStart(2, "0");
+    if (kind === 4) return hh + ":" + mm + ":" + ss;
+    return hh + ":" + mm;
+  }
+  window.__caTickFmt = caTickFmt;
+  window.__caGridErrors = [];
 
   let tf = "1m";
   let candleMap = new Map();
@@ -105,10 +136,7 @@
       secondsVisible: false,
       rightOffset: 6,
       shiftVisibleRangeOnNewBar: false,
-      tickMarkFormatter: (t) => {
-        const d = new Date(t * 1000);
-        return d.toLocaleString("en-IN", { timeZone: IST, hour12: false, hour: "2-digit", minute: "2-digit" });
-      },
+      tickMarkFormatter: (t, tickMarkType) => caTickFmt(t, tickMarkType),
     },
     localization: { timeFormatter: (t) => fmtIst(t) },
   });
@@ -177,6 +205,7 @@
     },
     getBarCount: function () { return visibleCandles().length; },
     getOldestTime: function () { return oldestCandleTime(); },
+    getTimes: function () { return sortedCandles().map((c) => Number(c.time)); },
     isReplay: function () { return replayOn; },
     isFollow: function () { return replayFollow; },
     isHistory: function () { return historyMode; },
@@ -195,9 +224,15 @@
       if (replayOn || historyMode) return;
       historyMode = true;
       viewModeSync();
-      view.request("history-pad");
       view.request("pin-view");
       updateGoRtBtn();
+    },
+    onEnterLive: function () {
+      if (replayOn || !historyMode) return;
+      historyMode = false;
+      viewModeSync();
+      updateGoRtBtn();
+      if (!ws || ws.readyState !== 1) connectWs();
     },
     onUserRange: function () { updateGoRtBtn(); },
   });
@@ -209,19 +244,23 @@
   function captureTfKeep() {
     let barSpacing = null;
     let visibleBars = 80;
+    let lastOffset = 6;
     let anchor = null;
     try {
       const ts = chart.timeScale();
       const opt = ts.options();
       if (opt && opt.barSpacing != null) barSpacing = Number(opt.barSpacing);
       const lr = ts.getVisibleLogicalRange();
+      const vis = visibleCandles();
+      const lastI = vis.length ? vis.length - 1 : 0;
       if (lr && lr.from != null && lr.to != null) {
         visibleBars = Math.max(8, Math.round(Number(lr.to) - Number(lr.from)));
+        lastOffset = Number(lr.to) - lastI;
       }
       const vr = ts.getVisibleRange();
       if (vr && vr.to != null) anchor = Number(vr.to);
     } catch (e) {}
-    return { barSpacing: barSpacing, visibleBars: visibleBars, anchor: anchor };
+    return { barSpacing: barSpacing, visibleBars: visibleBars, lastOffset: lastOffset, anchor: anchor };
   }
   function viewModeSync() {
     if (replayOn) view.request("set-mode", { mode: replayPlaying ? "REPLAY_PLAYING" : "REPLAY_PAUSED" });
@@ -268,6 +307,42 @@
   function viewNewestOpen() {
     if (replayOn && replayBarOpen != null) return Number(replayBarOpen);
     return newestCandleTime();
+  }
+  function lastCandleTime() {
+    const vis = visibleCandles();
+    return vis.length ? Number(vis[vis.length - 1].time) : null;
+  }
+  function snapToGrid(t) {
+    const sec = barSecNow();
+    const n = Number(t);
+    if (!Number.isFinite(n) || !Number.isFinite(sec) || sec <= 0) return n;
+    return Math.floor(n / sec) * sec;
+  }
+  function capToLastCandle(t) {
+    let s = snapToGrid(t);
+    const last = lastCandleTime();
+    if (last != null && Number.isFinite(last) && s > last) s = last;
+    return s;
+  }
+  function assertGrid(seriesName, points) {
+    const sec = barSecNow();
+    const last = lastCandleTime();
+    if (!window.__caGridErrors) window.__caGridErrors = [];
+    (points || []).forEach(function (p) {
+      if (!p || p.time == null) return;
+      const t = Number(p.time);
+      if (!Number.isFinite(t)) return;
+      const snapped = Math.floor(t / sec) * sec;
+      const off = t !== snapped;
+      const ahead = last != null && t > last;
+      if (off || ahead) {
+        const rec = {
+          series: seriesName, time: t, snap: snapped, last: last, off: off, ahead: ahead,
+        };
+        console.warn("[grid] off-grid overlay time", rec);
+        window.__caGridErrors.push(rec);
+      }
+    });
   }
   function visibleCandles() {
     const all = sortedCandles();
@@ -608,10 +683,8 @@
       applyCandles();
       await reloadOverlay();
       if (j.reached_now) {
-        historyMode = false;
-        viewModeSync();
-        updateHistStatus();
         connectWs();
+        updateHistStatus();
       }
     } finally {
       view.request("load-newer-end");
@@ -869,7 +942,7 @@
       const day = Math.floor(Number(t) / 86400);
       while (i + 1 < src.length && Number(src[i + 1].time) <= t) i += 1;
       if (prevDay != null && day !== prevDay) {
-        out.push({ time: Number(t) - 1 });
+        out.push({});
       }
       prevDay = day;
       const srcT = Number(src[i].time);
@@ -905,8 +978,9 @@
     const b = pts[pts.length - 1];
     if (Number(b.time) < oldest) return [];
     if (newest != null && Number(a.time) > newest) return [];
-    const t0 = Math.max(Number(a.time), oldest);
-    const t1 = newest != null ? Math.min(Number(b.time), newest) : Number(b.time);
+    let t0 = capToLastCandle(Math.max(Number(a.time), oldest));
+    let t1raw = newest != null ? Math.min(Number(b.time), newest) : Number(b.time);
+    let t1 = capToLastCandle(t1raw);
     if (t1 <= t0) return [];
     return [
       { time: t0, value: a.value },
@@ -915,6 +989,9 @@
   }
 
   function paintOverlay(j) {
+    window.__caGridErrors = [];
+    let holdLr = null;
+    try { holdLr = chart.timeScale().getVisibleLogicalRange(); } catch (e) { holdLr = null; }
     const oldest = oldestCandleTime();
     const newest = viewNewestOpen();
     const cursorClose = replayOn ? replayCursorClose() : (newest != null ? newest + barSecNow() : null);
@@ -926,7 +1003,11 @@
     const vwap = (j.lines || []).find((x) => x.kind === "vwap");
     vwapSeries.applyOptions({ visible: showVwap });
     const vwapPts = showVwap && vwap && oldest != null ? clipLinePoints(vwap, oldest, newest) : [];
-    const vwapKeep = vwapPts.filter((p) => p.time == null || canShowTime(p.time));
+    const vwapKeep = vwapPts.filter((p) => p.time == null || canShowTime(p.time)).map(function (p) {
+      if (p.time == null) return p;
+      return { time: capToLastCandle(p.time), value: p.value };
+    });
+    assertGrid("vwap", vwapKeep);
     const vwapSegs = splitLineSegs(vwapKeep);
     const v0 = vwapSegs[0] || [];
     let usedVwapUpdate = false;
@@ -964,6 +1045,7 @@
       if (!ln.active && !showExpired) return;
       const pts = oldest != null ? clipLinePoints(ln, oldest, newest) : (ln.points || []);
       const capped = pts.filter((p) => p.time == null || canShowTime(p.time));
+      assertGrid(ln.id || ln.kind || "line", capped);
       if (capped.length < 2) return;
       const color = ln.kind === "high"
         ? (ln.active ? "#ef4444" : "rgba(239,68,68,0.5)")
@@ -1037,6 +1119,7 @@
       }
       return m;
     });
+    assertGrid("markers", marks);
     try {
       series.setMarkers(marks);
     } catch (err) {
@@ -1075,6 +1158,21 @@
           ],
           fills: [{ kind: "hband", top: ob, bottom: os, fill: "rgba(126,87,194,0.08)" }],
         });
+      }
+    }
+    if (holdLr && holdLr.from != null && holdLr.to != null
+        && Number(holdLr.to) > Number(holdLr.from) && !historyMode && !replayOn) {
+      const visN = visibleCandles().length;
+      const lastI = visN ? visN - 1 : 0;
+      const wasOn = Number(lastI) >= Number(holdLr.from) - 2
+        && Number(lastI) <= Number(holdLr.to) + 2;
+      let nowOff = false;
+      try {
+        const nowLr = chart.timeScale().getVisibleLogicalRange();
+        nowOff = Boolean(nowLr && Number(lastI) > Number(nowLr.to) + 2);
+      } catch (e) {}
+      if (wasOn && nowOff) {
+        view.request("restore-logical", { from: holdLr.from, to: holdLr.to });
       }
     }
     requestAnimationFrame(() => {
@@ -1340,15 +1438,17 @@
     if (historyMode || replayOn) return;
     const t = wsCandleTime(raw);
     if (t == null) return;
+    const open = bucketOpen(t, barSecNow());
     const bar = {
-      time: t,
+      time: open,
       open: Number(raw.open),
       high: Number(raw.high),
       low: Number(raw.low),
       close: Number(raw.close),
       volume: Number(raw.volume || 0),
     };
-    applyLiveCandle(bar);
+    const prev = candleMap.get(open);
+    applyLiveCandle(bar, Boolean(prev));
   }
 
   function applyLiveTick(price, ts, meta) {
@@ -1383,13 +1483,31 @@
   window.__caTick = applyLiveTick;
 
   function applyLiveCandle(bar, sameBar) {
-    const t = Number(bar.time);
+    const sec = barSecNow();
+    let t = Number(bar.time);
+    const snapped = Number.isFinite(t) && sec > 0 ? Math.floor(t / sec) * sec : t;
+    window.__caLiveCandleLog = window.__caLiveCandleLog || [];
+    window.__caLiveCandleLog.push({
+      raw: t, snap: snapped, tf: tf, sameBar: Boolean(sameBar), off: t !== snapped,
+    });
+    if (window.__caLiveCandleLog.length > 40) window.__caLiveCandleLog.shift();
+    if (Number.isFinite(snapped) && t !== snapped) {
+      console.warn("[grid] live candle off-grid", { raw: t, snap: snapped, tf: tf });
+      t = snapped;
+      bar.time = snapped;
+    }
+    assertGrid("candles", [{ time: t }]);
     candleMap.set(t, bar);
-    if (historyMode) view.request("mute", { ms: 80 });
+    view.request("mute", { ms: 80 });
+    let holdLr = null;
+    try { holdLr = chart.timeScale().getVisibleLogicalRange(); } catch (e) {}
     try { series.update(bar); }
     catch (e) {
-      try { series.setData(visibleCandles()); }
-      catch (e2) {}
+      try { series.setData(visibleCandles()); } catch (e2) {}
+      if (holdLr && holdLr.from != null && holdLr.to != null
+          && Number(holdLr.to) > Number(holdLr.from)) {
+        view.request("restore-logical", { from: holdLr.from, to: holdLr.to });
+      }
     }
     paintOhlcLegend(bar);
     updateHistStatus();
@@ -1611,6 +1729,9 @@
       el("btnReplayPlay").textContent = replayPlaying ? "⏸" : "▶";
     }
     if (el("btnReplayStep")) el("btnReplayStep").disabled = !on;
+    if (el("btnReplayTick")) el("btnReplayTick").disabled = !on;
+    if (el("btnReplayCandle")) el("btnReplayCandle").disabled = !on;
+    if (el("replayPlayMode")) el("replayPlayMode").disabled = !on;
     syncFollowBtn();
     const lab = el("statusLabel");
     if (on && lab) {
@@ -1647,6 +1768,29 @@
     const j = await fetchCandlesTf("1m", { start: nextT, end: nextT, limit: 1, allowAhead: true });
     mergeM1(j.candles || []);
     return m1Map.get(nextT) || null;
+  }
+
+  async function ensureUpTo(target) {
+    const want = Number(target);
+    const cap = Number(replayBarOpen);
+    if (!Number.isFinite(want) || want <= cap) return m1Map.get(want) || null;
+    if (m1Map.has(want)) return m1Map.get(want);
+    const j = await fetchCandlesTf("1m", {
+      start: cap + 60, end: want, limit: 1500, allowAhead: true,
+    });
+    mergeM1(j.candles || []);
+    if (m1Map.has(want)) return m1Map.get(want);
+    let best = null;
+    m1Map.forEach((c) => {
+      const t = Number(c.time);
+      if (t > cap && t <= want && (best == null || t > Number(best.time))) best = c;
+    });
+    return best;
+  }
+
+  function replayPlayKind() {
+    const n = el("replayPlayMode");
+    return n && n.value === "tick" ? "tick" : "candle";
   }
 
   async function startReplayAt(openTs) {
@@ -1703,10 +1847,21 @@
     if (gen === tfFetchGen) view.request("replay-start");
   }
 
-  async function replayStep() {
+  async function replayStep(kind) {
     if (!replayOn || replayBarOpen == null) return;
     const t0 = performance.now();
-    const nxt = await ensureNextBar();
+    const sec = barSecNow();
+    const mode = kind === "candle" ? "candle" : "tick";
+    let nxt = null;
+    if (mode === "tick" || sec <= 60) {
+      nxt = await ensureNextBar();
+    } else {
+      const cur = Number(replayBarOpen);
+      const b = bucketOpen(cur, sec);
+      const endCur = b + sec - 60;
+      const target = cur < endCur ? endCur : endCur + sec;
+      nxt = await ensureUpTo(target);
+    }
     if (!nxt) {
       stopReplayTimer();
       setReplayButtons();
@@ -1725,7 +1880,7 @@
     const needFetch = lastOverlayTo == null || Number(replayBarOpen) > Number(lastOverlayTo) || lastOverlayTf !== tf;
     if (needFetch) scheduleOverlay(false);
     else if (indApi && typeof indApi.applyCap === "function") indApi.applyCap();
-    view.request("replay-step");
+    view.request("replay-step", { kind: mode });
     lastStepMs = performance.now() - t0;
     window.__caStepMs = lastStepMs;
     applyingRange = false;
@@ -1737,7 +1892,7 @@
     const spd = Number(el("replaySpeed") ? el("replaySpeed").value : 1);
     const ms = REPLAY_MS[spd] || 900;
     replayTimer = setTimeout(() => {
-      void replayStep().then(() => {
+      void replayStep(replayPlayKind()).then(() => {
         if (replayPlaying) replayPlayLoop();
       });
     }, ms);
@@ -1788,7 +1943,18 @@
       replayPlayLoop();
     });
   }
-  if (el("btnReplayStep")) el("btnReplayStep").addEventListener("click", () => replayStep());
+  if (el("btnReplayStep")) el("btnReplayStep").addEventListener("click", () => replayStep("tick"));
+  if (el("btnReplayTick")) el("btnReplayTick").addEventListener("click", () => replayStep("tick"));
+  if (el("btnReplayCandle")) el("btnReplayCandle").addEventListener("click", () => replayStep("candle"));
+  window.addEventListener("keydown", (ev) => {
+    if (!replayOn || replayBarOpen == null) return;
+    const tag = (ev.target && ev.target.tagName) ? String(ev.target.tagName).toLowerCase() : "";
+    if (tag === "input" || tag === "textarea" || tag === "select") return;
+    if (ev.key !== "ArrowRight") return;
+    ev.preventDefault();
+    if (ev.shiftKey) void replayStep("candle");
+    else void replayStep("tick");
+  });
   if (el("btnReplayFollow")) {
     el("btnReplayFollow").addEventListener("click", () => {
       if (!replayOn) return;
@@ -1812,6 +1978,7 @@
     const tfPay = {
       barSpacing: keep.barSpacing,
       visibleBars: keep.visibleBars,
+      lastOffset: keep.lastOffset,
       anchor: keep.anchor,
       center: savedCenter,
     };
@@ -2276,7 +2443,15 @@
     const vr = chart.timeScale().getVisibleRange();
     if (!vr) { btn.classList.remove("show"); return; }
     const last = Number(vis[vis.length - 1].time);
-    const away = Number(vr.to) < last - barSecNow() * 2;
+    let away = Number(vr.to) < last - barSecNow() * 2;
+    try {
+      const lr = chart.timeScale().getVisibleLogicalRange();
+      const lastX = chart.timeScale().timeToCoordinate(last);
+      if (lr && lastX != null) {
+        const lastL = chart.timeScale().coordinateToLogical(lastX);
+        away = Number(lastL) > Number(lr.to) + 1;
+      }
+    } catch (e) {}
     btn.classList.toggle("show", Boolean(away || (historyMode && !replayOn)));
   }
   function jumpRange(key) {
@@ -2479,8 +2654,14 @@
   window.addEventListener("ca-cmd", (ev) => {
     const d = ev.detail || {};
     if (d.cmd === "start" && d.ts != null) void startReplayAt(Number(d.ts));
+    if (d.cmd === "replayLayout") view.request("replay-start");
     if (d.cmd === "live") void exitReplayLive();
-    if (d.cmd === "step") void replayStep();
+    if (d.cmd === "step") void replayStep("tick");
+    if (d.cmd === "stepTick") void replayStep("tick");
+    if (d.cmd === "stepCandle") void replayStep("candle");
+    if (d.cmd === "playMode" && el("replayPlayMode")) {
+      el("replayPlayMode").value = d.mode === "tick" ? "tick" : "candle";
+    }
     if (d.cmd === "play") {
       if (!replayOn || replayPlaying) return;
       replayPlaying = true;
@@ -2575,7 +2756,16 @@
         vr,
         rr,
         barSpacing,
-        viewLog: typeof view.getLog === "function" ? view.getLog().slice(-12) : [],
+        viewLog: typeof view.getLog === "function" ? view.getLog().slice(-30) : [],
+        modeLog: (window.__caModeLog || []).slice(-20),
+        liveCandleLog: (window.__caLiveCandleLog || []).slice(-8),
+        liveBarDuringDrag: Boolean(window.__caLiveBarDuringDrag),
+        lastLogical: (function () {
+          try {
+            if (!last) return null;
+            return chart.timeScale().coordinateToLogical(chart.timeScale().timeToCoordinate(last.time));
+          } catch (e) { return null; }
+        })(),
         build: (function () {
           const n = document.getElementById("buildVer");
           return n ? n.textContent : "";
@@ -2610,7 +2800,13 @@
         lastX: (function () {
           try {
             if (!last) return null;
-            return chart.timeScale().timeToCoordinate(last.time);
+            const ts = chart.timeScale();
+            const idx = vis.length - 1;
+            if (typeof ts.logicalToCoordinate === "function") {
+              const xL = ts.logicalToCoordinate(idx);
+              if (xL != null && Number.isFinite(Number(xL))) return xL;
+            }
+            return ts.timeToCoordinate(last.time);
           } catch (e) { return null; }
         })(),
         seriesMax: (function () {
@@ -2673,6 +2869,8 @@
         }).length,
         subs: subCount,
         m1n: m1Map.size,
+        times: vis.map(function (c) { return Number(c.time); }),
+        gridErrors: (window.__caGridErrors || []).slice(),
         lastPartial: last && replayOn ? last : null,
         xAlign: (function () {
           if (!last || !paneCharts[0]) return null;

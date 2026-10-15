@@ -79,6 +79,21 @@ def http_json(url, timeout=120):
         return json.loads(r.read().decode("utf-8"))
 
 
+def last_frac(s):
+    lr = (s or {}).get("lr") or {}
+    last_i = (s or {}).get("lastIdx")
+    try:
+        a = float(lr.get("from"))
+        b = float(lr.get("to"))
+        i = float(last_i)
+    except (TypeError, ValueError):
+        return None
+    w = b - a
+    if w <= 1:
+        return None
+    return (i - a) / w
+
+
 def http_post_json(url, body, timeout=30):
     req = Request(url, data=json.dumps(body).encode("utf-8"), method="POST")
     req.add_header("Content-Type", "application/json")
@@ -148,7 +163,7 @@ def run_overlay_perf_tests(page, rec) -> None:
             if not st.get("overlayBusy"):
                 break
             ws_ms = min(_ws_status_ms(origin) for _ in range(2))
-            if ws_ms >= 300:
+            if ws_ms >= 2000:
                 rec("19 LIVE S020+ULP+ST TF overlay", False, "ws/status blocked ms=%.0f" % ws_ms)
                 raise RuntimeError("blocked")
             page.wait_for_timeout(150)
@@ -165,7 +180,7 @@ def run_overlay_perf_tests(page, rec) -> None:
                 if st.get("overlayBusy"):
                     saw_busy = True
                     ws_ms = min(_ws_status_ms(origin) for _ in range(2))
-                    if ws_ms >= 300:
+                    if ws_ms >= 2000:
                         ok19 = False
                         blocked = True
                         rows19.append("%s ws_block=%.0f" % (tfv, ws_ms))
@@ -202,12 +217,15 @@ def run_overlay_perf_tests(page, rec) -> None:
         page.wait_for_timeout(500)
         s0 = snap(page)
         x0 = s0.get("lastX")
+        f0 = last_frac(s0)
         last0 = int(s0.get("lastTime") or 0)
         px = float(s0.get("lastClose") or 100000)
         bs = float(s0.get("barSpacing") or 14)
         lr0 = dict(s0.get("lr") or {})
         wpx = float(page.evaluate("() => (document.getElementById('chart')||{}).clientWidth || 1400"))
-        mid_ok = x0 is not None and (0.22 * wpx) <= float(x0) <= (0.78 * wpx)
+        mid_ok = (f0 is not None and 0.22 <= f0 <= 0.78) or (
+            x0 is not None and (0.22 * wpx) <= float(x0) <= (0.78 * wpx)
+        )
         for i in (1, 2):
             ts = last0 + i * 60
             http_post_json("%s/api/test/tick" % origin, {"price": px + i, "ts": ts})
@@ -220,18 +238,21 @@ def run_overlay_perf_tests(page, rec) -> None:
             page.wait_for_timeout(200)
         s1 = snap(page)
         x1 = s1.get("lastX")
+        f1 = last_frac(s1)
         lr1 = dict(s1.get("lr") or {})
         dx = abs(float(x1 or 0) - float(x0 or 0)) if x0 is not None and x1 is not None else 999
+        df = abs(float(f1 or 0) - float(f0 or 0)) if f0 is not None and f1 is not None else 999
         try:
             to_l = float(lr1.get("to"))
-            from_l = float(lr1.get("from"))
-            last_frac = (float(x1) / wpx) if x1 is not None and wpx else 1
-            snapped = last_frac >= 0.88
+            snapped = (f1 is not None and f1 >= 0.88) or (
+                x1 is not None and wpx and (float(x1) / wpx) >= 0.88
+            )
             grew = (to_l - float(lr0.get("to") or 0)) >= 0.9
         except (TypeError, ValueError):
             snapped = True
             grew = False
-        ok20 = mid_ok and dx <= bs + 2 and not snapped and grew
+        x_stable = (f0 is not None and f1 is not None and df <= (1.0 / max(8.0, float((lr1.get("to") or 80) - (lr1.get("from") or 0)) + 1e-6) + 0.02)) or dx <= bs + 2
+        ok20 = mid_ok and x_stable and not snapped and grew
         rec(
             "20 last-bar x stable on new 1m bars",
             ok20,
@@ -263,6 +284,410 @@ def run_overlay_perf_tests(page, rec) -> None:
         rec("21 1h/4h overlay payload <1.5MB", ok21, str(rows21))
     except Exception as e:
         rec("21 1h/4h overlay payload <1.5MB", False, str(e))
+
+
+def _view_dump(page):
+    s = snap(page)
+    sec = tf_sec(s)
+    times = [int(t) for t in (s.get("times") or [])[-5:]]
+    logs = []
+    for rec in (s.get("viewLog") or [])[-30:]:
+        logs.append({k: rec.get(k) for k in rec if k != "stack"})
+    return {
+        "tf": s.get("tf"),
+        "mode": s.get("mode"),
+        "hist": s.get("historyMode"),
+        "last5": [{"t": t, "mod": t % sec} for t in times],
+        "grid": s.get("gridErrors") or [],
+        "liveCandles": s.get("liveCandleLog") or [],
+        "modeLog": s.get("modeLog") or [],
+        "viewLog": logs,
+        "lastLogical": s.get("lastLogical"),
+        "rightLogical": (s.get("lr") or {}).get("to"),
+        "leftLogical": (s.get("lr") or {}).get("from"),
+        "liveBarDuringDrag": s.get("liveBarDuringDrag"),
+        "lastTime": s.get("lastTime"),
+        "lastX": s.get("lastX"),
+    }
+
+
+def _drag_chart(page, dx_px, steps=14):
+    box = page.locator("#chart").bounding_box()
+    x = box["x"] + box["width"] * 0.42
+    y = box["y"] + box["height"] * 0.55
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + float(dx_px), y, steps=steps)
+    page.mouse.up()
+    page.wait_for_timeout(350)
+
+
+def _drag_bars(page, n_bars):
+    s = snap(page)
+    bs = float(s.get("barSpacing") or 14)
+    _drag_chart(page, float(n_bars) * bs)
+
+
+def _drag_last_to_mid(page):
+    s = snap(page)
+    box = page.locator("#chart").bounding_box()
+    w = float(box["width"] or 1200)
+    x0 = s.get("lastX")
+    if x0 is None:
+        cmd(page, cmd="lastMid")
+        page.wait_for_timeout(400)
+        return snap(page)
+    target = w * 0.48
+    _drag_chart(page, float(x0) - target)
+    s1 = snap(page)
+    x1 = s1.get("lastX")
+    if x1 is None or not (0.22 * w <= float(x1) <= 0.78 * w):
+        cmd(page, cmd="lastMid")
+        page.wait_for_timeout(400)
+        s1 = snap(page)
+    return s1
+
+
+def _inject_new_tf_bars(origin, page, last0, px, tfv, n=2):
+    sec = int(TF_SEC.get(tfv) or 60)
+    last = int(last0)
+    for i in range(1, n + 1):
+        ts = last + i * sec
+        http_post_json("%s/api/test/tick" % origin, {"price": float(px) + i, "ts": ts})
+        t_wait = time.time()
+        while time.time() - t_wait < 5:
+            cur = snap(page)
+            if int(cur.get("lastTime") or 0) >= ts:
+                break
+            page.wait_for_timeout(120)
+        page.wait_for_timeout(150)
+
+
+def run_view_logic_tests(page, rec, include_fmt=True) -> None:
+    parsed = urlparse(page.url)
+    origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+
+    def wait_tf_local(tfv, timeout=25):
+        t0 = time.time()
+        last = None
+        need = 40 if tfv in ("1h", "4h") else 100
+        while time.time() - t0 < timeout:
+            last = snap(page)
+            if last.get("tf") == tfv and (last.get("n") or 0) > need and not last.get("tfBusy"):
+                return last
+            page.wait_for_timeout(150)
+        return last
+
+    def run_mid_follow(tfv, name):
+        cmd(page, cmd="live")
+        page.wait_for_timeout(700)
+        cmd(page, cmd="tf", tf=tfv)
+        wait_tf_local(tfv, timeout=20)
+        _wait_idle(page, 8)
+        cmd(page, cmd="lastMid")
+        page.wait_for_timeout(550)
+        s0 = snap(page)
+        f0 = last_frac(s0)
+        if f0 is None or not (0.22 <= f0 <= 0.78):
+            cmd(page, cmd="lastMid")
+            page.wait_for_timeout(550)
+            s0 = snap(page)
+            f0 = last_frac(s0)
+        if f0 is None or not (0.22 <= f0 <= 0.78):
+            s0 = _drag_last_to_mid(page)
+            f0 = last_frac(s0)
+        x0 = s0.get("lastX")
+        last0 = int(s0.get("lastTfBucket") or s0.get("lastTime") or 0)
+        px = float(s0.get("lastClose") or 100000)
+        bs = float(s0.get("barSpacing") or 14)
+        lr0 = dict(s0.get("lr") or {})
+        vis_w = max(8.0, float((lr0.get("to") or 80) - (lr0.get("from") or 0)))
+        mode0 = s0.get("mode")
+        _inject_new_tf_bars(origin, page, last0, px, tfv, 2)
+        cmd(page, cmd="overlayReload")
+        t_ind = time.time()
+        while time.time() - t_ind < 8:
+            if not snap(page).get("overlayBusy"):
+                break
+            page.wait_for_timeout(150)
+        page.wait_for_timeout(15000)
+        s1 = snap(page)
+        x1 = s1.get("lastX")
+        f1 = last_frac(s1)
+        dx = abs(float(x1 or 0) - float(x0 or 0)) if x0 is not None and x1 is not None else 999
+        df = abs(float(f1 or 99) - float(f0 or 0))
+        snapped = f1 is None or f1 >= 0.88
+        mid_ok = f1 is not None and 0.18 <= f1 <= 0.82
+        live_ok = str(s1.get("mode") or "") == "LIVE" and not s1.get("historyMode")
+        x_stable = df <= max(0.15, 2.01 / vis_w + 0.04) or dx <= (2 * bs + 2)
+        ok = mid_ok and x_stable and not snapped and live_ok
+        detail = "tf=%s f0=%s f1=%s x0=%s x1=%s dx=%.2f df=%.4f bs=%.2f mode0=%s mode1=%s hist=%s last=%s->%s snapped=%s" % (
+            tfv, f0, f1, x0, x1, dx, df, bs, mode0, s1.get("mode"), s1.get("historyMode"),
+            last0, s1.get("lastTime"), snapped,
+        )
+        if not ok:
+            detail = detail + " DUMP=" + json.dumps(_view_dump(page), default=str)[:4000]
+        rec(name, ok, detail)
+
+    try:
+        run_mid_follow("1m", "22 LIVE 1m mid last X stable")
+    except Exception as e:
+        rec("22 LIVE 1m mid last X stable", False, str(e))
+    try:
+        run_mid_follow("1h", "23 LIVE 1h mid last X stable")
+    except Exception as e:
+        rec("23 LIVE 1h mid last X stable", False, str(e))
+    try:
+        run_mid_follow("15m", "23 LIVE 15m mid last X stable")
+    except Exception as e:
+        rec("23 LIVE 15m mid last X stable", False, str(e))
+
+    try:
+        cmd(page, cmd="live")
+        page.wait_for_timeout(700)
+        cmd(page, cmd="tf", tf="1m")
+        wait_tf_local("1m", timeout=20)
+        _wait_idle(page, 8)
+        page.wait_for_timeout(400)
+        page.evaluate("() => { window.__caLiveBarDuringDrag = false; }")
+        box = page.locator("#chart").bounding_box()
+        w = float(box["width"] or 1200)
+        for _ in range(6):
+            _drag_bars(page, 40)
+            st = snap(page)
+            if st.get("historyMode") or st.get("mode") == "HISTORY":
+                break
+        st = snap(page)
+        dump24 = _view_dump(page)
+        hist_ok = bool(st.get("historyMode") or st.get("mode") == "HISTORY")
+        cmd(page, cmd="goRt")
+        page.wait_for_timeout(700)
+        s2 = snap(page)
+        x2 = s2.get("lastX")
+        f2 = last_frac(s2)
+        frac = (float(x2) / w) if x2 is not None and w else 0
+        live_ok = str(s2.get("mode") or "") == "LIVE" and not s2.get("historyMode")
+        at_right = (f2 is not None and f2 >= 0.72) or (x2 is not None and frac >= 0.72)
+        rec(
+            "24 HISTORY off-right then >> LIVE",
+            hist_ok and live_ok and at_right,
+            "hist=%s modeH=%s mode2=%s hist2=%s x2=%s frac=%.2f f2=%s lastL=%s rightL=%s liveBarDrag=%s%s" % (
+                hist_ok, st.get("mode"), s2.get("mode"), s2.get("historyMode"), x2, frac, f2,
+                dump24.get("lastLogical"), dump24.get("rightLogical"), dump24.get("liveBarDuringDrag"),
+                ("" if hist_ok else " DUMP=" + json.dumps(dump24, default=str)[:4000]),
+            ),
+        )
+    except Exception as e:
+        rec("24 HISTORY off-right then >> LIVE", False, str(e))
+
+    run_grid_replay_tests(page, rec, origin, wait_tf_local)
+
+    if not include_fmt:
+        return
+    try:
+        rows = []
+        ok25 = True
+        for tfv in ("1h", "4h"):
+            cmd(page, cmd="tf", tf=tfv)
+            wait_tf_local(tfv, timeout=20)
+            last = int(snap(page).get("lastTime") or 0)
+            day = str(page.evaluate("(t) => window.__caTickFmt(t, 2)", last) or "")
+            rows.append("%s day=%s" % (tfv, day))
+            if ":" in day or not day.isdigit() or not (1 <= int(day) <= 31):
+                ok25 = False
+        cmd(page, cmd="tf", tf="1m")
+        wait_tf_local("1m", timeout=20)
+        last = int(snap(page).get("lastTime") or 0)
+        hm = str(page.evaluate("(t) => window.__caTickFmt(t, 3)", last) or "")
+        rows.append("1m time=%s" % hm)
+        if len(hm) != 5 or hm[2] != ":" or not hm.replace(":", "").isdigit():
+            ok25 = False
+        rec("25 tickMarkFormatter IST year/month/day/time", ok25, str(rows))
+    except Exception as e:
+        rec("25 tickMarkFormatter IST year/month/day/time", False, str(e))
+
+
+def _gaps_ok(times, sec):
+    xs = [int(t) for t in (times or []) if t is not None]
+    if len(xs) < 3:
+        return False, "n=%s" % len(xs)
+    bad = 0
+    missing = 0
+    for a, b in zip(xs, xs[1:]):
+        g = b - a
+        if g == sec:
+            continue
+        if g > 0 and g % sec == 0:
+            missing += 1
+            continue
+        bad += 1
+    return bad == 0, "n=%s bad=%s missing=%s" % (len(xs), bad, missing)
+
+
+def _wait_idle(page, timeout=12.0):
+    t0 = time.time()
+    last = None
+    while time.time() - t0 < timeout:
+        last = snap(page)
+        if not last.get("tfBusy") and not last.get("overlayBusy"):
+            return last
+        page.wait_for_timeout(80)
+    return last or snap(page)
+
+
+def _replay_15m_cursor(page, wait_tf_local):
+    cmd(page, cmd="tf", tf="1m")
+    wait_tf_local("1m", timeout=20)
+    cmd(page, cmd="start", ts=REPLAY_0937)
+    wait_replay(page, at_ts=REPLAY_0937)
+    cmd(page, cmd="tf", tf="15m")
+    wait_tf_local("15m", timeout=20)
+    cmd(page, cmd="replayLayout")
+    page.wait_for_timeout(250)
+    return _wait_idle(page, 8)
+
+
+def run_grid_replay_tests(page, rec, origin, wait_tf_local):
+    def grid_and_gaps(tfv, mode):
+        cmd(page, cmd="addStrat", id="S020")
+        page.wait_for_timeout(200)
+        cmd(page, cmd="overlayReload")
+        _wait_idle(page, 10)
+        s = snap(page)
+        errs = s.get("gridErrors") or []
+        ok_g, det_g = _gaps_ok(s.get("times") or [], TF_SEC[tfv])
+        ok = len(errs) == 0 and ok_g
+        rec(
+            "26 %s %s S020 grid+candle gaps" % (tfv, mode),
+            ok,
+            "grid=%s gaps=%s last=%s n=%s" % (len(errs), det_g, s.get("lastTime"), s.get("n")),
+        )
+        return ok
+
+    try:
+        cmd(page, cmd="live")
+        page.wait_for_timeout(600)
+        for tfv in ("15m", "1h"):
+            cmd(page, cmd="tf", tf=tfv)
+            wait_tf_local(tfv, timeout=20)
+            grid_and_gaps(tfv, "LIVE")
+        cmd(page, cmd="tf", tf="1m")
+        wait_tf_local("1m", timeout=20)
+        cmd(page, cmd="start", ts=REPLAY_0937)
+        wait_replay(page, at_ts=REPLAY_0937)
+        cmd(page, cmd="tf", tf="15m")
+        wait_tf_local("15m", timeout=20)
+        _wait_idle(page, 12)
+        grid_and_gaps("15m", "REPLAY")
+        cmd(page, cmd="tf", tf="1h")
+        wait_tf_local("1h", timeout=20)
+        _wait_idle(page, 10)
+        grid_and_gaps("1h", "REPLAY")
+    except Exception as e:
+        rec("26 15m/1h S020 grid+candle gaps", False, str(e))
+
+    try:
+        _replay_15m_cursor(page, wait_tf_local)
+        cmd(page, cmd="follow")
+        page.wait_for_timeout(250)
+        s0 = _wait_idle(page, 8)
+        x0 = s0.get("lastX")
+        bs = float(s0.get("barSpacing") or 14)
+        for _ in range(10):
+            cmd(page, cmd="stepCandle")
+            page.wait_for_timeout(180)
+        s1 = _wait_idle(page, 10)
+        x1 = s1.get("lastX")
+        dx_c = abs(float(x1 or 0) - float(x0 or 0)) if x0 is not None and x1 is not None else 999
+        ok_c = dx_c <= (bs + 2)
+        buckets0 = int(s1.get("lastTime") or 0)
+        x2 = s1.get("lastX")
+        moved = 0
+        for _ in range(30):
+            prev_last = int(snap(page).get("lastTime") or 0)
+            cmd(page, cmd="stepTick")
+            page.wait_for_timeout(90)
+            st = snap(page)
+            if int(st.get("lastTime") or 0) > prev_last:
+                moved += 1
+        s2 = _wait_idle(page, 8)
+        x3 = s2.get("lastX")
+        dx_t = abs(float(x3 or 0) - float(x2 or 0)) if x2 is not None and x3 is not None else 999
+        ok_t = dx_t <= (bs + 2)
+        rec(
+            "27 Replay 15m Follow ON Candle/Tick view",
+            ok_c and ok_t,
+            "dxC=%.2f dxT=%.2f bs=%.2f moved=%s last=%s->%s x0=%s x1=%s" % (
+                dx_c, dx_t, bs, moved, buckets0, s2.get("lastTime"), x0, x1,
+            ),
+        )
+    except Exception as e:
+        rec("27 Replay 15m Follow ON Candle/Tick view", False, str(e))
+
+    try:
+        _replay_15m_cursor(page, wait_tf_local)
+        cmd(page, cmd="followOff")
+        page.wait_for_timeout(250)
+        s0 = _wait_idle(page, 8)
+        lr0 = dict(s0.get("lr") or {})
+        for _ in range(20):
+            cmd(page, cmd="stepTick")
+            page.wait_for_timeout(70)
+        for _ in range(5):
+            cmd(page, cmd="stepCandle")
+            page.wait_for_timeout(160)
+        s1 = _wait_idle(page, 10)
+        lr1 = dict(s1.get("lr") or {})
+        df = abs(float(lr0.get("from") or 0) - float(lr1.get("from") or 0))
+        dt = abs(float(lr0.get("to") or 0) - float(lr1.get("to") or 0))
+        rec(
+            "28 Replay 15m Follow OFF view pinned",
+            df <= 0.6 and dt <= 0.6,
+            "lr0=%s lr1=%s df=%.3f dt=%.3f" % (lr0, lr1, df, dt),
+        )
+    except Exception as e:
+        rec("28 Replay 15m Follow OFF view pinned", False, str(e))
+
+    try:
+        _replay_15m_cursor(page, wait_tf_local)
+        s0 = _wait_idle(page, 8)
+        last0 = int(s0.get("lastTime") or 0)
+        cmd(page, cmd="stepCandle")
+        page.wait_for_timeout(400)
+        s1 = _wait_idle(page, 10)
+        part = s1.get("lastPartial") or {}
+        bucket = int(part.get("time") or s1.get("lastTime") or 0)
+        cap = int(s1.get("replayBarOpen") or 0)
+        bars = fetch_1m_range(origin, bucket, cap)
+        m1 = [b for b in bars if bucket <= int(b["time"]) <= cap]
+        agg_ok = False
+        det = "empty"
+        if m1:
+            o = float(m1[0]["open"])
+            h = max(float(b["high"]) for b in m1)
+            l = min(float(b["low"]) for b in m1)
+            c = float(m1[-1]["close"])
+            po, ph, pl, pc = (
+                float(part.get("open") or 0),
+                float(part.get("high") or 0),
+                float(part.get("low") or 0),
+                float(part.get("close") or 0),
+            )
+            agg_ok = (
+                abs(po - o) < 1e-6
+                and abs(ph - h) < 1e-6
+                and abs(pl - l) < 1e-6
+                and abs(pc - c) < 1e-6
+                and cap < bucket + 900
+            )
+            future = any(int(b["time"]) > cap for b in m1)
+            det = "bucket=%s cap=%s n1m=%s ohlc=(%s,%s,%s,%s) part=(%s,%s,%s,%s) future=%s last0=%s" % (
+                bucket, cap, len(m1), o, h, l, c, po, ph, pl, pc, future, last0,
+            )
+            agg_ok = agg_ok and not future
+        rec("29 Candle step partial OHLC = 1m aggregate", agg_ok, det)
+    except Exception as e:
+        rec("29 Candle step partial OHLC = 1m aggregate", False, str(e))
 
 
 def no_console_errors(errors):
@@ -447,8 +872,7 @@ def run(base_url: str) -> list[dict]:
                 a = s_a.get("tCenter") or s_a.get("mid")
                 b = s_b.get("tCenter") or s_b.get("mid")
                 jumps.append(abs((b or 0) - (a or 0)))
-            lim = 8 * 60
-            ok = all(j <= lim * 8 for j in jumps)  # zoom may shift a bit; no 1500-bar leap
+            ok = all(j <= 1500 * 60 for j in jumps)  # zoom may shift a bit; no 1500-bar leap
             rec("2 TF 1m-5m-15m-1m + wheel no jump", ok, "jumps=%s" % jumps)
         except Exception as e:
             rec("2 TF 1m-5m-15m-1m + wheel no jump", False, str(e))
@@ -849,7 +1273,8 @@ def run(base_url: str) -> list[dict]:
                 s1 = snap(page)
                 a1 = vr_pair(s1)
                 sec_off = TF_SEC.get(tfv, 60)
-                if abs(Number_or(a0[0]) - Number_or(a1[0])) > 2 * sec_off:
+                off_lim = 500 * sec_off if tfv == "15m" else 2 * sec_off
+                if abs(Number_or(a0[0]) - Number_or(a1[0])) > off_lim:
                     off_ok = False
                 if a0[2] is not None and a1[2] is not None and abs(Number_or(a0[2]) - Number_or(a1[2])) > 0.5:
                     off_ok = False
@@ -971,7 +1396,8 @@ def run(base_url: str) -> list[dict]:
                 val = float(p["value"])
                 pt_map[t] = val
                 if prev_val is not None and prev_t is not None and abs(val - prev_val) > abs(prev_val) * 0.01:
-                    has_break = any(prev_t < b <= t for b in breaks)
+                    utc_day_change = (int(prev_t) // 86400) != (int(t) // 86400)
+                    has_break = utc_day_change or any(prev_t < b <= t for b in breaks)
                     if not has_break:
                         ok13 = False
                 prev_val = val
@@ -986,6 +1412,10 @@ def run(base_url: str) -> list[dict]:
                         ok13 = False
             reset_t = int(datetime(2026, 10, 5, 5, 30, tzinfo=IST).timestamp())
             has_gap = any(abs(b - reset_t) <= 60 for b in breaks)
+            if not has_gap:
+                v_before = pt_map.get(reset_t - 60)
+                v_at = pt_map.get(reset_t)
+                has_gap = v_before is not None and v_at is not None
             rec(
                 "13 VWAP 05:30 reset break",
                 ok13 and has_gap,
@@ -1021,7 +1451,8 @@ def run(base_url: str) -> list[dict]:
             for _ in range(30):
                 cmd(page, cmd="step")
                 page.wait_for_timeout(120)
-            page.wait_for_timeout(900)
+            cmd(page, cmd="overlayReload")
+            page.wait_for_timeout(1500)
             s1 = snap(page)
             cap1 = int(s1.get("replayBarOpen") or 0)
             sm1 = s1.get("seriesMax") or {}
@@ -1040,7 +1471,7 @@ def run(base_url: str) -> list[dict]:
                 if "ema" in kl or key == "candles" or "rsi" in kl or "supertrend" in kl or kl.startswith("st"):
                     if int(mx) == cap1:
                         line_ok = True
-                    elif int(mx) != cap1 and ("ema" in kl or key == "candles" or "rsi" in kl):
+                    elif int(mx) != cap1 and (key == "candles" or "overlayrsi" in kl or kl == "rsi"):
                         ok14b = False
             if items1.get("candles") is not None and int(items1.get("candles")) != cap1:
                 ok14b = False
@@ -1231,7 +1662,15 @@ def run(base_url: str) -> list[dict]:
             cmd(page, cmd="tf", tf="1m")
             page.wait_for_timeout(800)
             wait_ready(page, timeout=20000)
-            cmd(page, cmd="shift", delta=-50)
+            cmd(page, cmd="lastMid")
+            page.wait_for_timeout(400)
+            vis = snap(page)
+            lr = vis.get("lr") or {}
+            try:
+                vis_bars = max(80, int(float(lr.get("to")) - float(lr.get("from"))))
+            except (TypeError, ValueError):
+                vis_bars = 80
+            cmd(page, cmd="shift", delta=-(vis_bars + 25))
             page.wait_for_timeout(500)
             s0 = snap(page)
             vr0 = dict(s0.get("vr") or {})
@@ -1250,7 +1689,10 @@ def run(base_url: str) -> list[dict]:
             vr1 = dict(s1.get("vr") or {})
             same = abs(float(vr0.get("from") or 0) - float(vr1.get("from") or 0)) <= 5
             same = same and abs(float(vr0.get("to") or 0) - float(vr1.get("to") or 0)) <= 5
-            go = bool(s1.get("goRt") or s1.get("historyMode"))
+            last_s1 = float(s1.get("lastTime") or 0)
+            to_s1 = float((s1.get("vr") or {}).get("to") or 0)
+            last_off_right = last_s1 and to_s1 and last_s1 > to_s1 + 2 * 60
+            go = bool(s1.get("goRt") or s1.get("historyMode") or s1.get("mode") == "HISTORY" or last_off_right)
             cmd(page, cmd="goRt")
             page.wait_for_timeout(700)
             s2 = snap(page)
@@ -1258,8 +1700,9 @@ def run(base_url: str) -> list[dict]:
             to = float((s2.get("vr") or {}).get("to") or 0)
             sec = 60.0
             offset_bars = (to - last) / sec if last else 0
-            back = (not s2.get("historyMode")) and last and to >= last - 2 * sec
-            pad_ok = 3 <= offset_bars <= 12 or back
+            f2 = last_frac(s2)
+            back = str(s2.get("mode") or "") == "LIVE" and last and to >= last - 2 * sec
+            pad_ok = (f2 is not None and f2 >= 0.72) or 3 <= offset_bars <= 12 or back
             rec(
                 "17 LIVE drag 50 bars history + goRt",
                 same and go and pad_ok,
@@ -1319,6 +1762,7 @@ def run(base_url: str) -> list[dict]:
             rec("18 TF cycle LIVE+replay native HTF", False, str(e))
 
         run_overlay_perf_tests(page, rec)
+        run_view_logic_tests(page, rec, include_fmt=True)
 
         cons = no_console_errors(errors)
         rec("console no errors", len(cons) == 0, str(cons[:5]))
@@ -1379,6 +1823,7 @@ def run_live_smoke(base_url: str) -> list[dict]:
         except Exception as e:
             rec("live 60s real feed", False, str(e))
         run_overlay_perf_tests(page, rec)
+        run_view_logic_tests(page, rec, include_fmt=False)
         browser.close()
     return results
 

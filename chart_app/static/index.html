@@ -277,7 +277,12 @@
         <div id="replayBar">
           <button id="btnSelectBar" type="button">Select bar</button>
           <button id="btnReplayPlay" type="button" disabled>▶</button>
-          <button id="btnReplayStep" type="button" disabled>Step</button>
+          <select id="replayPlayMode" disabled title="Play step mode">
+            <option value="candle" selected>Candle</option>
+            <option value="tick">Tick</option>
+          </select>
+          <button id="btnReplayTick" type="button" disabled>Tick +1m</button>
+          <button id="btnReplayCandle" type="button" disabled>Candle +1 bar</button>
           <select id="replaySpeed">
             <option value="1" selected>1x</option>
             <option value="3">3x</option>

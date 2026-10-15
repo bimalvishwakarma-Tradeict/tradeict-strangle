@@ -18,7 +18,7 @@ CHART_TF_SEC = {
 
 
 def _downsample_vwap_points(pts: list[dict[str, Any]], tf_sec: int) -> list[dict[str, Any]]:
-    """Keep last VWAP value per chart-TF bucket; preserve session-break whitespace."""
+    """Keep last VWAP value per chart-TF bucket. Sessions are split in the chart, not via off-grid points."""
     if tf_sec <= 60 or not pts:
         return pts
     out: list[dict[str, Any]] = []
@@ -28,12 +28,11 @@ def _downsample_vwap_points(pts: list[dict[str, Any]], tf_sec: int) -> list[dict
         if not isinstance(p, dict) or p.get("time") is None:
             continue
         t = int(p["time"])
-        if "value" not in p:
+        if "value" not in p or p.get("value") is None:
             if last_val is not None:
                 out.append(last_val)
                 last_val = None
             cur_b = None
-            out.append(p)
             continue
         b = (t // tf_sec) * tf_sec
         if cur_b is not None and b != cur_b and last_val is not None:
@@ -115,13 +114,8 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
     ts, o, h, l, c, vol = _arrays(bars)
     vwap_1m = s020.session_vwap(ts, h, l, c, vol)
     vwap_pts: list[dict[str, Any]] = []
-    prev_day: int | None = None
     for i in range(len(ts)):
-        day = int(ts[i]) // 86400
         t = int(ts[i])
-        if prev_day is not None and day != prev_day:
-            vwap_pts.append({"time": int(t) - 1})
-        prev_day = day
         if np.isfinite(vwap_1m[i]):
             vwap_pts.append({"time": t, "value": float(vwap_1m[i])})
     chart_sec = CHART_TF_SEC.get(str(params.get("chart_tf") or "1m"), 60)
@@ -171,6 +165,7 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
         sigs, _ = s020_dev.collect_signals(ts, o, h, l, c, work, variant)
         pending_vwap = []
     last_ts = int(ts[-1])
+    last_chart = (last_ts // chart_sec) * chart_sec
     raw_by_cross: dict[int, Any] = {}
     for rl in raw_lines:
         if 0 <= int(rl.cross_i) < len(tts):
@@ -183,8 +178,13 @@ def compute(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any
     n_drawn = 0
     for i, ln in enumerate(work):
         raw = raw_by_cross.get(int(ln.cross_ts))
-        t0 = _extreme_ts(ln, tts, th, tl, tc, vwap_tf, raw)
+        t0 = (_extreme_ts(ln, tts, th, tl, tc, vwap_tf, raw) // chart_sec) * chart_sec
         t1 = int(ln.expire_ts) if ln.expire_ts is not None else last_ts
+        t1 = (int(t1) // chart_sec) * chart_sec
+        if t1 > last_chart:
+            t1 = last_chart
+        if t1 <= t0:
+            continue
         if t1 < cutoff:
             continue
         if t0 > to_ts:

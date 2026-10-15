@@ -18,13 +18,28 @@
     let freezeUntil = 0;
     let leftLogical = null;
     let rightLogical = null;
-    let pinTimeFrom = null;
-    let pinTimeTo = null;
+    let pinFromL = null;
+    let pinToL = null;
+    let pinFromT = null;
+    let pinToT = null;
+    let pinLastIndex = null;
+    let pinOldest = null;
     let pinSpacing = null;
     let lastRangeWidth = null;
     let tfLayoutPending = false;
     const viewLog = [];
     const FOLLOW_EDGE = 10;
+    window.__caModeLog = window.__caModeLog || [];
+
+    function setMode(next, why) {
+      const prev = mode;
+      if (prev === next) return;
+      mode = next;
+      const rec = { from: prev, to: next, why: String(why || "") };
+      logView("mode", rec);
+      window.__caModeLog.push(rec);
+      if (window.__caModeLog.length > 40) window.__caModeLog.shift();
+    }
 
     function barSec() {
       return (opts.getBarSec && opts.getBarSec()) || 60;
@@ -43,6 +58,15 @@
         if (ch && out.indexOf(ch) < 0) out.push(ch);
       });
       return out;
+    }
+    function times() {
+      const fn = opts.getTimes;
+      const arr = typeof fn === "function" ? fn() : [];
+      return arr || [];
+    }
+    function lastIndex() {
+      const arr = times();
+      return arr.length ? arr.length - 1 : 0;
     }
     function beginMute() {
       mute += 1;
@@ -72,7 +96,57 @@
       if (viewLog.length > 60) viewLog.shift();
     }
 
+    function timeToLogical(t) {
+      const arr = times();
+      const sec = barSec();
+      if (!arr.length || t == null || !Number.isFinite(Number(t))) return null;
+      const tt = Number(t);
+      const lastI = arr.length - 1;
+      const lastT = Number(arr[lastI]);
+      if (tt > lastT) return lastI + (tt - lastT) / sec;
+      const firstT = Number(arr[0]);
+      if (tt <= firstT) return (tt - firstT) / sec;
+      let lo = 0;
+      let hi = lastI;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (Number(arr[mid]) <= tt) lo = mid;
+        else hi = mid - 1;
+      }
+      const t0 = Number(arr[lo]);
+      if (lo < lastI) {
+        const t1 = Number(arr[lo + 1]);
+        if (t1 > t0 && tt < t1) return lo + (tt - t0) / (t1 - t0);
+      }
+      return lo;
+    }
+
+    function logicalToTime(L) {
+      const arr = times();
+      if (!arr.length || L == null || !Number.isFinite(Number(L))) return null;
+      const lastI = arr.length - 1;
+      const lastT = Number(arr[lastI]);
+      const sec = barSec();
+      const x = Number(L);
+      if (x >= lastI) return lastT + (x - lastI) * sec;
+      if (x <= 0) return Number(arr[0]) + x * sec;
+      const i0 = Math.floor(x);
+      const frac = x - i0;
+      const t0 = Number(arr[i0]);
+      const t1 = i0 < lastI ? Number(arr[i0 + 1]) : t0 + sec;
+      return t0 + frac * (t1 - t0);
+    }
+
     function readRange() {
+      if (leftLogical != null && rightLogical != null) {
+        const a = logicalToTime(leftLogical);
+        const b = logicalToTime(rightLogical);
+        if (a != null && b != null) {
+          leftTime = a;
+          rightTime = b;
+          return { from: leftTime, to: rightTime };
+        }
+      }
       try {
         const vr = main().timeScale().getVisibleRange();
         if (vr && vr.from != null && vr.to != null) {
@@ -82,6 +156,22 @@
         }
       } catch (e) {}
       return leftTime != null ? { from: leftTime, to: rightTime } : null;
+    }
+
+    function applyLogical(from, to) {
+      if (from == null || to == null || !(to > from)) return;
+      leftLogical = Number(from);
+      rightLogical = Number(to);
+      leftTime = logicalToTime(leftLogical);
+      rightTime = logicalToTime(rightLogical);
+      freezeUntil = Date.now() + 220;
+      beginMute();
+      allCharts().forEach(function (ch) {
+        try {
+          ch.timeScale().setVisibleLogicalRange({ from: leftLogical, to: rightLogical });
+        } catch (e) {}
+      });
+      endMute();
     }
 
     function applyTime(from, to) {
@@ -95,16 +185,12 @@
         if (!(b > a)) b = a + Math.max(width, 8 * barSec());
       }
       if (!(b > a)) return;
+      const fromL = timeToLogical(a);
+      const toL = timeToLogical(b);
+      if (fromL == null || toL == null || !(toL > fromL)) return;
       leftTime = a;
       rightTime = b;
-      freezeUntil = Date.now() + 220;
-      beginMute();
-      allCharts().forEach(function (ch) {
-        try {
-          ch.timeScale().setVisibleRange({ from: leftTime, to: rightTime });
-        } catch (e) {}
-      });
-      endMute();
+      applyLogical(fromL, toL);
     }
 
     function readBarSpacing() {
@@ -122,14 +208,9 @@
       return null;
     }
 
-    function padBars() {
-      if (opts.isReplay && opts.isReplay()) return 0;
-      if (opts.isHistory && opts.isHistory()) return 0;
-      return LIVE_PAD;
-    }
-    function applyPad() {
+    function applyLiveRightOffset() {
       beginMute();
-      const opt = { timeScale: { rightOffset: padBars(), shiftVisibleRangeOnNewBar: false } };
+      const opt = { timeScale: { rightOffset: LIVE_PAD, shiftVisibleRangeOnNewBar: false } };
       allCharts().forEach(function (ch) {
         try {
           if (ch.applyOptions) ch.applyOptions(opt);
@@ -139,12 +220,12 @@
     }
 
     function restoreTime() {
+      if (leftLogical != null && rightLogical != null) {
+        applyLogical(leftLogical, rightLogical);
+        return;
+      }
       if (leftTime == null || rightTime == null) return;
       applyTime(leftTime, rightTime);
-    }
-
-    function captureTime() {
-      readRange();
     }
 
     function captureLogical() {
@@ -157,22 +238,14 @@
       } catch (e) {}
     }
 
-    function applyLogical(from, to) {
-      if (from == null || to == null || !(to > from)) return;
-      leftLogical = Number(from);
-      rightLogical = Number(to);
-      freezeUntil = Date.now() + 220;
-      beginMute();
-      allCharts().forEach(function (ch) {
-        try {
-          ch.timeScale().setVisibleLogicalRange({ from: leftLogical, to: rightLogical });
-        } catch (e) {}
-      });
-      endMute();
-      requestAnimationFrame(function () {
-        if (pinTimeFrom != null) return;
-        captureTime();
-      });
+    function captureTime() {
+      captureLogical();
+      if (leftLogical != null && rightLogical != null) {
+        leftTime = logicalToTime(leftLogical);
+        rightTime = logicalToTime(rightLogical);
+      } else {
+        readRange();
+      }
     }
 
     function applyBarSpacing(px) {
@@ -194,53 +267,97 @@
       return DATA_BARS;
     }
 
+    function capturePin() {
+      captureLogical();
+      if (leftLogical != null && rightLogical != null) {
+        leftTime = logicalToTime(leftLogical);
+        rightTime = logicalToTime(rightLogical);
+      }
+      pinFromL = leftLogical;
+      pinToL = rightLogical;
+      pinFromT = leftTime;
+      pinToT = rightTime;
+      pinLastIndex = lastIndex();
+      pinOldest = opts.getOldestTime && opts.getOldestTime();
+      pinSpacing = readBarSpacing();
+    }
+
     function restorePinned() {
-      if (pinTimeFrom != null && pinTimeTo != null) {
-        applyTime(pinTimeFrom, pinTimeTo);
+      if (pinFromL == null || pinToL == null) return false;
+      applyBarSpacing(pinSpacing);
+      if (opts.isReplay && opts.isReplay()) {
+        applyLogical(Number(pinFromL), Number(pinToL));
         applyBarSpacing(pinSpacing);
         return true;
       }
-      return false;
+      const oldest = opts.getOldestTime && opts.getOldestTime();
+      let shift = 0;
+      if (pinOldest != null && oldest != null && Number(oldest) < Number(pinOldest) - 1) {
+        shift = lastIndex() - Number(pinLastIndex || 0);
+      }
+      applyLogical(Number(pinFromL) + shift, Number(pinToL) + shift);
+      pinFromL = leftLogical;
+      pinToL = rightLogical;
+      pinFromT = leftTime;
+      pinToT = rightTime;
+      pinLastIndex = lastIndex();
+      pinOldest = oldest;
+      return true;
     }
 
     function applyTfKeepSpacing(payload) {
       const p = payload || {};
-      const spacing = p.barSpacing != null ? Number(p.barSpacing) : readBarSpacing();
+      let spacing = p.barSpacing != null ? Number(p.barSpacing) : readBarSpacing();
+      if (spacing == null || !Number.isFinite(Number(spacing)) || Number(spacing) < 4 || Number(spacing) > 24) {
+        spacing = 14;
+      }
       let visBars = p.visibleBars != null ? Number(p.visibleBars) : visibleBarCount();
       if (!Number.isFinite(visBars) || visBars < 8) visBars = DATA_BARS;
-      let anchor = p.anchor != null ? Number(p.anchor) : null;
-      if (anchor == null || !Number.isFinite(anchor)) {
-        const vr = readRange();
-        const last = opts.getLastTime && opts.getLastTime();
-        if (vr && vr.to != null) anchor = Number(vr.to);
-        else if (last != null) anchor = Number(last);
-      }
-      const sec = barSec();
-      applyPad();
       applyBarSpacing(spacing);
-      if (anchor != null && Number.isFinite(anchor) && visBars > 0) {
-        applyTime(anchor - visBars * sec, anchor);
+      const lastI = lastIndex();
+      let lastOff = p.lastOffset;
+      if (lastOff == null || !Number.isFinite(Number(lastOff))) {
+        lastOff = (leftLogical != null && rightLogical != null)
+          ? Number(rightLogical) - lastI
+          : LIVE_PAD;
       }
+      let rightL = null;
+      const anchorT = (p.anchor != null && Number.isFinite(Number(p.anchor)))
+        ? Number(p.anchor)
+        : pinToT;
+      if (anchorT != null && Number.isFinite(Number(anchorT))) {
+        rightL = timeToLogical(Number(anchorT));
+      }
+      if (rightL == null || !Number.isFinite(Number(rightL))) {
+        rightL = lastI + Number(lastOff);
+      }
+      const leftL = Number(rightL) - visBars;
+      if (rightL > leftL) applyLogical(leftL, rightL);
       applyBarSpacing(spacing);
       captureTime();
-      captureLogical();
-      pinTimeFrom = leftTime;
-      pinTimeTo = rightTime;
+      pinFromL = leftLogical;
+      pinToL = rightLogical;
+      pinFromT = leftTime;
+      pinToT = rightTime;
+      pinLastIndex = lastI;
+      pinOldest = opts.getOldestTime && opts.getOldestTime();
       pinSpacing = spacing != null && Number.isFinite(spacing) ? spacing : readBarSpacing();
       tfLayoutPending = false;
-      lastRangeWidth = (leftTime != null && rightTime != null) ? (rightTime - leftTime) : null;
+      lastRangeWidth = (leftLogical != null && rightLogical != null) ? (rightLogical - leftLogical) : null;
       const last = opts.getLastTime && opts.getLastTime();
       if (last != null) lastFollowedBar = last;
       logView("tf-keep-spacing", {
-        spacing: pinSpacing, visBars: visBars, anchor: anchor, sec: sec,
-        from: leftTime, to: rightTime,
+        spacing: pinSpacing, visBars: visBars, lastOffset: lastOff, anchor: p.anchor,
+        from: leftTime, to: rightTime, leftL: leftLogical, rightL: rightLogical,
       });
     }
 
     function lastLogical() {
+      const last = opts.getLastTime && opts.getLastTime();
+      if (last == null) return null;
+      const byTime = timeToLogical(last);
+      if (byTime != null) return byTime;
       try {
-        const last = opts.getLastTime && opts.getLastTime();
-        if (last == null) return null;
         const ts = main().timeScale();
         const x = ts.timeToCoordinate(last);
         if (x == null) return null;
@@ -250,27 +367,54 @@
       }
     }
 
+    function lastOnScreen() {
+      captureLogical();
+      const lastL = lastLogical();
+      if (lastL == null || leftLogical == null || rightLogical == null) return false;
+      return Number(lastL) >= Number(leftLogical) - 2 && Number(lastL) <= Number(rightLogical) + 2;
+    }
+
+    function lastOffRight() {
+      captureLogical();
+      const lastL = lastLogical();
+      if (lastL == null || rightLogical == null) return false;
+      return Number(lastL) > Number(rightLogical) + 2;
+    }
+
+    function syncLiveHistoryMode(why) {
+      if (opts.isReplay && opts.isReplay()) return;
+      if (!lastOffRight()) {
+        setMode("LIVE", why || "syncLiveHistoryMode");
+        if (opts.isHistory && opts.isHistory() && typeof opts.onEnterLive === "function") {
+          opts.onEnterLive();
+        }
+      } else {
+        setMode("HISTORY", why || "syncLiveHistoryMode");
+        if (!(opts.isHistory && opts.isHistory()) && typeof opts.onLeaveLive === "function") {
+          opts.onLeaveLive();
+        }
+      }
+    }
+
     function scrollLive() {
       beginMute();
+      applyLiveRightOffset();
       allCharts().forEach(function (ch) {
         try {
           ch.timeScale().scrollToRealTime();
         } catch (e) {}
       });
-      applyPad();
       endMute();
       requestAnimationFrame(function () {
         captureTime();
+        setMode("LIVE", "scrollLive");
       });
     }
 
     function lastInView() {
-      const vr = readRange();
-      const last = opts.getLastTime && opts.getLastTime();
-      if (last == null || !vr) return false;
-      const sec = barSec();
-      return Number(last) <= Number(vr.to) + 2 * sec && Number(last) >= Number(vr.from) - 2 * sec;
+      return lastOnScreen();
     }
+
     function layoutReplay(force) {
       const cursor = opts.getCursorTime && opts.getCursorTime();
       if (cursor == null) return;
@@ -279,13 +423,13 @@
       logView("layoutReplay", {
         cursor: Number(cursor), last: last, force: Boolean(force),
       });
-      applyPad();
-      const sec = barSec();
       if (!Number.isFinite(Number(last))) return;
-      const vr = readRange();
-      const wide = vr && (Number(vr.to) - Number(vr.from) >= 40 * sec);
+      captureLogical();
+      const wide = leftLogical != null && rightLogical != null
+        && (Number(rightLogical) - Number(leftLogical) >= 40);
       if (!force && lastInView() && wide) return;
-      applyTime(Number(last) - DATA_BARS * sec, Number(last));
+      const lastI = lastIndex();
+      applyLogical(Number(lastI) - DATA_BARS, Number(lastI));
     }
 
     function replayStepView() {
@@ -293,10 +437,8 @@
       const last = opts.getLastTime ? opts.getLastTime() : cursor;
       const follow = Boolean(opts.isFollow && opts.isFollow());
       freezeUntil = Date.now() + 180;
-      if (pinTimeFrom == null || pinTimeTo == null) {
-        captureTime();
-        pinTimeFrom = leftTime;
-        pinTimeTo = rightTime;
+      if (pinFromL == null || pinToL == null) {
+        capturePin();
       }
       captureLogical();
       const holdFrom = leftLogical;
@@ -310,7 +452,7 @@
         logFrom: holdFrom, logTo: holdTo,
       });
       if (!follow) {
-        applyTime(pinTimeFrom, pinTimeTo);
+        restorePinned();
         lastFollowedBar = last;
         return;
       }
@@ -325,10 +467,8 @@
         logView("replay-step:hold", { gapBars: gapBars, grew: grew });
         return;
       }
-      applyLogical(holdFrom + 1, holdTo + 1);
-      captureTime();
-      pinTimeFrom = leftTime;
-      pinTimeTo = rightTime;
+      applyLogical(Number(holdFrom) + 1, Number(holdTo) + 1);
+      capturePin();
       logView("replay-step:shift-1", { gapBars: gapBars });
     }
 
@@ -336,30 +476,27 @@
       if (!(opts.isReplay && opts.isReplay())) return;
       const cursor = opts.getCursorTime && opts.getCursorTime();
       if (cursor == null) return;
-      const sec = barSec();
-      const vr = readRange();
-      if (!vr) return;
-      const maxTo = Number(cursor) + RIGHT_PAD * sec;
-      if (Number(vr.to) > maxTo + sec) {
-        const width = Number(vr.to) - Number(vr.from);
-        applyTime(maxTo - width, maxTo);
+      const lastL = lastLogical();
+      captureLogical();
+      if (lastL == null || rightLogical == null) return;
+      const maxTo = Number(lastL) + RIGHT_PAD;
+      if (Number(rightLogical) > maxTo + 1) {
+        const width = Number(rightLogical) - Number(leftLogical);
+        applyLogical(maxTo - width, maxTo);
       }
     }
 
     function maybeLeaveLive() {
       if (opts.isReplay && opts.isReplay()) return;
-      if (opts.isHistory && opts.isHistory()) return;
-      const last = opts.getLastTime && opts.getLastTime();
-      const vr = readRange();
-      if (last == null || !vr) return;
-      const width = Number(vr.to) - Number(vr.from);
-      const zoomed = lastRangeWidth != null && lastRangeWidth > 0
+      captureLogical();
+      const width = (leftLogical != null && rightLogical != null)
+        ? Number(rightLogical) - Number(leftLogical)
+        : null;
+      const zoomed = lastRangeWidth != null && lastRangeWidth > 0 && width != null
         && Math.abs(width - lastRangeWidth) / lastRangeWidth > 0.06;
-      lastRangeWidth = width;
+      if (width != null) lastRangeWidth = width;
       if (zoomed) return;
-      if (Number(vr.to) < Number(last) - barSec() * 2) {
-        if (typeof opts.onLeaveLive === "function") opts.onLeaveLive();
-      }
+      syncLiveHistoryMode("maybeLeaveLive:userRange");
     }
 
     function maybeFollowOff() {
@@ -380,6 +517,7 @@
         loadTimer = null;
         if (isMuted()) return;
         if (opts.isReplay && opts.isReplay() && Date.now() < freezeUntil) return;
+        captureLogical();
         const vr = readRange();
         if (!vr) return;
         const oldest = opts.getOldestTime && opts.getOldestTime();
@@ -392,8 +530,11 @@
           if (typeof opts.onNeedOlder === "function") opts.onNeedOlder();
         }
         if (!(opts.isReplay && opts.isReplay()) && opts.isHistory && opts.isHistory()) {
-          if (newest != null && vr.to >= newest - EDGE_BARS * sec) {
-            if (typeof opts.onNeedNewer === "function") opts.onNeedNewer();
+          if (newest != null && leftLogical != null && rightLogical != null) {
+            const lastL = lastLogical();
+            if (lastL != null && Number(rightLogical) >= Number(lastL) - EDGE_BARS) {
+              if (typeof opts.onNeedNewer === "function") opts.onNeedNewer();
+            }
           }
         }
       }, LOAD_DEBOUNCE_MS);
@@ -423,9 +564,6 @@
         try {
           if (leftLogical != null && rightLogical != null) {
             ch.timeScale().setVisibleLogicalRange({ from: leftLogical, to: rightLogical });
-          } else {
-            const vr = leftTime != null ? { from: leftTime, to: rightTime } : null;
-            if (vr) ch.timeScale().setVisibleRange({ from: vr.from, to: vr.to });
           }
         } catch (e) {}
       });
@@ -503,22 +641,31 @@
             syncPanes();
             break;
           }
-          if (mode === "LIVE" && leftTime == null) {
+          if (mode === "LIVE" && leftLogical == null) {
             scrollLive();
           }
           break;
         case "load-older-start":
+          capturePin();
+          beginMute();
+          break;
         case "load-newer-start":
-          captureTime();
+          capturePin();
           beginMute();
           break;
         case "load-older-end":
-        case "load-newer-end":
-          restoreTime();
+          restorePinned();
           syncPanes();
           endMute();
           break;
+        case "load-newer-end":
+          restorePinned();
+          syncPanes();
+          syncLiveHistoryMode();
+          endMute();
+          break;
         case "tf-pending":
+          capturePin();
           tfLayoutPending = true;
           break;
         case "tf-change": {
@@ -527,38 +674,36 @@
           break;
         }
         case "resize":
-          captureTime();
+          capturePin();
           doResize(payload);
-          restoreTime();
+          restorePinned();
           syncPanes();
           break;
         case "goto":
           if (payload.center != null) centerOn(payload.center);
           break;
         case "replay-start":
-          pinTimeFrom = null;
-          pinTimeTo = null;
+          pinFromL = null;
+          pinToL = null;
+          pinFromT = null;
+          pinToT = null;
           pinSpacing = null;
           layoutReplay(true);
           break;
         case "follow":
-          captureTime();
-          captureLogical();
-          pinTimeFrom = leftTime;
-          pinTimeTo = rightTime;
-          pinSpacing = readBarSpacing();
+          capturePin();
           lastFollowedBar = (opts.getLastTime && opts.getLastTime()) || null;
           break;
         case "pin-view":
-          captureTime();
-          captureLogical();
-          pinTimeFrom = leftTime;
-          pinTimeTo = rightTime;
-          pinSpacing = readBarSpacing();
+          capturePin();
           break;
         case "unpin-view":
-          pinTimeFrom = null;
-          pinTimeTo = null;
+          pinFromL = null;
+          pinToL = null;
+          pinFromT = null;
+          pinToT = null;
+          pinLastIndex = null;
+          pinOldest = null;
           pinSpacing = null;
           break;
         case "replay-step-before":
@@ -571,6 +716,12 @@
           break;
         case "drawing":
           break;
+        case "restore-logical":
+          if (payload && payload.from != null && payload.to != null
+              && Number(payload.to) > Number(payload.from)) {
+            applyLogical(Number(payload.from), Number(payload.to));
+          }
+          break;
         case "indicator":
           if (opts.isReplay && opts.isReplay()) {
             if (!restorePinned()) restoreTime();
@@ -579,54 +730,84 @@
           if (opts.isHistory && opts.isHistory()) {
             if (!restorePinned()) restoreTime();
             syncPanes();
+            break;
           }
+          captureLogical();
+          syncPanes();
           break;
-        case "live-bar":
+        case "live-bar": {
           if (opts.isReplay && opts.isReplay()) break;
+          if (mode === "HISTORY" || (opts.isHistory && opts.isHistory())) {
+            logView("live-bar:skip-history", { mode: mode });
+            break;
+          }
+          if (userTimer) {
+            captureLogical();
+            if (lastOffRight()) {
+              logView("live-bar:skip-user-drag", { lastL: lastLogical(), rightL: rightLogical });
+              window.__caLiveBarDuringDrag = true;
+              break;
+            }
+          }
           captureLogical();
           const lastL = lastLogical();
           const holdFrom = leftLogical;
           const holdTo = rightLogical;
-          const atEdge = lastL != null && holdTo != null
-            && Number(lastL) >= Number(holdTo) - LIVE_PAD - 2;
-          if (atEdge && !(opts.isHistory && opts.isHistory())) {
-            scrollLive();
-            lastFollowedBar = opts.getLastTime && opts.getLastTime();
-            break;
-          }
           const liveLast = opts.getLastTime && opts.getLastTime();
-          const grew = lastFollowedBar != null && liveLast != null
-            && Number(liveLast) > Number(lastFollowedBar);
-          if (lastFollowedBar == null) {
+          const offRight = lastL != null && holdTo != null
+            && Number(lastL) > Number(holdTo) + 2;
+          if (offRight) {
             lastFollowedBar = liveLast;
+            logView("live-bar:off-right-no-shift", { lastL: lastL, holdTo: holdTo });
             break;
           }
+          const prevFollow = lastFollowedBar;
+          const grew = prevFollow != null && liveLast != null
+            && Number(liveLast) > Number(prevFollow);
           lastFollowedBar = liveLast;
-          if (!grew) break;
-          if (lastL == null || holdFrom == null || holdTo == null) break;
-          if (Number(lastL) < Number(holdFrom) - 2 || Number(lastL) > Number(holdTo) + 2) break;
-          applyLogical(Number(holdFrom) + 1, Number(holdTo) + 1);
-          captureTime();
+          if (prevFollow == null || !grew) break;
+          if (holdFrom == null || holdTo == null) break;
+          const prevL = timeToLogical(prevFollow);
+          let dlt = 1;
+          if (lastL != null && prevL != null) dlt = Math.max(1, Math.round(Number(lastL) - Number(prevL)));
+          applyLogical(Number(holdFrom) + dlt, Number(holdTo) + dlt);
+          capturePin();
+          logView("live-bar:shift", { dlt: dlt, lastL: lastL });
           break;
-        case "jump-live":
-          mode = "LIVE";
-          leftTime = null;
-          rightTime = null;
-          scrollLive();
+        }
+        case "jump-live": {
+          setMode("LIVE", "jump-live");
+          const lastI = lastIndex();
+          applyLogical(lastI - DATA_BARS + LIVE_PAD, lastI + LIVE_PAD);
+          applyLiveRightOffset();
+          applyLogical(lastI - DATA_BARS + LIVE_PAD, lastI + LIVE_PAD);
           lastFollowedBar = opts.getLastTime && opts.getLastTime();
+          if (opts.isHistory && opts.isHistory() && typeof opts.onEnterLive === "function") {
+            opts.onEnterLive();
+          }
           break;
+        }
         case "last-mid": {
+          freezeUntil = Date.now() + 450;
           captureLogical();
-          const midL = lastLogical();
-          if (midL == null || leftLogical == null || rightLogical == null) break;
-          const midW = Number(rightLogical) - Number(leftLogical);
-          if (!(midW > 4)) break;
-          applyLogical(Number(midL) - midW / 2, Number(midL) + midW / 2);
-          lastFollowedBar = opts.getLastTime && opts.getLastTime();
+          const lastT = opts.getLastTime && opts.getLastTime();
+          const midL = (lastT != null ? timeToLogical(lastT) : null);
+          const midUse = (midL != null && Number.isFinite(Number(midL))) ? Number(midL) : lastIndex();
+          let midW = (leftLogical != null && rightLogical != null)
+            ? Number(rightLogical) - Number(leftLogical)
+            : DATA_BARS;
+          if (!Number.isFinite(midW) || midW < 16) midW = DATA_BARS;
+          if (midW > 160) midW = DATA_BARS;
+          applyLogical(Number(midUse) - midW / 2, Number(midUse) + midW / 2);
+          capturePin();
+          lastFollowedBar = lastT;
+          setMode("LIVE", "last-mid");
+          if (opts.isHistory && opts.isHistory() && typeof opts.onEnterLive === "function") {
+            opts.onEnterLive();
+          }
           break;
         }
         case "history-pad":
-          applyPad();
           captureTime();
           captureLogical();
           break;
@@ -634,23 +815,20 @@
           if (payload.from != null && payload.to != null) applyTime(payload.from, payload.to);
           break;
         case "shift": {
-          captureTime();
-          const sec = barSec();
-          const dlt = (Number(payload.delta) || -20) * sec;
-          if (leftTime != null) applyTime(leftTime + dlt, rightTime + dlt);
-          if (!(opts.isReplay && opts.isReplay()) && !(opts.isHistory && opts.isHistory())) {
-            if (typeof opts.onLeaveLive === "function") opts.onLeaveLive();
-          } else {
-            maybeLeaveLive();
+          captureLogical();
+          const dlt = Number(payload.delta) || -20;
+          if (leftLogical != null && rightLogical != null) {
+            applyLogical(Number(leftLogical) + dlt, Number(rightLogical) + dlt);
           }
+          syncLiveHistoryMode("shift");
           break;
         }
         case "zoom": {
-          captureTime();
-          if (leftTime == null) break;
-          const mid = (leftTime + rightTime) / 2;
-          const half = Math.max(8 * barSec(), (rightTime - leftTime) / 4);
-          applyTime(mid - half, mid + half);
+          captureLogical();
+          if (leftLogical == null || rightLogical == null) break;
+          const mid = (Number(leftLogical) + Number(rightLogical)) / 2;
+          const half = Math.max(8, (Number(rightLogical) - Number(leftLogical)) / 4);
+          applyLogical(mid - half, mid + half);
           break;
         }
         case "sync-panes":
@@ -675,7 +853,15 @@
     }
 
     bind();
-    applyPad();
+    beginMute();
+    allCharts().forEach(function (ch) {
+      try {
+        if (ch.applyOptions) {
+          ch.applyOptions({ timeScale: { shiftVisibleRangeOnNewBar: false } });
+        }
+      } catch (e) {}
+    });
+    endMute();
 
     return {
       request: request,
