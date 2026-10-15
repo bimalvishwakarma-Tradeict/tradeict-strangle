@@ -227,3 +227,52 @@ def test_posthoc_tsl_matches_brute_on_three_paths() -> None:
     assert abs(n3 - brute3.tsl_net) < 1e-6
     _ = QTY
     _ = slip_usd()
+
+
+def test_missing_marks_after_roll_do_not_drop_path() -> None:
+    t0 = 1_700_000_040
+    exp = ist_date(t0) + timedelta(days=1)
+    mkt = MemMkt()
+    mkt.rows = _chain_atm100k() + [
+        _row("C-100800", 100_800.0, True),
+        _row("P-100800", 100_800.0, False),
+    ]
+    minutes = [t0 + i * 60 for i in range(8)]
+    for t in minutes:
+        mkt.spots[t] = 100_000.0
+        mkt.marks.setdefault("P-100400", {})[t] = 40.0
+        mkt.marks.setdefault("C-100000", {})[t] = 60.0
+        mkt.marks.setdefault("P-100800", {})[t] = 40.0
+    mkt.marks.setdefault("C-99600", {})[t0] = 100.0
+    t1 = t0 + 60
+    mkt.marks["C-99600"][t1] = 125.0
+    mkt.spots[t1] = 100_400.0
+    for t in minutes:
+        if t > t1:
+            mkt.spots[t] = 100_400.0
+            # old call marks absent after the roll minute; no same-strike put for parity
+    p = simulate_path(mkt, t0, exp, 400, "itm", 120.0, minutes)
+    assert p.ok, p.skip_reason
+    assert p.n_adj_total >= 1
+    assert p.skip_reason == ""
+
+
+def test_parity_fallback_tags_parity() -> None:
+    t0 = 1_700_000_040
+    exp = ist_date(t0) + timedelta(days=1)
+    mkt = MemMkt()
+    mkt.rows = _chain_atm100k()
+    minutes = [t0 + i * 60 for i in range(5)]
+    for t in minutes:
+        mkt.spots[t] = 100_000.0
+        mkt.marks.setdefault("P-100400", {})[t] = 50.0
+        mkt.marks.setdefault("P-99600", {})[t] = 80.0
+        # C-99600 intentionally missing
+    p = simulate_path(mkt, t0, exp, 400, "itm", 150.0, minutes)
+    assert p.ok, p.skip_reason
+    calls = [lg for lg in p.legs if lg.is_call]
+    assert calls
+    assert calls[0].src == "parity"
+    expect = 80.0 + 100_000.0 - 99_600.0
+    assert abs(calls[0].mark0 - expect) < 1e-6
+    assert p.src_counts.get("parity", 0) > 0
