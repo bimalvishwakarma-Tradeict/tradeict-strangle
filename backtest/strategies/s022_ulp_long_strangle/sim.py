@@ -1,6 +1,7 @@
-"""S022 path simulator: ITM/OTM long strangle, per-leg a% roll, post-hoc T/SL.
+"""S022 path simulator: ITM/OTM long strangle, per-leg a% roll, post-hoc T/SL/H.
 
-Adjustments do not depend on T/SL. Simulate one path to expiry, then slice T/SL.
+Adjustments do not depend on T/SL/H. Simulate one path to expiry, then slice exits.
+a_pct=None holds both legs with no rolls. H is minutes-since-entry TIME exit.
 """
 
 from __future__ import annotations
@@ -23,9 +24,14 @@ SLIP_PTS = 20.0
 X_ITM = (400, 600, 800, 1000, 1200)
 X_OTM = (1000,)
 A_GRID = (120, 125, 130, 135, 140, 145, 150)
+A_GRID_REDUCED: tuple[float | None, ...] = (None, 150)
+H_GRID: tuple[int | None, ...] = (None,)
+H_GRID_REDUCED: tuple[int | None, ...] = (None, 60, 120, 240)
+X_REDUCED: tuple[tuple[str, int], ...] = (("itm", 600), ("itm", 1000), ("otm", 1000))
 T_GRID = (150, 200, 250, 300, 350, 400)
 SL_GRID = (50, 100, 150, 200)
 DTE_GRID = (1, 2)
+DTE_GRID_REDUCED = (1,)
 MULT = float(QTY) * float(OPTIONS_CONTRACT_VALUE)
 GST = 1.18
 STALE_MIN = 5
@@ -38,16 +44,16 @@ class Market(Protocol):
     def ensure(self, symbol: str, exp: date) -> None: ...
 
 
-def slip_usd(qty: int = QTY) -> float:
-    return float(SLIP_PTS) * float(qty) * float(OPTIONS_CONTRACT_VALUE)
+def slip_usd(qty: int = QTY, slip_pts: float = SLIP_PTS) -> float:
+    return float(slip_pts) * float(qty) * float(OPTIONS_CONTRACT_VALUE)
 
 
-def buy_fill(mark: float) -> float:
-    return float(mark) + SLIP_PTS
+def buy_fill(mark: float, slip_pts: float = SLIP_PTS) -> float:
+    return float(mark) + float(slip_pts)
 
 
-def sell_fill(mark: float) -> float:
-    return float(mark) - SLIP_PTS
+def sell_fill(mark: float, slip_pts: float = SLIP_PTS) -> float:
+    return float(mark) - float(slip_pts)
 
 
 def sl_level(peak_net: float, sl: float) -> float:
@@ -59,8 +65,8 @@ def fee_at(mark: float, spot: float, qty: int = QTY) -> float:
     return float(d.fee_gst_qty(float(mark), float(spot), int(qty)))
 
 
-def est_exit_cost(mark: float, spot: float, qty: int = QTY) -> float:
-    return fee_at(mark, spot, qty) + slip_usd(qty)
+def est_exit_cost(mark: float, spot: float, qty: int = QTY, slip_pts: float = SLIP_PTS) -> float:
+    return fee_at(mark, spot, qty) + slip_usd(qty, slip_pts)
 
 
 def expiry_date(entry_ts: int, dte: int) -> date:
@@ -278,6 +284,7 @@ def _open_leg(
     role: str,
     rows: list[dict[str, Any]] | None = None,
     src_counts: dict[str, int] | None = None,
+    slip_pts: float = SLIP_PTS,
 ) -> SimLeg | None:
     sym = str(row["symbol"])
     is_call = bool(row["is_call"])
@@ -291,7 +298,7 @@ def _open_leg(
         return None
     px, src = q
     fee = fee_at(px, spot, QTY)
-    sl = slip_usd(QTY)
+    sl = slip_usd(QTY, slip_pts)
     return SimLeg(
         role=role,
         symbol=sym,
@@ -299,7 +306,7 @@ def _open_leg(
         is_call=is_call,
         expiry=exp,
         mark0=float(px),
-        fill=buy_fill(px),
+        fill=buy_fill(px, slip_pts),
         fee=fee,
         slip=sl,
         qty=QTY,
@@ -321,11 +328,14 @@ def _fill_rec(
     net: float,
     peak: float,
     reason: str,
-    a_pct: float = 0.0,
+    a_pct: float | None = 0.0,
     gross: float = float("nan"),
     peak_gross: float = float("nan"),
+    slip_pts: float = SLIP_PTS,
 ) -> dict[str, Any]:
-    fill = buy_fill(mark) if is_buy else (lg.exit_fill if side == "sell" and math.isfinite(lg.exit_fill) else sell_fill(mark))
+    fill = buy_fill(mark, slip_pts) if is_buy else (
+        lg.exit_fill if side == "sell" and math.isfinite(lg.exit_fill) else sell_fill(mark, slip_pts)
+    )
     fee = lg.fee if is_buy else float(lg.exit_fee)
     slip = lg.slip if is_buy else float(lg.exit_slip)
     if side == "settle":
@@ -360,13 +370,13 @@ def _fill_rec(
     }
 
 
-def _close_live(lg: SimLeg, t: int, mark: float, spot: float) -> None:
+def _close_live(lg: SimLeg, t: int, mark: float, spot: float, slip_pts: float = SLIP_PTS) -> None:
     lg.open = False
     lg.closed_ts = int(t)
     lg.exit_mark = float(mark)
-    lg.exit_fill = sell_fill(mark)
+    lg.exit_fill = sell_fill(mark, slip_pts)
     lg.exit_fee = fee_at(mark, spot, lg.qty)
-    lg.exit_slip = slip_usd(lg.qty)
+    lg.exit_slip = slip_usd(lg.qty, slip_pts)
     lg.settled = False
 
 
@@ -490,6 +500,7 @@ def _adjust_one(
     x: int,
     style: str,
     src_counts: dict[str, int],
+    slip_pts: float = SLIP_PTS,
 ) -> SimLeg | None:
     packed = mkt.chain(exp, t)
     if packed is None:
@@ -501,7 +512,9 @@ def _adjust_one(
     c_row, p_row, _dc, _dp, _atm = picked
     row = c_row if lg.is_call else p_row
     role = "C" if lg.is_call else "P"
-    return _open_leg(mkt, row, exp, t, spot, role, rows=rows, src_counts=src_counts)
+    return _open_leg(
+        mkt, row, exp, t, spot, role, rows=rows, src_counts=src_counts, slip_pts=slip_pts,
+    )
 
 
 def simulate_path(
@@ -510,13 +523,20 @@ def simulate_path(
     exp: date,
     x: int,
     style: str,
-    a_pct: float,
+    a_pct: float | None,
     minutes: list[int],
     tsl: tuple[float, float] | None = None,
     compact: bool = False,
     record_fills: bool = False,
+    slip_pts: float = SLIP_PTS,
+    hold_min: int | None = None,
+    h_grid: tuple[int | None, ...] | None = None,
 ) -> PathResult:
-    """Run adjustments to expiry; record per-minute pre-adj net (T/SL view)."""
+    """Run adjustments to expiry; record per-minute pre-adj net (T/SL/H view).
+
+    a_pct=None: no rolls. hold_min: brute TIME exit (minutes since entry). Defaults
+    match the Stage-1 baseline (a% on, H off, 20pt slip).
+    """
     src_counts = {"real": 0, "stale": 0, "parity": 0, "none": 0}
     out = PathResult(ok=False, skip_reason="", t0=int(t0), exp_ts=int(s018.expiry_unix(exp)))
     out.src_counts = src_counts
@@ -535,8 +555,14 @@ def simulate_path(
         return out
     c_row, p_row, d_c, d_p, _atm = picked
     out.strike_dev = [abs(d_c), abs(d_p)]
-    call = _open_leg(mkt, c_row, exp, int(t0), float(spot0), "C", rows=rows, src_counts=src_counts)
-    put = _open_leg(mkt, p_row, exp, int(t0), float(spot0), "P", rows=rows, src_counts=src_counts)
+    call = _open_leg(
+        mkt, c_row, exp, int(t0), float(spot0), "C", rows=rows, src_counts=src_counts,
+        slip_pts=slip_pts,
+    )
+    put = _open_leg(
+        mkt, p_row, exp, int(t0), float(spot0), "P", rows=rows, src_counts=src_counts,
+        slip_pts=slip_pts,
+    )
     if call is None or put is None:
         out.skip_reason = "entry_mark_none"
         return out
@@ -550,20 +576,21 @@ def simulate_path(
         out.fills.append(
             _fill_rec(
                 int(t0), float(spot0), call, "buy", call.mark0, call.src, True, 0.0, 0.0, "ENTRY",
-                gross=0.0, peak_gross=0.0,
+                gross=0.0, peak_gross=0.0, slip_pts=slip_pts,
             )
         )
         out.fills.append(
             _fill_rec(
                 int(t0), float(spot0), put, "buy", put.mark0, put.src, True, 0.0, 0.0, "ENTRY",
-                gross=0.0, peak_gross=0.0,
+                gross=0.0, peak_gross=0.0, slip_pts=slip_pts,
             )
         )
     realized = 0.0
     n_adj = 0
     peak = 0.0
     peak_g = 0.0
-    ratio = float(a_pct) / 100.0
+    ratio: float | None = None if a_pct is None else float(a_pct) / 100.0
+    hg: tuple[int | None, ...] = H_GRID if h_grid is None else tuple(h_grid)
     exp_ts = out.exp_ts
 
     ts_all = np.array([int(t) for t in minutes if int(t) >= int(t0)], dtype=np.int64)
@@ -583,7 +610,7 @@ def simulate_path(
             if got is None:
                 out.skip_reason = "exit_mark_none"
                 return out
-            _close_live(lg, t, got[0], float(spx))
+            _close_live(lg, t, got[0], float(spx), slip_pts=slip_pts)
             if record_fills:
                 gv = float(out.gross[-1]) if out.gross else 0.0
                 pg = float(out.peak_gross[-1]) if out.peak_gross else 0.0
@@ -592,7 +619,7 @@ def simulate_path(
                 out.fills.append(
                     _fill_rec(
                         t, float(spx), lg, "sell", got[0], got[1], False, nv, pk, "",
-                        gross=gv, peak_gross=pg,
+                        gross=gv, peak_gross=pg, slip_pts=slip_pts,
                     )
                 )
             realized += _cash_mark_closed(lg)
@@ -631,14 +658,15 @@ def simulate_path(
             srcs.append(src)
         at_exp = seg >= int(exp_ts)
         hit_adj: int | None = None
-        for lg, px in zip(live, pxs):
-            if lg.ref <= 0:
-                continue
-            h = np.flatnonzero(np.isfinite(px) & (px >= float(lg.ref) * ratio))
-            if h.size:
-                j = int(h[0])
-                if hit_adj is None or j < hit_adj:
-                    hit_adj = j
+        if ratio is not None:
+            for lg, px in zip(live, pxs):
+                if lg.ref <= 0:
+                    continue
+                h = np.flatnonzero(np.isfinite(px) & (px >= float(lg.ref) * ratio))
+                if h.size:
+                    j = int(h[0])
+                    if hit_adj is None or j < hit_adj:
+                        hit_adj = j
         end = int(seg.size)
         if hit_adj is not None:
             end = min(end, hit_adj + 1)
@@ -667,17 +695,19 @@ def simulate_path(
         for lg, px in zip(live, pxs):
             sl = px[:end]
             open_pnl += (sl - float(lg.mark0)) * MULT
-            est += _vec_fee(sl, spots[:end]) + slip_usd(lg.qty)
+            est += _vec_fee(sl, spots[:end]) + slip_usd(lg.qty, slip_pts)
         grosses = realized + open_pnl
         nets = grosses - float(fees) - float(slips) - est
         nets = np.where(at_exp[:end], grosses - float(fees) - float(slips), nets)
 
         stop_j: int | None = None
         stop_why = ""
-        if tsl is not None:
-            tgt, slv = float(tsl[0]), float(tsl[1])
+        if tsl is not None or hold_min is not None:
+            tgt = float(tsl[0]) if tsl is not None else float("inf")
+            slv = float(tsl[1]) if tsl is not None else float("inf")
             run_peak_n = float(peak)
             run_peak_g = float(peak_g)
+            hlim = None if hold_min is None else float(hold_min)
             for j in range(end):
                 if bool(at_exp[j]):
                     break
@@ -685,11 +715,14 @@ def simulate_path(
                 gv = float(grosses[j])
                 run_peak_n = max(run_peak_n, nv)
                 run_peak_g = max(run_peak_g, gv)
-                if nv >= tgt:
+                if tsl is not None and nv >= tgt:
                     stop_j, stop_why = j, "TARGET"
                     break
-                if gv <= sl_level(run_peak_g, slv):
+                if tsl is not None and gv <= sl_level(run_peak_g, slv):
                     stop_j, stop_why = j, "SL"
+                    break
+                if hlim is not None and (int(seg[j]) - int(t0)) / 60.0 >= hlim:
+                    stop_j, stop_why = j, "TIME"
                     break
             if stop_j is not None:
                 end = stop_j + 1
@@ -716,7 +749,7 @@ def simulate_path(
         if stop_j is not None:
             ret = _close_tsl(last_t, float(nets[stop_j]), stop_why)
             if ret.ok:
-                _finalize_path(ret, compact=compact)
+                _finalize_path(ret, compact=compact, h_grid=hg)
             return ret
 
         if bool(at_exp[end - 1]):
@@ -733,6 +766,7 @@ def simulate_path(
                             "EXPIRY",
                             gross=float(out.gross[-1]) if out.gross else 0.0,
                             peak_gross=float(out.peak_gross[-1]) if out.peak_gross else 0.0,
+                            slip_pts=slip_pts,
                         )
                     )
             live = []
@@ -756,18 +790,18 @@ def simulate_path(
                         out.skip_reason = "adj_mark_none"
                         return out
                     mk = got[0]
-                    if lg.ref > 0 and mk >= float(lg.ref) * ratio:
+                    if ratio is not None and lg.ref > 0 and mk >= float(lg.ref) * ratio:
                         ranked.append((mk / float(lg.ref), lg, mk))
                 if not ranked:
                     break
                 ranked.sort(key=lambda z: z[0], reverse=True)
                 _ratio, lg, mk = ranked[0]
-                _close_live(lg, t, mk, sp)
+                _close_live(lg, t, mk, sp, slip_pts=slip_pts)
                 realized += _cash_mark_closed(lg)
                 fees += lg.exit_fee
                 slips += lg.exit_slip
                 live = [x for x in live if x.open]
-                neu = _adjust_one(mkt, lg, t, sp, exp, int(x), style, src_counts)
+                neu = _adjust_one(mkt, lg, t, sp, exp, int(x), style, src_counts, slip_pts=slip_pts)
                 if neu is None:
                     out.skip_reason = "adj_entry_none"
                     return out
@@ -782,12 +816,15 @@ def simulate_path(
                     gv = float(out.gross[-1]) if out.gross else 0.0
                     pg = float(out.peak_gross[-1]) if out.peak_gross else 0.0
                     out.fills.append(
-                        _fill_rec(t, sp, lg, "sell", mk, "real", False, nv, pk, "ADJ", a_pct, gross=gv, peak_gross=pg)
+                        _fill_rec(
+                            t, sp, lg, "sell", mk, "real", False, nv, pk, "ADJ", a_pct,
+                            gross=gv, peak_gross=pg, slip_pts=slip_pts,
+                        )
                     )
                     out.fills.append(
                         _fill_rec(
                             t, sp, neu, "buy", neu.mark0, neu.src, True, nv, pk, "ADJ", a_pct,
-                            gross=gv, peak_gross=pg,
+                            gross=gv, peak_gross=pg, slip_pts=slip_pts,
                         )
                     )
                 out.adjs.append(
@@ -816,7 +853,7 @@ def simulate_path(
     if not math.isfinite(out.expiry_net) and out.net:
         out.expiry_net = float(out.net[-1])
         out.cash_mark = realized
-    _finalize_path(out, compact=compact)
+    _finalize_path(out, compact=compact, h_grid=hg)
     return out
 
 
@@ -833,10 +870,22 @@ def drop_series(path: PathResult) -> None:
     path.est_slip_m = []
 
 
-def exit_table(path: PathResult) -> list[dict[str, Any]]:
-    """24 (T,SL) first-exit rows. Costs are as of the exit minute, not expiry."""
+def _norm_h(v: Any) -> int | None:
+    if v is None or v == "" or v is False:
+        return None
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return int(v)
+
+
+def exit_table(
+    path: PathResult,
+    h_grid: tuple[int | None, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """(T,SL,H) first-exit rows. Default H=None only (24 rows). Costs as of exit minute."""
     if not path.ok or not path.ts:
         return []
+    hs: tuple[int | None, ...] = H_GRID if h_grid is None else tuple(h_grid)
     ts = np.asarray(path.ts, dtype=np.int64)
     net = np.asarray(path.net, dtype=np.float64)
     peak = np.asarray(path.peak, dtype=np.float64)
@@ -856,57 +905,71 @@ def exit_table(path: PathResult) -> list[dict[str, Any]]:
     if est_s.size != ts.size:
         est_s = np.zeros(ts.shape)
     live = ts < int(path.exp_ts)
+    held = (ts.astype(np.float64) - float(path.t0)) / 60.0
     rows: list[dict[str, Any]] = []
-    for tgt in T_GRID:
-        for slv in SL_GRID:
-            lvl = -float(slv) + 5.0 * np.floor(np.maximum(0.0, peak_g) / 10.0)
-            tgt_hit = live & (net >= float(tgt))
-            sl_hit = live & (gross <= lvl)
-            i_t = int(np.flatnonzero(tgt_hit)[0]) if np.any(tgt_hit) else None
-            i_s = int(np.flatnonzero(sl_hit)[0]) if np.any(sl_hit) else None
-            reason = "EXPIRY"
-            i = int(ts.size - 1)
-            if i_t is not None and (i_s is None or i_t <= i_s):
-                reason, i = "TARGET", i_t
-            elif i_s is not None:
-                reason, i = "SL", i_s
-            else:
-                exp_i = np.flatnonzero(~live)
-                if exp_i.size:
-                    i = int(exp_i[0])
-                    reason = "EXPIRY"
-            if reason == "EXPIRY":
-                net_x = float(path.expiry_net) if math.isfinite(path.expiry_net) else float(net[i])
-                fee_x = float(fees[i])
-                slip_x = float(slips[i])
-            else:
-                net_x = float(net[i])
-                fee_x = float(fees[i]) + float(est_f[i])
-                slip_x = float(slips[i]) + float(est_s[i])
-            slc = net[: i + 1]
-            rows.append(
-                {
-                    "T": int(tgt),
-                    "SL": int(slv),
-                    "exit_ts": int(ts[i]),
-                    "reason": reason,
-                    "net": net_x,
-                    "gross_at_exit": float(gross[i]),
-                    "n_adj_at_exit": int(nadj[i]),
-                    "peak_at_exit": float(peak[i]),
-                    "peak_gross_at_exit": float(peak_g[i]),
-                    "mfe": float(np.max(slc)),
-                    "mae": float(np.min(slc)),
-                    "fees_at_exit": fee_x,
-                    "slip_at_exit": slip_x,
-                }
-            )
+    for hold in hs:
+        for tgt in T_GRID:
+            for slv in SL_GRID:
+                lvl = -float(slv) + 5.0 * np.floor(np.maximum(0.0, peak_g) / 10.0)
+                tgt_hit = live & (net >= float(tgt))
+                sl_hit = live & (gross <= lvl)
+                i_t = int(np.flatnonzero(tgt_hit)[0]) if np.any(tgt_hit) else None
+                i_s = int(np.flatnonzero(sl_hit)[0]) if np.any(sl_hit) else None
+                i_h: int | None = None
+                if hold is not None:
+                    time_hit = live & (held >= float(hold))
+                    if np.any(time_hit):
+                        i_h = int(np.flatnonzero(time_hit)[0])
+                reason = "EXPIRY"
+                i = int(ts.size - 1)
+                if i_t is not None and (i_s is None or i_t <= i_s) and (i_h is None or i_t <= i_h):
+                    reason, i = "TARGET", i_t
+                elif i_s is not None and (i_h is None or i_s <= i_h):
+                    reason, i = "SL", i_s
+                elif i_h is not None:
+                    reason, i = "TIME", i_h
+                else:
+                    exp_i = np.flatnonzero(~live)
+                    if exp_i.size:
+                        i = int(exp_i[0])
+                        reason = "EXPIRY"
+                if reason == "EXPIRY":
+                    net_x = float(path.expiry_net) if math.isfinite(path.expiry_net) else float(net[i])
+                    fee_x = float(fees[i])
+                    slip_x = float(slips[i])
+                else:
+                    net_x = float(net[i])
+                    fee_x = float(fees[i]) + float(est_f[i])
+                    slip_x = float(slips[i]) + float(est_s[i])
+                slc = net[: i + 1]
+                rows.append(
+                    {
+                        "T": int(tgt),
+                        "SL": int(slv),
+                        "H": hold,
+                        "exit_ts": int(ts[i]),
+                        "reason": reason,
+                        "net": net_x,
+                        "gross_at_exit": float(gross[i]),
+                        "n_adj_at_exit": int(nadj[i]),
+                        "peak_at_exit": float(peak[i]),
+                        "peak_gross_at_exit": float(peak_g[i]),
+                        "mfe": float(np.max(slc)),
+                        "mae": float(np.min(slc)),
+                        "fees_at_exit": fee_x,
+                        "slip_at_exit": slip_x,
+                    }
+                )
     return rows
 
 
-def _finalize_path(path: PathResult, compact: bool) -> None:
+def _finalize_path(
+    path: PathResult,
+    compact: bool,
+    h_grid: tuple[int | None, ...] | None = None,
+) -> None:
     if path.ok:
-        path.exits = exit_table(path)
+        path.exits = exit_table(path, h_grid=h_grid)
     if compact:
         drop_series(path)
 
@@ -915,8 +978,9 @@ def first_exit(
     path: PathResult,
     target: float,
     sl: float,
+    h: int | None = None,
 ) -> tuple[int, str, float]:
-    """First minute: TARGET on net, SL on gross (ratchet on peak_gross); else EXPIRY."""
+    """First minute: TARGET on net, SL on gross, then TIME at H minutes; else EXPIRY."""
     if not path.ok or not path.ts:
         return int(path.t0), "SKIP", float("nan")
     tgt = float(target)
@@ -932,6 +996,8 @@ def first_exit(
             return int(t), "TARGET", n
         if g <= sl_level(pg, slv):
             return int(t), "SL", n
+        if h is not None and (int(t) - int(path.t0)) / 60.0 >= float(h):
+            return int(t), "TIME", n
     t = int(path.ts[last_i])
     return t, "EXPIRY", float(path.expiry_net)
 
@@ -940,9 +1006,10 @@ def brute_exit(
     path: PathResult,
     target: float,
     sl: float,
+    h: int | None = None,
 ) -> tuple[int, str, float]:
     """Same rule as first_exit; used to prove post-hoc == minute walk."""
-    return first_exit(path, target, sl)
+    return first_exit(path, target, sl, h)
 
 
 def take_in_order(
@@ -951,6 +1018,7 @@ def take_in_order(
     skip_by_key: dict[Any, str],
     target: float,
     sl: float,
+    h: int | None = None,
 ) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
     """Walk events in time; skip while a basket is open. Returns taken, n_skipped, skip_reasons."""
     taken: list[dict[str, Any]] = []
@@ -959,6 +1027,7 @@ def take_in_order(
     busy_until = -1
     prev_ts: int | None = None
     tgt, slv = int(target), int(sl)
+    want_h = _norm_h(h)
     for e in sorted(events, key=lambda r: int(r["signal_ts"])):
         t0 = int(e["signal_ts"])
         key = e.get("path_key")
@@ -973,7 +1042,13 @@ def take_in_order(
         prev_ts = t0
         why = skip_by_key.get(key, "")
         rows = exits_by_key.get(key) or []
-        row = next((r for r in rows if int(r["T"]) == tgt and int(r["SL"]) == slv), None)
+        row = next(
+            (
+                r for r in rows
+                if int(r["T"]) == tgt and int(r["SL"]) == slv and _norm_h(r.get("H")) == want_h
+            ),
+            None,
+        )
         if row is None:
             n_skipped += 1
             label = why or "no_path"

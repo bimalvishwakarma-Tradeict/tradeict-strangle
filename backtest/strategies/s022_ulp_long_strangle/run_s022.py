@@ -45,10 +45,15 @@ from backtest.strategies.s022_ulp_long_strangle.stage0_move_edge import (  # noq
 )
 from backtest.strategies.s022_ulp_long_strangle.sim import (  # noqa: E402
     A_GRID,
+    A_GRID_REDUCED,
     DTE_GRID,
+    DTE_GRID_REDUCED,
+    H_GRID,
+    H_GRID_REDUCED,
     SL_GRID,
     T_GRID,
     X_ITM,
+    X_REDUCED,
     expiry_date,
     filter_traded_events,
     map_src,
@@ -270,6 +275,65 @@ def _strike_cfgs() -> list[tuple[str, int]]:
     return [("itm", int(x)) for x in X_ITM] + [("otm", 1000)]
 
 
+def _profit_factor(nets: list[float]) -> float:
+    pos = sum(float(x) for x in nets if float(x) > 0)
+    neg = sum(float(x) for x in nets if float(x) < 0)
+    if neg == 0.0:
+        return float("inf") if pos > 0 else float("nan")
+    return pos / abs(neg)
+
+
+def _a_pct(a: Any) -> float | None:
+    if a is None or a == "" or a == "none":
+        return None
+    return float(a)
+
+
+def _a_dist(a: Any, target: int = 125) -> int:
+    if a is None or a == "" or a == "none":
+        return 10**9
+    return abs(int(a) - int(target))
+
+
+def _h_dist(h: Any, target: int = 0) -> int:
+    if h is None or h == "":
+        return abs(0 - int(target)) if target == 0 else 10**9
+    return abs(int(h) - int(target))
+
+
+def _cell_key(r: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        r.get("tf"), r.get("mode"), r.get("style"), r.get("X"), r.get("dte"),
+        r.get("a"), r.get("H"), r.get("T"), r.get("SL"),
+    )
+
+
+def _paired_ulp(
+    cell_rows: list[dict[str, Any]],
+    other: str,
+) -> tuple[int, float, float]:
+    idx = {
+        _cell_key(r): r
+        for r in cell_rows
+        if r.get("arm") == other and int(r.get("n") or 0) > 0
+    }
+    diffs: list[float] = []
+    n_better = 0
+    for r in cell_rows:
+        if r.get("arm") != "ulp" or int(r.get("n") or 0) <= 0:
+            continue
+        o = idx.get(_cell_key(r))
+        if o is None:
+            continue
+        d = float(r["mean"]) - float(o["mean"])
+        diffs.append(d)
+        if d > 0:
+            n_better += 1
+    n = len(diffs)
+    pct = (100.0 * n_better / n) if n else float("nan")
+    return n, _median(diffs), pct
+
+
 def _median(xs: list[float]) -> float:
     a = sorted(float(x) for x in xs)
     if not a:
@@ -344,8 +408,19 @@ def _cell_stats(taken: list[dict[str, Any]], n_skipped: int, reasons: dict[str, 
         "avg_adj": (sum(float(r["n_adj_at_exit"]) for r in taken) / n) if n else float("nan"),
         "avg_fee": (sum(float(r["fees_at_exit"]) for r in taken) / n) if n else float("nan"),
         "avg_slip": (sum(float(r["slip_at_exit"]) for r in taken) / n) if n else float("nan"),
+        "mean_gross": (
+            sum(float(r.get("gross_at_exit", 0.0) or 0.0) for r in taken) / n
+        ) if n else float("nan"),
+        "mean_cost": (
+            sum(
+                float(r["fees_at_exit"]) + float(r["slip_at_exit"])
+                for r in taken
+            ) / n
+        ) if n else float("nan"),
+        "profit_factor": _profit_factor(nets),
         "n_TARGET": by_r.get("TARGET", 0),
         "n_SL": by_r.get("SL", 0),
+        "n_TIME": by_r.get("TIME", 0),
         "n_EXPIRY": by_r.get("EXPIRY", 0),
     }
 
@@ -370,7 +445,7 @@ def _add_taken_trade(
     spot1 = mkt.spot(x_ts) or float("nan")
     tid = (
         f"{cell['arm']}|{ev.get('event_id')}|{cell['style']}|{cell['X']}|"
-        f"{cell['dte']}|{cell['a']}|{cell['T']}|{cell['SL']}|{t0}"
+        f"{cell['dte']}|{cell['a']}|{cell.get('H')}|{cell['T']}|{cell['SL']}|{t0}"
     )
     trade = {
         "trade_id": tid,
@@ -524,6 +599,8 @@ def main() -> None:
     ap.add_argument("--modes", default="wick,full")
     ap.add_argument("--csv", default=None)
     ap.add_argument("--cache-gb", type=float, default=1.0)
+    ap.add_argument("--slip", type=float, default=20.0)
+    ap.add_argument("--reduced", action="store_true")
     args = ap.parse_args()
 
     month = str(args.month)
@@ -554,7 +631,18 @@ def main() -> None:
     from datetime import datetime, timezone
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    tag = "smoke" if (days or args.smoke) else "grid"
+    slip_pts = float(args.slip)
+    reduced = bool(args.reduced)
+    a_grid: tuple[Any, ...] = A_GRID_REDUCED if reduced else A_GRID
+    dte_grid = DTE_GRID_REDUCED if reduced else DTE_GRID
+    h_grid: tuple[int | None, ...] = H_GRID_REDUCED if reduced else H_GRID
+    cfgs = list(X_REDUCED) if reduced else _strike_cfgs()
+    if days or args.smoke:
+        tag = "smoke"
+    elif reduced:
+        tag = "reduced"
+    else:
+        tag = "grid"
     folder = RUNS_DIR / f"{stamp}_s022_{tag}_{month}"
     n = 0
     while folder.exists():
@@ -565,10 +653,26 @@ def main() -> None:
         tag,
         args,
         month=month,
-        prereg_note="S022 ULP rolling ITM long strangle; fixed 20pt slip; settle intrinsic 0 fee",
+        prereg_note=(
+            f"S022 ULP rolling ITM long strangle; slip={slip_pts}pt; "
+            f"reduced={reduced}; settle intrinsic 0 fee"
+        ),
         folder=folder,
     )
     print(f"archive folder={archive.folder}", flush=True)
+    meta_p = archive.folder / "run_meta.json"
+    meta = json.loads(meta_p.read_text(encoding="utf-8"))
+    meta["slip_pts"] = slip_pts
+    meta["reduced"] = reduced
+    meta["grid"] = {
+        "X": [list(c) for c in cfgs],
+        "dte": list(dte_grid),
+        "a": ["none" if a is None else a for a in a_grid],
+        "H": ["none" if h is None else h for h in h_grid],
+        "T": list(T_GRID),
+        "SL": list(SL_GRID),
+    }
+    meta_p.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
     t_load = time.perf_counter()
     spot = s018.load_spot_1m(csv_path)
@@ -647,13 +751,12 @@ def main() -> None:
                 )
                 n_ev_table.append({"arm": arm, "tf": tf, "mode": mode, "n": n_keep})
 
-    cfgs = _strike_cfgs()
-    n_combo = len(cfgs) * len(DTE_GRID) * len(A_GRID)
+    n_combo = len(cfgs) * len(dte_grid) * len(a_grid)
     work_events = [e for a in arms for e in events_by_arm[a]]
     n_clipped = {a: int(n_before_clip[a]) - len(events_by_arm[a]) for a in arms}
     print(
         f"events smoke={len(work_events)} ulp_month={n_ulp_month} "
-        f"combos_per_event={n_combo} (X={len(cfgs)} dte={len(DTE_GRID)} a={len(A_GRID)})",
+        f"combos_per_event={n_combo} (X={len(cfgs)} dte={len(dte_grid)} a={len(a_grid)} H={len(h_grid)})",
         flush=True,
     )
 
@@ -673,7 +776,9 @@ def main() -> None:
     }
     src_tot = {"real": 0, "stale": 0, "parity": 0, "none": 0}
     src_by_x: dict[tuple[str, int], dict[str, int]] = {}
-    src_by_dte: dict[int, dict[str, int]] = {1: dict(src_tot), 2: dict(src_tot)}
+    src_by_dte: dict[int, dict[str, int]] = {int(d): dict(src_tot) for d in dte_grid}
+    if 2 not in src_by_dte:
+        src_by_dte[2] = dict(src_tot)
     n_paths = 0
     n_ok = 0
     t_sim = time.perf_counter()
@@ -695,29 +800,30 @@ def main() -> None:
         if ym not in listed_cache:
             listed_cache[ym] = s021.listed_expiries(store, around)
         exp_set = set(listed_cache[ym])
-        for dte in DTE_GRID:
+        for dte in dte_grid:
             ed = expiry_date(t0, int(dte))
             if ed not in exp_set:
                 miss_exp_ev[int(dte)] += 1
                 miss_exp_dates[int(dte)].add(ed.isoformat())
         for style, x in cfgs:
-            for dte in DTE_GRID:
+            for dte in dte_grid:
                 ed = expiry_date(t0, int(dte))
                 if ed not in exp_set:
-                    skip["missing_expiry"] += len(A_GRID)
-                    for a in A_GRID:
-                        key = (e["event_id"], style, int(x), int(dte), int(a))
+                    skip["missing_expiry"] += len(a_grid)
+                    for a in a_grid:
+                        key = (e["event_id"], style, int(x), int(dte), a)
                         skip_by_key[key] = "missing_expiry"
                     continue
                 exp_ts = int(s018.expiry_unix(ed))
                 minutes = np.arange(t0, exp_ts + 1, 60, dtype=np.int64)
-                for a in A_GRID:
+                for a in a_grid:
                     p = simulate_path(
-                        mkt, t0, ed, int(x), style, float(a), minutes,
+                        mkt, t0, ed, int(x), style, _a_pct(a), minutes,
                         compact=True, record_fills=False,
+                        slip_pts=slip_pts, h_grid=h_grid,
                     )
                     n_paths += 1
-                    key = (e["event_id"], style, int(x), int(dte), int(a))
+                    key = (e["event_id"], style, int(x), int(dte), a)
                     bx = (style, int(x))
                     src_by_x.setdefault(bx, {"real": 0, "stale": 0, "parity": 0, "none": 0})
                     for k, v in p.src_counts.items():
@@ -758,33 +864,38 @@ def main() -> None:
     streams: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for e in work_events:
         for style, x in cfgs:
-            for dte in DTE_GRID:
-                for a in A_GRID:
+            for dte in dte_grid:
+                for a in a_grid:
                     rec = dict(e)
-                    rec["path_key"] = (e["event_id"], style, int(x), int(dte), int(a))
-                    sk = (e["arm"], e["tf"], e["mode"], style, int(x), int(dte), int(a))
+                    rec["path_key"] = (e["event_id"], style, int(x), int(dte), a)
+                    sk = (e["arm"], e["tf"], e["mode"], style, int(x), int(dte), a)
                     streams.setdefault(sk, []).append(rec)
     dump_taken: list[dict[str, Any]] = []
     dump_cell_used = dump_spec
+    DUMP_H: int | None = None
     for sk, evs in streams.items():
         arm, tf, mode, style, x, dte, a = sk
         for T in T_GRID:
             for SL in SL_GRID:
-                taken, n_sk, reasons = take_in_order(evs, exits_by_key, skip_by_key, float(T), float(SL))
-                n_taken += len(taken)
-                st = _cell_stats(taken, n_sk, reasons)
-                st.update(
-                    {
-                        "arm": arm, "tf": tf, "mode": mode, "style": style,
-                        "X": int(x), "dte": int(dte), "a": int(a), "T": int(T), "SL": int(SL),
-                    }
-                )
-                cell_rows.append(st)
-                if (
-                    arm, tf, mode, style, int(x), int(dte), int(a), int(T), int(SL)
-                ) == (*dump_spec, DUMP_T, DUMP_SL):
-                    dump_taken = taken
-                    dump_cell_used = dump_spec
+                for H in h_grid:
+                    taken, n_sk, reasons = take_in_order(
+                        evs, exits_by_key, skip_by_key, float(T), float(SL), h=H,
+                    )
+                    n_taken += len(taken)
+                    st = _cell_stats(taken, n_sk, reasons)
+                    st.update(
+                        {
+                            "arm": arm, "tf": tf, "mode": mode, "style": style,
+                            "X": int(x), "dte": int(dte), "a": a, "H": H,
+                            "T": int(T), "SL": int(SL),
+                        }
+                    )
+                    cell_rows.append(st)
+                    if (
+                        arm, tf, mode, style, int(x), int(dte), a, int(T), int(SL)
+                    ) == (*dump_spec, DUMP_T, DUMP_SL) and H is None:
+                        dump_taken = taken
+                        dump_cell_used = dump_spec
     occ_s = time.perf_counter() - t_occ
 
     dump_requested = True
@@ -797,26 +908,30 @@ def main() -> None:
         ]
         near.sort(key=lambda r: (
             abs(int(r["X"]) - 1000), abs(int(r["dte"]) - 1),
-            abs(int(r["a"]) - 125), abs(int(r["T"]) - 200), abs(int(r["SL"]) - 200),
+            _a_dist(r["a"], 125), _h_dist(r.get("H"), 0),
+            abs(int(r["T"]) - 200), abs(int(r["SL"]) - 200),
         ))
         if near:
             pick = near[0]
             dump_cell_used = (
-                "ulp", "15m", "wick", "itm", int(pick["X"]), int(pick["dte"]), int(pick["a"]),
+                "ulp", "15m", "wick", "itm", int(pick["X"]), int(pick["dte"]), pick["a"],
             )
-            sk = ("ulp", "15m", "wick", "itm", int(pick["X"]), int(pick["dte"]), int(pick["a"]))
+            sk = ("ulp", "15m", "wick", "itm", int(pick["X"]), int(pick["dte"]), pick["a"])
             evs = streams.get(sk, [])
+            DUMP_H = pick.get("H")
             dump_taken, _, _ = take_in_order(
                 evs, exits_by_key, skip_by_key, float(pick["T"]), float(pick["SL"]),
+                h=DUMP_H,
             )
             DUMP_T, DUMP_SL = int(pick["T"]), int(pick["SL"])
 
     cell_path = archive.folder / "cells.csv"
     cell_cols = [
-        "arm", "tf", "mode", "style", "X", "dte", "a", "T", "SL",
+        "arm", "tf", "mode", "style", "X", "dte", "a", "H", "T", "SL",
         "n", "n_skipped_events", "mean", "median", "worst", "p5", "win_pct",
-        "sum", "maxDD", "avg_adj", "avg_fee", "avg_slip",
-        "n_TARGET", "n_SL", "n_EXPIRY",
+        "sum", "maxDD", "profit_factor", "avg_adj", "avg_fee", "avg_slip",
+        "mean_gross", "mean_cost",
+        "n_TARGET", "n_SL", "n_TIME", "n_EXPIRY",
     ]
     with cell_path.open("w", newline="", encoding="utf-8") as fp:
         w = csv.DictWriter(fp, fieldnames=cell_cols, extrasaction="ignore")
@@ -832,7 +947,7 @@ def main() -> None:
     db_exps = _db_expiries(store, date_cls(2025, 5, 30), date_cls(2025, 6, 6))
     n_ulp_smoke = sum(1 for e in work_events if e.get("arm") == "ulp")
     miss_txt = []
-    for dte in DTE_GRID:
+    for dte in dte_grid:
         miss_txt.append(
             f"  dte={dte}: events_missing_expiry={miss_exp_ev[int(dte)]}/{len(work_events)} "
             f"dates={sorted(miss_exp_dates[int(dte)])}"
@@ -869,8 +984,9 @@ def main() -> None:
         exp_ts = int(s018.expiry_unix(ed))
         minutes = np.arange(t0, exp_ts + 1, 60, dtype=np.int64)
         dump_paths[key] = simulate_path(
-            mkt, t0, ed, int(x), str(style), float(a), minutes,
+            mkt, t0, ed, int(x), str(style), _a_pct(a), minutes,
             compact=False, record_fills=True,
+            slip_pts=slip_pts, h_grid=h_grid,
         )
 
     basket_rows: list[dict[str, Any]] = []
@@ -938,22 +1054,26 @@ def main() -> None:
     )
 
     dump_note = (
-        f"dump cell={dump_cell_used} T={DUMP_T} SL={DUMP_SL} n_taken={len(dump_taken)} "
+        f"dump cell={dump_cell_used} T={DUMP_T} SL={DUMP_SL} H={DUMP_H} n_taken={len(dump_taken)} "
         f"dumped={len(dump_baskets)}"
         + (
             ""
             if dump_requested and dump_cell_used == dump_spec
-            else " (nearest cell; requested ULP 15m wick X=1000 ITM dte=1 a=125 T=200 SL=200)"
+            else " (nearest cell; requested ULP 15m wick X=1000 ITM dte=1 a=125 T=200 SL=200 H=None)"
         )
     )
 
+    run_kind = "smoke" if bool(args.smoke) or days else ("reduced" if reduced else "grid")
+    grid_a = ["none" if a is None else a for a in a_grid]
+    grid_h = ["none" if h is None else h for h in h_grid]
     lines = [
-        "S022 smoke — ULP rolling ITM long strangle (no full-month run)",
+        f"S022 {run_kind} — ULP rolling ITM long strangle",
         f"folder={archive.folder}",
         f"month={month} days={days} arms={arms} tfs={tfs} modes={modes}",
-        f"grid X_ITM={list(X_ITM)} OTM1000 a={list(A_GRID)} T={list(T_GRID)} SL={list(SL_GRID)} dte={list(DTE_GRID)}",
-        f"slip_pts={20} qty={1000} seed={SEED}",
-        "SL_basis=GROSS TARGET_basis=NET (exit P&L is NET)",
+        f"grid X={list(cfgs)} a={grid_a} T={list(T_GRID)} SL={list(SL_GRID)} "
+        f"dte={list(dte_grid)} H={grid_h}",
+        f"slip_pts={slip_pts} qty={1000} seed={SEED} reduced={reduced}",
+        "SL_basis=GROSS TARGET_basis=NET (exit P&L is NET); TIME at H minutes after entry",
         "",
         "n events per arm/tf/mode:",
     ]
@@ -971,7 +1091,7 @@ def main() -> None:
         f"skip={skip}",
         _src_line("mark_src ALL", src_tot),
     ]
-    for dte in DTE_GRID:
+    for dte in dte_grid:
         lines.append(_src_line(f"mark_src dte={dte}", src_by_dte[int(dte)]))
     for (style, x), dsrc in sorted(src_by_x.items()):
         lines.append(_src_line(f"mark_src {style} X={x}", dsrc))
@@ -1020,35 +1140,82 @@ def main() -> None:
     ]
     for r in ulp15_best:
         lines.append(
-            f"  {r['mode']} {r['style']} X={r['X']} dte={r['dte']} a={r['a']} T={r['T']} SL={r['SL']} "
+            f"  {r['mode']} {r['style']} X={r['X']} dte={r['dte']} a={r['a']} H={r.get('H')} "
+            f"T={r['T']} SL={r['SL']} "
             f"n={r['n']} mean={r['mean']:.3f} win%={r['win_pct']:.1f} maxDD={r['maxDD']:.1f}"
         )
     lines.append("--- 5 worst cells arm=ulp tf=15m by mean (3-day PREVIEW only) ---")
     for r in ulp15_worst:
         lines.append(
-            f"  {r['mode']} {r['style']} X={r['X']} dte={r['dte']} a={r['a']} T={r['T']} SL={r['SL']} "
+            f"  {r['mode']} {r['style']} X={r['X']} dte={r['dte']} a={r['a']} H={r.get('H')} "
+            f"T={r['T']} SL={r['SL']} "
             f"n={r['n']} mean={r['mean']:.3f} win%={r['win_pct']:.1f} maxDD={r['maxDD']:.1f}"
         )
 
     def _same_cell(a: dict[str, Any], b: dict[str, Any]) -> bool:
-        return all(a.get(k) == b.get(k) for k in ("tf", "mode", "style", "X", "dte", "a", "T", "SL"))
+        return all(
+            a.get(k) == b.get(k)
+            for k in ("tf", "mode", "style", "X", "dte", "a", "H", "T", "SL")
+        )
 
     ulp_cells = [r for r in cell_rows if r["arm"] == "ulp" and int(r["n"]) > 0]
     best10 = sorted(ulp_cells, key=_mean_ok, reverse=True)[:10]
     lines.append("")
-    lines.append("--- n cells with mean > 0 ---")
+    lines.append("--- n cells with mean > 0 (net) ---")
     for arm in arms:
         npos = sum(1 for r in cell_rows if r["arm"] == arm and int(r["n"]) > 0 and float(r["mean"]) > 0)
         ncell = sum(1 for r in cell_rows if r["arm"] == arm and int(r["n"]) > 0)
         lines.append(f"  {arm}: {npos}/{ncell}")
+    n_p, med_p, pct_p = _paired_ulp(cell_rows, "c2")
+    n_v, med_v, pct_v = _paired_ulp(cell_rows, "volctrl")
+    lines.append("--- paired ULP minus C2 / VOLCTRL (cells with n>0 both arms) ---")
+    lines.append(
+        f"  ULP-C2 n={n_p} median={med_p:.4f} pct_ULP_better={pct_p:.1f}%"
+    )
+    lines.append(
+        f"  ULP-VOLCTRL n={n_v} median={med_v:.4f} pct_ULP_better={pct_v:.1f}%"
+    )
+    for tf in tfs:
+        for mode in modes:
+            sub = [r for r in cell_rows if r["tf"] == tf and r["mode"] == mode]
+            n_p, med_p, pct_p = _paired_ulp(sub, "c2")
+            n_v, med_v, pct_v = _paired_ulp(sub, "volctrl")
+            lines.append(
+                f"  {tf} {mode} ULP-C2 n={n_p} med={med_p:.4f} pct={pct_p:.1f}% | "
+                f"ULP-VOL n={n_v} med={med_v:.4f} pct={pct_v:.1f}%"
+            )
+    lines.append("--- ULP median gross / cost / net per (a, H) (cell means) ---")
+    ah_keys: list[tuple[Any, Any]] = []
+    seen_ah: set[tuple[Any, Any]] = set()
+    for r in cell_rows:
+        if r["arm"] != "ulp":
+            continue
+        k = (r.get("a"), r.get("H"))
+        if k not in seen_ah:
+            seen_ah.add(k)
+            ah_keys.append(k)
+    for a_k, h_k in ah_keys:
+        rs = [
+            r for r in cell_rows
+            if r["arm"] == "ulp" and r.get("a") == a_k and r.get("H") == h_k and int(r["n"]) > 0
+        ]
+        g = [float(r["mean_gross"]) for r in rs if r.get("mean_gross") == r.get("mean_gross")]
+        c = [float(r["mean_cost"]) for r in rs if r.get("mean_cost") == r.get("mean_cost")]
+        nts = [float(r["mean"]) for r in rs if r.get("mean") == r.get("mean")]
+        lines.append(
+            f"  a={a_k} H={h_k} n_cells={len(rs)} median_gross={_median(g):.3f} "
+            f"median_cost={_median(c):.3f} median_net={_median(nts):.3f}"
+        )
     lines.append("--- best 10 ULP cells (C2 / VOLCTRL same cell side-by-side) ---")
     for r in best10:
         c2 = next((x for x in cell_rows if x["arm"] == "c2" and _same_cell(x, r)), None)
         vc = next((x for x in cell_rows if x["arm"] == "volctrl" and _same_cell(x, r)), None)
+        pf = r.get("profit_factor", float("nan"))
         lines.append(
-            f"  {r['tf']} {r['mode']} {r['style']} X={r['X']} dte={r['dte']} a={r['a']} T={r['T']} SL={r['SL']} "
+            f"  {r['tf']} {r['mode']} {r['style']} X={r['X']} dte={r['dte']} a={r['a']} "
+            f"H={r.get('H')} T={r['T']} SL={r['SL']} "
             f"n={r['n']} mean={r['mean']:.3f} med={r['median']:.3f} worst={r['worst']:.3f} p5={r['p5']:.3f} "
-            f"win%={r['win_pct']:.1f} maxDD={r['maxDD']:.1f} adj={r['avg_adj']:.2f} "
+            f"win%={r['win_pct']:.1f} maxDD={r['maxDD']:.1f} pf={pf} adj={r['avg_adj']:.2f} "
             f"fee={r['avg_fee']:.2f} slip={r['avg_slip']:.2f} "
             f"| C2 mean={c2['mean'] if c2 else float('nan')} n={c2['n'] if c2 else 0} "
             f"| VOL mean={vc['mean'] if vc else float('nan')} n={vc['n'] if vc else 0}"
@@ -1063,24 +1230,27 @@ def main() -> None:
                 if cand:
                     b = cand[0]
                     bits.append(
-                        f"{arm}: {b['style']} X={b['X']} dte={b['dte']} a={b['a']} T={b['T']} SL={b['SL']} "
-                        f"mean={b['mean']:.3f} n={b['n']}"
+                        f"{arm}: {b['style']} X={b['X']} dte={b['dte']} a={b['a']} H={b.get('H')} "
+                        f"T={b['T']} SL={b['SL']} mean={b['mean']:.3f} n={b['n']}"
                     )
                 else:
                     bits.append(f"{arm}: none")
             lines.append(f"  {tf} {mode} | " + " | ".join(bits))
     if best10:
         br = best10[0]
-        sk = ("ulp", br["tf"], br["mode"], br["style"], int(br["X"]), int(br["dte"]), int(br["a"]))
+        sk = ("ulp", br["tf"], br["mode"], br["style"], int(br["X"]), int(br["dte"]), br["a"])
         evs = streams.get(sk, [])
-        taken_best, _, _ = take_in_order(evs, exits_by_key, skip_by_key, float(br["T"]), float(br["SL"]))
+        taken_best, _, _ = take_in_order(
+            evs, exits_by_key, skip_by_key, float(br["T"]), float(br["SL"]), h=br.get("H"),
+        )
         losers = [t for t in taken_best if float(t["net"]) <= 0]
         n_los = len(losers)
         n_prof_first = sum(1 for t in losers if float(t.get("peak_at_exit", 0.0) or 0.0) > 0)
         peaks = [float(t.get("peak_at_exit", float("nan"))) for t in losers]
         lines.append("--- loss anatomy best ULP cell (peak_net) ---")
         lines.append(
-            f"  {br['tf']} {br['mode']} {br['style']} X={br['X']} dte={br['dte']} a={br['a']} T={br['T']} SL={br['SL']} "
+            f"  {br['tf']} {br['mode']} {br['style']} X={br['X']} dte={br['dte']} a={br['a']} "
+            f"H={br.get('H')} T={br['T']} SL={br['SL']} "
             f"losers={n_los} share_profit_first={((100.0 * n_prof_first / n_los) if n_los else float('nan')):.1f}% "
             f"median_peak={_median(peaks) if peaks else float('nan'):.3f}"
         )
@@ -1104,6 +1274,16 @@ def main() -> None:
                 "n_events": n_ev_table,
                 "db_expiries": db_exps,
                 "dump_cell": list(dump_cell_used),
+                "slip_pts": slip_pts,
+                "reduced": reduced,
+                "grid": {
+                    "X": [list(c) for c in cfgs],
+                    "dte": list(dte_grid),
+                    "a": grid_a,
+                    "H": grid_h,
+                    "T": list(T_GRID),
+                    "SL": list(SL_GRID),
+                },
             },
             indent=2,
         )
@@ -1120,7 +1300,7 @@ def main() -> None:
         for r in cell_rows:
             archive.add_config_result(
                 {
-                    "key": f"{r['arm']}|{r['tf']}|{r['mode']}|{r['style']}|{r['X']}|{r['dte']}|{r['a']}|{r['T']}|{r['SL']}",
+                    "key": f"{r['arm']}|{r['tf']}|{r['mode']}|{r['style']}|{r['X']}|{r['dte']}|{r['a']}|{r.get('H')}|{r['T']}|{r['SL']}",
                     "month": month,
                     "tf": r["tf"],
                     "variant": r["style"],
@@ -1141,9 +1321,12 @@ def main() -> None:
             for arm in arms:
                 cell = dict(pick)
                 cell["arm"] = arm
-                sk = (arm, pick["tf"], pick["mode"], pick["style"], int(pick["X"]), int(pick["dte"]), int(pick["a"]))
+                sk = (arm, pick["tf"], pick["mode"], pick["style"], int(pick["X"]), int(pick["dte"]), pick["a"])
                 evs = streams.get(sk, [])
-                taken, _, _ = take_in_order(evs, exits_by_key, skip_by_key, float(pick["T"]), float(pick["SL"]))
+                taken, _, _ = take_in_order(
+                    evs, exits_by_key, skip_by_key, float(pick["T"]), float(pick["SL"]),
+                    h=pick.get("H"),
+                )
                 for rec in taken:
                     ev = rec["event"]
                     key = ev["path_key"]
@@ -1153,8 +1336,9 @@ def main() -> None:
                     exp_ts = int(s018.expiry_unix(ed))
                     minutes = np.arange(t0, exp_ts + 1, 60, dtype=np.int64)
                     pth = simulate_path(
-                        mkt, t0, ed, int(x), str(style), float(a), minutes,
+                        mkt, t0, ed, int(x), str(style), _a_pct(a), minutes,
                         compact=False, record_fills=True,
+                        slip_pts=slip_pts, h_grid=h_grid,
                     )
                     if pth.ok:
                         _add_taken_trade(archive, rec, pth, cell, month, mkt)

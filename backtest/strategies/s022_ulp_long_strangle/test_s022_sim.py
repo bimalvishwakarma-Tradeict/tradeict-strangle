@@ -336,3 +336,48 @@ def test_sl_on_gross_while_net_above_minus_sl() -> None:
     assert i >= 0
     assert float(p.gross[i]) <= sl_level(float(p.peak_gross[i]), 50.0)
     assert float(p.tsl_net) > -50.0
+
+
+def test_a_pct_none_never_adjusts_at_10x_ref() -> None:
+    t0 = 1_700_000_040
+    exp = ist_date(t0) + timedelta(days=1)
+    mkt = MemMkt()
+    mkt.rows = _chain_atm100k()
+    minutes = [t0 + i * 60 for i in range(12)]
+    for t in minutes:
+        mkt.spots[t] = 100_000.0
+        mkt.marks.setdefault("C-99600", {})[t] = 80.0
+        mkt.marks.setdefault("P-100400", {})[t] = 80.0
+    mkt.marks["C-99600"][t0 + 60] = 800.0
+    mkt.marks["C-99600"][t0 + 120] = 800.0
+    p = simulate_path(mkt, t0, exp, 400, "itm", None, minutes)
+    assert p.ok, p.skip_reason
+    assert p.n_adj_total == 0
+    assert p.adjs == []
+    calls = [lg for lg in p.legs if lg.is_call]
+    assert len(calls) == 1
+    assert abs(float(calls[0].ref) - 80.0) < 1e-9
+
+
+def test_time_exit_posthoc_equals_brute() -> None:
+    t0 = 1_700_000_040
+    exp = ist_date(t0) + timedelta(days=1)
+    mkt = MemMkt()
+    mkt.rows = _chain_atm100k()
+    minutes = [t0 + i * 60 for i in range(90)]
+    _fill_flat(mkt, t0, 90, 100_000.0, 80.0, 80.0)
+    full = simulate_path(mkt, t0, exp, 400, "itm", 150.0, minutes)
+    assert full.ok, full.skip_reason
+    ts, reason, net = first_exit(full, 10_000.0, 10_000.0, h=60)
+    assert reason == "TIME"
+    assert ts == t0 + 60 * 60
+    brute = simulate_path(
+        mkt, t0, exp, 400, "itm", 150.0, minutes,
+        tsl=(10_000.0, 10_000.0), hold_min=60,
+    )
+    assert brute.tsl_reason == "TIME"
+    assert int(brute.tsl_ts) == int(ts)
+    assert abs(float(brute.tsl_net) - float(net)) < 1e-6
+    assert abs(
+        float(brute.tsl_net) - cash_conservation_net(brute.legs, brute.fees, brute.slips)
+    ) < 1e-6
