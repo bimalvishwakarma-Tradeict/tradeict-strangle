@@ -95,6 +95,7 @@ def is_pivot_low(lows: list[float], i: int, left: int, right: int) -> bool:
 def compute_ulp(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any]:
     L = max(2, min(50, _int(params.get("lookback"), 10)))
     max_lv = max(5, min(200, _int(params.get("maxLevels"), 100)))
+    full = _bool(params.get("fullRange"), False)
     show_lab = _bool(params.get("showLabels"), True)
     hi_col = _color(params.get("highColor"), "#089981", 70)
     lo_col = _color(params.get("lowColor"), "#F23645", 70)
@@ -117,7 +118,7 @@ def compute_ulp(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str,
                 p = i - L
                 pb = bars[p]
                 top = float(pb["high"])
-                bottom = max(float(pb["open"]), float(pb["close"]))
+                bottom = float(pb["low"]) if full else max(float(pb["open"]), float(pb["close"]))
                 if top > bottom:
                     dup = any(abs(float(z["top"]) - top) < DUP_EPS for z in zones_h)
                     if not dup:
@@ -137,7 +138,7 @@ def compute_ulp(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str,
                 p = i - L
                 pb = bars[p]
                 bottom = float(pb["low"])
-                top = min(float(pb["open"]), float(pb["close"]))
+                top = float(pb["high"]) if full else min(float(pb["open"]), float(pb["close"]))
                 if top > bottom:
                     dup = any(abs(float(z["bottom"]) - bottom) < DUP_EPS for z in zones_l)
                     if not dup:
@@ -210,6 +211,10 @@ class UlpIndicator:
             "min": 5, "max": 200, "step": 1, "tab": "inputs",
         },
         {
+            "key": "fullRange", "label": "Full candle range (High→Low)", "type": "bool",
+            "default": False, "tab": "inputs",
+        },
+        {
             "key": "showLabels", "label": "Show Labels", "type": "bool", "default": True,
             "tab": "inputs",
         },
@@ -226,7 +231,10 @@ class UlpIndicator:
     def short_name(self, params: dict[str, Any]) -> str:
         L = _int((params or {}).get("lookback"), 10)
         m = _int((params or {}).get("maxLevels"), 100)
-        return f"ULP {L} {m}"
+        name = f"ULP {L} {m}"
+        if _bool((params or {}).get("fullRange"), False):
+            name += " F"
+        return name
 
     def compute(self, bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any]:
         return compute_ulp(bars, params or {})

@@ -61,3 +61,73 @@ def test_duplicate_near_mintick() -> None:
     htops = [b["top"] for b in out["boxes"] if b["kind"] == "high"]
     assert len(htops) == 1
     assert abs(htops[0] - 130.0) < 1e-9
+
+
+def _pivot_high_bars() -> list[dict]:
+    bars = []
+    for i in range(21):
+        h, l_ = 100.0, 90.0
+        o, c = 95.0, 96.0
+        if i == 10:
+            h = 120.0
+        bars.append(_bar(i, o, h, l_, c))
+    return bars
+
+
+def _pivot_low_bars() -> list[dict]:
+    bars = []
+    for i in range(21):
+        h, l_ = 100.0, 90.0
+        o, c = 96.0, 95.0
+        if i == 10:
+            l_ = 70.0
+        bars.append(_bar(i, o, h, l_, c))
+    return bars
+
+
+def test_full_range_high_zone_is_pivot_high_to_low() -> None:
+    bars = _pivot_high_bars()
+    pb = bars[10]
+    out = compute_ulp(bars, {"lookback": 10, "fullRange": True})
+    highs = [b for b in out["boxes"] if b["kind"] == "high"]
+    assert highs
+    z = highs[0]
+    assert abs(float(z["top"]) - float(pb["high"])) < 1e-9
+    assert abs(float(z["bottom"]) - float(pb["low"])) < 1e-9
+
+
+def test_full_range_low_zone_is_pivot_low_to_high() -> None:
+    bars = _pivot_low_bars()
+    pb = bars[10]
+    out = compute_ulp(bars, {"lookback": 10, "fullRange": True})
+    lows = [b for b in out["boxes"] if b["kind"] == "low"]
+    assert lows
+    z = lows[0]
+    assert abs(float(z["bottom"]) - float(pb["low"])) < 1e-9
+    assert abs(float(z["top"]) - float(pb["high"])) < 1e-9
+
+
+def test_full_range_default_matches_body_edge() -> None:
+    bars = []
+    for i in range(45):
+        h, l_ = 100.0, 90.0
+        o, c = 95.0, 96.0
+        if i == 10:
+            h = 120.0
+        if i == 30:
+            l_ = 70.0
+        bars.append(_bar(i, o, h, l_, c))
+    omitted = compute_ulp(bars, {"lookback": 10})
+    explicit = compute_ulp(bars, {"lookback": 10, "fullRange": False})
+    assert omitted["boxes"] == explicit["boxes"]
+    by_time = {int(x["time"]): x for x in bars}
+    for z in omitted["boxes"]:
+        pb = by_time[int(z["t1"])]
+        if z["kind"] == "high":
+            assert abs(float(z["top"]) - float(pb["high"])) < 1e-9
+            assert abs(float(z["bottom"]) - max(float(pb["open"]), float(pb["close"]))) < 1e-9
+        else:
+            assert abs(float(z["bottom"]) - float(pb["low"])) < 1e-9
+            assert abs(float(z["top"]) - min(float(pb["open"]), float(pb["close"]))) < 1e-9
+    kinds = {z["kind"] for z in omitted["boxes"]}
+    assert "high" in kinds and "low" in kinds
