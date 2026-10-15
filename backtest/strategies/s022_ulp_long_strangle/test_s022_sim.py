@@ -170,7 +170,9 @@ def test_cash_conservation_all_exit_paths() -> None:
 
     mkt2 = MemMkt()
     mkt2.rows = _chain_atm100k()
-    _fill_flat(mkt2, t0, 40, 100_000.0, 5.0, 5.0)
+    _fill_flat(mkt2, t0, 40, 100_000.0, 80.0, 80.0)
+    mkt2.marks["C-99600"][t0 + 60] = 20.0
+    mkt2.marks["P-100400"][t0 + 60] = 20.0
     p_sl = simulate_path(mkt2, t0, exp, 400, "itm", 150.0, minutes, tsl=(400.0, 50.0))
     assert p_sl.tsl_reason == "SL"
     _assert_cash(p_sl, "SL")
@@ -224,7 +226,9 @@ def test_posthoc_tsl_matches_brute_on_three_paths() -> None:
 
     mkt2 = MemMkt()
     mkt2.rows = _chain_atm100k()
-    _fill_flat(mkt2, t0, 50, 100_000.0, 8.0, 8.0)
+    _fill_flat(mkt2, t0, 50, 100_000.0, 80.0, 80.0)
+    mkt2.marks["C-99600"][t0 + 120] = 20.0
+    mkt2.marks["P-100400"][t0 + 120] = 20.0
     full2 = simulate_path(mkt2, t0, exp, 400, "itm", 150.0, minutes)
     brute2 = simulate_path(mkt2, t0, exp, 400, "itm", 150.0, minutes, tsl=(400.0, 50.0))
     ts2, r2, n2 = first_exit(full2, 400.0, 50.0)
@@ -294,3 +298,41 @@ def test_parity_fallback_tags_parity() -> None:
     expect = 80.0 + 100_000.0 - 99_600.0
     assert abs(calls[0].mark0 - expect) < 1e-6
     assert p.src_counts.get("parity", 0) > 0
+
+
+def test_entry_gross_zero_sl50_does_not_fire() -> None:
+    t0 = 1_700_000_040
+    exp = ist_date(t0) + timedelta(days=1)
+    mkt = MemMkt()
+    mkt.rows = _chain_atm100k()
+    minutes = [t0 + i * 60 for i in range(8)]
+    _fill_flat(mkt, t0, 10, 100_000.0, 80.0, 80.0)
+    p = simulate_path(mkt, t0, exp, 400, "itm", 150.0, minutes)
+    assert p.ok
+    assert abs(float(p.gross[0])) < 1e-9
+    ts, reason, _net = first_exit(p, 10_000.0, 50.0)
+    assert reason != "SL"
+    brute = simulate_path(mkt, t0, exp, 400, "itm", 150.0, minutes, tsl=(10_000.0, 50.0))
+    assert brute.tsl_reason != "SL"
+
+
+def test_sl_on_gross_while_net_above_minus_sl() -> None:
+    t0 = 1_700_000_040
+    exp = ist_date(t0) + timedelta(days=1)
+    mkt = MemMkt()
+    mkt.rows = _chain_atm100k()
+    minutes = [t0 + i * 60 for i in range(6)]
+    for t in minutes:
+        mkt.spots[t] = 100_000.0
+        mkt.marks.setdefault("C-99600", {})[t] = 80.0
+        mkt.marks.setdefault("P-100400", {})[t] = 80.0
+    mkt.marks["C-99600"][t0 + 60] = 230.0
+    mkt.marks["P-100400"][t0 + 60] = 230.0
+    mkt.marks["C-99600"][t0 + 120] = 130.0
+    mkt.marks["P-100400"][t0 + 120] = 130.0
+    p = simulate_path(mkt, t0, exp, 400, "itm", 500.0, minutes, tsl=(10_000.0, 50.0))
+    assert p.tsl_reason == "SL"
+    i = p.ts.index(p.tsl_ts) if p.tsl_ts in p.ts else -1
+    assert i >= 0
+    assert float(p.gross[i]) <= sl_level(float(p.peak_gross[i]), 50.0)
+    assert float(p.tsl_net) > -50.0

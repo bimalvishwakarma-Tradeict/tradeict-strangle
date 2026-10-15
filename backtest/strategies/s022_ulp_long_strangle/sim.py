@@ -13,7 +13,8 @@ from typing import Any, Protocol
 import numpy as np
 
 from backtest.fees_sim import OPTION_FEE_RATE, OPTIONS_CONTRACT_VALUE, PREMIUM_CAP_RATE
-from backtest.strategies.s012_trend_follow.engine import intrinsic, ist_date
+from backtest.harness.run_archive import greeks_from_mark
+from backtest.strategies.s012_trend_follow.engine import intrinsic, ist_date, t_years
 from backtest.strategies.s018_4h_trend import run_s018 as s018
 from backtest.strategies.s020_vwap_touch import run_s020_dev as d
 
@@ -141,6 +142,8 @@ class PathResult:
     ts: list[int] = field(default_factory=list)
     net: list[float] = field(default_factory=list)
     peak: list[float] = field(default_factory=list)
+    gross: list[float] = field(default_factory=list)
+    peak_gross: list[float] = field(default_factory=list)
     n_adj: list[int] = field(default_factory=list)
     src_counts: dict[str, int] = field(default_factory=lambda: {"real": 0, "stale": 0, "parity": 0, "none": 0})
     fees_m: list[float] = field(default_factory=list)
@@ -319,6 +322,8 @@ def _fill_rec(
     peak: float,
     reason: str,
     a_pct: float = 0.0,
+    gross: float = float("nan"),
+    peak_gross: float = float("nan"),
 ) -> dict[str, Any]:
     fill = buy_fill(mark) if is_buy else (lg.exit_fill if side == "sell" and math.isfinite(lg.exit_fill) else sell_fill(mark))
     fee = lg.fee if is_buy else float(lg.exit_fee)
@@ -327,6 +332,8 @@ def _fill_rec(
         fill = float(lg.exit_fill)
         fee = 0.0
         slip = 0.0
+    t_yr = t_years(int(t), int(s018.expiry_unix(lg.expiry)))
+    gk = greeks_from_mark(float(mark), float(spot), float(lg.strike), float(t_yr), bool(lg.is_call))
     return {
         "ts": int(t),
         "ist": s018.ist_str(int(t)),
@@ -343,9 +350,13 @@ def _fill_rec(
         "trigger": float(lg.ref) * (float(a_pct) / 100.0) if a_pct else float("nan"),
         "net": float(net),
         "peak": float(peak),
+        "gross": float(gross),
+        "peak_gross": float(peak_gross),
         "sl_level": float("nan"),
         "reason": reason,
         "symbol": lg.symbol,
+        "iv": gk.get("iv", float("nan")),
+        "delta": gk.get("delta", float("nan")),
     }
 
 
@@ -536,11 +547,22 @@ def simulate_path(
     fees = call.fee + put.fee
     slips = call.slip + put.slip
     if record_fills:
-        out.fills.append(_fill_rec(int(t0), float(spot0), call, "buy", call.mark0, call.src, True, 0.0, 0.0, "ENTRY"))
-        out.fills.append(_fill_rec(int(t0), float(spot0), put, "buy", put.mark0, put.src, True, 0.0, 0.0, "ENTRY"))
+        out.fills.append(
+            _fill_rec(
+                int(t0), float(spot0), call, "buy", call.mark0, call.src, True, 0.0, 0.0, "ENTRY",
+                gross=0.0, peak_gross=0.0,
+            )
+        )
+        out.fills.append(
+            _fill_rec(
+                int(t0), float(spot0), put, "buy", put.mark0, put.src, True, 0.0, 0.0, "ENTRY",
+                gross=0.0, peak_gross=0.0,
+            )
+        )
     realized = 0.0
     n_adj = 0
     peak = 0.0
+    peak_g = 0.0
     ratio = float(a_pct) / 100.0
     exp_ts = out.exp_ts
 
@@ -563,7 +585,16 @@ def simulate_path(
                 return out
             _close_live(lg, t, got[0], float(spx))
             if record_fills:
-                out.fills.append(_fill_rec(t, float(spx), lg, "sell", got[0], got[1], False, 0.0, 0.0, ""))
+                gv = float(out.gross[-1]) if out.gross else 0.0
+                pg = float(out.peak_gross[-1]) if out.peak_gross else 0.0
+                nv = float(out.net[-1]) if out.net else 0.0
+                pk = float(out.peak[-1]) if out.peak else 0.0
+                out.fills.append(
+                    _fill_rec(
+                        t, float(spx), lg, "sell", got[0], got[1], False, nv, pk, "",
+                        gross=gv, peak_gross=pg,
+                    )
+                )
             realized += _cash_mark_closed(lg)
             fees += lg.exit_fee
             slips += lg.exit_slip
@@ -637,23 +668,27 @@ def simulate_path(
             sl = px[:end]
             open_pnl += (sl - float(lg.mark0)) * MULT
             est += _vec_fee(sl, spots[:end]) + slip_usd(lg.qty)
-        nets = realized + open_pnl - float(fees) - float(slips) - est
-        nets = np.where(at_exp[:end], realized + open_pnl - float(fees) - float(slips), nets)
+        grosses = realized + open_pnl
+        nets = grosses - float(fees) - float(slips) - est
+        nets = np.where(at_exp[:end], grosses - float(fees) - float(slips), nets)
 
         stop_j: int | None = None
         stop_why = ""
         if tsl is not None:
             tgt, slv = float(tsl[0]), float(tsl[1])
-            run_peak = float(peak)
+            run_peak_n = float(peak)
+            run_peak_g = float(peak_g)
             for j in range(end):
                 if bool(at_exp[j]):
                     break
                 nv = float(nets[j])
-                run_peak = max(run_peak, nv)
+                gv = float(grosses[j])
+                run_peak_n = max(run_peak_n, nv)
+                run_peak_g = max(run_peak_g, gv)
                 if nv >= tgt:
                     stop_j, stop_why = j, "TARGET"
                     break
-                if nv <= sl_level(run_peak, slv):
+                if gv <= sl_level(run_peak_g, slv):
                     stop_j, stop_why = j, "SL"
                     break
             if stop_j is not None:
@@ -663,10 +698,14 @@ def simulate_path(
         est_slip_one = slip_usd(QTY) * float(n_live)
         for j in range(end):
             nv = float(nets[j])
+            gv = float(grosses[j])
             peak = max(peak, nv)
+            peak_g = max(peak_g, gv)
             out.ts.append(int(seg[j]))
             out.net.append(nv)
             out.peak.append(float(peak))
+            out.gross.append(gv)
+            out.peak_gross.append(float(peak_g))
             out.n_adj.append(int(n_adj))
             out.fees_m.append(float(fees))
             out.slip_m.append(float(slips))
@@ -687,7 +726,14 @@ def simulate_path(
                 realized += _cash_mark_closed(lg)
                 if record_fills:
                     out.fills.append(
-                        _fill_rec(last_t, sp, lg, "settle", lg.exit_mark, "settle", False, 0.0, 0.0, "EXPIRY")
+                        _fill_rec(
+                            last_t, sp, lg, "settle", lg.exit_mark, "settle", False,
+                            float(out.net[-1]) if out.net else 0.0,
+                            float(out.peak[-1]) if out.peak else 0.0,
+                            "EXPIRY",
+                            gross=float(out.gross[-1]) if out.gross else 0.0,
+                            peak_gross=float(out.peak_gross[-1]) if out.peak_gross else 0.0,
+                        )
                     )
             live = []
             out.expiry_net = reported_net(realized, [], fees, slips, sp, False)
@@ -733,8 +779,17 @@ def simulate_path(
                 if record_fills:
                     nv = float(out.net[-1]) if out.net else 0.0
                     pk = float(out.peak[-1]) if out.peak else 0.0
-                    out.fills.append(_fill_rec(t, sp, lg, "sell", mk, "real", False, nv, pk, "ADJ", a_pct))
-                    out.fills.append(_fill_rec(t, sp, neu, "buy", neu.mark0, neu.src, True, nv, pk, "ADJ", a_pct))
+                    gv = float(out.gross[-1]) if out.gross else 0.0
+                    pg = float(out.peak_gross[-1]) if out.peak_gross else 0.0
+                    out.fills.append(
+                        _fill_rec(t, sp, lg, "sell", mk, "real", False, nv, pk, "ADJ", a_pct, gross=gv, peak_gross=pg)
+                    )
+                    out.fills.append(
+                        _fill_rec(
+                            t, sp, neu, "buy", neu.mark0, neu.src, True, nv, pk, "ADJ", a_pct,
+                            gross=gv, peak_gross=pg,
+                        )
+                    )
                 out.adjs.append(
                     {
                         "ts": t,
@@ -769,6 +824,8 @@ def drop_series(path: PathResult) -> None:
     path.ts = []
     path.net = []
     path.peak = []
+    path.gross = []
+    path.peak_gross = []
     path.n_adj = []
     path.fees_m = []
     path.slip_m = []
@@ -783,6 +840,12 @@ def exit_table(path: PathResult) -> list[dict[str, Any]]:
     ts = np.asarray(path.ts, dtype=np.int64)
     net = np.asarray(path.net, dtype=np.float64)
     peak = np.asarray(path.peak, dtype=np.float64)
+    gross = np.asarray(path.gross, dtype=np.float64) if path.gross else np.zeros(ts.shape)
+    peak_g = np.asarray(path.peak_gross, dtype=np.float64) if path.peak_gross else np.zeros(ts.shape)
+    if gross.size != ts.size:
+        gross = np.zeros(ts.shape)
+    if peak_g.size != ts.size:
+        peak_g = np.zeros(ts.shape)
     nadj = np.asarray(path.n_adj, dtype=np.int32)
     fees = np.asarray(path.fees_m, dtype=np.float64) if path.fees_m else np.zeros(ts.shape)
     slips = np.asarray(path.slip_m, dtype=np.float64) if path.slip_m else np.zeros(ts.shape)
@@ -796,9 +859,9 @@ def exit_table(path: PathResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for tgt in T_GRID:
         for slv in SL_GRID:
-            lvl = -float(slv) + 5.0 * np.floor(np.maximum(0.0, peak) / 10.0)
+            lvl = -float(slv) + 5.0 * np.floor(np.maximum(0.0, peak_g) / 10.0)
             tgt_hit = live & (net >= float(tgt))
-            sl_hit = live & (net <= lvl)
+            sl_hit = live & (gross <= lvl)
             i_t = int(np.flatnonzero(tgt_hit)[0]) if np.any(tgt_hit) else None
             i_s = int(np.flatnonzero(sl_hit)[0]) if np.any(sl_hit) else None
             reason = "EXPIRY"
@@ -828,8 +891,10 @@ def exit_table(path: PathResult) -> list[dict[str, Any]]:
                     "exit_ts": int(ts[i]),
                     "reason": reason,
                     "net": net_x,
+                    "gross_at_exit": float(gross[i]),
                     "n_adj_at_exit": int(nadj[i]),
                     "peak_at_exit": float(peak[i]),
+                    "peak_gross_at_exit": float(peak_g[i]),
                     "mfe": float(np.max(slc)),
                     "mae": float(np.min(slc)),
                     "fees_at_exit": fee_x,
@@ -851,7 +916,7 @@ def first_exit(
     target: float,
     sl: float,
 ) -> tuple[int, str, float]:
-    """First minute where T/SL hits on the stored pre-adj net; else EXPIRY."""
+    """First minute: TARGET on net, SL on gross (ratchet on peak_gross); else EXPIRY."""
     if not path.ok or not path.ts:
         return int(path.t0), "SKIP", float("nan")
     tgt = float(target)
@@ -859,12 +924,13 @@ def first_exit(
     last_i = len(path.ts) - 1
     for i, t in enumerate(path.ts):
         n = float(path.net[i])
-        pk = float(path.peak[i])
+        g = float(path.gross[i]) if path.gross else n
+        pg = float(path.peak_gross[i]) if path.peak_gross else float(path.peak[i])
         if t >= path.exp_ts:
             return int(t), "EXPIRY", float(path.expiry_net)
         if n >= tgt:
             return int(t), "TARGET", n
-        if n <= sl_level(pk, slv):
+        if g <= sl_level(pg, slv):
             return int(t), "SL", n
     t = int(path.ts[last_i])
     return t, "EXPIRY", float(path.expiry_net)

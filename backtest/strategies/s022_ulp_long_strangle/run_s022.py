@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from datetime import timedelta
@@ -22,7 +23,8 @@ if str(_ROOT) not in sys.path:
 
 from backtest.harness.data import ist_dt, to_unix  # noqa: E402
 from backtest.harness.mark_cache import reset_mark_cache  # noqa: E402
-from backtest.harness.run_archive import RunArchive  # noqa: E402
+from backtest.harness.run_archive import RunArchive, greeks_from_mark  # noqa: E402
+from backtest.strategies.s012_trend_follow.engine import t_years as _t_years  # noqa: E402
 from backtest.strategies.s018_4h_trend import run_s018 as s018  # noqa: E402
 from backtest.strategies.s020_vwap_touch import run_s020 as s020  # noqa: E402
 from backtest.strategies.s020_vwap_touch import run_s020_dev as d  # noqa: E402
@@ -35,7 +37,6 @@ from backtest.strategies.s022_ulp_long_strangle.stage0_move_edge import (  # noq
     collapse_events,
     ffill_1m_grid,
     forbidden_mask,
-    grouped_cell_indices,
     ist_hod,
     ist_hod_arr,
     ist_ym,
@@ -163,22 +164,21 @@ def _c2_events(
     near: np.ndarray,
     hod_1m: np.ndarray,
     rng: np.random.Generator,
-) -> list[dict[str, Any]]:
-    by_pool: dict[tuple[int, int], np.ndarray] = {}
-    ym_1m = None
-    from backtest.strategies.s022_ulp_long_strangle.stage0_move_edge import ist_ym_arr
-
-    ym_1m = ist_ym_arr(ts_1m)
+    win_lo: int,
+    win_hi: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """One control per ULP event: same IST hour, inside traded window, ±60 exclusion."""
+    in_win = (ts_1m.astype(np.int64) >= int(win_lo)) & (ts_1m.astype(np.int64) < int(win_hi)) & (~near)
     out: list[dict[str, Any]] = []
+    n_miss = 0
+    by_hod: dict[int, np.ndarray] = {}
     for i, e in enumerate(ulp):
         hod = int(e.get("hod") if e.get("hod") is not None else ist_hod(int(e["signal_ts"])))
-        ym = int(e.get("ym") if e.get("ym") is not None else ist_ym(int(e["signal_ts"])))
-        k = (hod, ym)
-        if k not in by_pool:
-            m = (hod_1m == hod) & (ym_1m == ym) & (~near)
-            by_pool[k] = ts_1m[m]
-        picked = sample_control_times(by_pool[k], 1, rng)
+        if hod not in by_hod:
+            by_hod[hod] = ts_1m[in_win & (hod_1m == hod)]
+        picked = sample_control_times(by_hod[hod], 1, rng)
         if picked.size == 0:
+            n_miss += 1
             continue
         ct = int(picked[0])
         out.append(
@@ -194,30 +194,59 @@ def _c2_events(
                 "src_event": e["event_id"],
             }
         )
-    return out
+    return out, n_miss
 
 
 def _volctrl_events(
     ulp: list[dict[str, Any]],
     grid: np.ndarray,
     cell: np.ndarray,
-    groups: list[np.ndarray],
+    hod_g: np.ndarray,
     rng: np.random.Generator,
-) -> list[dict[str, Any]]:
+    win_lo: int,
+    win_hi: int,
+    near_g: np.ndarray,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """VOLCTRL from (vol bin × hour) inside the traded window; widen neighbour then hour."""
     g0 = int(grid[0]) if grid.size else 0
     n = int(grid.size)
+    in_win = (
+        (grid.astype(np.int64) >= int(win_lo))
+        & (grid.astype(np.int64) < int(win_hi))
+        & (~near_g)
+        & (cell >= 0)
+    )
+    stats = {"neighbor_bin": 0, "same_hour": 0, "miss": 0}
     out: list[dict[str, Any]] = []
     for i, e in enumerate(ulp):
         t0 = int(e["signal_ts"])
         gi = int((t0 - g0) // 60)
         if gi < 0 or gi >= n:
+            stats["miss"] += 1
             continue
         cid = int(cell[gi])
-        pool = groups[cid] if 0 <= cid < len(groups) else np.zeros(0, dtype=np.int64)
+        hod = int(hod_g[gi]) if 0 <= gi < int(hod_g.size) else ist_hod(t0)
+        bin0 = cid // 24 if cid >= 0 else -1
+        pool = grid[in_win & (cell == cid)] if cid >= 0 else np.zeros(0, dtype=np.int64)
+        widen = "cell"
+        if pool.size == 0 and bin0 >= 0:
+            neigh = [int((bin0 + d) * 24 + hod) for d in (-1, 1) if 0 <= bin0 + d < 20]
+            if neigh:
+                pool = grid[in_win & np.isin(cell, np.array(neigh, dtype=np.int32))]
+            if pool.size:
+                widen = "neighbor_bin"
+                stats["neighbor_bin"] += 1
         if pool.size == 0:
+            pool = grid[in_win & (hod_g == hod)]
+            if pool.size:
+                widen = "same_hour"
+                stats["same_hour"] += 1
+        if pool.size == 0:
+            stats["miss"] += 1
             continue
-        picked = sample_control_times(grid[pool], 1, rng)
+        picked = sample_control_times(pool, 1, rng)
         if picked.size == 0:
+            stats["miss"] += 1
             continue
         ct = int(picked[0])
         out.append(
@@ -231,9 +260,10 @@ def _volctrl_events(
                 "hod": ist_hod(ct),
                 "ym": ist_ym(ct),
                 "src_event": e["event_id"],
+                "vol_widen": widen,
             }
         )
-    return out
+    return out, stats
 
 
 def _strike_cfgs() -> list[tuple[str, int]]:
@@ -318,6 +348,109 @@ def _cell_stats(taken: list[dict[str, Any]], n_skipped: int, reasons: dict[str, 
         "n_SL": by_r.get("SL", 0),
         "n_EXPIRY": by_r.get("EXPIRY", 0),
     }
+
+
+def _mean_ok(r: dict[str, Any]) -> float:
+    v = float(r.get("mean", float("nan")))
+    return v if v == v else -1e18
+
+
+def _add_taken_trade(
+    archive: RunArchive,
+    rec: dict[str, Any],
+    path: Any,
+    cell: dict[str, Any],
+    month: str,
+    mkt: S021Market,
+) -> None:
+    ev = rec["event"]
+    t0 = int(ev["signal_ts"])
+    x_ts = int(rec.get("exit_ts") or path.tsl_ts or t0)
+    spot0 = mkt.spot(t0) or float("nan")
+    spot1 = mkt.spot(x_ts) or float("nan")
+    tid = (
+        f"{cell['arm']}|{ev.get('event_id')}|{cell['style']}|{cell['X']}|"
+        f"{cell['dte']}|{cell['a']}|{cell['T']}|{cell['SL']}|{t0}"
+    )
+    trade = {
+        "trade_id": tid,
+        "month": month,
+        "tf": cell["tf"],
+        "variant": cell["style"],
+        "band": cell["X"],
+        "band_mode": f"a{cell['a']}",
+        "arm": cell["arm"],
+        "n_legs": len(path.legs),
+        "dte": cell["dte"],
+        "side": "long",
+        "entry_ist": s018.ist_str(t0),
+        "exit_ist": s018.ist_str(x_ts),
+        "exit_reason": rec.get("reason", path.tsl_reason),
+        "hold_hrs": (x_ts - t0) / 3600.0,
+        "hrs_to_exp": max(0.0, (int(path.exp_ts) - t0) / 3600.0),
+        "spot_entry": spot0,
+        "spot_exit": spot1,
+        "gross": rec.get("gross_at_exit", float("nan")),
+        "brokerage": rec.get("fees_at_exit", path.fees),
+        "slippage": rec.get("slip_at_exit", path.slips),
+        "net": rec.get("net", path.tsl_net),
+        "mfe": rec.get("mfe", float("nan")),
+        "mae": rec.get("mae", float("nan")),
+    }
+    legs: list[dict[str, Any]] = []
+    snaps: list[dict[str, Any]] = []
+    for lg in path.legs:
+        t_yr0 = _t_years(int(lg.opened_ts), int(s018.expiry_unix(lg.expiry)))
+        sp_e = mkt.spot(int(lg.opened_ts)) or spot0
+        g0 = greeks_from_mark(float(lg.mark0), float(sp_e), float(lg.strike), t_yr0, bool(lg.is_call))
+        xt = int(lg.closed_ts) if lg.closed_ts else x_ts
+        t_yr1 = _t_years(xt, int(s018.expiry_unix(lg.expiry)))
+        sp_x = mkt.spot(xt) or spot1
+        em = float(lg.exit_mark) if math.isfinite(float(lg.exit_mark)) else float(lg.mark0)
+        g1 = greeks_from_mark(em, float(sp_x), float(lg.strike), t_yr1, bool(lg.is_call))
+        legs.append(
+            {
+                "symbol": lg.symbol,
+                "strike": lg.strike,
+                "type": "C" if lg.is_call else "P",
+                "expiry": lg.expiry.isoformat(),
+                "qty": lg.qty,
+                "long_short": "long",
+                "entry_mark": lg.mark0,
+                "entry_fill": lg.fill,
+                "exit_mark": lg.exit_mark,
+                "exit_fill": lg.exit_fill,
+                "fee_entry": lg.fee,
+                "fee_exit": lg.exit_fee,
+                "slip_entry": lg.slip,
+                "slip_exit": lg.exit_slip,
+                "iv_entry": g0.get("iv"),
+                "delta_entry": g0.get("delta"),
+                "gamma_entry": g0.get("gamma"),
+                "theta_entry": g0.get("theta"),
+                "vega_entry": g0.get("vega"),
+                "iv_exit": g1.get("iv"),
+                "delta_exit": g1.get("delta"),
+                "gamma_exit": g1.get("gamma"),
+                "theta_exit": g1.get("theta"),
+                "vega_exit": g1.get("vega"),
+            }
+        )
+    for fr in path.fills:
+        kind = "entry" if str(fr.get("reason")) == "ENTRY" else (
+            "adj" if str(fr.get("reason")) == "ADJ" else str(fr.get("reason") or "mark").lower()
+        )
+        snaps.append(
+            {
+                "ts_ist": fr.get("ist"),
+                "kind": kind,
+                "spot": fr.get("spot"),
+                "leg1_mark": fr.get("mark"),
+                "leg1_iv": fr.get("iv"),
+                "basket_mark_pnl": fr.get("gross", fr.get("net")),
+            }
+        )
+    archive.add_trade(trade, legs, snaps)
 
 
 def _chain_gap_windows(
@@ -473,6 +606,9 @@ def main() -> None:
     rng = np.random.default_rng(SEED)
     events_by_arm: dict[str, list[dict[str, Any]]] = {a: [] for a in ARMS}
     n_ev_table: list[dict[str, Any]] = []
+    vol_widen: dict[str, int] = {"neighbor_bin": 0, "same_hour": 0, "miss": 0}
+    c2_miss = 0
+    count_notes: list[str] = []
     for tf in tfs:
         for mode in modes:
             ulp = ulp_by.get((tf, mode), [])
@@ -481,15 +617,21 @@ def main() -> None:
             sig_arr = np.array([int(e["signal_ts"]) for e in ulp], dtype=np.int64)
             near_g = forbidden_mask(grid, sig_arr, MIN_SEP)
             near_1 = forbidden_mask(ts, sig_arr, MIN_SEP)
-            groups = grouped_cell_indices(cell, np.isfinite(pre) & (~near_g) & (cell >= 0))
             if "c2" in arms:
-                c2 = _c2_events(ulp, ts, near_1, hod_1m, rng)
+                c2, n_c2m = _c2_events(ulp, ts, near_1, hod_1m, rng, start_ts, cutoff)
+                c2_miss += int(n_c2m)
                 n_ev_table.append({"arm": "c2", "tf": tf, "mode": mode, "n": len(c2)})
                 events_by_arm["c2"].extend(c2)
+                if len(c2) != len(ulp):
+                    count_notes.append(f"c2 {tf} {mode}: ulp={len(ulp)} c2={len(c2)} miss={n_c2m}")
             if "volctrl" in arms:
-                vc = _volctrl_events(ulp, grid, cell, groups, rng)
+                vc, vw = _volctrl_events(ulp, grid, cell, hod_g, rng, start_ts, cutoff, near_g)
+                for k, v in vw.items():
+                    vol_widen[k] = vol_widen.get(k, 0) + int(v)
                 n_ev_table.append({"arm": "volctrl", "tf": tf, "mode": mode, "n": len(vc)})
                 events_by_arm["volctrl"].extend(vc)
+                if len(vc) != len(ulp):
+                    count_notes.append(f"volctrl {tf} {mode}: ulp={len(ulp)} vol={len(vc)} {vw}")
 
     n_before_clip = {a: len(events_by_arm[a]) for a in arms}
     for a in arms:
@@ -751,11 +893,15 @@ def main() -> None:
                 idx = int(np.argmin(np.array(diffs)))
             net = float(p.net[idx]) if p.net else float("nan")
             pk = float(p.peak[idx]) if p.peak else float("nan")
+            gv = float(p.gross[idx]) if p.gross else float(fr.get("gross", "nan") or "nan")
+            pg = float(p.peak_gross[idx]) if p.peak_gross else float(fr.get("peak_gross", "nan") or "nan")
             fr2 = dict(fr)
             fr2["basket"] = bi
             fr2["net"] = net
             fr2["peak"] = pk
-            fr2["sl_level"] = sl_level(pk, slv) if pk == pk else float("nan")
+            fr2["gross"] = gv
+            fr2["peak_gross"] = pg
+            fr2["sl_level"] = sl_level(pg, slv) if pg == pg else float("nan")
             after = bool(x_ts) and t > x_ts
             fr2["exit_reason"] = "PATH_ONLY (after exit)" if after else rec.get("reason", "")
             basket_rows.append(fr2)
@@ -764,10 +910,12 @@ def main() -> None:
                 f"{'C' if fr2['is_call'] else 'P'} {fr2['side']} mark={fr2['mark']:.4f} "
                 f"src={fr2['mark_src']} fill={fr2['fill']:.4f} fee={fr2['fee']:.4f} "
                 f"slip={fr2['slip']:.4f} ref={fr2['ref']:.4f} trig={fr2['trigger']} "
-                f"net={net:.4f} peak={pk:.4f} SLlvl={fr2['sl_level']:.4f} {fr2['exit_reason']}"
+                f"net={net:.4f} gross={gv:.4f} peak_g={pg:.4f} SLlvl={fr2['sl_level']:.4f} "
+                f"{fr2['exit_reason']}"
             )
         basket_text.append(
             f"  EXIT {rec.get('reason')} ts={rec.get('exit_ts')} net={rec.get('net')} "
+            f"gross={rec.get('gross_at_exit')} peak_gross={rec.get('peak_gross_at_exit')} "
             f"n_adj={rec.get('n_adj_at_exit')}"
         )
 
@@ -776,8 +924,8 @@ def main() -> None:
     ws.title = "baskets"
     bcols = [
         "basket", "ist", "spot", "strike", "is_call", "side", "mark", "mark_src",
-        "fill", "fee", "slip", "ref", "trigger", "net", "peak", "sl_level", "exit_reason",
-        "symbol", "ts",
+        "fill", "fee", "slip", "ref", "trigger", "net", "peak", "gross", "peak_gross",
+        "sl_level", "exit_reason", "symbol", "ts",
     ]
     ws.append(bcols)
     for r in basket_rows:
@@ -805,6 +953,7 @@ def main() -> None:
         f"month={month} days={days} arms={arms} tfs={tfs} modes={modes}",
         f"grid X_ITM={list(X_ITM)} OTM1000 a={list(A_GRID)} T={list(T_GRID)} SL={list(SL_GRID)} dte={list(DTE_GRID)}",
         f"slip_pts={20} qty={1000} seed={SEED}",
+        "SL_basis=GROSS TARGET_basis=NET (exit P&L is NET)",
         "",
         "n events per arm/tf/mode:",
     ]
@@ -844,6 +993,8 @@ def main() -> None:
             )
         ),
         f"warmup_signals_dropped (not traded): {n_clipped}",
+        f"c2_miss={c2_miss} volctrl_widen={vol_widen}",
+        *(count_notes or ["control counts matched ULP for every tf/mode"]),
         "",
         "--- option-chain mark gaps (reporting only; handling unchanged) ---",
         f"gaps.csv n_windows={len(gap_rows)} expiries={sorted(str(x)[:10] for x in traded_exps)}",
@@ -878,6 +1029,61 @@ def main() -> None:
             f"  {r['mode']} {r['style']} X={r['X']} dte={r['dte']} a={r['a']} T={r['T']} SL={r['SL']} "
             f"n={r['n']} mean={r['mean']:.3f} win%={r['win_pct']:.1f} maxDD={r['maxDD']:.1f}"
         )
+
+    def _same_cell(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        return all(a.get(k) == b.get(k) for k in ("tf", "mode", "style", "X", "dte", "a", "T", "SL"))
+
+    ulp_cells = [r for r in cell_rows if r["arm"] == "ulp" and int(r["n"]) > 0]
+    best10 = sorted(ulp_cells, key=_mean_ok, reverse=True)[:10]
+    lines.append("")
+    lines.append("--- n cells with mean > 0 ---")
+    for arm in arms:
+        npos = sum(1 for r in cell_rows if r["arm"] == arm and int(r["n"]) > 0 and float(r["mean"]) > 0)
+        ncell = sum(1 for r in cell_rows if r["arm"] == arm and int(r["n"]) > 0)
+        lines.append(f"  {arm}: {npos}/{ncell}")
+    lines.append("--- best 10 ULP cells (C2 / VOLCTRL same cell side-by-side) ---")
+    for r in best10:
+        c2 = next((x for x in cell_rows if x["arm"] == "c2" and _same_cell(x, r)), None)
+        vc = next((x for x in cell_rows if x["arm"] == "volctrl" and _same_cell(x, r)), None)
+        lines.append(
+            f"  {r['tf']} {r['mode']} {r['style']} X={r['X']} dte={r['dte']} a={r['a']} T={r['T']} SL={r['SL']} "
+            f"n={r['n']} mean={r['mean']:.3f} med={r['median']:.3f} worst={r['worst']:.3f} p5={r['p5']:.3f} "
+            f"win%={r['win_pct']:.1f} maxDD={r['maxDD']:.1f} adj={r['avg_adj']:.2f} "
+            f"fee={r['avg_fee']:.2f} slip={r['avg_slip']:.2f} "
+            f"| C2 mean={c2['mean'] if c2 else float('nan')} n={c2['n'] if c2 else 0} "
+            f"| VOL mean={vc['mean'] if vc else float('nan')} n={vc['n'] if vc else 0}"
+        )
+    lines.append("--- best cell per (tf, mode) by arm ---")
+    for tf in tfs:
+        for mode in modes:
+            bits = []
+            for arm in arms:
+                cand = [r for r in cell_rows if r["arm"] == arm and r["tf"] == tf and r["mode"] == mode and int(r["n"]) > 0]
+                cand = sorted(cand, key=_mean_ok, reverse=True)
+                if cand:
+                    b = cand[0]
+                    bits.append(
+                        f"{arm}: {b['style']} X={b['X']} dte={b['dte']} a={b['a']} T={b['T']} SL={b['SL']} "
+                        f"mean={b['mean']:.3f} n={b['n']}"
+                    )
+                else:
+                    bits.append(f"{arm}: none")
+            lines.append(f"  {tf} {mode} | " + " | ".join(bits))
+    if best10:
+        br = best10[0]
+        sk = ("ulp", br["tf"], br["mode"], br["style"], int(br["X"]), int(br["dte"]), int(br["a"]))
+        evs = streams.get(sk, [])
+        taken_best, _, _ = take_in_order(evs, exits_by_key, skip_by_key, float(br["T"]), float(br["SL"]))
+        losers = [t for t in taken_best if float(t["net"]) <= 0]
+        n_los = len(losers)
+        n_prof_first = sum(1 for t in losers if float(t.get("peak_at_exit", 0.0) or 0.0) > 0)
+        peaks = [float(t.get("peak_at_exit", float("nan"))) for t in losers]
+        lines.append("--- loss anatomy best ULP cell (peak_net) ---")
+        lines.append(
+            f"  {br['tf']} {br['mode']} {br['style']} X={br['X']} dte={br['dte']} a={br['a']} T={br['T']} SL={br['SL']} "
+            f"losers={n_los} share_profit_first={((100.0 * n_prof_first / n_los) if n_los else float('nan')):.1f}% "
+            f"median_peak={_median(peaks) if peaks else float('nan'):.3f}"
+        )
     lines.append("")
     text = "\n".join(lines)
     (archive.folder / "summary.txt").write_text(text + "\n", encoding="utf-8")
@@ -909,6 +1115,62 @@ def main() -> None:
     print(f"wrote {cell_path}", flush=True)
     print(f"wrote {gap_path}", flush=True)
     print(f"wrote {xlsx_path}", flush=True)
+
+    if not bool(args.smoke):
+        for r in cell_rows:
+            archive.add_config_result(
+                {
+                    "key": f"{r['arm']}|{r['tf']}|{r['mode']}|{r['style']}|{r['X']}|{r['dte']}|{r['a']}|{r['T']}|{r['SL']}",
+                    "month": month,
+                    "tf": r["tf"],
+                    "variant": r["style"],
+                    "band": r["X"],
+                    "band_mode": r["mode"],
+                    "arm": r["arm"],
+                    "dte": r["dte"],
+                    "tgt": r["T"],
+                    "sl": r["SL"],
+                    "n": r["n"],
+                    "mean": r["mean"],
+                    "brokerage": r["avg_fee"],
+                    "slippage": r["avg_slip"],
+                    "win": r["win_pct"],
+                }
+            )
+        for pick in best10:
+            for arm in arms:
+                cell = dict(pick)
+                cell["arm"] = arm
+                sk = (arm, pick["tf"], pick["mode"], pick["style"], int(pick["X"]), int(pick["dte"]), int(pick["a"]))
+                evs = streams.get(sk, [])
+                taken, _, _ = take_in_order(evs, exits_by_key, skip_by_key, float(pick["T"]), float(pick["SL"]))
+                for rec in taken:
+                    ev = rec["event"]
+                    key = ev["path_key"]
+                    t0 = int(ev["signal_ts"])
+                    _eid, style, x, dte, a = key
+                    ed = expiry_date(t0, int(dte))
+                    exp_ts = int(s018.expiry_unix(ed))
+                    minutes = np.arange(t0, exp_ts + 1, 60, dtype=np.int64)
+                    pth = simulate_path(
+                        mkt, t0, ed, int(x), str(style), float(a), minutes,
+                        compact=False, record_fills=True,
+                    )
+                    if pth.ok:
+                        _add_taken_trade(archive, rec, pth, cell, month, mkt)
+        archive.finalize()
+        mo = int(str(month).split("-")[1])
+        mnames = (
+            "", "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december",
+        )
+        june_name = archive.folder / f"s022_{mnames[mo]}.xlsx"
+        rpt = archive.folder / "report.xlsx"
+        if rpt.exists():
+            june_name.write_bytes(rpt.read_bytes())
+            print(f"wrote {june_name}", flush=True)
+        return
+
     sys.stdout = archive._orig_stdout
     archive._log_fp.close()
 
