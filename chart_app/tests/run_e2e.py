@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -57,6 +58,11 @@ def main() -> int:
         env["CHART_APP_FIXTURES"] = "1"
         env["CHART_APP_WS_MOCK"] = "1"
     OUT.mkdir(parents=True, exist_ok=True)
+    layout_dir = OUT / "layouts"
+    if layout_dir.exists():
+        shutil.rmtree(layout_dir, ignore_errors=True)
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    env["CHART_APP_LAYOUTS"] = str(layout_dir)
     log_path = OUT / "server.log"
     if _port_up():
         print("e2e refuse: port %s already in use (will not reuse stale server)" % PORT)

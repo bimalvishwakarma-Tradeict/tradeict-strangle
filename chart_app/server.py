@@ -11,10 +11,12 @@ import copy
 import csv
 import json
 import logging
+import os
+import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -753,10 +755,144 @@ async def api_ws_status() -> dict[str, Any]:
     return st
 
 
+_LAYOUT_NAME_RE = re.compile(r"^[a-zA-Z0-9_\- ]{1,40}$")
+_LAST_FILE = "_last.json"
+
+
+def layouts_dir() -> Path:
+    env = os.environ.get("CHART_APP_LAYOUTS", "").strip()
+    p = Path(env) if env else (APP_DIR / "layouts")
+    p.mkdir(parents=True, exist_ok=True)
+    return p.resolve()
+
+
+def sanitize_layout_name(name: str) -> str:
+    raw = str(name or "").strip()
+    if (
+        not raw
+        or raw in ("_last", ".", "..")
+        or ".." in raw
+        or "/" in raw
+        or "\\" in raw
+        or not _LAYOUT_NAME_RE.fullmatch(raw)
+    ):
+        raise HTTPException(status_code=400, detail="invalid layout name")
+    return raw
+
+
+def layout_path(name: str) -> Path:
+    safe = sanitize_layout_name(name)
+    root = layouts_dir()
+    path = (root / (safe + ".json")).resolve()
+    if path.parent != root:
+        raise HTTPException(status_code=400, detail="invalid layout name")
+    return path
+
+
+def last_path() -> Path:
+    return layouts_dir() / _LAST_FILE
+
+
+def layout_updated_at(path: Path) -> str:
+    ts = path.stat().st_mtime
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@app.get("/api/layouts")
+async def api_layouts_list() -> list[dict[str, str]]:
+    root = layouts_dir()
+    rows: list[dict[str, str]] = []
+    for p in sorted(root.glob("*.json")):
+        if p.name.startswith("_"):
+            continue
+        rows.append({"name": p.stem, "updated_at": layout_updated_at(p)})
+    return rows
+
+
+@app.get("/api/layouts/_last")
+async def api_layouts_get_last() -> dict[str, Any]:
+    p = last_path()
+    if not p.is_file():
+        return {"name": None}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.error("read _last failed: %s", e)
+        return {"name": None}
+    name = data.get("name") if isinstance(data, dict) else None
+    return {"name": name if isinstance(name, str) and name else None}
+
+
+@app.put("/api/layouts/_last")
+async def api_layouts_put_last(body: dict[str, Any]) -> dict[str, Any]:
+    name = body.get("name") if isinstance(body, dict) else None
+    if name is None or name == "":
+        p = last_path()
+        if p.is_file():
+            p.unlink()
+        return {"name": None}
+    safe = sanitize_layout_name(str(name))
+    last_path().write_text(json.dumps({"name": safe}), encoding="utf-8")
+    return {"name": safe}
+
+
+@app.get("/api/layouts/{name}")
+async def api_layouts_get(name: str) -> dict[str, Any]:
+    path = layout_path(name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="layout not found")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.error("read layout %s: %s", name, e)
+        raise HTTPException(status_code=500, detail="layout read failed") from e
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=500, detail="layout invalid")
+    return data
+
+
+@app.put("/api/layouts/{name}")
+async def api_layouts_put(name: str, body: dict[str, Any]) -> dict[str, Any]:
+    path = layout_path(name)
+    safe = path.stem
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="layout body must be an object")
+    state = body.get("state")
+    if not isinstance(state, dict):
+        raise HTTPException(status_code=400, detail="layout state required")
+    doc = {
+        "version": 1,
+        "name": safe,
+        "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "state": state,
+    }
+    path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    logger.info("layout saved %s", safe)
+    return doc
+
+
+@app.delete("/api/layouts/{name}")
+async def api_layouts_delete(name: str) -> dict[str, bool]:
+    path = layout_path(name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="layout not found")
+    path.unlink()
+    last = last_path()
+    if last.is_file():
+        try:
+            data = json.loads(last.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("name") == path.stem:
+                last.unlink()
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error("clear _last after delete: %s", e)
+    logger.info("layout deleted %s", path.stem)
+    return {"ok": True}
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    import os
     import uvicorn
 
     port = int(os.environ.get("CHART_APP_PORT", "8700"))
+    print("chart_app  http://127.0.0.1:%s" % port, flush=True)
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")

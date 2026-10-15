@@ -48,6 +48,28 @@
     #alertLog .long { color: #3fb950; }
     #alertLog .short { color: #f85149; }
     header h1 { font-size: 13px; margin: 0; font-weight: 600; white-space: nowrap; }
+    #layoutWrap { position: relative; display: flex; align-items: center; gap: 6px; }
+    #layoutNameLab, #layoutNameFoot { color: var(--mut); font-size: 11px; white-space: nowrap; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+    #layoutMenu {
+      display: none; position: absolute; top: 32px; left: 0; z-index: 60;
+      min-width: 220px; background: var(--panel); border: 1px solid var(--bd);
+      border-radius: 6px; padding: 6px 0; box-shadow: 0 8px 24px #0008;
+    }
+    #layoutWrap.open #layoutMenu { display: block; }
+    #layoutMenu button, #layoutMenu label {
+      display: flex; width: 100%; align-items: center; justify-content: space-between;
+      background: transparent; border: 0; border-radius: 0; padding: 6px 12px; text-align: left;
+    }
+    #layoutMenu button:hover, #layoutLoadList button:hover { background: #363a45; }
+    #layoutMenu kbd { color: var(--mut); font-size: 10px; }
+    #layoutLoadWrap { position: relative; }
+    #layoutLoadList {
+      display: none; position: absolute; left: 100%; top: 0; z-index: 61;
+      min-width: 160px; background: var(--panel); border: 1px solid var(--bd);
+      border-radius: 6px; padding: 4px 0; max-height: 240px; overflow-y: auto;
+    }
+    #layoutLoadWrap:hover #layoutLoadList, #layoutLoadList.open { display: block; }
+    #layoutLoadList button { width: 100%; border: 0; background: transparent; text-align: left; padding: 6px 12px; }
     .tf-bar { display: flex; gap: 2px; }
     .tf-bar button { padding: 3px 7px; }
     select, input, button { background: #2a2e39; color: var(--tx); border: 1px solid var(--bd); border-radius: 4px; padding: 4px 8px; font-size: 12px; }
@@ -229,6 +251,21 @@
         <option value="1h">1h</option>
         <option value="4h">4h</option>
       </select>
+      <div id="layoutWrap">
+        <button id="btnLayout" type="button">Layout</button>
+        <span id="layoutNameLab">unsaved</span>
+        <div id="layoutMenu">
+          <button type="button" data-act="save">Save <kbd>Ctrl+S</kbd></button>
+          <button type="button" data-act="saveas">Save as…</button>
+          <div id="layoutLoadWrap">
+            <button type="button" data-act="load">Load ▸</button>
+            <div id="layoutLoadList"></div>
+          </div>
+          <button type="button" data-act="rename">Rename</button>
+          <button type="button" data-act="delete">Delete</button>
+          <label><span>Autosave</span><input type="checkbox" id="togAutosave" checked /></label>
+        </div>
+      </div>
       <button id="btnIndicators" type="button">ƒx Indicators</button>
       <button id="btnAlerts" type="button">Alert</button>
       <button id="btnReplay" type="button">Replay</button>
@@ -344,6 +381,7 @@
       <div id="dot"></div>
       <span id="histStatus" title="">LIVE · 0</span>
       <span id="liveClock">—</span>
+      <span id="layoutNameFoot"></span>
       <span id="buildVer">build __BUILD__</span>
       <div id="ohlc" hidden></div>
       <div id="markTip"></div>

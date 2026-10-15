@@ -807,6 +807,101 @@ def assert_no_leak(s, label):
         raise AssertionError("%s lastTime %s > cursor %s" % (label, last, cur))
 
 
+def run_layout_named_test(page, rec, browser, base_url: str) -> None:
+    parsed = urlparse(base_url)
+    origin = "%s://%s" % (parsed.scheme, parsed.netloc)
+
+    def wait_boot(pg, timeout=20000):
+        t0 = time.time()
+        while (time.time() - t0) * 1000 < timeout:
+            try:
+                boot = pg.evaluate(
+                    "() => document.documentElement.getAttribute('data-layout-boot')"
+                )
+            except Exception:
+                pg.wait_for_timeout(150)
+                continue
+            if boot == "1":
+                return
+            pg.wait_for_timeout(150)
+        raise RuntimeError("layout boot did not finish")
+
+    def wait_ids(pg, want_ind, want_strat, timeout=25):
+        t0 = time.time()
+        last = None
+        while time.time() - t0 < timeout:
+            last = snap(pg)
+            inds = last.get("indIds") or []
+            strats = last.get("stratIds") or []
+            if all(i in inds for i in want_ind) and all(s in strats for s in want_strat):
+                return last
+            pg.wait_for_timeout(250)
+        return last
+
+    try:
+        cmd(page, cmd="clearInds")
+        cmd(page, cmd="clearStrats")
+        page.wait_for_timeout(400)
+        cmd(page, cmd="addInd", id="ULP")
+        cmd(page, cmd="addInd", id="ADX")
+        cmd(page, cmd="addStrat", id="S022F")
+        s_add = wait_ids(page, ("ULP", "ADX"), ("S022F",), timeout=30)
+        page.evaluate("async () => { await window.__caLayoutSave('T1'); }")
+        cmd(page, cmd="clearInds")
+        cmd(page, cmd="clearStrats")
+        page.wait_for_timeout(500)
+        s_clr = snap(page)
+        gone = "ULP" not in (s_clr.get("indIds") or []) and "ADX" not in (s_clr.get("indIds") or [])
+        gone = gone and "S022F" not in (s_clr.get("stratIds") or [])
+        try:
+            page.evaluate("() => window.__caLayoutLoad('T1')")
+        except Exception:
+            pass
+        page.wait_for_load_state("domcontentloaded")
+        wait_boot(page)
+        wait_ready(page, timeout=45000)
+        s_load = wait_ids(page, ("ULP", "ADX"), ("S022F",), timeout=30)
+        inds = s_load.get("indIds") or []
+        strats = s_load.get("stratIds") or []
+        load_ok = gone and "ULP" in inds and "ADX" in inds and "S022F" in strats
+        load_ok = load_ok and (s_load.get("layoutName") == "T1")
+        last = http_json("%s/api/layouts/_last" % origin, timeout=10)
+        last_ok = (last or {}).get("name") == "T1"
+
+        ctx = browser.new_context()
+        fresh = ctx.new_page()
+        fresh.goto(base_url, wait_until="domcontentloaded")
+        wait_boot(fresh)
+        wait_ready(fresh, timeout=45000)
+        s_auto = wait_ids(fresh, ("ULP", "ADX"), ("S022F",), timeout=30)
+        auto_inds = s_auto.get("indIds") or []
+        auto_strats = s_auto.get("stratIds") or []
+        auto_ok = (
+            "ULP" in auto_inds
+            and "ADX" in auto_inds
+            and "S022F" in auto_strats
+            and s_auto.get("layoutName") == "T1"
+        )
+        ctx.close()
+        rec(
+            "30 named layout T1 save/load/_last",
+            load_ok and last_ok and auto_ok,
+            "add=%s gone=%s load_inds=%s load_strats=%s last=%s auto_inds=%s auto_strats=%s auto_name=%s"
+            % (
+                (s_add or {}).get("indIds"),
+                gone,
+                inds,
+                strats,
+                last,
+                auto_inds,
+                auto_strats,
+                s_auto.get("layoutName"),
+            ),
+        )
+    except Exception as e:
+        rec("30 named layout T1 save/load/_last", False, str(e))
+
+
 def run(base_url: str) -> list[dict]:
     results = []
     errors = []
@@ -1763,6 +1858,7 @@ def run(base_url: str) -> list[dict]:
 
         run_overlay_perf_tests(page, rec)
         run_view_logic_tests(page, rec, include_fmt=True)
+        run_layout_named_test(page, rec, browser, base_url)
 
         cons = no_console_errors(errors)
         rec("console no errors", len(cons) == 0, str(cons[:5]))

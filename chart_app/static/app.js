@@ -156,6 +156,8 @@
   let stratInstances = [];
   const LS_STRAT = "chart_app.strategies.BTCUSD";
   const LS_PANEL = "chart_app.rightPanel";
+  const LS_LAYOUT_NAME = "chart_app.layoutName";
+  const LS_AUTOSAVE = "chart_app.layoutAutosave";
   const vwapSeries = chart.addLineSeries({ color: "#58a6ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
   const vwapSegSeries = [];
   let lastVwapPts = null;
@@ -2647,9 +2649,291 @@
     setInterval(tickClock, 1000);
   }
 
-  loadFileList();
-  initAlertUi();
-  initShell().then(() => loadInitial().then(connectWs));
+  let layoutApplying = false;
+  let layoutAutoTimer = null;
+  let currentLayoutName = lsGet(LS_LAYOUT_NAME, "") || "";
+
+  function paintLayoutName() {
+    const lab = currentLayoutName || "unsaved";
+    const a = el("layoutNameLab");
+    const b = el("layoutNameFoot");
+    if (a) a.textContent = lab;
+    if (b) b.textContent = lab;
+  }
+
+  function collectLayoutState() {
+    const state = {};
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.indexOf("chart_app.") === 0) state[k] = localStorage.getItem(k);
+      }
+    } catch (e) {}
+    state.chartTf = tf;
+    return state;
+  }
+
+  function writeLayoutState(state) {
+    layoutApplying = true;
+    try {
+      const drop = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.indexOf("chart_app.") === 0) drop.push(k);
+      }
+      drop.forEach((k) => localStorage.removeItem(k));
+      Object.keys(state || {}).forEach((k) => {
+        if (k === "chartTf") return;
+        if (k.indexOf("chart_app.") === 0 && state[k] != null) {
+          localStorage.setItem(k, String(state[k]));
+        }
+      });
+      if (state && state.chartTf) {
+        localStorage.setItem("chart_app.chartTf", String(state.chartTf));
+      }
+    } finally {
+      layoutApplying = false;
+    }
+  }
+
+  async function layoutFetch(method, path, body) {
+    const opt = { method, headers: { "Content-Type": "application/json" } };
+    if (body !== undefined) opt.body = JSON.stringify(body);
+    const r = await fetch(path, opt);
+    if (!r.ok) {
+      let detail = String(r.status);
+      try {
+        const j = await r.json();
+        if (j && j.detail) detail = String(j.detail);
+      } catch (e) {}
+      throw new Error(detail);
+    }
+    if (r.status === 204) return null;
+    const txt = await r.text();
+    return txt ? JSON.parse(txt) : null;
+  }
+
+  async function persistLastUsed(name) {
+    await layoutFetch("PUT", "/api/layouts/_last", { name: name || null });
+  }
+
+  async function saveLayoutByName(name, quiet) {
+    const safe = String(name || "").trim();
+    if (!safe) throw new Error("layout name required");
+    currentLayoutName = safe;
+    lsSet(LS_LAYOUT_NAME, safe);
+    const doc = {
+      version: 1,
+      name: safe,
+      state: collectLayoutState(),
+    };
+    const saved = await layoutFetch("PUT", "/api/layouts/" + encodeURIComponent(safe), doc);
+    currentLayoutName = saved && saved.name ? saved.name : safe;
+    lsSet(LS_LAYOUT_NAME, currentLayoutName);
+    await persistLastUsed(currentLayoutName);
+    paintLayoutName();
+    void quiet;
+    return saved;
+  }
+
+  async function loadLayoutByName(name) {
+    const safe = String(name || "").trim();
+    const doc = await layoutFetch("GET", "/api/layouts/" + encodeURIComponent(safe));
+    writeLayoutState((doc && doc.state) || {});
+    currentLayoutName = (doc && doc.name) || safe;
+    lsSet(LS_LAYOUT_NAME, currentLayoutName);
+    await persistLastUsed(currentLayoutName);
+    location.reload();
+  }
+
+  function markLayoutDirty() {
+    if (layoutApplying) return;
+    if (lsGet(LS_AUTOSAVE, "1") !== "1") return;
+    if (!currentLayoutName) return;
+    if (layoutAutoTimer) clearTimeout(layoutAutoTimer);
+    layoutAutoTimer = setTimeout(() => {
+      void saveLayoutByName(currentLayoutName, true).catch((e) => {
+        console.error("layout autosave", e);
+      });
+    }, 3000);
+  }
+
+  async function refreshLayoutLoadList() {
+    const host = el("layoutLoadList");
+    if (!host) return;
+    host.innerHTML = "";
+    let rows = [];
+    try {
+      rows = await layoutFetch("GET", "/api/layouts");
+    } catch (e) {
+      rows = [];
+    }
+    (rows || []).forEach((row) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = row.name;
+      b.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        el("layoutWrap").classList.remove("open");
+        void loadLayoutByName(row.name);
+      });
+      host.appendChild(b);
+    });
+    if (!(rows || []).length) {
+      const empty = document.createElement("button");
+      empty.type = "button";
+      empty.disabled = true;
+      empty.textContent = "(none)";
+      host.appendChild(empty);
+    }
+  }
+
+  function initLayoutUi() {
+    paintLayoutName();
+    const wrap = el("layoutWrap");
+    const btn = el("btnLayout");
+    const tog = el("togAutosave");
+    if (tog) {
+      tog.checked = lsGet(LS_AUTOSAVE, "1") !== "0";
+      tog.addEventListener("change", () => {
+        lsSet(LS_AUTOSAVE, tog.checked ? "1" : "0");
+      });
+    }
+    if (btn && wrap) {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        wrap.classList.toggle("open");
+        if (wrap.classList.contains("open")) void refreshLayoutLoadList();
+      });
+    }
+    document.addEventListener("click", (ev) => {
+      if (wrap && !wrap.contains(ev.target)) wrap.classList.remove("open");
+    });
+    if (el("layoutMenu")) {
+      el("layoutMenu").addEventListener("click", async (ev) => {
+        const t = ev.target.closest("[data-act]");
+        if (!t) return;
+        const act = t.getAttribute("data-act");
+        wrap.classList.remove("open");
+        try {
+          if (act === "save") {
+            if (!currentLayoutName) {
+              const n = window.prompt("Save layout as", "Untitled");
+              if (n) await saveLayoutByName(n);
+            } else {
+              await saveLayoutByName(currentLayoutName);
+            }
+          }
+          if (act === "saveas") {
+            const n = window.prompt("Save layout as", currentLayoutName || "Untitled");
+            if (n) await saveLayoutByName(n);
+          }
+          if (act === "load") {
+            wrap.classList.add("open");
+            void refreshLayoutLoadList();
+          }
+          if (act === "rename") {
+            if (!currentLayoutName) return;
+            const n = window.prompt("Rename layout", currentLayoutName);
+            if (!n || n === currentLayoutName) return;
+            const doc = await layoutFetch("GET", "/api/layouts/" + encodeURIComponent(currentLayoutName));
+            const old = currentLayoutName;
+            await saveLayoutByName(n);
+            try {
+              await layoutFetch("DELETE", "/api/layouts/" + encodeURIComponent(old));
+            } catch (e) {}
+            void doc;
+          }
+          if (act === "delete") {
+            if (!currentLayoutName) return;
+            if (!window.confirm("Delete layout " + currentLayoutName + "?")) return;
+            await layoutFetch("DELETE", "/api/layouts/" + encodeURIComponent(currentLayoutName));
+            currentLayoutName = "";
+            lsSet(LS_LAYOUT_NAME, "");
+            paintLayoutName();
+          }
+        } catch (e) {
+          window.alert("Layout: " + (e && e.message ? e.message : e));
+        }
+      });
+    }
+    document.addEventListener("keydown", (ev) => {
+      if ((ev.ctrlKey || ev.metaKey) && String(ev.key).toLowerCase() === "s") {
+        ev.preventDefault();
+        void (async () => {
+          try {
+            if (!currentLayoutName) {
+              const n = window.prompt("Save layout as", "Untitled");
+              if (n) await saveLayoutByName(n);
+            } else {
+              await saveLayoutByName(currentLayoutName);
+            }
+          } catch (e) {
+            window.alert("Layout: " + (e && e.message ? e.message : e));
+          }
+        })();
+      }
+    });
+    try {
+      const orig = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (k, v) {
+        orig.call(this, k, v);
+        if (!layoutApplying && String(k).indexOf("chart_app.") === 0) markLayoutDirty();
+      };
+    } catch (e) {}
+  }
+
+  async function tryRestoreLastLayout() {
+    try {
+      const last = await layoutFetch("GET", "/api/layouts/_last");
+      const lastName = last && last.name;
+      if (!lastName) return false;
+      const cur = lsGet(LS_LAYOUT_NAME, "") || "";
+      function blank(key) {
+        const v = lsGet(key, "");
+        return !v || v === "null" || v === "[]" || v === "{}";
+      }
+      const empty = blank(LS_STRAT) && blank("chart_app.indicators.BTCUSD");
+      if (cur === lastName && !empty) return false;
+      const doc = await layoutFetch("GET", "/api/layouts/" + encodeURIComponent(lastName));
+      writeLayoutState((doc && doc.state) || {});
+      lsSet(LS_LAYOUT_NAME, lastName);
+      location.reload();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function bootLayoutsThenStart() {
+    const reloading = await tryRestoreLastLayout();
+    document.documentElement.setAttribute("data-layout-boot", reloading ? "0" : "1");
+    if (reloading) return;
+    const savedTf = lsGet("chart_app.chartTf", "");
+    if (savedTf) {
+      tf = savedTf;
+      const sel = el("tf");
+      if (sel) sel.value = tf;
+      document.querySelectorAll("#tfBar [data-tf]").forEach((b) => {
+        b.classList.toggle("active", b.getAttribute("data-tf") === tf);
+      });
+    }
+    initLayoutUi();
+    loadFileList();
+    initAlertUi();
+    await initShell();
+    await loadInitial();
+    connectWs();
+  }
+
+  window.__caLayoutSave = function (name) {
+    return saveLayoutByName(name);
+  };
+  window.__caLayoutLoad = function (name) {
+    return loadLayoutByName(name);
+  };
+
+  void bootLayoutsThenStart();
 
   window.addEventListener("ca-cmd", (ev) => {
     const d = ev.detail || {};
@@ -2702,7 +2986,20 @@
     if (d.cmd === "size") sizeCharts();
     if (d.cmd === "addInd" && indApi && indApi.add) void indApi.add(d.id || "ULP");
     if (d.cmd === "removeInd" && indApi && indApi.removeLast) indApi.removeLast();
+    if (d.cmd === "clearInds" && indApi && indApi.removeLast) {
+      while (indApi.list && indApi.list().length) indApi.removeLast();
+    }
     if (d.cmd === "addStrat") addStrat(d.id || "S020_RSI");
+    if (d.cmd === "clearStrats") {
+      stratInstances = [];
+      saveStrats();
+      paintStratLegend();
+      renderStratSettings();
+      lastOverlaySigClose = -1;
+      reloadOverlay(true);
+    }
+    if (d.cmd === "saveLayout" && d.name) void saveLayoutByName(d.name);
+    if (d.cmd === "loadLayout" && d.name) void loadLayoutByName(d.name);
     if (d.cmd === "overlayReload") void reloadOverlay(true);
     if (d.cmd === "injectTick") {
       liveNowOverride = d.ts != null ? Number(d.ts) : liveNowOverride;
@@ -2870,6 +3167,9 @@
         subs: subCount,
         m1n: m1Map.size,
         times: vis.map(function (c) { return Number(c.time); }),
+        indIds: (indApi && indApi.list ? indApi.list().map(function (it) { return it.id; }) : []),
+        stratIds: stratInstances.map(function (s) { return s.id; }),
+        layoutName: currentLayoutName || lsGet(LS_LAYOUT_NAME, "") || "",
         gridErrors: (window.__caGridErrors || []).slice(),
         lastPartial: last && replayOn ? last : null,
         xAlign: (function () {

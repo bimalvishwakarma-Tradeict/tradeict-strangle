@@ -28,7 +28,7 @@ python -m pip install -r chart_app\requirements.txt
 python chart_app\server.py
 ```
 
-Open http://localhost:8700 (`CHART_APP_PORT` overrides, default 8700).
+Open http://127.0.0.1:8700 (`CHART_APP_PORT` overrides, default 8700). Use this origin only so browser storage stays on one host.
 
 Footer shows `build <short git hash>` (`server.py` `_build_id()` replaces
 `__BUILD__` in `index.html`). If git is unavailable, it falls back to
