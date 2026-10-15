@@ -44,7 +44,11 @@ def test_add_then_touch_removes() -> None:
     # later bar trades through the top
     bars.append(_bar(25, 119.0, 121.0, 118.0, 120.0))
     out2 = compute_ulp(bars, {"lookback": 10})
-    tops2 = [round(b["top"], 2) for b in out2["boxes"] if b["kind"] == "high"]
+    tops2 = [
+        round(b["top"], 2)
+        for b in out2["boxes"]
+        if b["kind"] == "high" and not b.get("expired")
+    ]
     assert 120.0 not in tops2
 
 
@@ -131,3 +135,100 @@ def test_full_range_default_matches_body_edge() -> None:
             assert abs(float(z["top"]) - min(float(pb["open"]), float(pb["close"]))) < 1e-9
     kinds = {z["kind"] for z in omitted["boxes"]}
     assert "high" in kinds and "low" in kinds
+
+
+def _rgba_alpha(s: str) -> float:
+    inner = s[s.find("(") + 1 : s.rfind(")")]
+    return float(inner.split(",")[3])
+
+
+def test_t_exp1_show_expired_false_matches_legacy() -> None:
+    bars = []
+    for i in range(25):
+        h, l_ = 100.0, 90.0
+        if i == 10:
+            h = 120.0
+        bars.append(_bar(i, 95.0, h, l_, 96.0))
+    bars.append(_bar(25, 119.0, 121.0, 118.0, 120.0))
+    params = {"lookback": 10, "maxLevels": 100, "showLabels": True, "showExpired": False}
+    out = compute_ulp(bars, params)
+    assert out == compute_ulp(bars, dict(params))
+    assert not any(b.get("expired") for b in out["boxes"])
+    assert all(b.get("extend_right") is True for b in out["boxes"])
+    last_t = int(bars[-1]["time"])
+    assert all(int(b["t2"]) == last_t for b in out["boxes"])
+    assert all(not str(b["id"]).endswith("-exp") for b in out["boxes"])
+    on = compute_ulp(bars, {**params, "showExpired": True})
+    fresh = [b for b in on["boxes"] if not b.get("expired")]
+    assert fresh == out["boxes"]
+    assert on["labels"] == out["labels"]
+    assert 120.0 not in [round(b["top"], 2) for b in out["boxes"] if b["kind"] == "high"]
+
+
+def test_t_exp2_expired_box_t2_is_touch_bar() -> None:
+    bars = []
+    for i in range(25):
+        h, l_ = 100.0, 90.0
+        if i == 10:
+            h = 120.0
+        bars.append(_bar(i, 95.0, h, l_, 96.0))
+    touch = _bar(25, 119.0, 121.0, 118.0, 120.0)
+    bars.append(touch)
+    out = compute_ulp(bars, {"lookback": 10, "showExpired": True})
+    exp = [b for b in out["boxes"] if b.get("expired") and b["kind"] == "high" and abs(b["top"] - 120.0) < 1e-9]
+    assert len(exp) == 1
+    z = exp[0]
+    assert int(z["t2"]) == int(touch["time"])
+    assert z.get("expired") is True
+    assert z.get("extend_right") is False
+    assert int(z["t1"]) == int(bars[10]["time"])
+    active = [b for b in out["boxes"] if not b.get("expired") and b["kind"] == "high"]
+    assert 120.0 not in [round(b["top"], 2) for b in active]
+
+
+def test_t_exp3_expired_alpha_is_40pct_of_fresh() -> None:
+    bars = []
+    for i in range(25):
+        h, l_ = 100.0, 90.0
+        if i == 10:
+            h = 120.0
+        bars.append(_bar(i, 95.0, h, l_, 96.0))
+    live = compute_ulp(bars[:21], {"lookback": 10, "showExpired": True})
+    fresh = next(b for b in live["boxes"] if b["kind"] == "high" and abs(b["top"] - 120.0) < 1e-9)
+    bars.append(_bar(25, 119.0, 121.0, 118.0, 120.0))
+    out = compute_ulp(bars, {"lookback": 10, "showExpired": True})
+    exp = next(b for b in out["boxes"] if b.get("expired") and abs(b["top"] - 120.0) < 1e-9)
+    fa = _rgba_alpha(str(fresh["fill"]))
+    ea = _rgba_alpha(str(exp["fill"]))
+    ba = _rgba_alpha(str(fresh["border"]))
+    be = _rgba_alpha(str(exp["border"]))
+    assert abs(ea - fa * 0.40) < 1e-9
+    assert abs(be - ba * 0.40) < 1e-9
+
+
+def test_t_exp4_max_expired_keeps_latest_n() -> None:
+    bars = []
+    n_touch = 8
+    n = 0
+    for k in range(n_touch):
+        for i in range(21):
+            # rising lows: no pivot-low, so expired list is high-zone touches only
+            l_ = 50.0 + n * 0.01
+            h = 100.0 + n * 0.01
+            if i == 10:
+                h = 200.0 + k * 10.0
+            bars.append(_bar(n, 95.0, h, l_, 96.0))
+            n += 1
+        h_touch = 201.0 + k * 10.0
+        l_touch = 50.0 + n * 0.01
+        bars.append(_bar(n, 199.0 + k * 10, h_touch, l_touch, 200.0))
+        n += 1
+    params = {"lookback": 10, "showExpired": True}
+    all_exp = [b for b in compute_ulp(bars, {**params, "maxExpired": 500})["boxes"] if b.get("expired")]
+    assert len(all_exp) >= 5
+    capped = [b for b in compute_ulp(bars, {**params, "maxExpired": 5})["boxes"] if b.get("expired")]
+    assert len(capped) == 5
+    assert capped == all_exp[-5:]
+    assert all(b.get("extend_right") is False for b in capped)
+    t2s = [int(b["t2"]) for b in capped]
+    assert t2s == sorted(t2s)

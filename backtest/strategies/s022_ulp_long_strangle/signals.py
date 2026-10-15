@@ -36,6 +36,7 @@ def ulp_params(mode: str) -> dict[str, Any]:
         "maxLevels": MAX_LEVELS,
         "fullRange": is_full_mode(mode),
         "showLabels": False,
+        "showExpired": False,
     }
 
 
@@ -61,7 +62,7 @@ def zone_key(z: dict[str, Any]) -> tuple[int, float, float, str]:
 
 
 def boxes_to_keys(boxes: list[dict[str, Any]]) -> set[tuple[int, float, float, str]]:
-    return {zone_key(b) for b in boxes}
+    return {zone_key(b) for b in boxes if not b.get("expired")}
 
 
 def _touches(bar: dict[str, Any], z: dict[str, Any]) -> bool:

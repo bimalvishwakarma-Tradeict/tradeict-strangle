@@ -47,7 +47,11 @@ def _color(v: Any, hex_fb: str, tr_fb: int) -> dict[str, Any]:
     return {"hex": hex_fb, "transparency": int(tr_fb)}
 
 
-def _rgba(col: dict[str, Any], tr_override: int | None = None) -> str:
+def _rgba(
+    col: dict[str, Any],
+    tr_override: int | None = None,
+    alpha_scale: float = 1.0,
+) -> str:
     hx = str(col.get("hex") or "#089981").lstrip("#")
     if len(hx) < 6:
         hx = "089981"
@@ -55,7 +59,7 @@ def _rgba(col: dict[str, Any], tr_override: int | None = None) -> str:
     g = int(hx[2:4], 16)
     b = int(hx[4:6], 16)
     tr = int(tr_override if tr_override is not None else col.get("transparency", 70))
-    a = max(0.0, min(1.0, (100 - tr) / 100.0))
+    a = max(0.0, min(1.0, (100 - tr) / 100.0 * float(alpha_scale)))
     return f"rgba({r},{g},{b},{a:.3f})"
 
 
@@ -97,6 +101,9 @@ def compute_ulp(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str,
     max_lv = max(5, min(200, _int(params.get("maxLevels"), 100)))
     full = _bool(params.get("fullRange"), False)
     show_lab = _bool(params.get("showLabels"), True)
+    show_exp = _bool(params.get("showExpired"), True)
+    exp_pct = max(10, min(100, _int(params.get("expiredOpacityPct"), 40)))
+    max_exp = max(0, min(500, _int(params.get("maxExpired"), 100)))
     hi_col = _color(params.get("highColor"), "#089981", 70)
     lo_col = _color(params.get("lowColor"), "#F23645", 70)
     if not bars:
@@ -106,6 +113,7 @@ def compute_ulp(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str,
     lows = [float(b["low"]) for b in bars]
     zones_h: list[dict[str, Any]] = []
     zones_l: list[dict[str, Any]] = []
+    expired: list[dict[str, Any]] = []
     n_add = 0
 
     def pop_oldest(zones: list[dict[str, Any]]) -> None:
@@ -156,8 +164,24 @@ def compute_ulp(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str,
                         pop_oldest(zones_l)
         hi = float(bar["high"])
         lo = float(bar["low"])
-        zones_h = [z for z in zones_h if hi < float(z["top"])]
-        zones_l = [z for z in zones_l if lo > float(z["bottom"])]
+        if show_exp:
+            nxt_h: list[dict[str, Any]] = []
+            for z in zones_h:
+                if hi < float(z["top"]):
+                    nxt_h.append(z)
+                else:
+                    expired.append({**z, "expired_t": int(bar["time"])})
+            zones_h = nxt_h
+            nxt_l: list[dict[str, Any]] = []
+            for z in zones_l:
+                if lo > float(z["bottom"]):
+                    nxt_l.append(z)
+                else:
+                    expired.append({**z, "expired_t": int(bar["time"])})
+            zones_l = nxt_l
+        else:
+            zones_h = [z for z in zones_h if hi < float(z["top"])]
+            zones_l = [z for z in zones_l if lo > float(z["bottom"])]
 
     fill_h = _rgba(hi_col)
     fill_l = _rgba(lo_col)
@@ -193,6 +217,29 @@ def compute_ulp(bars: list[dict[str, Any]], params: dict[str, Any]) -> dict[str,
                     "kind": z["kind"],
                 }
             )
+    if show_exp and max_exp > 0:
+        scale = float(exp_pct) / 100.0
+        fill_h_e = _rgba(hi_col, alpha_scale=scale)
+        fill_l_e = _rgba(lo_col, alpha_scale=scale)
+        border_h_e = _rgba({**hi_col, "hex": "#089981"}, 60, alpha_scale=scale)
+        border_l_e = _rgba({**lo_col, "hex": "#F23645"}, 60, alpha_scale=scale)
+        tail = expired[-max_exp:] if len(expired) > max_exp else expired
+        for z in tail:
+            hi_z = z["kind"] == "high"
+            boxes.append(
+                {
+                    "id": z["id"] + "-exp",
+                    "t1": int(z["t1"]),
+                    "t2": int(z["expired_t"]),
+                    "top": float(z["top"]),
+                    "bottom": float(z["bottom"]),
+                    "extend_right": False,
+                    "fill": fill_h_e if hi_z else fill_l_e,
+                    "border": border_h_e if hi_z else border_l_e,
+                    "kind": z["kind"],
+                    "expired": True,
+                }
+            )
     return {"boxes": boxes, "labels": labels, "lines": [], "markers": [], "series": []}
 
 
@@ -217,6 +264,18 @@ class UlpIndicator:
         {
             "key": "showLabels", "label": "Show Labels", "type": "bool", "default": True,
             "tab": "inputs",
+        },
+        {
+            "key": "showExpired", "label": "Show expired zones", "type": "bool",
+            "default": True, "tab": "inputs",
+        },
+        {
+            "key": "expiredOpacityPct", "label": "Expired opacity % of fresh", "type": "int",
+            "default": 40, "min": 10, "max": 100, "step": 1, "tab": "style",
+        },
+        {
+            "key": "maxExpired", "label": "Max expired boxes", "type": "int",
+            "default": 100, "min": 0, "max": 500, "step": 1, "tab": "inputs",
         },
         {
             "key": "highColor", "label": "Resistance Zone Color", "type": "color",
