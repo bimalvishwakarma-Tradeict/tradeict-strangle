@@ -3,6 +3,9 @@
 Full project knowledge: `../PROJECT_KNOWLEDGE.md`
 Session records live under `claude/`.
 
+**Strategy research (MANDATORY, 2026-10-15):** any backtest / research / optimization / validation
+work must follow `docs/STRATEGY_RESEARCH_PROTOCOL.md`. Read it before writing research code.
+
 Read this file before touching anything. It exists because several fixes here
 were made twice — once wrongly, on an assumption.
 
