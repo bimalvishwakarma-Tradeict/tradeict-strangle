@@ -76,7 +76,7 @@ def test_four_auto_baskets_match_trades_csv() -> None:
     assert len(picked) == 4
     ctx = RunContext(DRY_RUN)
     for row in picked:
-        res, _log, _sig = replay_row(ctx, row)
+        res, _log, _sig = replay_row(ctx, row, min_prem=0.0, apply_cap=False)
         assert res.ok, res.skip_reason
         tot = totals_vs_trade(res, row)
         for k in ("gross", "fees", "net"):

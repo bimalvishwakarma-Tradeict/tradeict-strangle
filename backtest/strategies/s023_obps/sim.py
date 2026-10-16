@@ -29,6 +29,7 @@ SLIP_MODEL = "table"
 SLIP_MULT = 3.2
 STALE_MIN = 5
 DEFAULT_QTY = 1000
+DEFAULT_MIN_PREM = 100.0
 
 
 class Market(Protocol):
@@ -68,6 +69,27 @@ def protection_qty(qty: int, avg_prem: float) -> int:
 
 def step_qty(qty: int, prem: float) -> int:
     return protection_qty(qty, prem)
+
+
+def decide_step_qty(
+    qty: int,
+    prem: float,
+    existing_short_side: int,
+    *,
+    apply_cap: bool = True,
+    min_prem: float = DEFAULT_MIN_PREM,
+) -> tuple[int, int, str]:
+    """Return (raw_qty, qty, skip_reason). skip_reason is '' if the leg is placed."""
+    raw = step_qty(qty, prem)
+    if float(prem) < float(min_prem):
+        return raw, 0, "min_prem"
+    if apply_cap:
+        placed = min(int(raw), max(0, int(qty) - int(existing_short_side)))
+    else:
+        placed = int(raw)
+    if placed <= 0:
+        return raw, 0, "cap"
+    return raw, placed, ""
 
 
 def fee_fill(premium: float, spot: float, qty: int) -> float:
@@ -159,6 +181,16 @@ class BasketResult:
     stale_minutes: int = 0
     steps: int = 0
     step_strike_gap: float = 0.0
+    step1_raw_qty: int = 0
+    step1_qty: int = 0
+    step1_skip: str = ""
+    step2_raw_qty: int = 0
+    step2_qty: int = 0
+    step2_skip: str = ""
+    redeploy_capped: int = 0
+    redeploy_skipped: int = 0
+    max_short_call: int = 0
+    max_short_put: int = 0
 
 
 def _mtm(lg: Leg, mark: float) -> float:
@@ -255,6 +287,8 @@ def simulate_basket(
     slip_mult: float = SLIP_MULT,
     max_minutes: int = 80_000,
     event_log: list[dict[str, Any]] | None = None,
+    min_prem: float = DEFAULT_MIN_PREM,
+    apply_cap: bool = True,
 ) -> BasketResult:
     t0 = int(entry_ts)
     Q = int(qty)
@@ -382,6 +416,10 @@ def simulate_basket(
     fees_acc = [0.0]
     slips_acc = [0.0]
     gaps_acc = [0.0]
+    max_sc = [0]
+    max_sp = [0]
+    rd_capped = [0]
+    rd_skipped = [0]
     realized = 0.0
     steps = 0
     legs: list[Leg] = []
@@ -529,6 +567,28 @@ def simulate_basket(
             "late": late,
         }
 
+    def existing_short(is_call: bool) -> int:
+        return sum(
+            int(lg.qty)
+            for lg in legs
+            if lg.open and lg.sign < 0 and lg.is_call == bool(is_call)
+        )
+
+    def bump_max_short() -> None:
+        max_sc[0] = max(max_sc[0], existing_short(True))
+        max_sp[0] = max(max_sp[0], existing_short(False))
+
+    def record_step(rec: dict[str, Any]) -> None:
+        nonlocal steps, step1, step2
+        if steps == 0:
+            step1 = rec
+            steps = 1
+        elif steps == 1:
+            step2 = rec
+            steps = 2
+
+    bump_max_short()
+
     while t <= t_end and nloop < max_minutes:
         nloop += 1
         if pending is not None and int(pending["fill_ts"]) <= t:
@@ -555,41 +615,54 @@ def simulate_basket(
                 got = cache.next_px(sym, t, exp)
                 if got is not None:
                     ft, prem = got
-                    qn = step_qty(Q, prem)
-                    lg = open_leg(
-                        f"step{steps+1}_{'C' if is_call else 'P'}",
-                        is_call, strike, exp, qn, -1, ft, True,
+                    exist = existing_short(is_call)
+                    raw, qn, skip_why = decide_step_qty(
+                        Q, prem, exist, apply_cap=apply_cap, min_prem=min_prem,
                     )
-                    if lg is not None:
-                        legs.append(lg)
-                        rec = {
-                            "ts": int(lg.fill_ts),
-                            "is_call": is_call,
-                            "strike": float(lg.strike),
-                            "expiry": exp.isoformat(),
-                            "qty": int(lg.qty),
-                            "prem": float(lg.fill_px),
-                            "wanted_strike": wanted,
-                            "strike_gap": abs(float(lg.strike) - wanted),
-                            "late": bool(pending.get("late")),
-                        }
-                        ev_name = "STEP1" if steps == 0 else "STEP2"
-                        if steps == 0:
-                            step1 = rec
-                            steps = 1
-                        elif steps == 1:
-                            step2 = rec
-                            steps = 2
-                        sp_f = mkt.spot(lg.fill_ts) or spot0
-                        emit(
-                            ev_name,
-                            trigger_ts=int(pending.get("trigger_ts", t)),
-                            fill_ts=lg.fill_ts,
-                            lg=lg,
-                            price=lg.fill_px,
-                            fee=fee_fill(lg.fill_px, float(sp_f), lg.qty),
-                            slip=slip_usd(lg.fill_px, dte_days(lg.expiry, lg.fill_ts), lg.qty, slip_mult),
+                    rec_base = {
+                        "ts": int(ft),
+                        "is_call": is_call,
+                        "strike": float(strike),
+                        "expiry": exp.isoformat(),
+                        "qty": int(qn),
+                        "raw_qty": int(raw),
+                        "prem": float(prem),
+                        "wanted_strike": wanted,
+                        "strike_gap": abs(float(strike) - wanted),
+                        "late": bool(pending.get("late")),
+                        "skip": skip_why,
+                    }
+                    if skip_why:
+                        record_step(rec_base)
+                    else:
+                        lg = open_leg(
+                            f"step{steps+1}_{'C' if is_call else 'P'}",
+                            is_call, strike, exp, qn, -1, ft, True,
                         )
+                        if lg is not None:
+                            legs.append(lg)
+                            rec_base["qty"] = int(lg.qty)
+                            rec_base["strike"] = float(lg.strike)
+                            rec_base["prem"] = float(lg.fill_px)
+                            rec_base["ts"] = int(lg.fill_ts)
+                            rec_base["strike_gap"] = abs(float(lg.strike) - wanted)
+                            ev_name = "STEP1" if steps == 0 else "STEP2"
+                            record_step(rec_base)
+                            bump_max_short()
+                            sp_f = mkt.spot(lg.fill_ts) or spot0
+                            emit(
+                                ev_name,
+                                trigger_ts=int(pending.get("trigger_ts", t)),
+                                fill_ts=lg.fill_ts,
+                                lg=lg,
+                                price=lg.fill_px,
+                                fee=fee_fill(lg.fill_px, float(sp_f), lg.qty),
+                                slip=slip_usd(lg.fill_px, dte_days(lg.expiry, lg.fill_ts), lg.qty, slip_mult),
+                            )
+                        else:
+                            rec_base["qty"] = 0
+                            rec_base["skip"] = rec_base["skip"] or "cap"
+                            record_step(rec_base)
                 pending = None
             elif kind == "redeploy":
                 for item in pending["items"]:
@@ -605,7 +678,15 @@ def simulate_basket(
                     if got is None:
                         continue
                     ft, prem = got
-                    qn = step_qty(Q, prem)
+                    exist = existing_short(lg0.is_call)
+                    raw, qn, skip_why = decide_step_qty(
+                        Q, prem, exist, apply_cap=apply_cap, min_prem=min_prem,
+                    )
+                    if skip_why:
+                        rd_skipped[0] += 1
+                        continue
+                    if apply_cap and qn < raw:
+                        rd_capped[0] += 1
                     lg = open_leg(
                         lg0.role + "_rd",
                         lg0.is_call, k_s, e_new, qn, -1, ft, True,
@@ -613,6 +694,7 @@ def simulate_basket(
                     if lg is not None:
                         legs.append(lg)
                         redeploys += 1
+                        bump_max_short()
                         sp_f = mkt.spot(lg.fill_ts) or spot0
                         emit(
                             "REDEPLOY",
@@ -651,6 +733,7 @@ def simulate_basket(
         last_gross = g
         max_g = max(max_g, g)
         min_g = min(min_g, g)
+        bump_max_short()
 
         if pending is None:
             if g >= tgt:
@@ -721,4 +804,14 @@ def simulate_basket(
         stale_minutes=int(cache.stale_minutes),
         steps=int(steps),
         step_strike_gap=float(gaps_acc[0]),
+        step1_raw_qty=int((step1 or {}).get("raw_qty") or 0),
+        step1_qty=int((step1 or {}).get("qty") or 0),
+        step1_skip=str((step1 or {}).get("skip") or ""),
+        step2_raw_qty=int((step2 or {}).get("raw_qty") or 0),
+        step2_qty=int((step2 or {}).get("qty") or 0),
+        step2_skip=str((step2 or {}).get("skip") or ""),
+        redeploy_capped=int(rd_capped[0]),
+        redeploy_skipped=int(rd_skipped[0]),
+        max_short_call=int(max_sc[0]),
+        max_short_put=int(max_sp[0]),
     )

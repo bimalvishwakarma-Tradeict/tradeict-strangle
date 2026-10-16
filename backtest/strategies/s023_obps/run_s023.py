@@ -41,7 +41,12 @@ from backtest.strategies.s022_ulp_long_strangle.stage0_move_edge import (  # noq
     rolling_pre_range_60,
 )
 from backtest.strategies.s023_obps.signals import ARMS, MODES, TFS, iter_obps_signals  # noqa: E402
-from backtest.strategies.s023_obps.sim import BasketResult, DEFAULT_QTY, simulate_basket  # noqa: E402
+from backtest.strategies.s023_obps.sim import (  # noqa: E402
+    BasketResult,
+    DEFAULT_MIN_PREM,
+    DEFAULT_QTY,
+    simulate_basket,
+)
 
 PKG_DIR = Path(__file__).resolve().parent
 RUNS_DIR = PKG_DIR / "runs"
@@ -115,6 +120,8 @@ def occupancy_walk(
     listed: list[date],
     ohlc: dict[int, tuple[float, float, float]],
     qty: int,
+    min_prem: float = DEFAULT_MIN_PREM,
+    apply_cap: bool = True,
 ) -> tuple[list[BasketResult], dict[str, int], list[dict[str, Any]]]:
     ordered = sorted(events, key=lambda e: int(e["signal_ts"]))
     taken: list[BasketResult] = []
@@ -129,6 +136,7 @@ def occupancy_walk(
         sig_px = float(e.get("signal_price", e.get("close", e.get("entry", float("nan")))))
         res = simulate_basket(
             mkt, listed, entry_ts=entry, signal_price=sig_px, qty=qty, ohlc=ohlc,
+            min_prem=min_prem, apply_cap=apply_cap,
         )
         if not res.ok:
             skip[res.skip_reason or "skip"] += 1
@@ -167,6 +175,16 @@ def _trade_row(e: dict[str, Any], res: BasketResult) -> dict[str, Any]:
         "hold_min": res.hold_min,
         "stale_minutes": res.stale_minutes,
         "step_strike_gap": res.step_strike_gap,
+        "step1_raw_qty": res.step1_raw_qty,
+        "step1_qty": res.step1_qty,
+        "step1_skip": res.step1_skip,
+        "step2_raw_qty": res.step2_raw_qty,
+        "step2_qty": res.step2_qty,
+        "step2_skip": res.step2_skip,
+        "redeploy_capped": res.redeploy_capped,
+        "redeploy_skipped": res.redeploy_skipped,
+        "max_short_call": res.max_short_call,
+        "max_short_put": res.max_short_put,
     }
 
 
@@ -211,6 +229,8 @@ def main() -> None:
     ap.add_argument("--mode", default="")
     ap.add_argument("--arm", default="")
     ap.add_argument("--qty", type=int, default=DEFAULT_QTY)
+    ap.add_argument("--min-prem", type=float, default=DEFAULT_MIN_PREM)
+    ap.add_argument("--no-cap", action="store_true")
     ap.add_argument("--csv", default=s018.SPOT_CSV)
     args = ap.parse_args()
     months = [m.strip() for m in str(args.months).split(",") if m.strip()]
@@ -218,6 +238,8 @@ def main() -> None:
     modes = [args.mode] if args.mode else list(MODES)
     sig_arms = [args.arm.upper()] if args.arm else list(ARMS)
     qty = int(args.qty)
+    min_prem = float(args.min_prem)
+    apply_cap = not bool(args.no_cap)
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     from datetime import datetime, timezone
@@ -270,6 +292,10 @@ def main() -> None:
         "redeploys", "exit_ist", "exit_reason", "gross", "fees", "net", "slip",
         "net_with_slip", "max_gross", "min_gross", "hold_min", "stale_minutes",
         "step_strike_gap",
+        "step1_raw_qty", "step1_qty", "step1_skip",
+        "step2_raw_qty", "step2_qty", "step2_skip",
+        "redeploy_capped", "redeploy_skipped",
+        "max_short_call", "max_short_put",
     ]
     trades_path = archive.folder / "trades.csv"
     with trades_path.open("w", newline="", encoding="utf-8") as f:
@@ -331,7 +357,10 @@ def main() -> None:
                     print(f"{month} {tf} {mode} {sarm} F={len(f_ev)} C2={len(c2)} VOL={len(vol_ev)}", flush=True)
                     t_cell = time.perf_counter()
                     for name, evs in packs.items():
-                        taken, skip, rows = occupancy_walk(evs, mkt, listed, ohlc, qty)
+                        taken, skip, rows = occupancy_walk(
+                            evs, mkt, listed, ohlc, qty,
+                            min_prem=min_prem, apply_cap=apply_cap,
+                        )
                         st = _stats(taken, skip)
                         st["month"] = month
                         st["tf"] = tf

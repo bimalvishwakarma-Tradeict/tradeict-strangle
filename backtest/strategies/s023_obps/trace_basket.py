@@ -374,7 +374,15 @@ def snapshots(ctx: RunContext, res: BasketResult, qty: int) -> list[dict[str, An
     return rows
 
 
-def replay_row(ctx: RunContext, row: dict[str, Any]) -> tuple[BasketResult, list[dict[str, Any]], dict[str, Any]]:
+def replay_row(
+    ctx: RunContext,
+    row: dict[str, Any],
+    *,
+    min_prem: float | None = None,
+    apply_cap: bool = True,
+) -> tuple[BasketResult, list[dict[str, Any]], dict[str, Any]]:
+    from backtest.strategies.s023_obps.sim import DEFAULT_MIN_PREM
+
     entry_ts = parse_ist(str(row["entry_ist"]))
     sig = ctx.signal_for(row)
     log: list[dict[str, Any]] = []
@@ -386,6 +394,8 @@ def replay_row(ctx: RunContext, row: dict[str, Any]) -> tuple[BasketResult, list
         qty=ctx.qty,
         ohlc=ctx.ohlc,
         event_log=log,
+        min_prem=DEFAULT_MIN_PREM if min_prem is None else float(min_prem),
+        apply_cap=apply_cap,
     )
     return res, log, sig
 

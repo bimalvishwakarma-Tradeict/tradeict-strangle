@@ -87,6 +87,12 @@ def check_trades(path: str | Path, qty: int = 1000) -> list[str]:
             )
         e1 = mc["expiry"]
         gap_col = float(row.get("step_strike_gap") or 0.0 or 0)
+        for col in ("max_short_call", "max_short_put"):
+            rawv = row.get(col)
+            if rawv is None or str(rawv).strip() == "":
+                continue
+            if float(rawv) > float(q_main) + 1e-9:
+                violations.append(f"L{i} {col} {rawv} > Q={q_main}")
         for name in ("step1", "step2"):
             blob = _blob(row.get(name) or "")
             if not blob:
@@ -100,10 +106,14 @@ def check_trades(path: str | Path, qty: int = 1000) -> list[str]:
             exp = date.fromisoformat(str(blob["expiry"]))
             prem = float(blob.get("prem") or 0.0)
             sq = int(blob.get("qty") or 0)
-            if prem > 0:
+            skip_why = str(blob.get("skip") or row.get(f"{name}_skip") or "")
+            if skip_why:
+                if sq != 0:
+                    violations.append(f"L{i} {name} skip={skip_why} but qty={sq}")
+            elif prem > 0:
                 want_s = step_qty(q_main, prem)
-                if sq != want_s:
-                    violations.append(f"L{i} {name} qty {sq} != floor(70*{q_main}/{prem}*3)={want_s}")
+                if sq > want_s:
+                    violations.append(f"L{i} {name} qty {sq} > raw {want_s}")
             json_gap = float(blob.get("strike_gap") or 0.0)
             logged = max(gap_col, json_gap)
             if late:

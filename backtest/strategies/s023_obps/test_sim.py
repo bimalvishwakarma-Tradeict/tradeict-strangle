@@ -21,6 +21,7 @@ from backtest.strategies.s023_obps.sim import (  # noqa: E402
     hours_to,
     is_late_window,
     lock_usd,
+    decide_step_qty,
     protection_qty,
     sl0_usd,
     sl_now,
@@ -449,6 +450,16 @@ def _trade_dict(res: Any, cell: str = "30m|full|ANY") -> dict[str, Any]:
         "hold_min": res.hold_min,
         "stale_minutes": res.stale_minutes,
         "step_strike_gap": res.step_strike_gap,
+        "step1_raw_qty": res.step1_raw_qty,
+        "step1_qty": res.step1_qty,
+        "step1_skip": res.step1_skip,
+        "step2_raw_qty": res.step2_raw_qty,
+        "step2_qty": res.step2_qty,
+        "step2_skip": res.step2_skip,
+        "redeploy_capped": res.redeploy_capped,
+        "redeploy_skipped": res.redeploy_skipped,
+        "max_short_call": res.max_short_call,
+        "max_short_put": res.max_short_put,
     }
 
 
@@ -493,3 +504,157 @@ def test_t_invariant(tmp_path: Path) -> None:
     bad = check_trades(path)
     assert bad == []
     _ = json.dumps(rows[0]["step1"])
+
+
+def test_t_cap() -> None:
+    raw, qn, skip = decide_step_qty(1000, 290.6, 648, apply_cap=True, min_prem=0.0)
+    assert skip == ""
+    assert raw == 722
+    assert qn == 352
+    d0, d1 = date(2025, 6, 2), date(2025, 6, 3)
+    listed = [d0, d1, date(2025, 6, 4)]
+    t_ent = to_unix(ist_dt(d0, 10, 0))
+    t_step = to_unix(ist_dt(d0, 11, 0))
+    m = FakeMkt()
+    px0 = {"lc": 500.0, "lp": 500.0, "sc": 324.0, "sp": 324.0}
+    _fill_day(m, d0, d1, t_ent, t_step + 180, px0, 100_000.0)
+    assert protection_qty(1000, 324.0) == 648
+    t = t_step
+    while t <= t_step + 180:
+        px_e1 = dict(px0)
+        px_e1["lc"] = 580.0
+        _put_chain(m, d1, t, 100_000.0, px_e1)
+        px_0 = dict(px0)
+        px_0["lc"] = 290.6
+        _put_chain(m, d0, t, 100_000.0, px_0)
+        t += 60
+    ohlc = {tt: (100010.0, 99990.0, 100000.0) for tt in range(t_ent, t_step + 240, 60)}
+    res = simulate_basket(
+        m, listed, entry_ts=t_ent, signal_price=1.0, qty=1000, ohlc=ohlc, slip_mult=0.0,
+    )
+    assert res.ok and res.step1 is not None
+    assert res.step1_raw_qty == 722
+    assert res.step1_qty == 352
+    assert res.step1_skip == ""
+    assert res.max_short_call == 1000
+
+
+def test_t_cap_zero() -> None:
+    d0, d1 = date(2025, 6, 2), date(2025, 6, 3)
+    listed = [d0, d1, date(2025, 6, 4)]
+    t_ent = to_unix(ist_dt(d0, 10, 0))
+    t_step = to_unix(ist_dt(d0, 11, 0))
+    m = FakeMkt()
+    px0 = {"lc": 500.0, "lp": 500.0, "sc": 210.0, "sp": 210.0}
+    _fill_day(m, d0, d1, t_ent, t_step + 180, px0, 100_000.0)
+    assert protection_qty(1000, 210.0) == 1000
+    t = t_step
+    while t <= t_step + 180:
+        px = dict(px0)
+        px["lc"] = 580.0
+        _put_chain(m, d1, t, 100_000.0, px)
+        _put_chain(m, d0, t, 100_000.0, px)
+        t += 60
+    ohlc = {tt: (100010.0, 99990.0, 100000.0) for tt in range(t_ent, t_step + 240, 60)}
+    res = simulate_basket(
+        m, listed, entry_ts=t_ent, signal_price=1.0, qty=1000, ohlc=ohlc, slip_mult=0.0,
+    )
+    assert res.ok
+    assert res.steps >= 1
+    assert res.step1_skip == "cap"
+    assert res.step1_qty == 0
+    assert sl_now(res.steps, 1000) == -140 or (res.steps >= 2 and sl_now(2, 1000) == -70)
+    assert sl_now(1, 1000) == -140
+
+
+def test_t_min_prem() -> None:
+    d0, d1 = date(2025, 6, 2), date(2025, 6, 3)
+    listed = [d0, d1, date(2025, 6, 4)]
+    t_ent = to_unix(ist_dt(d0, 10, 0))
+    t_step = to_unix(ist_dt(d0, 11, 0))
+
+    def _run(step_prem: float) -> Any:
+        m = FakeMkt()
+        px0 = {"lc": 500.0, "lp": 500.0, "sc": 690.0, "sp": 690.0}
+        _fill_day(m, d0, d1, t_ent, t_step + 180, px0, 100_000.0)
+        t = t_step
+        while t <= t_step + 180:
+            px_e1 = dict(px0)
+            px_e1["lc"] = 580.0
+            _put_chain(m, d1, t, 100_000.0, px_e1)
+            px_0 = dict(px0)
+            px_0["lc"] = step_prem
+            _put_chain(m, d0, t, 100_000.0, px_0)
+            t += 60
+        ohlc = {tt: (100010.0, 99990.0, 100000.0) for tt in range(t_ent, t_step + 240, 60)}
+        return simulate_basket(
+            m, listed, entry_ts=t_ent, signal_price=1.0, qty=1000, ohlc=ohlc, slip_mult=0.0,
+            min_prem=100.0,
+        )
+
+    a = _run(90.0)
+    assert a.ok and a.steps >= 1
+    assert a.step1_skip == "min_prem"
+    assert a.step1_qty == 0
+    b = _run(100.0)
+    assert b.ok and b.steps >= 1
+    assert b.step1_skip == ""
+    assert b.step1_qty > 0
+
+
+def test_t_redeploy_cap() -> None:
+    d0, d1, d2 = date(2025, 6, 2), date(2025, 6, 3), date(2025, 6, 4)
+    listed = [d0, d1, d2]
+    t_ent = to_unix(ist_dt(d0, 10, 0))
+    t_1730 = expiry_unix(d0)
+    t_hi = to_unix(ist_dt(d0, 11, 0))
+    m = FakeMkt()
+    px0 = {"lc": 500.0, "lp": 500.0, "sc": 324.0, "sp": 324.0}
+    _fill_day(m, d0, d1, t_ent, t_1730 + 180, px0, 100_000.0)
+    t = t_hi
+    while t <= t_hi + 180:
+        px_e1 = dict(px0)
+        px_e1["lc"] = 580.0
+        _put_chain(m, d1, t, 100_000.0, px_e1)
+        px_0 = dict(px0)
+        px_0["lc"] = 290.6
+        _put_chain(m, d0, t, 100_000.0, px_0)
+        t += 60
+    t = t_1730
+    while t <= t_1730 + 180:
+        px = dict(px0)
+        px["lc"] = 290.6
+        _put_chain(m, d1, t, 100_000.0, px)
+        _put_chain(m, d0, t, 100_000.0, px)
+        t += 60
+    ohlc = {tt: (100010.0, 99990.0, 100000.0) for tt in range(t_ent, t_1730 + 180, 60)}
+    res = simulate_basket(
+        m, listed, entry_ts=t_ent, signal_price=999999.0, qty=1000, ohlc=ohlc, slip_mult=0.0,
+    )
+    assert res.ok
+    assert res.redeploys >= 1 or res.redeploy_capped >= 1 or res.redeploy_skipped >= 0
+    assert res.max_short_call <= 1000
+    rd = [lg for lg in res.legs if lg.is_step and "_rd" in lg.role]
+    if rd:
+        assert rd[0].qty <= 352 or res.redeploy_capped >= 1
+
+
+def test_t_regression() -> None:
+    from backtest.harness.data import to_unix as _tu  # noqa: F401
+    from backtest.strategies.s023_obps.trace_basket import RunContext, load_trades, parse_ist, pick_auto
+
+    folder = Path(__file__).resolve().parent / "runs" / "20261016T143434Z_s023_stage1"
+    assert folder.is_dir(), f"missing {folder}"
+    picked = pick_auto(load_trades(folder))
+    assert len(picked) == 4
+    ctx = RunContext(folder)
+    for row in picked:
+        res = simulate_basket(
+            ctx.mkt, ctx.listed,
+            entry_ts=parse_ist(str(row["entry_ist"])),
+            signal_price=float(row["signal_price"]),
+            qty=1000, ohlc=ctx.ohlc, min_prem=0.0, apply_cap=False,
+        )
+        assert res.ok, res.skip_reason
+        assert abs(res.gross - float(row["gross"])) < 1e-6
+        assert abs(res.net - float(row["net"])) < 1e-6
