@@ -30,6 +30,8 @@ python chart_app\server.py
 
 Open http://127.0.0.1:8700 (`CHART_APP_PORT` overrides, default 8700). Use this origin only so browser storage stays on one host.
 
+You can also double-click `chart_app\start_chart.bat`. It starts `python chart_app\server.py` only if nothing is already serving that URL, then opens the browser. If `CHART_APP_PORT` is set, the launcher uses that port.
+
 Footer shows `build <short git hash>` (`server.py` `_build_id()` replaces
 `__BUILD__` in `index.html`). If git is unavailable, it falls back to
 `app.js` mtime.
