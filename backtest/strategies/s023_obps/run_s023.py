@@ -309,7 +309,7 @@ def main() -> None:
                     near_g = forbidden_mask(grid, sig_arr, 3600)
                     near_1 = forbidden_mask(ts, sig_arr, 3600)
                     c2, _m = _c2_events(f_ev, ts, near_1, hod_1m, rng, start_ts, cutoff)
-                    vol, _st = _volctrl_events(
+                    vol_ev, _st = _volctrl_events(
                         f_ev, grid, cell, hod_g, rng, start_ts, cutoff, near_g,
                     )
                     for e in c2:
@@ -318,15 +318,15 @@ def main() -> None:
                         e["tf"] = tf
                         e["mode"] = mode
                         e["signal_price"] = float(spot_c.get(int(e["signal_ts"]), float("nan")))
-                    for e in vol:
+                    for e in vol_ev:
                         e["sig_arm"] = sarm
                         e["ctrl_arm"] = "VOLCTRL"
                         e["tf"] = tf
                         e["mode"] = mode
                         e["signal_price"] = float(spot_c.get(int(e["signal_ts"]), float("nan")))
-                    packs = {"F": f_ev, "C2": c2, "VOLCTRL": vol}
+                    packs = {"F": f_ev, "C2": c2, "VOLCTRL": vol_ev}
                     cell_stats: dict[str, dict[str, Any]] = {}
-                    print(f"{month} {tf} {mode} {sarm} F={len(f_ev)} C2={len(c2)} VOL={len(vol)}", flush=True)
+                    print(f"{month} {tf} {mode} {sarm} F={len(f_ev)} C2={len(c2)} VOL={len(vol_ev)}", flush=True)
                     t_cell = time.perf_counter()
                     for name, evs in packs.items():
                         taken, skip, rows = occupancy_walk(evs, mkt, listed, ohlc, qty)

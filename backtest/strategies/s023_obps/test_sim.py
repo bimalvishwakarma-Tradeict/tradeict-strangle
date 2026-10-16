@@ -284,3 +284,37 @@ def test_t10_golden_gross_fees_net() -> None:
     expect_fees = 2 * (2 * fee_long + 2 * fee_short)
     assert abs(res.fees - expect_fees) < 1e-6
     assert abs(res.net - (210.0 - expect_fees)) < 1e-6
+
+
+def test_t_multi_month(monkeypatch: Any, tmp_path: Path) -> None:
+    """Second month must still see the 1m volume array (not VOLCTRL event list)."""
+    import csv
+
+    import backtest.strategies.s023_obps.run_s023 as rs
+
+    monkeypatch.setattr(rs, "occupancy_walk", lambda *a, **k: ([], {}, []))
+    dest = tmp_path / "mm"
+    orig = rs.RunArchive.__init__
+
+    def _init(self: Any, *a: Any, **k: Any) -> None:
+        k["folder"] = dest
+        orig(self, *a, **k)
+
+    monkeypatch.setattr(rs.RunArchive, "__init__", _init)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_s023.py",
+            "--months", "2025-06,2025-07",
+            "--tf", "30m",
+            "--mode", "wick",
+            "--arm", "ANY",
+        ],
+    )
+    rs.main()
+    sum_path = dest / "summary.csv"
+    assert sum_path.is_file()
+    months = {row["month"] for row in csv.DictReader(sum_path.open(encoding="utf-8"))}
+    assert "2025-06" in months
+    assert "2025-07" in months
