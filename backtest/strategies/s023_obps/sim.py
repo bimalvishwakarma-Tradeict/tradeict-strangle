@@ -229,6 +229,7 @@ def simulate_basket(
     ohlc: dict[int, tuple[float, float, float]] | None = None,
     slip_mult: float = SLIP_MULT,
     max_minutes: int = 80_000,
+    event_log: list[dict[str, Any]] | None = None,
 ) -> BasketResult:
     t0 = int(entry_ts)
     Q = int(qty)
@@ -258,6 +259,64 @@ def simulate_basket(
     if rc is None or rp is None or r_atm_c is None or r_atm_p is None:
         return BasketResult(False, "missing_strike")
     cache = _MarkCache(mkt)
+
+    def peek_mark(lg: Leg, tt: int) -> float | None:
+        q = mkt.quote(lg.symbol, tt)
+        if q is not None:
+            return float(q[0])
+        hit = cache.last.get(lg.symbol)
+        return float(hit[1]) if hit is not None else None
+
+    def peek_gross(tt: int) -> float:
+        g = float(realized)
+        for lg in legs:
+            if not lg.open:
+                continue
+            px = peek_mark(lg, tt)
+            if px is None:
+                continue
+            g += _mtm(lg, px)
+        return g
+
+    def emit(
+        event: str,
+        *,
+        trigger_ts: int,
+        fill_ts: int,
+        lg: Leg | None,
+        price: float,
+        fee: float,
+        slip: float,
+    ) -> None:
+        if event_log is None:
+            return
+        closing = event.startswith("EXIT") or event == "EXPIRY_SETTLE"
+        side = ""
+        if lg is not None:
+            if closing:
+                side = "sell" if lg.sign > 0 else "buy"
+            else:
+                side = "buy" if lg.sign > 0 else "sell"
+        event_log.append(
+            {
+                "event": event,
+                "trigger_ts": int(trigger_ts),
+                "fill_ts": int(fill_ts),
+                "leg": "" if lg is None else lg.role,
+                "symbol": "" if lg is None else lg.symbol,
+                "is_call": None if lg is None else lg.is_call,
+                "strike": None if lg is None else lg.strike,
+                "expiry": None if lg is None else lg.expiry,
+                "side": side,
+                "qty": 0 if lg is None else int(lg.qty),
+                "price": float(price),
+                "fee": float(fee),
+                "slip": float(slip),
+                "gross_after": peek_gross(int(fill_ts)),
+                "sl_after": sl_now(steps, Q),
+            }
+        )
+
     def open_leg(
         role: str,
         is_call: bool,
@@ -297,6 +356,9 @@ def simulate_basket(
 
     fees_acc = [0.0]
     slips_acc = [0.0]
+    realized = 0.0
+    steps = 0
+    legs: list[Leg] = []
     px_c = cache.px(str(r_atm_c["symbol"]), t0, e1)
     px_p = cache.px(str(r_atm_p["symbol"]), t0, e1)
     if px_c is None or px_p is None:
@@ -305,7 +367,6 @@ def simulate_basket(
     sq = protection_qty(Q, avg)
     if sq <= 0:
         return BasketResult(False, "missing_qty")
-    legs: list[Leg] = []
     for spec in (
         ("main_call", True, k_c, e1, Q, 1, False),
         ("main_put", False, k_p, e1, Q, 1, False),
@@ -316,9 +377,17 @@ def simulate_basket(
         if lg is None:
             return BasketResult(False, "missing_marks")
         legs.append(lg)
+        sp_f = mkt.spot(lg.fill_ts) or spot0
+        emit(
+            "ENTRY",
+            trigger_ts=t0,
+            fill_ts=lg.fill_ts,
+            lg=lg,
+            price=lg.fill_px,
+            fee=fee_fill(lg.fill_px, float(sp_f), lg.qty),
+            slip=slip_usd(lg.fill_px, dte_days(lg.expiry, lg.fill_ts), lg.qty, slip_mult),
+        )
 
-    realized = 0.0
-    steps = 0
     pending: dict[str, Any] | None = None
     step1: dict[str, Any] | None = None
     step2: dict[str, Any] | None = None
@@ -347,7 +416,7 @@ def simulate_basket(
             g += _mtm(lg, px)
         return g
 
-    def close_open(tt: int) -> bool:
+    def close_open(tt: int, *, event: str = "", trigger_ts: int = 0) -> bool:
         nonlocal realized
         ok = True
         for lg in legs:
@@ -359,12 +428,16 @@ def simulate_basket(
                 continue
             ft, px = got
             sp = mkt.spot(ft) or 0.0
+            fee = fee_fill(px, float(sp), lg.qty)
+            slp = slip_usd(px, dte_days(lg.expiry, ft), lg.qty, slip_mult)
             realized += _mtm(lg, px)
-            fees_acc[0] += fee_fill(px, float(sp), lg.qty)
-            slips_acc[0] += slip_usd(px, dte_days(lg.expiry, ft), lg.qty, slip_mult)
+            fees_acc[0] += fee
+            slips_acc[0] += slp
             lg.open = False
             lg.exit_ts = int(ft)
             lg.exit_px = float(px)
+            if event:
+                emit(event, trigger_ts=trigger_ts or tt, fill_ts=ft, lg=lg, price=px, fee=fee, slip=slp)
         return ok
 
     def settle_exp(exp: date, tt: int) -> None:
@@ -381,6 +454,15 @@ def simulate_basket(
             lg.settled = True
             lg.exit_ts = int(tt)
             lg.exit_px = xf
+            emit(
+                "EXPIRY_SETTLE",
+                trigger_ts=tt,
+                fill_ts=tt,
+                lg=lg,
+                price=xf,
+                fee=0.0,
+                slip=0.0,
+            )
 
     def main_open() -> bool:
         return any(lg.open and lg.role in ("main_call", "main_put") for lg in legs)
@@ -405,8 +487,10 @@ def simulate_basket(
         if pending is not None and int(pending["fill_ts"]) <= t:
             kind = pending["kind"]
             if kind == "close":
-                close_open(t)
-                exit_reason = str(pending["reason"])
+                reason = str(pending["reason"])
+                trig = int(pending.get("trigger_ts", t))
+                close_open(t, event=f"EXIT_{reason}", trigger_ts=trig)
+                exit_reason = reason
                 exit_ts = t
                 last_gross = gross_at(t)
                 pending = None
@@ -441,12 +525,23 @@ def simulate_basket(
                             "qty": int(lg.qty),
                             "prem": float(lg.fill_px),
                         }
+                        ev_name = "STEP1" if steps == 0 else "STEP2"
                         if steps == 0:
                             step1 = rec
                             steps = 1
                         elif steps == 1:
                             step2 = rec
                             steps = 2
+                        sp_f = mkt.spot(lg.fill_ts) or spot0
+                        emit(
+                            ev_name,
+                            trigger_ts=int(pending.get("trigger_ts", t)),
+                            fill_ts=lg.fill_ts,
+                            lg=lg,
+                            price=lg.fill_px,
+                            fee=fee_fill(lg.fill_px, float(sp_f), lg.qty),
+                            slip=slip_usd(lg.fill_px, dte_days(lg.expiry, lg.fill_ts), lg.qty, slip_mult),
+                        )
                 pending = None
             elif kind == "redeploy":
                 for item in pending["items"]:
@@ -467,6 +562,16 @@ def simulate_basket(
                     if lg is not None:
                         legs.append(lg)
                         redeploys += 1
+                        sp_f = mkt.spot(lg.fill_ts) or spot0
+                        emit(
+                            "REDEPLOY",
+                            trigger_ts=int(pending.get("trigger_ts", t)),
+                            fill_ts=lg.fill_ts,
+                            lg=lg,
+                            price=lg.fill_px,
+                            fee=fee_fill(lg.fill_px, float(sp_f), lg.qty),
+                            slip=slip_usd(lg.fill_px, dte_days(lg.expiry, lg.fill_ts), lg.qty, slip_mult),
+                        )
                 pending = None
 
         exp_now = [e for e in listed if expiry_unix(e) == t]
@@ -479,6 +584,7 @@ def simulate_basket(
                     pending = {
                         "kind": "redeploy",
                         "fill_ts": t + 60,
+                        "trigger_ts": t,
                         "items": settled_steps,
                         "new_exp": e_new,
                     }
@@ -497,15 +603,20 @@ def simulate_basket(
 
         if pending is None:
             if g >= tgt:
-                pending = {"kind": "close", "reason": "TARGET", "fill_ts": t + 60}
+                pending = {"kind": "close", "reason": "TARGET", "fill_ts": t + 60, "trigger_ts": t}
             elif g <= sl_now(steps, Q):
-                pending = {"kind": "close", "reason": "SL", "fill_ts": t + 60}
+                pending = {"kind": "close", "reason": "SL", "fill_ts": t + 60, "trigger_ts": t}
             elif steps >= 1:
                 bar = ohlc.get(t)
                 if bar is not None:
                     hi, lo, _c = bar
                     if float(lo) <= float(signal_price) <= float(hi):
-                        pending = {"kind": "close", "reason": "SIGNAL_PRICE", "fill_ts": t + 60}
+                        pending = {
+                            "kind": "close",
+                            "reason": "SIGNAL_PRICE",
+                            "fill_ts": t + 60,
+                            "trigger_ts": t,
+                        }
             if pending is None and steps == 0 and g >= lock:
                 is_call, strike = profit_side(t)
                 e0n, _ = dte0_dte1(t, listed)
@@ -520,6 +631,7 @@ def simulate_basket(
                 pending = {
                     "kind": "step",
                     "fill_ts": t + 60,
+                    "trigger_ts": t,
                     "is_call": is_call,
                     "strike": k_s,
                     "exp": exp_s,
@@ -538,6 +650,7 @@ def simulate_basket(
                 pending = {
                     "kind": "step",
                     "fill_ts": t + 60,
+                    "trigger_ts": t,
                     "is_call": is_call,
                     "strike": k_s,
                     "exp": exp_s,
@@ -545,9 +658,10 @@ def simulate_basket(
         t += 60
 
     if not exit_reason:
-        close_open(min(t, t_end))
+        xt = min(t, t_end)
+        close_open(xt, event="EXIT_EXPIRY", trigger_ts=xt)
         exit_reason = "EXPIRY"
-        exit_ts = min(t, t_end)
+        exit_ts = xt
         last_gross = gross_at(exit_ts)
 
     fees = float(fees_acc[0])
