@@ -166,6 +166,7 @@ def _trade_row(e: dict[str, Any], res: BasketResult) -> dict[str, Any]:
         "min_gross": res.min_gross,
         "hold_min": res.hold_min,
         "stale_minutes": res.stale_minutes,
+        "step_strike_gap": res.step_strike_gap,
     }
 
 
@@ -268,6 +269,7 @@ def main() -> None:
         "cell", "arm", "entry_ist", "signal_price", "legs", "step1", "step2",
         "redeploys", "exit_ist", "exit_reason", "gross", "fees", "net", "slip",
         "net_with_slip", "max_gross", "min_gross", "hold_min", "stale_minutes",
+        "step_strike_gap",
     ]
     trades_path = archive.folder / "trades.csv"
     with trades_path.open("w", newline="", encoding="utf-8") as f:

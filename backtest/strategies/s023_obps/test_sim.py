@@ -12,12 +12,14 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backtest.harness.data import ist_dt, to_unix  # noqa: E402
+from backtest.strategies.s023_obps.check_trades import check_trades  # noqa: E402
 from backtest.strategies.s023_obps.sim import (  # noqa: E402
     BasketResult,
     dte0_dte1,
     expiry_unix,
     fee_fill,
     hours_to,
+    is_late_window,
     lock_usd,
     protection_qty,
     sl0_usd,
@@ -318,3 +320,176 @@ def test_t_multi_month(monkeypatch: Any, tmp_path: Path) -> None:
     months = {row["month"] for row in csv.DictReader(sum_path.open(encoding="utf-8"))}
     assert "2025-06" in months
     assert "2025-07" in months
+
+
+def test_t4_late_day_step_uses_e1_straddle() -> None:
+    d0, d1 = date(2025, 6, 2), date(2025, 6, 3)
+    listed = [d0, d1, date(2025, 6, 4)]
+    t_ent = to_unix(ist_dt(d0, 10, 0))
+    t_step = to_unix(ist_dt(d0, 13, 0))
+    m = FakeMkt()
+    px0 = {"lc": 500.0, "lp": 500.0, "sc": 690.0, "sp": 690.0}
+    _fill_day(m, d0, d1, t_ent, t_step + 180, px0, 100_000.0)
+    t = t_step
+    while t <= t_step + 180:
+        px = dict(px0)
+        px["lc"] = 580.0
+        _put_chain(m, d1, t, 100_000.0, px)
+        _put_chain(m, d0, t, 100_000.0, px)
+        extra = _row(f"C-101000-{d1}", 101000.0, True, 400.0)
+        packed = m.chains[(d1, t)]
+        m.chains[(d1, t)] = list(packed) + [extra]
+        m.quotes[(extra["symbol"], t)] = 400.0
+        m.spots[t] = 101000.0
+        t += 60
+    ohlc = {tt: (100010.0, 99990.0, 100000.0) for tt in range(t_ent, t_step + 240, 60)}
+    res = simulate_basket(
+        m, listed, entry_ts=t_ent, signal_price=1.0, qty=1000, ohlc=ohlc, slip_mult=0.0,
+    )
+    assert res.ok and res.step1 is not None
+    assert res.step1["expiry"] == d1.isoformat()
+    assert abs(float(res.step1["strike"]) - 100000.0) < 1e-6
+
+
+def test_t_late_strike() -> None:
+    test_t4_late_day_step_uses_e1_straddle()
+
+
+def test_t_boundary() -> None:
+    d0, d1 = date(2025, 6, 2), date(2025, 6, 3)
+    listed = [d0, d1, date(2025, 6, 4)]
+    t_ent = to_unix(ist_dt(d0, 10, 0))
+    t_step = to_unix(ist_dt(d0, 12, 0))
+    assert abs(hours_to(d0, t_step) - 5.5) < 1e-9
+    assert is_late_window(d0, t_step) is True
+    assert is_late_window(d0, t_step - 60) is False
+    m = FakeMkt()
+    px0 = {"lc": 500.0, "lp": 500.0, "sc": 690.0, "sp": 690.0}
+    _fill_day(m, d0, d1, t_ent, t_step + 180, px0, 100_000.0)
+    t = t_step
+    while t <= t_step + 180:
+        px = dict(px0)
+        px["lc"] = 580.0
+        _put_chain(m, d1, t, 100_000.0, px)
+        _put_chain(m, d0, t, 100_000.0, px)
+        t += 60
+    ohlc = {tt: (100010.0, 99990.0, 100000.0) for tt in range(t_ent, t_step + 240, 60)}
+    res = simulate_basket(
+        m, listed, entry_ts=t_ent, signal_price=1.0, qty=1000, ohlc=ohlc, slip_mult=0.0,
+    )
+    assert res.ok and res.step1 is not None
+    assert res.step1["expiry"] == d1.isoformat()
+    assert abs(float(res.step1["strike"]) - 100000.0) < 1e-6
+    assert bool(res.step1.get("late")) is True
+
+
+def test_t_fallback() -> None:
+    d0, d1 = date(2025, 6, 2), date(2025, 6, 3)
+    listed = [d0, d1, date(2025, 6, 4)]
+    t_ent = to_unix(ist_dt(d0, 10, 0))
+    t_step = to_unix(ist_dt(d0, 11, 0))
+    assert hours_to(d0, t_step) > 5.5
+    m = FakeMkt()
+    px0 = {"lc": 500.0, "lp": 500.0, "sc": 690.0, "sp": 690.0}
+    _fill_day(m, d0, d1, t_ent, t_step + 180, px0, 100_000.0)
+    t = t_step
+    while t <= t_step + 180:
+        px = dict(px0)
+        px["lc"] = 580.0
+        _put_chain(m, d1, t, 100_000.0, px)
+        alt = [
+            _row(f"C-99200-{d0}", 99200.0, True, 580.0),
+            _row(f"P-101000-{d0}", 101000.0, False, 500.0),
+            _row(f"C-100000-{d0}", 100000.0, True, 690.0),
+            _row(f"P-100000-{d0}", 100000.0, False, 690.0),
+        ]
+        m.chains[(d0, t)] = alt
+        for r in alt:
+            m.quotes[(r["symbol"], t)] = float(r["mark"])
+        t += 60
+    ohlc = {tt: (100010.0, 99990.0, 100000.0) for tt in range(t_ent, t_step + 240, 60)}
+    res = simulate_basket(
+        m, listed, entry_ts=t_ent, signal_price=1.0, qty=1000, ohlc=ohlc, slip_mult=0.0,
+    )
+    assert res.ok and res.step1 is not None
+    assert res.step1["expiry"] == d0.isoformat()
+    assert abs(float(res.step1["strike"]) - 99200.0) < 1e-6
+    assert abs(float(res.step1["strike"]) - 100000.0) > 1.0
+    assert abs(float(res.step1["strike_gap"]) - 200.0) < 1e-6
+    assert abs(res.step_strike_gap - 200.0) < 1e-6
+
+
+def _trade_dict(res: Any, cell: str = "30m|full|ANY") -> dict[str, Any]:
+    import json
+
+    from backtest.strategies.s018_4h_trend import run_s018 as s018
+
+    legs_s = ";".join(
+        f"{'C' if lg.is_call else 'P'}/{int(lg.strike)}/{lg.expiry.isoformat()}/{lg.qty}/{lg.fill_px:.4f}/{lg.role}"
+        for lg in res.legs
+    )
+    return {
+        "cell": cell,
+        "arm": "F",
+        "entry_ist": s018.ist_str(res.entry_ts),
+        "signal_price": res.signal_price,
+        "legs": legs_s,
+        "step1": json.dumps(res.step1, default=str) if res.step1 else "",
+        "step2": json.dumps(res.step2, default=str) if res.step2 else "",
+        "redeploys": res.redeploys,
+        "exit_ist": s018.ist_str(res.exit_ts),
+        "exit_reason": res.exit_reason,
+        "gross": res.gross,
+        "fees": res.fees,
+        "net": res.net,
+        "slip": res.slip,
+        "net_with_slip": res.net_with_slip,
+        "max_gross": res.max_gross,
+        "min_gross": res.min_gross,
+        "hold_min": res.hold_min,
+        "stale_minutes": res.stale_minutes,
+        "step_strike_gap": res.step_strike_gap,
+    }
+
+
+def test_t_invariant(tmp_path: Path) -> None:
+    import csv
+    import json
+
+    d0, d1 = date(2025, 6, 2), date(2025, 6, 3)
+    listed = [d0, d1, date(2025, 6, 4)]
+    t_ent = to_unix(ist_dt(d0, 10, 0))
+    m = FakeMkt()
+    px0 = {"lc": 500.0, "lp": 500.0, "sc": 690.0, "sp": 690.0}
+    t_end = t_ent + 8 * 60
+    _fill_day(m, d0, d1, t_ent, t_end, px0, 100_000.0)
+    t_hit = t_ent + 60
+    for tt in range(t_hit, t_end + 60, 60):
+        px = dict(px0)
+        px["lc"] = 580.0
+        _put_chain(m, d1, tt, 100_000.0, px)
+        _put_chain(m, d0, tt, 100_000.0, px)
+    ohlc = {tt: (100010.0, 99990.0, 100000.0) for tt in range(t_ent, t_end + 60, 60)}
+    res_step = simulate_basket(
+        m, listed, entry_ts=t_ent, signal_price=1.0, qty=1000, ohlc=ohlc, slip_mult=0.0,
+    )
+    m2 = FakeMkt()
+    _fill_day(m2, d0, d1, t_ent, t_end, px0, 100_000.0)
+    for tt in range(t_hit, t_end + 60, 60):
+        px = dict(px0)
+        px["lc"] = 710.0
+        _put_chain(m2, d1, tt, 100_000.0, px)
+    res_tgt = simulate_basket(
+        m2, listed, entry_ts=t_ent, signal_price=1.0, qty=1000, ohlc=ohlc, slip_mult=0.0,
+    )
+    path = tmp_path / "trades.csv"
+    rows = [_trade_dict(res_step), _trade_dict(res_tgt)]
+    cols = list(rows[0].keys())
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    bad = check_trades(path)
+    assert bad == []
+    _ = json.dumps(rows[0]["step1"])

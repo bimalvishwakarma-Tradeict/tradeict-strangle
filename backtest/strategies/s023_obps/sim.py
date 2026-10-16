@@ -158,6 +158,7 @@ class BasketResult:
     hold_min: int = 0
     stale_minutes: int = 0
     steps: int = 0
+    step_strike_gap: float = 0.0
 
 
 def _mtm(lg: Leg, mark: float) -> float:
@@ -217,6 +218,30 @@ def _pick_k(ks: list[float], target: float) -> float | None:
 
 def _leg_row(rows: list[dict[str, Any]], is_call: bool, strike: float) -> dict[str, Any] | None:
     return d.row_strike(rows, bool(is_call), float(strike))
+
+
+def is_late_window(e0: date | None, t: int) -> bool:
+    """Prereg: hours_to(0DTE, t) <= 5.5 is late (boundary inclusive)."""
+    if e0 is None:
+        return True
+    return hours_to(e0, t) <= HOURS_0DTE_CUT
+
+
+def resolve_listed_strike(
+    rows: list[dict[str, Any]],
+    is_call: bool,
+    wanted: float,
+) -> tuple[float, float]:
+    """Exact listed strike, else nearest listed of that type. Never ATM."""
+    if _leg_row(rows, is_call, wanted) is not None:
+        return float(wanted), 0.0
+    ks = sorted({float(r["strike"]) for r in rows if bool(r["is_call"]) == bool(is_call)})
+    k = d.nearest_listed(ks, float(wanted))
+    if k is None:
+        k = d.nearest_listed(sorted({float(r["strike"]) for r in rows}), float(wanted))
+    if k is None:
+        return float(wanted), 0.0
+    return float(k), abs(float(k) - float(wanted))
 
 
 def simulate_basket(
@@ -356,6 +381,7 @@ def simulate_basket(
 
     fees_acc = [0.0]
     slips_acc = [0.0]
+    gaps_acc = [0.0]
     realized = 0.0
     steps = 0
     legs: list[Leg] = []
@@ -467,7 +493,7 @@ def simulate_basket(
     def main_open() -> bool:
         return any(lg.open and lg.role in ("main_call", "main_put") for lg in legs)
 
-    def profit_side(tt: int) -> tuple[bool, float]:
+    def profit_is_call(tt: int) -> bool:
         mc = next(lg for lg in legs if lg.role == "main_call")
         mp = next(lg for lg in legs if lg.role == "main_put")
 
@@ -478,9 +504,30 @@ def simulate_basket(
             xf = lg.exit_px if lg.exit_px == lg.exit_px else lg.fill_px
             return float(lg.sign) * lg.qty * CV * (float(xf) - lg.fill_px)
 
-        mtm_c = mtm_open_or_exit(mc)
-        mtm_p = mtm_open_or_exit(mp)
-        return (True, mc.strike) if mtm_c >= mtm_p else (False, mp.strike)
+        return mtm_open_or_exit(mc) >= mtm_open_or_exit(mp)
+
+    def plan_step(tt: int) -> dict[str, Any]:
+        is_call = profit_is_call(tt)
+        e0n, _ = dte0_dte1(tt, listed)
+        late = is_late_window(e0n, tt)
+        if late:
+            role = "short_call" if is_call else "short_put"
+            wanted = float(next(lg.strike for lg in legs if lg.role == role))
+            exp_s = e1
+        else:
+            role = "main_call" if is_call else "main_put"
+            wanted = float(next(lg.strike for lg in legs if lg.role == role))
+            exp_s = e0n if e0n is not None else e1
+        ch = _chain_rows(mkt, exp_s, tt)
+        k_s, gap = resolve_listed_strike(ch, is_call, wanted)
+        return {
+            "is_call": is_call,
+            "strike": k_s,
+            "wanted": wanted,
+            "exp": exp_s,
+            "gap": gap,
+            "late": late,
+        }
 
     while t <= t_end and nloop < max_minutes:
         nloop += 1
@@ -496,15 +543,13 @@ def simulate_basket(
                 pending = None
                 break
             if kind == "step":
-                is_call, strike, exp = pending["is_call"], pending["strike"], pending["exp"]
+                is_call = bool(pending["is_call"])
+                exp = pending["exp"]
+                wanted = float(pending.get("wanted", pending["strike"]))
                 ch = _chain_rows(mkt, exp, t)
+                strike, gap = resolve_listed_strike(ch, is_call, wanted)
+                gaps_acc[0] = max(gaps_acc[0], float(pending.get("gap", 0.0)), gap)
                 row = _leg_row(ch, is_call, strike) if ch else None
-                if row is None and ch:
-                    atm_now = d.atm_strike_of(ch, float(mkt.spot(t) or 0.0))
-                    if atm_now is not None:
-                        row = _leg_row(ch, is_call, float(atm_now))
-                        if row is not None:
-                            strike = float(row["strike"])
                 prem_row = row
                 sym = str(prem_row["symbol"]) if prem_row is not None else opt_symbol(is_call, strike, exp)
                 got = cache.next_px(sym, t, exp)
@@ -524,6 +569,9 @@ def simulate_basket(
                             "expiry": exp.isoformat(),
                             "qty": int(lg.qty),
                             "prem": float(lg.fill_px),
+                            "wanted_strike": wanted,
+                            "strike_gap": abs(float(lg.strike) - wanted),
+                            "late": bool(pending.get("late")),
                         }
                         ev_name = "STEP1" if steps == 0 else "STEP2"
                         if steps == 0:
@@ -548,8 +596,11 @@ def simulate_basket(
                     lg0: Leg = item
                     e_new = pending["new_exp"]
                     ch = _chain_rows(mkt, e_new, t)
-                    row = _leg_row(ch, lg0.is_call, lg0.strike) if ch else None
-                    sym = str(row["symbol"]) if row is not None else opt_symbol(lg0.is_call, lg0.strike, e_new)
+                    wanted = float(lg0.strike)
+                    k_s, gap = resolve_listed_strike(ch, lg0.is_call, wanted)
+                    gaps_acc[0] = max(gaps_acc[0], gap)
+                    row = _leg_row(ch, lg0.is_call, k_s) if ch else None
+                    sym = str(row["symbol"]) if row is not None else opt_symbol(lg0.is_call, k_s, e_new)
                     got = cache.next_px(sym, t, e_new)
                     if got is None:
                         continue
@@ -557,7 +608,7 @@ def simulate_basket(
                     qn = step_qty(Q, prem)
                     lg = open_leg(
                         lg0.role + "_rd",
-                        lg0.is_call, lg0.strike, e_new, qn, -1, ft, True,
+                        lg0.is_call, k_s, e_new, qn, -1, ft, True,
                     )
                     if lg is not None:
                         legs.append(lg)
@@ -618,42 +669,22 @@ def simulate_basket(
                             "trigger_ts": t,
                         }
             if pending is None and steps == 0 and g >= lock:
-                is_call, strike = profit_side(t)
-                e0n, _ = dte0_dte1(t, listed)
-                if e0n is not None and hours_to(e0n, t) > HOURS_0DTE_CUT:
-                    exp_s, k_s = e0n, strike
-                else:
-                    exp_s = e1
-                    ch = _chain_rows(mkt, e1, t)
-                    sp = mkt.spot(t) or spot0
-                    atm_now = d.atm_strike_of(ch, float(sp)) if ch else None
-                    k_s = float(atm_now) if atm_now is not None else strike
+                spec = plan_step(t)
+                gaps_acc[0] = max(gaps_acc[0], float(spec["gap"]))
                 pending = {
                     "kind": "step",
                     "fill_ts": t + 60,
                     "trigger_ts": t,
-                    "is_call": is_call,
-                    "strike": k_s,
-                    "exp": exp_s,
+                    **spec,
                 }
             elif pending is None and steps == 1 and g >= 2.0 * lock:
-                is_call, strike = profit_side(t)
-                e0n, _ = dte0_dte1(t, listed)
-                if e0n is not None and hours_to(e0n, t) > HOURS_0DTE_CUT:
-                    exp_s, k_s = e0n, strike
-                else:
-                    exp_s = e1
-                    ch = _chain_rows(mkt, e1, t)
-                    sp = mkt.spot(t) or spot0
-                    atm_now = d.atm_strike_of(ch, float(sp)) if ch else None
-                    k_s = float(atm_now) if atm_now is not None else strike
+                spec = plan_step(t)
+                gaps_acc[0] = max(gaps_acc[0], float(spec["gap"]))
                 pending = {
                     "kind": "step",
                     "fill_ts": t + 60,
                     "trigger_ts": t,
-                    "is_call": is_call,
-                    "strike": k_s,
-                    "exp": exp_s,
+                    **spec,
                 }
         t += 60
 
@@ -689,4 +720,5 @@ def simulate_basket(
         hold_min=int(max(0, (exit_ts - t0) // 60)),
         stale_minutes=int(cache.stale_minutes),
         steps=int(steps),
+        step_strike_gap=float(gaps_acc[0]),
     )
