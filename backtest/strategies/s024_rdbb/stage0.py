@@ -42,14 +42,17 @@ from backtest.strategies.s022_ulp_long_strangle.stage0_move_edge import (  # noq
     ist_hod_arr,
     ist_ym,
     rolling_pre_range_60,
+    sample_control_times,
 )
 from backtest.strategies.s024_rdbb.signals import (  # noqa: E402
     FILTERS,
+    NOFILTER,
     RSI_SETS,
     TFS,
     apply_move_filter,
     iter_rdbb_signals,
     parse_filter,
+    passes_move_filter,
     weekend_bucket,
 )
 
@@ -57,6 +60,8 @@ PKG_DIR = Path(__file__).resolve().parent
 RUNS_DIR = PKG_DIR / "runs"
 HORIZONS = ("1h", "2h", "4h")
 METS = ("mfe", "absmove")
+GATE_RATIO = 1.10
+GATE_T = 2.0
 
 
 def _window(month: str) -> tuple[int, int]:
@@ -92,6 +97,86 @@ def _fmt(x: Any) -> str:
             return "nan"
         return f"{x:.4f}"
     return str(x)
+
+
+def filter_pass_close_ts(bars: list[dict[str, Any]], filt: str, tf_sec: int) -> np.ndarray:
+    """TF bar close timestamps where the causal pre-move filter is true."""
+    if not bars:
+        return np.zeros(0, dtype=np.int64)
+    h = np.array([float(b["high"]) for b in bars], dtype=np.float64)
+    l = np.array([float(b["low"]) for b in bars], dtype=np.float64)
+    c = np.array([float(b["close"]) for b in bars], dtype=np.float64)
+    parsed = parse_filter(filt)
+    out: list[int] = []
+    for j, b in enumerate(bars):
+        if parsed is not None and not passes_move_filter(h, l, c, j, filt):
+            continue
+        out.append(int(b["time"]) + int(tf_sec))
+    return np.asarray(out, dtype=np.int64)
+
+
+def filtctrl_events(
+    f_events: list[dict[str, Any]],
+    pool_close_ts: np.ndarray,
+    signal_ts: np.ndarray,
+    rng: np.random.Generator,
+    win_lo: int,
+    win_hi: int,
+    tf: str,
+    rsi_set: str,
+    filt: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Count-matched TF-bar controls: same filter, no S024 signal, same IST hour, ±60m off F."""
+    pool = np.asarray(pool_close_ts, dtype=np.int64)
+    sig = np.asarray(signal_ts, dtype=np.int64)
+    f_ts = np.array([int(e["signal_ts"]) for e in f_events], dtype=np.int64)
+    if pool.size == 0:
+        return [], len(f_events)
+    in_win = (pool >= int(win_lo)) & (pool < int(win_hi))
+    if sig.size:
+        sig_set = set(int(x) for x in sig.tolist())
+        not_sig = np.array([int(t) not in sig_set for t in pool], dtype=bool)
+    else:
+        not_sig = np.ones(int(pool.size), dtype=bool)
+    near = forbidden_mask(pool, f_ts, 3600)
+    ok = pool[in_win & not_sig & (~near)]
+    hod_ok = ist_hod_arr(ok) if ok.size else np.zeros(0, dtype=np.int16)
+    by_hod: dict[int, np.ndarray] = {}
+    out: list[dict[str, Any]] = []
+    n_miss = 0
+    for i, e in enumerate(f_events):
+        hod = int(e.get("hod") if e.get("hod") is not None else ist_hod(int(e["signal_ts"])))
+        if hod not in by_hod:
+            by_hod[hod] = ok[hod_ok == hod] if ok.size else np.zeros(0, dtype=np.int64)
+        picked = sample_control_times(by_hod[hod], 1, rng)
+        if picked.size == 0:
+            n_miss += 1
+            continue
+        ct = int(picked[0])
+        out.append(
+            {
+                "event_id": f"filtctrl|{tf}|{rsi_set}|{filt}|{i}|{ct}",
+                "arm": "filtctrl",
+                "tf": tf,
+                "mode": rsi_set,
+                "signal_ts": ct,
+                "signal_ist": s018.ist_str(ct),
+                "hod": ist_hod(ct),
+                "ym": ist_ym(ct),
+                "src_event": e.get("event_id", ""),
+            }
+        )
+    return out, n_miss
+
+
+def _rt_pass(cell: dict[str, Any], ctrl: str) -> bool:
+    for met in METS:
+        for hk in ("2h", "4h"):
+            r = float(cell.get(f"F_{ctrl}_{met}_{hk}", float("nan")))
+            t = float(cell.get(f"t_{ctrl}_{met}_{hk}", float("nan")))
+            if math.isfinite(r) and math.isfinite(t) and r >= GATE_RATIO and t >= GATE_T:
+                return True
+    return False
 
 
 def _tag_controls(
@@ -132,13 +217,20 @@ def _tag_controls(
     return out
 
 
-def _cell_stats(f_rows: list[dict[str, Any]], v_rows: list[dict[str, Any]], c2_rows: list[dict[str, Any]], months: list[str]) -> dict[str, Any]:
+def _cell_stats(
+    f_rows: list[dict[str, Any]],
+    v_rows: list[dict[str, Any]],
+    c2_rows: list[dict[str, Any]],
+    fc_rows: list[dict[str, Any]],
+    months: list[str],
+) -> dict[str, Any]:
     cell: dict[str, Any] = {
         "n": len(f_rows),
         "n_WEEKDAY": sum(1 for e in f_rows if e.get("bucket") == "WEEKDAY"),
         "n_WEEKEND": sum(1 for e in f_rows if e.get("bucket") == "WEEKEND"),
         "n_C2": len(c2_rows),
         "n_VOLCTRL": len(v_rows),
+        "n_FILTCTRL": len(fc_rows),
     }
     for ym in months:
         ymi = int(ym.replace("-", ""))
@@ -155,13 +247,17 @@ def _cell_stats(f_rows: list[dict[str, Any]], v_rows: list[dict[str, Any]], c2_r
             fv = [float(e.get(key, float("nan"))) for e in f_rows]
             vv = [float(e.get(key, float("nan"))) for e in v_rows]
             cv = [float(e.get(key, float("nan"))) for e in c2_rows]
+            fcv = [float(e.get(key, float("nan"))) for e in fc_rows]
             cell[f"F_{met}_{hk}"] = float(np.nanmean(fv)) if fv else float("nan")
             cell[f"VOLCTRL_{met}_{hk}"] = float(np.nanmean(vv)) if vv else float("nan")
             cell[f"C2_{met}_{hk}"] = float(np.nanmean(cv)) if cv else float("nan")
+            cell[f"FILTCTRL_{met}_{hk}"] = float(np.nanmean(fcv)) if fcv else float("nan")
             cell[f"F_VOLCTRL_{met}_{hk}"] = ratio_means(fv, vv)
             cell[f"t_VOLCTRL_{met}_{hk}"] = welch_t(fv, vv)
             cell[f"F_C2_{met}_{hk}"] = ratio_means(fv, cv)
             cell[f"t_C2_{met}_{hk}"] = welch_t(fv, cv)
+            cell[f"F_FILTCTRL_{met}_{hk}"] = ratio_means(fv, fcv)
+            cell[f"t_FILTCTRL_{met}_{hk}"] = welch_t(fv, fcv)
     return cell
 
 
@@ -195,7 +291,7 @@ def main() -> None:
         "stage0",
         args,
         month=",".join(months),
-        prereg_note="S024 RDBB stage0; RSI-div + BB break; pre-move filter grid; vs VOLCTRL/C2; no occupancy",
+        prereg_note="S024 RDBB stage0; RSI-div + BB break; pre-move filter; FILTCTRL/VOLCTRL/C2; no occupancy",
         folder=folder,
     )
     print(f"archive folder={archive.folder}", flush=True)
@@ -224,8 +320,10 @@ def main() -> None:
     by_cell_f: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     by_cell_v: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     by_cell_c2: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    by_cell_fc: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     event_rows: list[dict[str, Any]] = []
     rng = np.random.default_rng(SEED)
+    pool_cache: dict[tuple[str, str], np.ndarray] = {}
 
     month_bounds = {ym: _window(ym) for ym in months}
     for tf in tfs:
@@ -276,13 +374,26 @@ def main() -> None:
                     )
                     c2_ev = _tag_controls(c2_raw, rsi_set, filt, close_1m, ts, h, l, c, "C2")
                     v_ev = _tag_controls(vol_raw, rsi_set, filt, close_1m, ts, h, l, c, "VOLCTRL")
+                    if filt == NOFILTER:
+                        fc_raw = c2_raw
+                    else:
+                        pk = (tf, filt)
+                        if pk not in pool_cache:
+                            pool_cache[pk] = filter_pass_close_ts(bars, filt, tf_sec)
+                        raw_ts = np.array([int(e["signal_ts"]) for e in raw], dtype=np.int64)
+                        fc_raw, _fm = filtctrl_events(
+                            f_ev, pool_cache[pk], raw_ts, rng, start, cutoff, tf, rsi_set, filt,
+                        )
+                    fc_ev = _tag_controls(fc_raw, rsi_set, filt, close_1m, ts, h, l, c, "FILTCTRL")
                     key = (tf, rsi_set, filt)
                     by_cell_f[key].extend(f_ev)
                     by_cell_c2[key].extend(c2_ev)
                     by_cell_v[key].extend(v_ev)
+                    by_cell_fc[key].extend(fc_ev)
                     event_rows.extend(f_ev)
                     event_rows.extend(c2_ev)
                     event_rows.extend(v_ev)
+                    event_rows.extend(fc_ev)
 
     cells: list[dict[str, Any]] = []
     for tf in tfs:
@@ -290,8 +401,14 @@ def main() -> None:
             for filt in filts:
                 key = (tf, rsi_set, filt)
                 row = {"tf": tf, "rsi_set": rsi_set, "filter": filt}
-                row.update(_cell_stats(by_cell_f[key], by_cell_v[key], by_cell_c2[key], months))
+                row.update(
+                    _cell_stats(
+                        by_cell_f[key], by_cell_v[key], by_cell_c2[key], by_cell_fc[key], months,
+                    )
+                )
                 cells.append(row)
+    n_vol = sum(1 for r in cells if _rt_pass(r, "VOLCTRL"))
+    n_fc = sum(1 for r in cells if _rt_pass(r, "FILTCTRL"))
 
     ev_cols = [
         "arm", "event_id", "tf", "rsi_set", "filter", "side", "bucket", "ym",
@@ -315,6 +432,8 @@ def main() -> None:
     lines: list[str] = [
         "S024 RDBB stage0 (underlying, raw counts, no occupancy)",
         f"months={','.join(months)} cells={len(cells)} tfs={tfs} rsi={rsi_sets} filters={len(filts)}",
+        f"cells F/VOLCTRL>=1.10 & t>=2 (mfe|absmove, 2h or 4h) = {n_vol}/{len(cells)}",
+        f"cells F/FILTCTRL>=1.10 & t>=2 (mfe|absmove, 2h or 4h) = {n_fc}/{len(cells)}",
         f"folder={archive.folder}",
         "",
         "=== nofilter cells ===",
@@ -322,7 +441,7 @@ def main() -> None:
     hdr = (
         f"{'tf':>5} {'rsi':>4} {'n':>5} "
         f"{'n06':>5} {'n07':>5} {'WD':>5} {'WE':>5} "
-        f"{'F/V mfe2h':>11} {'tV 2h':>8} {'F/C2 mfe2h':>12} {'tC2 2h':>8} "
+        f"{'F/V mfe2h':>11} {'tV 2h':>8} {'F/FC mfe2h':>12} {'tFC 2h':>8} "
         f"{'F/V mfe4h':>11} {'tV 4h':>8}"
     )
     lines.append(hdr)
@@ -334,17 +453,21 @@ def main() -> None:
             f"{int(row.get('n_2025-06', 0)):>5} {int(row.get('n_2025-07', 0)):>5} "
             f"{int(row['n_WEEKDAY']):>5} {int(row['n_WEEKEND']):>5} "
             f"{_fmt(row['F_VOLCTRL_mfe_2h']):>11} {_fmt(row['t_VOLCTRL_mfe_2h']):>8} "
-            f"{_fmt(row['F_C2_mfe_2h']):>12} {_fmt(row['t_C2_mfe_2h']):>8} "
+            f"{_fmt(row['F_FILTCTRL_mfe_2h']):>12} {_fmt(row['t_FILTCTRL_mfe_2h']):>8} "
             f"{_fmt(row['F_VOLCTRL_mfe_4h']):>11} {_fmt(row['t_VOLCTRL_mfe_4h']):>8}"
         )
     lines.append("")
     lines.append("=== all cells (n) ===")
-    lines.append(f"{'tf':>5} {'rsi':>4} {'filter':>10} {'n':>5} {'WD':>5} {'WE':>5} {'F/V2h':>8} {'tV2h':>8}")
+    lines.append(
+        f"{'tf':>5} {'rsi':>4} {'filter':>10} {'n':>5} {'nFC':>5} "
+        f"{'F/V2h':>8} {'tV2h':>8} {'F/FC2h':>8} {'tFC2h':>8}"
+    )
     for row in cells:
         lines.append(
             f"{row['tf']:>5} {row['rsi_set']:>4} {row['filter']:>10} "
-            f"{int(row['n']):>5} {int(row['n_WEEKDAY']):>5} {int(row['n_WEEKEND']):>5} "
-            f"{_fmt(row['F_VOLCTRL_mfe_2h']):>8} {_fmt(row['t_VOLCTRL_mfe_2h']):>8}"
+            f"{int(row['n']):>5} {int(row['n_FILTCTRL']):>5} "
+            f"{_fmt(row['F_VOLCTRL_mfe_2h']):>8} {_fmt(row['t_VOLCTRL_mfe_2h']):>8} "
+            f"{_fmt(row['F_FILTCTRL_mfe_2h']):>8} {_fmt(row['t_FILTCTRL_mfe_2h']):>8}"
         )
     txt = "\n".join(lines) + "\n"
     (archive.folder / "summary.txt").write_text(txt, encoding="utf-8")

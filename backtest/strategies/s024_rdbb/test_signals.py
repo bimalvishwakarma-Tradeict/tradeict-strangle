@@ -13,8 +13,18 @@ from backtest.strategies.s024_rdbb.signals import (
     bb_side_ok,
     bollinger,
     iter_rdbb_signals,
+    parse_filter,
     passes_move_filter,
     weekend_bucket,
+)
+from backtest.strategies.s022_ulp_long_strangle.stage0_move_edge import (  # noqa: E402
+    SEED,
+    ist_hod,
+    ist_ym,
+)
+from backtest.strategies.s024_rdbb.stage0 import (  # noqa: E402
+    filter_pass_close_ts,
+    filtctrl_events,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -136,3 +146,80 @@ def test_t5_weekend_bucket_ist() -> None:
     assert weekend_bucket(unix(2025, 6, 20, 12, 0)) == "WEEKEND"
     assert weekend_bucket(unix(2025, 6, 22, 3, 59)) == "WEEKEND"
     assert weekend_bucket(unix(2025, 6, 22, 4, 0)) == "WEEKDAY"
+
+
+def _ist_unix(y: int, m: int, d: int, hh: int, mm: int) -> int:
+    return int(datetime(y, m, d, hh, mm, tzinfo=IST).timestamp())
+
+
+def _range_bars() -> list[dict[str, Any]]:
+    """5m bars, IST hour 10, N=4 X=1% true (high-low)/close = 1%."""
+    days = (
+        (2025, 6, 2), (2025, 6, 3), (2025, 6, 4),
+        (2025, 7, 2), (2025, 7, 3), (2025, 7, 4),
+    )
+    bars: list[dict[str, Any]] = []
+    for y, mo, d in days:
+        for mm in (55, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50):
+            hh = 9 if mm == 55 else 10
+            o_ts = _ist_unix(y, mo, d, hh, mm)
+            bars.append(
+                {
+                    "time": o_ts,
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 100.0,
+                    "close": 100.0,
+                }
+            )
+    return bars
+
+
+def test_t_filtctrl() -> None:
+    bars = _range_bars()
+    tf_sec = 300
+    filt = "N4_X1"
+    assert parse_filter(filt) == (4, 1.0)
+    h = np.array([float(b["high"]) for b in bars], dtype=np.float64)
+    l = np.array([float(b["low"]) for b in bars], dtype=np.float64)
+    c = np.array([float(b["close"]) for b in bars], dtype=np.float64)
+    pool = filter_pass_close_ts(bars, filt, tf_sec)
+    assert pool.size > 8
+    close_to_j = {int(b["time"]) + tf_sec: i for i, b in enumerate(bars)}
+    # F: one June, one July, both IST hour 10, on filter-true bars.
+    f_june_ts = int(bars[5]["time"]) + tf_sec
+    f_july_ts = int(bars[5 + 36]["time"]) + tf_sec
+    assert ist_hod(f_june_ts) == 10
+    assert ist_hod(f_july_ts) == 10
+    assert ist_ym(f_june_ts) == 202506
+    assert ist_ym(f_july_ts) == 202507
+    extra_sig = int(bars[20]["time"]) + tf_sec  # June 3, not an F event
+    signal_ts = np.array([f_june_ts, extra_sig, f_july_ts], dtype=np.int64)
+    f_june = [{"signal_ts": f_june_ts, "event_id": "f_june", "hod": 10}]
+    f_july = [{"signal_ts": f_july_ts, "event_id": "f_july", "hod": 10}]
+    rng = np.random.default_rng(SEED)
+    jun_lo = _ist_unix(2025, 6, 1, 0, 0)
+    jun_hi = _ist_unix(2025, 7, 1, 0, 0)
+    jul_lo = _ist_unix(2025, 7, 1, 0, 0)
+    jul_hi = _ist_unix(2025, 8, 1, 0, 0)
+    fc_j, miss_j = filtctrl_events(
+        f_june, pool, signal_ts, rng, jun_lo, jun_hi, "5m", "R3", filt,
+    )
+    fc_u, miss_u = filtctrl_events(
+        f_july, pool, signal_ts, rng, jul_lo, jul_hi, "5m", "R3", filt,
+    )
+    assert miss_j == 0 and miss_u == 0
+    assert len(fc_j) == len(f_june) == 1
+    assert len(fc_u) == len(f_july) == 1
+    assert ist_ym(int(fc_j[0]["signal_ts"])) == 202506
+    assert ist_ym(int(fc_u[0]["signal_ts"])) == 202507
+    f_all = [f_june_ts, f_july_ts]
+    sig_set = {int(x) for x in signal_ts.tolist()}
+    for ev in fc_j + fc_u:
+        ct = int(ev["signal_ts"])
+        j = close_to_j[ct]
+        assert passes_move_filter(h, l, c, j, filt) is True
+        assert ct not in sig_set
+        for ft in f_all:
+            assert abs(ct - int(ft)) > 3600
+        assert int(ev["hod"]) == 10
