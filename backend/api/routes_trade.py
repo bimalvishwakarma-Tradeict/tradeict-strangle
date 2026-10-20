@@ -1919,502 +1919,516 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
         pass
 
     for state in list(bot_engine.position_tracker.get_all_active()):
-        call_open = str(state.call_leg.status).lower() == "open"
-        put_open = str(state.put_leg.status).lower() == "open"
-        # Safety: both shorts flat → close orphan wings then drop from tracker
-        if not call_open and not put_open:
-            try:
-                await bot_engine.maybe_close_orphaned_wings(
-                    trade_id=int(state.trade_id),
-                    db=db,
-                    reason=ExitReason.WINGS_ORPHANED.value,
+        try:
+            call_open = str(state.call_leg.status).lower() == "open"
+            put_open = str(state.put_leg.status).lower() == "open"
+            # Safety: both shorts flat → close orphan wings then drop from tracker
+            if not call_open and not put_open:
+                try:
+                    await bot_engine.maybe_close_orphaned_wings(
+                        trade_id=int(state.trade_id),
+                        db=db,
+                        reason=ExitReason.WINGS_ORPHANED.value,
+                    )
+                except Exception as orphan_exc:
+                    logger.warning(
+                        "orphan wing hook on active-list failed trade=%s: %s",
+                        state.trade_id,
+                        orphan_exc,
+                    )
+                # Re-check: if wings still open, keep showing basket
+                wing_open = (
+                    db.query(Leg)
+                    .filter(
+                        Leg.trade_id == state.trade_id,
+                        Leg.status == "open",
+                        Leg.leg_type.in_(("wing_call", "wing_put")),
+                    )
+                    .count()
                 )
-            except Exception as orphan_exc:
-                logger.warning(
-                    "orphan wing hook on active-list failed trade=%s: %s",
-                    state.trade_id,
-                    orphan_exc,
+                if wing_open > 0:
+                    continue
+                bot_engine.position_tracker.mark_closed(state.trade_id)
+                await ws_manager.broadcast(
+                    {
+                        "type": "TRADE_CLOSED",
+                        "trade_id": state.trade_id,
+                        "reason": ExitReason.MANUAL_LEG_CLOSE.value,
+                        "message": "Basket closed — no open short legs",
+                    }
                 )
-            # Re-check: if wings still open, keep showing basket
-            wing_open = (
+                continue
+            if str(getattr(state.trade, "status", "")).lower() != TradeStatus.ACTIVE.value:
+                bot_engine.position_tracker.mark_closed(state.trade_id)
+                continue
+
+            call_prem = float(state.last_call_premium or state.call_leg.initial_premium)
+            put_prem = float(state.last_put_premium or state.put_leg.initial_premium)
+            calculated = float(state.last_pnl)
+            delta_mtm = float(state.last_delta_mtm)
+            call_mtm = 0.0
+            put_mtm = 0.0
+            wing_call_mtm = 0.0
+            wing_put_mtm = 0.0
+            wing_call_prem = 0.0
+            wing_put_prem = 0.0
+
+            from backend.core.basket_legs import basket_legs as _basket_legs
+
+            bl = _basket_legs(state.trade, db)
+            wing_call_leg = bl.get("wing_call")
+            wing_put_leg = bl.get("wing_put")
+            wing_call_open = (
+                wing_call_leg is not None
+                and str(getattr(wing_call_leg, "status", "")).lower() == "open"
+            )
+            wing_put_open = (
+                wing_put_leg is not None
+                and str(getattr(wing_put_leg, "status", "")).lower() == "open"
+            )
+            if wing_call_leg is not None:
+                wing_call_prem = float(wing_call_leg.initial_premium or 0)
+            if wing_put_leg is not None:
+                wing_put_prem = float(wing_put_leg.initial_premium or 0)
+
+            if client is not None:
+                try:
+                    pids = []
+                    if call_open and int(state.call_leg.product_id) > 0:
+                        pids.append(int(state.call_leg.product_id))
+                    if put_open and int(state.put_leg.product_id) > 0:
+                        pids.append(int(state.put_leg.product_id))
+                    if wing_call_open and int(wing_call_leg.product_id) > 0:
+                        pids.append(int(wing_call_leg.product_id))
+                    if wing_put_open and int(wing_put_leg.product_id) > 0:
+                        pids.append(int(wing_put_leg.product_id))
+                    if pids:
+                        upnl_data = await client.get_positions_upnl(pids)
+                        call_pid = int(state.call_leg.product_id)
+                        put_pid = int(state.put_leg.product_id)
+                        call_row = upnl_data.get(call_pid) or {}
+                        put_row = upnl_data.get(put_pid) or {}
+                        if call_open and call_row:
+                            call_mtm = float(call_row.get("upnl") or 0.0)
+                            if float(call_row.get("best_offer") or 0) > 0:
+                                call_prem = float(call_row["best_offer"])
+                        elif call_open:
+                            call_prem = float(
+                                await client.get_short_exit_price(
+                                    str(state.call_leg.symbol)
+                                )
+                            )
+                        else:
+                            call_prem = float(
+                                state.call_leg.exit_premium
+                                or state.call_leg.initial_premium
+                                or 0.0
+                            )
+                        if put_open and put_row:
+                            put_mtm = float(put_row.get("upnl") or 0.0)
+                            if float(put_row.get("best_offer") or 0) > 0:
+                                put_prem = float(put_row["best_offer"])
+                        elif put_open:
+                            put_prem = float(
+                                await client.get_short_exit_price(
+                                    str(state.put_leg.symbol)
+                                )
+                            )
+                        else:
+                            put_prem = float(
+                                state.put_leg.exit_premium
+                                or state.put_leg.initial_premium
+                                or 0.0
+                            )
+                        if wing_call_open:
+                            wc_pid = int(wing_call_leg.product_id)
+                            wc_row = upnl_data.get(wc_pid) or {}
+                            if wc_row:
+                                wing_call_mtm = float(wc_row.get("upnl") or 0.0)
+                                best = float(wc_row.get("best_bid") or wc_row.get("best_offer") or 0)
+                                if best > 0:
+                                    wing_call_prem = best
+                            else:
+                                try:
+                                    wing_call_prem = float(
+                                        await client.get_long_exit_price(
+                                            str(wing_call_leg.symbol)
+                                        )
+                                        or wing_call_prem
+                                    )
+                                except Exception:
+                                    pass
+                        if wing_put_open:
+                            wp_pid = int(wing_put_leg.product_id)
+                            wp_row = upnl_data.get(wp_pid) or {}
+                            if wp_row:
+                                wing_put_mtm = float(wp_row.get("upnl") or 0.0)
+                                best = float(wp_row.get("best_bid") or wp_row.get("best_offer") or 0)
+                                if best > 0:
+                                    wing_put_prem = best
+                            else:
+                                try:
+                                    wing_put_prem = float(
+                                        await client.get_long_exit_price(
+                                            str(wing_put_leg.symbol)
+                                        )
+                                        or wing_put_prem
+                                    )
+                                except Exception:
+                                    pass
+                        delta_mtm = call_mtm + put_mtm + wing_call_mtm + wing_put_mtm
+                        bot_engine.position_tracker.update_premiums(
+                            state.trade_id, call_prem, put_prem, calculated
+                        )
+                        bot_engine.position_tracker.update_delta_mtm(
+                            state.trade_id, delta_mtm
+                        )
+                except Exception as exc:
+                    logger.warning("Live UPL@offer refresh failed trade=%s: %s", state.trade_id, exc)
+
+            realized = float(getattr(state.trade, "realized_pnl", None) or 0.0)
+            target = float(state.trade.profit_target_usd or 0)
+            display_total = realized + delta_mtm
+            pnl_pct = (display_total / target * 100.0) if target else 0.0
+            settling = get_settling_info_for_trade(state.trade)
+
+            trigger_pct = bot_engine.strategy.get_current_trigger_pct(state.trade, db)
+            call_trig_pct = bot_engine.strategy.get_trigger_for_leg(
+                call_prem, state.trade, db
+            )
+            put_trig_pct = bot_engine.strategy.get_trigger_for_leg(
+                put_prem, state.trade, db
+            )
+            premium_slabs = None
+            if str(getattr(state.trade, "trigger_mode", "") or "").lower() == "premium":
+                premium_slabs = bot_engine.strategy.get_slabs(state.trade.id, db)
+            if client is not None and call_open and put_open:
+                try:
+                    await bot_engine._estimate_replacements(state, call_prem, put_prem)
+                except Exception:
+                    pass
+
+            adj_count = (
+                db.query(Adjustment).filter(Adjustment.trade_id == state.trade_id).count()
+            )
+            last_adj = (
+                db.query(Adjustment)
+                .filter(Adjustment.trade_id == state.trade_id)
+                .order_by(Adjustment.timestamp.desc())
+                .first()
+            )
+            last_adjustment = None
+            if last_adj is not None:
+                last_adjustment = {
+                    "timestamp": _to_ist_iso(last_adj.timestamp),
+                    "leg_type": last_adj.leg_type,
+                    "old_strike": last_adj.old_strike,
+                    "new_strike": last_adj.new_strike,
+                    "trigger_pct_reached": last_adj.trigger_pct_reached,
+                    "slab_used": last_adj.slab_used,
+                }
+
+            call_snap = _leg_snapshot(state.call_leg, call_prem)
+            put_snap = _leg_snapshot(state.put_leg, put_prem)
+            if call_open:
+                call_snap["leg_pnl"] = round(call_mtm, 4)
+            if put_open:
+                put_snap["leg_pnl"] = round(put_mtm, 4)
+
+            all_legs = (
                 db.query(Leg)
                 .filter(
                     Leg.trade_id == state.trade_id,
-                    Leg.status == "open",
-                    Leg.leg_type.in_(("wing_call", "wing_put")),
+                    Leg.is_bot_managed.is_(True),
                 )
-                .count()
+                .all()
             )
-            if wing_open > 0:
-                continue
-            bot_engine.position_tracker.mark_closed(state.trade_id)
-            await ws_manager.broadcast(
+            fee_fields = await _fee_fields_for_basket(
+                client=client,
+                db=db,
+                trade=state.trade,
+                all_legs=all_legs,
+                open_call=state.call_leg if call_open else None,
+                open_put=state.put_leg if put_open else None,
+                call_offer=call_prem,
+                put_offer=put_prem,
+            )
+            call_snap = _leg_snapshot(state.call_leg, call_prem)
+            put_snap = _leg_snapshot(state.put_leg, put_prem)
+            if call_open:
+                call_snap["leg_pnl"] = round(call_mtm, 4)
+                call_snap["est_exit_fee_usd"] = round(float(fee_fields["call_est_exit_fee"]), 6)
+            else:
+                call_snap["est_exit_fee_usd"] = 0.0
+            if put_open:
+                put_snap["leg_pnl"] = round(put_mtm, 4)
+                put_snap["est_exit_fee_usd"] = round(float(fee_fields["put_est_exit_fee"]), 6)
+            else:
+                put_snap["est_exit_fee_usd"] = 0.0
+
+            wing_call_snap = None
+            wing_put_snap = None
+            if wing_call_leg is not None:
+                wing_call_snap = _leg_snapshot(wing_call_leg, wing_call_prem)
+                if wing_call_open:
+                    wing_call_snap["leg_pnl"] = round(wing_call_mtm, 4)
+            if wing_put_leg is not None:
+                wing_put_snap = _leg_snapshot(wing_put_leg, wing_put_prem)
+                if wing_put_open:
+                    wing_put_snap["leg_pnl"] = round(wing_put_mtm, 4)
+
+            from backend.core.basket_legs import build_wing_credit_fields
+
+            wing_fields = build_wing_credit_fields(
+                trade=state.trade,
+                short_call=state.call_leg,
+                short_put=state.put_leg,
+                wing_call=wing_call_leg,
+                wing_put=wing_put_leg,
+                call_premium=call_prem,
+                put_premium=put_prem,
+                wing_call_premium=wing_call_prem if wing_call_leg else None,
+                wing_put_premium=wing_put_prem if wing_put_leg else None,
+            )
+
+            # Gross MTM = realized + Delta UPNL (premium-only; fees NOT included)
+            gross_mtm = display_total
+            fees_paid = float(fee_fields["fees_paid"])
+            est_exit = float(fee_fields["est_exit_fees"])
+            total_fees = float(fee_fields["total_expected_fees"])
+            from backend.core.fees import (
+                audit_mtm_source_mismatch,
+                basket_net_mtm_snapshot,
+                estimate_expected_exit_spread_usd,
+                get_entry_spread_for_sl,
+            )
+            from backend.core.spread_utils import get_exit_spread_pct
+
+            expected_exit_spread = 0.0
+            spread_settings = get_or_create_auto_settings(db)
+            for leg in all_legs:
+                if str(getattr(leg, "status", "") or "").lower() != "open":
+                    continue
+                lt = str(leg.leg_type or "").lower()
+                if lt == "call":
+                    offer = float(call_prem)
+                elif lt == "put":
+                    offer = float(put_prem)
+                elif lt == "wing_call":
+                    offer = float(wing_call_prem or getattr(leg, "initial_premium", 0) or 0)
+                elif lt == "wing_put":
+                    offer = float(wing_put_prem or getattr(leg, "initial_premium", 0) or 0)
+                else:
+                    offer = float(getattr(leg, "initial_premium", 0) or 0)
+                if offer > 0:
+                    # Same exit-spread basis as monitor loop (settings pct, not fixed 0.5%)
+                    try:
+                        pct, _src = await get_exit_spread_pct(
+                            str(leg.symbol or ""),
+                            spread_settings,
+                            "basket",
+                            client=client,
+                        )
+                        spread_factor = float(pct) / 100.0
+                    except Exception:
+                        spread_factor = 0.005
+                    expected_exit_spread += estimate_expected_exit_spread_usd(
+                        offer_price=offer,
+                        quantity=int(leg.quantity or 0),
+                        spread_factor=spread_factor,
+                    )
+
+            entry_spread_for_sl = get_entry_spread_for_sl(state.trade)
+            gross_mtm_for_stoploss = float(gross_mtm) + entry_spread_for_sl
+
+            mtm_snap = basket_net_mtm_snapshot(
+                gross_mtm=gross_mtm,
+                fees_paid=fees_paid,
+                est_exit_fees=est_exit,
+                slippage_pct=getattr(state.trade, "slippage_pct", None) or 2.0,
+                expected_exit_spread_usd=expected_exit_spread,
+            )
+            net_mtm = float(mtm_snap["net_mtm"])
+            slip_fields = mtm_snap
+
+            # Keep tracker in lockstep with API so top-card / slave overview match
+            tracker_net = float(getattr(state, "last_net_mtm", 0.0) or 0.0)
+            if getattr(state, "last_net_mtm_computed_at", None) is not None:
+                audit_mtm_source_mismatch(
+                    int(state.trade_id),
+                    "api_trade_active",
+                    net_mtm,
+                    "position_tracker",
+                    tracker_net,
+                )
+            bot_engine.position_tracker.update_net_mtm(
+                int(state.trade_id),
+                net_mtm,
+                computed_at=mtm_snap.get("computed_at"),
+                snapshot=mtm_snap,
+            )
+
+            plan = bot_engine.build_bot_plan_fields(
+                state,
+                call_prem,
+                put_prem,
+                float(trigger_pct),
+                call_trigger_pct=float(call_trig_pct),
+                put_trigger_pct=float(put_trig_pct),
+                premium_slabs=premium_slabs,
+                net_mtm=net_mtm,
+                gross_mtm_for_stoploss=gross_mtm_for_stoploss,
+                conversion_min_premium=conversion_min_premium,
+                conversion_equality_pct=conversion_equality_pct,
+                conversion_enabled=conversion_enabled,
+            )
+
+            leg_history = _basket_leg_history(db, state.trade_id)
+            open_count = sum(1 for x in (call_open, put_open) if x)
+
+            row: dict[str, Any] = {
+                "trade_id": state.trade_id,
+                "basket_number": getattr(state.trade, "basket_number", None)
+                or state.trade_id,
+                "underlying": state.trade.underlying,
+                "expiry_date": str(state.trade.expiry_date),
+                "expiry_label": get_dte_label(state.trade.expiry_date),
+                "status": state.trade.status,
+                "is_demo": bool(getattr(state.trade, "is_demo", False)),
+                "open_leg_count": open_count,
+                "call_leg": call_snap,
+                "put_leg": put_snap,
+                "wing_call": wing_call_snap,
+                "wing_put": wing_put_snap,
+                "net_credit_entry": wing_fields["net_credit_entry"],
+                "net_credit_now": wing_fields["net_credit_now"],
+                "wing_premium_paid_usd": wing_fields["wing_premium_paid_usd"],
+                "max_loss_usd": wing_fields["max_loss_usd"],
+                "leg_history": leg_history,
+                "call_premium": call_prem,
+                "put_premium": put_prem,
+                "wing_call_premium": wing_call_prem if wing_call_leg else None,
+                "wing_put_premium": wing_put_prem if wing_put_leg else None,
+                "call_offer": call_prem,
+                "put_offer": put_prem,
+                "call_change_pct": call_snap["change_pct"],
+                "put_change_pct": put_snap["change_pct"],
+                "calculated_pnl": round(float(calculated), 4),
+                "delta_mtm_pnl": round(float(delta_mtm), 4),
+                "delta_upnl": round(float(delta_mtm), 4),
+                "call_delta_mtm": round(float(call_mtm), 4),
+                "put_delta_mtm": round(float(put_mtm), 4),
+                "wing_call_upnl": round(float(wing_call_mtm), 4),
+                "wing_put_upnl": round(float(wing_put_mtm), 4),
+                "call_upnl": round(float(call_mtm), 4),
+                "put_upnl": round(float(put_mtm), 4),
+                "realized_pnl": round(float(realized), 4),
+                "unrealized_pnl": round(float(delta_mtm), 4),
+                "total_pnl": display_total,
+                "gross_mtm": gross_mtm,
+                "gross_mtm_for_stoploss": round(gross_mtm_for_stoploss, 4),
+                "entry_spread_for_sl": round(entry_spread_for_sl, 4),
+                "expected_exit_spread_usd": round(expected_exit_spread, 4),
+                "fees_paid": fees_paid,
+                "est_exit_fees": est_exit,
+                "total_expected_fees": total_fees,
+                "underlying_price": (
+                    float(fee_fields.get("btc_index_for_fees") or 0)
+                    or float(getattr(bot_engine, "_btc_spot", 0) or 0)
+                    or None
+                ),
+                "call_entry_fee": fee_fields.get("call_entry_fee"),
+                "put_entry_fee": fee_fields.get("put_entry_fee"),
+                "call_est_exit_fee": fee_fields.get("call_est_exit_fee"),
+                "put_est_exit_fee": fee_fields.get("put_est_exit_fee"),
+                "profit_target_usd": target,
+                "stoploss_usd": float(state.trade.stoploss_usd),
+                "initial_max_profit": float(
+                    getattr(state.trade, "initial_max_profit", None) or 0
+                )
+                or None,
+                "tp_pct": float(getattr(state.trade, "tp_pct", None) or 50.0),
+                "sl_pct": float(getattr(state.trade, "sl_pct", None) or 100.0),
+                "target_source": getattr(state.trade, "target_source", None),
+                "hedge_theta_at_entry": (
+                    float(getattr(state.trade, "hedge_theta_at_entry", None))
+                    if getattr(state.trade, "hedge_theta_at_entry", None) is not None
+                    else None
+                ),
+                "pnl_pct_of_target": round(pnl_pct, 2),
+                "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
+                **long_trade_public_fields(state.trade),
+                "adjustment_count": int(
+                    getattr(state.trade, "adjustment_count", None) or adj_count or 0
+                ),
+                "max_adjustments_per_basket": max_adjustments_per_basket,
+                "adjustments_remaining": (
+                    max(
+                        0,
+                        int(max_adjustments_per_basket)
+                        - int(
+                            getattr(state.trade, "adjustment_count", None)
+                            or adj_count
+                            or 0
+                        ),
+                    )
+                    if max_adjustments_per_basket is not None
+                    else None
+                ),
+                "conversion_mode_enabled": conversion_mode_enabled,
+                # Adj Engine v2 (read-only display for Bot Monitoring Plan)
+                "adjustment_mode": adjustment_mode,
+                "adj_b_trigger_pct": round(adj_b_trigger_pct, 4),
+                "min_short_gap_points": round(min_short_gap_points, 4),
+                "last_adjustment": last_adjustment,
+                "is_settling": settling["is_settling"],
+                "settling_ends_at": settling["settling_ends_at"],
+                "settling_minutes_left": settling["settling_minutes_left"],
+                "settling_source": settling.get("settling_source", "none"),
+                "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
+                "in_conversion_mode": bool(
+                    getattr(state.trade, "in_conversion_mode", False)
+                ),
+                "conversion_hedge_symbol": getattr(
+                    state.trade, "conversion_hedge_symbol", None
+                ),
+                "conversion_hedge_entry_price": float(
+                    getattr(state.trade, "conversion_hedge_entry_price", 0) or 0
+                ),
+                "conversion_triggered_leg": getattr(
+                    state.trade, "conversion_triggered_leg", None
+                ),
+                "conversion_equality_pct": conversion_equality_pct,
+                **plan,
+                # Always last — never overwritten by plan
+                "slippage_pct": float(slip_fields["slippage_pct"]),
+                "slippage_amount": float(slip_fields["slippage_amount"]),
+                "total_deductions": float(slip_fields["total_deductions"]),
+                "net_mtm": net_mtm,
+                "computed_at": mtm_snap.get("computed_at_iso"),
+                "stale_seconds": mtm_snap.get("stale_seconds", 0.0),
+            }
+            logger.info(
+                "/active trade=%s slippage_pct=%s slippage_amount=%s net_mtm=%s",
+                state.trade_id,
+                row["slippage_pct"],
+                row["slippage_amount"],
+                row["net_mtm"],
+            )
+            trades_out.append(row)
+        except Exception as exc:
+            logger.error(
+                "get_active_trades failed trade_id=%s: %s",
+                getattr(state, "trade_id", None),
+                exc,
+                exc_info=True,
+            )
+            trades_out.append(
                 {
-                    "type": "TRADE_CLOSED",
-                    "trade_id": state.trade_id,
-                    "reason": ExitReason.MANUAL_LEG_CLOSE.value,
-                    "message": "Basket closed — no open short legs",
+                    "trade_id": getattr(state, "trade_id", None),
+                    "error": "state_unreadable",
                 }
             )
-            continue
-        if str(getattr(state.trade, "status", "")).lower() != TradeStatus.ACTIVE.value:
-            bot_engine.position_tracker.mark_closed(state.trade_id)
-            continue
-
-        call_prem = float(state.last_call_premium or state.call_leg.initial_premium)
-        put_prem = float(state.last_put_premium or state.put_leg.initial_premium)
-        calculated = float(state.last_pnl)
-        delta_mtm = float(state.last_delta_mtm)
-        call_mtm = 0.0
-        put_mtm = 0.0
-        wing_call_mtm = 0.0
-        wing_put_mtm = 0.0
-        wing_call_prem = 0.0
-        wing_put_prem = 0.0
-
-        from backend.core.basket_legs import basket_legs as _basket_legs
-
-        bl = _basket_legs(state.trade, db)
-        wing_call_leg = bl.get("wing_call")
-        wing_put_leg = bl.get("wing_put")
-        wing_call_open = (
-            wing_call_leg is not None
-            and str(getattr(wing_call_leg, "status", "")).lower() == "open"
-        )
-        wing_put_open = (
-            wing_put_leg is not None
-            and str(getattr(wing_put_leg, "status", "")).lower() == "open"
-        )
-        if wing_call_leg is not None:
-            wing_call_prem = float(wing_call_leg.initial_premium or 0)
-        if wing_put_leg is not None:
-            wing_put_prem = float(wing_put_leg.initial_premium or 0)
-
-        if client is not None:
-            try:
-                pids = []
-                if call_open and int(state.call_leg.product_id) > 0:
-                    pids.append(int(state.call_leg.product_id))
-                if put_open and int(state.put_leg.product_id) > 0:
-                    pids.append(int(state.put_leg.product_id))
-                if wing_call_open and int(wing_call_leg.product_id) > 0:
-                    pids.append(int(wing_call_leg.product_id))
-                if wing_put_open and int(wing_put_leg.product_id) > 0:
-                    pids.append(int(wing_put_leg.product_id))
-                if pids:
-                    upnl_data = await client.get_positions_upnl(pids)
-                    call_pid = int(state.call_leg.product_id)
-                    put_pid = int(state.put_leg.product_id)
-                    call_row = upnl_data.get(call_pid) or {}
-                    put_row = upnl_data.get(put_pid) or {}
-                    if call_open and call_row:
-                        call_mtm = float(call_row.get("upnl") or 0.0)
-                        if float(call_row.get("best_offer") or 0) > 0:
-                            call_prem = float(call_row["best_offer"])
-                    elif call_open:
-                        call_prem = float(
-                            await client.get_short_exit_price(
-                                str(state.call_leg.symbol)
-                            )
-                        )
-                    else:
-                        call_prem = float(
-                            state.call_leg.exit_premium
-                            or state.call_leg.initial_premium
-                            or 0.0
-                        )
-                    if put_open and put_row:
-                        put_mtm = float(put_row.get("upnl") or 0.0)
-                        if float(put_row.get("best_offer") or 0) > 0:
-                            put_prem = float(put_row["best_offer"])
-                    elif put_open:
-                        put_prem = float(
-                            await client.get_short_exit_price(
-                                str(state.put_leg.symbol)
-                            )
-                        )
-                    else:
-                        put_prem = float(
-                            state.put_leg.exit_premium
-                            or state.put_leg.initial_premium
-                            or 0.0
-                        )
-                    if wing_call_open:
-                        wc_pid = int(wing_call_leg.product_id)
-                        wc_row = upnl_data.get(wc_pid) or {}
-                        if wc_row:
-                            wing_call_mtm = float(wc_row.get("upnl") or 0.0)
-                            best = float(wc_row.get("best_bid") or wc_row.get("best_offer") or 0)
-                            if best > 0:
-                                wing_call_prem = best
-                        else:
-                            try:
-                                wing_call_prem = float(
-                                    await client.get_long_exit_price(
-                                        str(wing_call_leg.symbol)
-                                    )
-                                    or wing_call_prem
-                                )
-                            except Exception:
-                                pass
-                    if wing_put_open:
-                        wp_pid = int(wing_put_leg.product_id)
-                        wp_row = upnl_data.get(wp_pid) or {}
-                        if wp_row:
-                            wing_put_mtm = float(wp_row.get("upnl") or 0.0)
-                            best = float(wp_row.get("best_bid") or wp_row.get("best_offer") or 0)
-                            if best > 0:
-                                wing_put_prem = best
-                        else:
-                            try:
-                                wing_put_prem = float(
-                                    await client.get_long_exit_price(
-                                        str(wing_put_leg.symbol)
-                                    )
-                                    or wing_put_prem
-                                )
-                            except Exception:
-                                pass
-                    delta_mtm = call_mtm + put_mtm + wing_call_mtm + wing_put_mtm
-                    bot_engine.position_tracker.update_premiums(
-                        state.trade_id, call_prem, put_prem, calculated
-                    )
-                    bot_engine.position_tracker.update_delta_mtm(
-                        state.trade_id, delta_mtm
-                    )
-            except Exception as exc:
-                logger.warning("Live UPL@offer refresh failed trade=%s: %s", state.trade_id, exc)
-
-        realized = float(getattr(state.trade, "realized_pnl", None) or 0.0)
-        target = float(state.trade.profit_target_usd or 0)
-        display_total = realized + delta_mtm
-        pnl_pct = (display_total / target * 100.0) if target else 0.0
-        settling = get_settling_info_for_trade(state.trade)
-
-        trigger_pct = bot_engine.strategy.get_current_trigger_pct(state.trade, db)
-        call_trig_pct = bot_engine.strategy.get_trigger_for_leg(
-            call_prem, state.trade, db
-        )
-        put_trig_pct = bot_engine.strategy.get_trigger_for_leg(
-            put_prem, state.trade, db
-        )
-        premium_slabs = None
-        if str(getattr(state.trade, "trigger_mode", "") or "").lower() == "premium":
-            premium_slabs = bot_engine.strategy.get_slabs(state.trade.id, db)
-        if client is not None and call_open and put_open:
-            try:
-                await bot_engine._estimate_replacements(state, call_prem, put_prem)
-            except Exception:
-                pass
-
-        adj_count = (
-            db.query(Adjustment).filter(Adjustment.trade_id == state.trade_id).count()
-        )
-        last_adj = (
-            db.query(Adjustment)
-            .filter(Adjustment.trade_id == state.trade_id)
-            .order_by(Adjustment.timestamp.desc())
-            .first()
-        )
-        last_adjustment = None
-        if last_adj is not None:
-            last_adjustment = {
-                "timestamp": _to_ist_iso(last_adj.timestamp),
-                "leg_type": last_adj.leg_type,
-                "old_strike": last_adj.old_strike,
-                "new_strike": last_adj.new_strike,
-                "trigger_pct_reached": last_adj.trigger_pct_reached,
-                "slab_used": last_adj.slab_used,
-            }
-
-        call_snap = _leg_snapshot(state.call_leg, call_prem)
-        put_snap = _leg_snapshot(state.put_leg, put_prem)
-        if call_open:
-            call_snap["leg_pnl"] = round(call_mtm, 4)
-        if put_open:
-            put_snap["leg_pnl"] = round(put_mtm, 4)
-
-        all_legs = (
-            db.query(Leg)
-            .filter(
-                Leg.trade_id == state.trade_id,
-                Leg.is_bot_managed.is_(True),
-            )
-            .all()
-        )
-        fee_fields = await _fee_fields_for_basket(
-            client=client,
-            db=db,
-            trade=state.trade,
-            all_legs=all_legs,
-            open_call=state.call_leg if call_open else None,
-            open_put=state.put_leg if put_open else None,
-            call_offer=call_prem,
-            put_offer=put_prem,
-        )
-        call_snap = _leg_snapshot(state.call_leg, call_prem)
-        put_snap = _leg_snapshot(state.put_leg, put_prem)
-        if call_open:
-            call_snap["leg_pnl"] = round(call_mtm, 4)
-            call_snap["est_exit_fee_usd"] = round(float(fee_fields["call_est_exit_fee"]), 6)
-        else:
-            call_snap["est_exit_fee_usd"] = 0.0
-        if put_open:
-            put_snap["leg_pnl"] = round(put_mtm, 4)
-            put_snap["est_exit_fee_usd"] = round(float(fee_fields["put_est_exit_fee"]), 6)
-        else:
-            put_snap["est_exit_fee_usd"] = 0.0
-
-        wing_call_snap = None
-        wing_put_snap = None
-        if wing_call_leg is not None:
-            wing_call_snap = _leg_snapshot(wing_call_leg, wing_call_prem)
-            if wing_call_open:
-                wing_call_snap["leg_pnl"] = round(wing_call_mtm, 4)
-        if wing_put_leg is not None:
-            wing_put_snap = _leg_snapshot(wing_put_leg, wing_put_prem)
-            if wing_put_open:
-                wing_put_snap["leg_pnl"] = round(wing_put_mtm, 4)
-
-        from backend.core.basket_legs import build_wing_credit_fields
-
-        wing_fields = build_wing_credit_fields(
-            trade=state.trade,
-            short_call=state.call_leg,
-            short_put=state.put_leg,
-            wing_call=wing_call_leg,
-            wing_put=wing_put_leg,
-            call_premium=call_prem,
-            put_premium=put_prem,
-            wing_call_premium=wing_call_prem if wing_call_leg else None,
-            wing_put_premium=wing_put_prem if wing_put_leg else None,
-        )
-
-        # Gross MTM = realized + Delta UPNL (premium-only; fees NOT included)
-        gross_mtm = display_total
-        fees_paid = float(fee_fields["fees_paid"])
-        est_exit = float(fee_fields["est_exit_fees"])
-        total_fees = float(fee_fields["total_expected_fees"])
-        from backend.core.fees import (
-            audit_mtm_source_mismatch,
-            basket_net_mtm_snapshot,
-            estimate_expected_exit_spread_usd,
-            get_entry_spread_for_sl,
-        )
-        from backend.core.spread_utils import get_exit_spread_pct
-
-        expected_exit_spread = 0.0
-        spread_settings = get_or_create_auto_settings(db)
-        for leg in all_legs:
-            if str(getattr(leg, "status", "") or "").lower() != "open":
-                continue
-            lt = str(leg.leg_type or "").lower()
-            if lt == "call":
-                offer = float(call_prem)
-            elif lt == "put":
-                offer = float(put_prem)
-            elif lt == "wing_call":
-                offer = float(wing_call_prem or getattr(leg, "initial_premium", 0) or 0)
-            elif lt == "wing_put":
-                offer = float(wing_put_prem or getattr(leg, "initial_premium", 0) or 0)
-            else:
-                offer = float(getattr(leg, "initial_premium", 0) or 0)
-            if offer > 0:
-                # Same exit-spread basis as monitor loop (settings pct, not fixed 0.5%)
-                try:
-                    pct, _src = await get_exit_spread_pct(
-                        str(leg.symbol or ""),
-                        spread_settings,
-                        "basket",
-                        client=client,
-                    )
-                    spread_factor = float(pct) / 100.0
-                except Exception:
-                    spread_factor = 0.005
-                expected_exit_spread += estimate_expected_exit_spread_usd(
-                    offer_price=offer,
-                    quantity=int(leg.quantity or 0),
-                    spread_factor=spread_factor,
-                )
-
-        entry_spread_for_sl = get_entry_spread_for_sl(state.trade)
-        gross_mtm_for_stoploss = float(gross_mtm) + entry_spread_for_sl
-
-        mtm_snap = basket_net_mtm_snapshot(
-            gross_mtm=gross_mtm,
-            fees_paid=fees_paid,
-            est_exit_fees=est_exit,
-            slippage_pct=getattr(state.trade, "slippage_pct", None) or 2.0,
-            expected_exit_spread_usd=expected_exit_spread,
-        )
-        net_mtm = float(mtm_snap["net_mtm"])
-        slip_fields = mtm_snap
-
-        # Keep tracker in lockstep with API so top-card / slave overview match
-        tracker_net = float(getattr(state, "last_net_mtm", 0.0) or 0.0)
-        if getattr(state, "last_net_mtm_computed_at", None) is not None:
-            audit_mtm_source_mismatch(
-                int(state.trade_id),
-                "api_trade_active",
-                net_mtm,
-                "position_tracker",
-                tracker_net,
-            )
-        bot_engine.position_tracker.update_net_mtm(
-            int(state.trade_id),
-            net_mtm,
-            computed_at=mtm_snap.get("computed_at"),
-            snapshot=mtm_snap,
-        )
-
-        plan = bot_engine.build_bot_plan_fields(
-            state,
-            call_prem,
-            put_prem,
-            float(trigger_pct),
-            call_trigger_pct=float(call_trig_pct),
-            put_trigger_pct=float(put_trig_pct),
-            premium_slabs=premium_slabs,
-            net_mtm=net_mtm,
-            gross_mtm_for_stoploss=gross_mtm_for_stoploss,
-            conversion_min_premium=conversion_min_premium,
-            conversion_equality_pct=conversion_equality_pct,
-            conversion_enabled=conversion_enabled,
-        )
-
-        leg_history = _basket_leg_history(db, state.trade_id)
-        open_count = sum(1 for x in (call_open, put_open) if x)
-
-        row: dict[str, Any] = {
-            "trade_id": state.trade_id,
-            "basket_number": getattr(state.trade, "basket_number", None)
-            or state.trade_id,
-            "underlying": state.trade.underlying,
-            "expiry_date": str(state.trade.expiry_date),
-            "expiry_label": get_dte_label(state.trade.expiry_date),
-            "status": state.trade.status,
-            "is_demo": bool(getattr(state.trade, "is_demo", False)),
-            "open_leg_count": open_count,
-            "call_leg": call_snap,
-            "put_leg": put_snap,
-            "wing_call": wing_call_snap,
-            "wing_put": wing_put_snap,
-            "net_credit_entry": wing_fields["net_credit_entry"],
-            "net_credit_now": wing_fields["net_credit_now"],
-            "wing_premium_paid_usd": wing_fields["wing_premium_paid_usd"],
-            "max_loss_usd": wing_fields["max_loss_usd"],
-            "leg_history": leg_history,
-            "call_premium": call_prem,
-            "put_premium": put_prem,
-            "wing_call_premium": wing_call_prem if wing_call_leg else None,
-            "wing_put_premium": wing_put_prem if wing_put_leg else None,
-            "call_offer": call_prem,
-            "put_offer": put_prem,
-            "call_change_pct": call_snap["change_pct"],
-            "put_change_pct": put_snap["change_pct"],
-            "calculated_pnl": round(float(calculated), 4),
-            "delta_mtm_pnl": round(float(delta_mtm), 4),
-            "delta_upnl": round(float(delta_mtm), 4),
-            "call_delta_mtm": round(float(call_mtm), 4),
-            "put_delta_mtm": round(float(put_mtm), 4),
-            "wing_call_upnl": round(float(wing_call_mtm), 4),
-            "wing_put_upnl": round(float(wing_put_mtm), 4),
-            "call_upnl": round(float(call_mtm), 4),
-            "put_upnl": round(float(put_mtm), 4),
-            "realized_pnl": round(float(realized), 4),
-            "unrealized_pnl": round(float(delta_mtm), 4),
-            "total_pnl": display_total,
-            "gross_mtm": gross_mtm,
-            "gross_mtm_for_stoploss": round(gross_mtm_for_stoploss, 4),
-            "entry_spread_for_sl": round(entry_spread_for_sl, 4),
-            "expected_exit_spread_usd": round(expected_exit_spread, 4),
-            "fees_paid": fees_paid,
-            "est_exit_fees": est_exit,
-            "total_expected_fees": total_fees,
-            "underlying_price": (
-                float(fee_fields.get("btc_index_for_fees") or 0)
-                or float(getattr(bot_engine, "_btc_spot", 0) or 0)
-                or None
-            ),
-            "call_entry_fee": fee_fields.get("call_entry_fee"),
-            "put_entry_fee": fee_fields.get("put_entry_fee"),
-            "call_est_exit_fee": fee_fields.get("call_est_exit_fee"),
-            "put_est_exit_fee": fee_fields.get("put_est_exit_fee"),
-            "profit_target_usd": target,
-            "stoploss_usd": float(state.trade.stoploss_usd),
-            "initial_max_profit": float(
-                getattr(state.trade, "initial_max_profit", None) or 0
-            )
-            or None,
-            "tp_pct": float(getattr(state.trade, "tp_pct", None) or 50.0),
-            "sl_pct": float(getattr(state.trade, "sl_pct", None) or 100.0),
-            "target_source": getattr(state.trade, "target_source", None),
-            "hedge_theta_at_entry": (
-                float(getattr(state.trade, "hedge_theta_at_entry", None))
-                if getattr(state.trade, "hedge_theta_at_entry", None) is not None
-                else None
-            ),
-            "pnl_pct_of_target": round(pnl_pct, 2),
-            "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
-            **long_trade_public_fields(state.trade),
-            "adjustment_count": int(
-                getattr(state.trade, "adjustment_count", None) or adj_count or 0
-            ),
-            "max_adjustments_per_basket": max_adjustments_per_basket,
-            "adjustments_remaining": (
-                max(
-                    0,
-                    int(max_adjustments_per_basket)
-                    - int(
-                        getattr(state.trade, "adjustment_count", None)
-                        or adj_count
-                        or 0
-                    ),
-                )
-                if max_adjustments_per_basket is not None
-                else None
-            ),
-            "conversion_mode_enabled": conversion_mode_enabled,
-            # Adj Engine v2 (read-only display for Bot Monitoring Plan)
-            "adjustment_mode": adjustment_mode,
-            "adj_b_trigger_pct": round(adj_b_trigger_pct, 4),
-            "min_short_gap_points": round(min_short_gap_points, 4),
-            "last_adjustment": last_adjustment,
-            "is_settling": settling["is_settling"],
-            "settling_ends_at": settling["settling_ends_at"],
-            "settling_minutes_left": settling["settling_minutes_left"],
-            "settling_source": settling.get("settling_source", "none"),
-            "last_mtm_update": get_ist_now().strftime("%H:%M:%S IST"),
-            "in_conversion_mode": bool(
-                getattr(state.trade, "in_conversion_mode", False)
-            ),
-            "conversion_hedge_symbol": getattr(
-                state.trade, "conversion_hedge_symbol", None
-            ),
-            "conversion_hedge_entry_price": float(
-                getattr(state.trade, "conversion_hedge_entry_price", 0) or 0
-            ),
-            "conversion_triggered_leg": getattr(
-                state.trade, "conversion_triggered_leg", None
-            ),
-            "conversion_equality_pct": conversion_equality_pct,
-            **plan,
-            # Always last — never overwritten by plan
-            "slippage_pct": float(slip_fields["slippage_pct"]),
-            "slippage_amount": float(slip_fields["slippage_amount"]),
-            "total_deductions": float(slip_fields["total_deductions"]),
-            "net_mtm": net_mtm,
-            "computed_at": mtm_snap.get("computed_at_iso"),
-            "stale_seconds": mtm_snap.get("stale_seconds", 0.0),
-        }
-        logger.info(
-            "/active trade=%s slippage_pct=%s slippage_amount=%s net_mtm=%s",
-            state.trade_id,
-            row["slippage_pct"],
-            row["slippage_amount"],
-            row["net_mtm"],
-        )
-        trades_out.append(row)
     return {"trades": trades_out}
 
 

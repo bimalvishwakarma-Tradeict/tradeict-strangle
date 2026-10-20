@@ -1661,6 +1661,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
 
     master_trade_data: dict[str, Any] | None = None
     if master_states:
+      try:
         state = master_states[0]
         call_leg = state.call_leg
         put_leg = state.put_leg
@@ -1745,33 +1746,57 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
                 hedge_missing=active_hedge_row is None,
             ),
         }
+      except Exception as exc:
+        tid = getattr(master_states[0], "trade_id", None)
+        logger.error(
+            "slave_overview failed trade_id=%s: %s",
+            tid,
+            exc,
+            exc_info=True,
+        )
+        master_trade_data = {
+            "trade_id": tid,
+            "error": "state_unreadable",
+        }
 
     def _master_snapshot(trade_id: int) -> dict[str, Any] | None:
         """Build master trade snapshot for a specific trade_id from tracker."""
         state = master_by_id.get(int(trade_id))
         if state is None:
             return None
-        call_leg = state.call_leg
-        put_leg = state.put_leg
-        mtm_fields = _tracker_mtm_fields(state)
-        return {
-            "trade_id": state.trade_id,
-            "underlying": getattr(state.trade, "underlying", None),
-            "basket_number": getattr(state.trade, "basket_number", None),
-            "is_demo": bool(getattr(state.trade, "is_demo", False)),
-            "net_mtm": mtm_fields["net_mtm"],
-            "gross_mtm": mtm_fields["gross_mtm"],
-            "computed_at": mtm_fields.get("computed_at"),
-            "stale_seconds": mtm_fields.get("stale_seconds"),
-            "profit_target_usd": float(
-                getattr(state.trade, "profit_target_usd", 0) or 0
-            ),
-            "call_strike": float(getattr(call_leg, "strike", 0) or 0),
-            "put_strike": float(getattr(put_leg, "strike", 0) or 0),
-            "call_premium": float(getattr(state, "last_call_premium", 0) or 0),
-            "put_premium": float(getattr(state, "last_put_premium", 0) or 0),
-            "expiry_date": str(getattr(state.trade, "expiry_date", "") or ""),
-        }
+        try:
+            call_leg = state.call_leg
+            put_leg = state.put_leg
+            mtm_fields = _tracker_mtm_fields(state)
+            return {
+                "trade_id": state.trade_id,
+                "underlying": getattr(state.trade, "underlying", None),
+                "basket_number": getattr(state.trade, "basket_number", None),
+                "is_demo": bool(getattr(state.trade, "is_demo", False)),
+                "net_mtm": mtm_fields["net_mtm"],
+                "gross_mtm": mtm_fields["gross_mtm"],
+                "computed_at": mtm_fields.get("computed_at"),
+                "stale_seconds": mtm_fields.get("stale_seconds"),
+                "profit_target_usd": float(
+                    getattr(state.trade, "profit_target_usd", 0) or 0
+                ),
+                "call_strike": float(getattr(call_leg, "strike", 0) or 0),
+                "put_strike": float(getattr(put_leg, "strike", 0) or 0),
+                "call_premium": float(getattr(state, "last_call_premium", 0) or 0),
+                "put_premium": float(getattr(state, "last_put_premium", 0) or 0),
+                "expiry_date": str(getattr(state.trade, "expiry_date", "") or ""),
+            }
+        except Exception as exc:
+            logger.error(
+                "slave_overview failed trade_id=%s: %s",
+                trade_id,
+                exc,
+                exc_info=True,
+            )
+            return {
+                "trade_id": int(trade_id),
+                "error": "state_unreadable",
+            }
 
     slaves = (
         db.query(SlaveAccount).order_by(SlaveAccount.id.asc()).all()
@@ -1779,7 +1804,7 @@ async def slave_overview(db: Session = Depends(get_db)) -> dict[str, Any]:
     slaves_data: list[dict[str, Any]] = []
     master_target = (
         float(master_trade_data["profit_target_usd"])
-        if master_trade_data
+        if master_trade_data and "error" not in master_trade_data
         else 0.0
     )
 

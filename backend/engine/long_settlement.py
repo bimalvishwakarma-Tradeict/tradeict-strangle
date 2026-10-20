@@ -18,6 +18,35 @@ from backend.models import Leg, Trade
 
 logger = logging.getLogger(__name__)
 
+
+def _session_has_writes(db: Any) -> bool:
+    return bool(getattr(db, "new", None) or getattr(db, "dirty", None) or getattr(db, "deleted", None))
+
+
+def _commit_if_dirty(db: Any) -> None:
+    if _session_has_writes(db):
+        db.commit()
+
+
+def _refresh_expunge_for_tracker(db: Any, *objs: Any) -> None:
+    """Load column values, then detach so they stay readable after session close."""
+    seen: set[int] = set()
+    for obj in objs:
+        if obj is None:
+            continue
+        ident = id(obj)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        try:
+            db.refresh(obj)
+        except Exception as exc:
+            logger.warning("tracker refresh failed %s: %s", type(obj).__name__, exc)
+        try:
+            db.expunge(obj)
+        except Exception as exc:
+            logger.warning("tracker expunge failed %s: %s", type(obj).__name__, exc)
+
 LONG_EXPIRY_FLAT_WAIT_SECONDS = 30 * 60
 LONG_EXTERNAL_FLAT_CONFIRM_SECONDS = 60.0
 
@@ -384,9 +413,11 @@ async def handle_long_trade_tick(
                     finalize=False,
                     settlement_src=settlement_src,
                 )
-                db.commit()
                 wait_since.pop(trade_id, None)
                 if close_funnel is not None:
+                    _commit_if_dirty(db)
+                    call_leg, put_leg = pick_call_put_legs(legs)
+                    _refresh_expunge_for_tracker(db, db_trade, call_leg, put_leg)
                     await close_funnel(
                         trade_id,
                         ExitReason.EXPIRY_SETTLED.value,
@@ -395,7 +426,9 @@ async def handle_long_trade_tick(
                 else:
                     db_trade.status = TradeStatus.CLOSED.value
                     db_trade.exit_time = get_utc_now()
-                    db.commit()
+                    _commit_if_dirty(db)
+                    call_leg, put_leg = pick_call_put_legs(legs)
+                    _refresh_expunge_for_tracker(db, db_trade, call_leg, put_leg)
                     if position_tracker is not None:
                         position_tracker.mark_closed(trade_id)
                 return "stop"
@@ -426,7 +459,9 @@ async def handle_long_trade_tick(
             flat_since=flat_since,
         )
         if reason is not None:
-            db.commit()
+            _commit_if_dirty(db)
+            call_leg, put_leg = pick_call_put_legs(legs)
+            _refresh_expunge_for_tracker(db, db_trade, call_leg, put_leg)
             if close_funnel is not None:
                 await close_funnel(
                     trade_id,
@@ -436,8 +471,9 @@ async def handle_long_trade_tick(
             elif position_tracker is not None:
                 position_tracker.mark_closed(trade_id)
             return "stop"
-        db.commit()
+        _commit_if_dirty(db)
         call_leg, put_leg = pick_call_put_legs(legs)
+        _refresh_expunge_for_tracker(db, db_trade, call_leg, put_leg)
         if (
             position_tracker is not None
             and call_leg is not None

@@ -2876,6 +2876,26 @@ class BotEngine:
             )
             return
 
+        try:
+            _ = str(getattr(trade_state.trade, "position_side", "") or "")
+            _ = trade_state.trade.profit_target_usd
+            _ = getattr(trade_state.trade, "peak_gross_mtm", None)
+            _ = trade_state.call_leg.initial_premium
+            _ = trade_state.put_leg.initial_premium
+        except Exception as exc:
+            logger.critical(
+                "Trade %s tracker state unreadable (%s) — reloading from DB",
+                trade_id,
+                exc,
+                exc_info=True,
+            )
+            with self.db_factory() as db:
+                self.position_tracker.reload_trade(db, trade_id)
+            live = self.position_tracker.get(trade_id)
+            if live is None:
+                return
+            trade_state = live
+
         # Recover legs wrongly closed by pre-fix emergency race (≤1/min)
         await self._maybe_recover_legs(trade_state)
 

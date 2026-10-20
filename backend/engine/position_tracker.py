@@ -68,94 +68,126 @@ class PositionTracker:
         )
         loaded = 0
         for trade in trades:
-            legs = (
-                db_session.query(Leg)
-                .filter(
-                    Leg.trade_id == trade.id,
-                    Leg.is_bot_managed.is_(True),
-                )
-                .all()
-            )
-            open_legs = [leg for leg in legs if _is_open(leg)]
-            if not open_legs:
-                logger.warning(
-                    "Trade %s skipped: ACTIVE but no open bot-managed legs",
-                    trade.id,
-                )
-                continue
-
-            from backend.core.basket_legs import classify_legs
-            from backend.core.trade_side import is_long_trade
-
-            bl = classify_legs(legs)
-            if is_long_trade(trade):
-                call_leg = bl.get("long_call")
-                put_leg = bl.get("long_put")
-            else:
-                call_leg, put_leg = pick_call_put_legs(legs)
-            if call_leg is None or put_leg is None:
-                logger.warning(
-                    "Trade %s skipped: incomplete call/put history "
-                    "(call=%s, put=%s)",
-                    trade.id,
-                    call_leg is not None,
-                    put_leg is not None,
-                )
-                continue
-
-            wing_call_leg = bl.get("wing_call")
-            wing_put_leg = bl.get("wing_put")
-
-            hedge_leg = next(
-                (
-                    leg
-                    for leg in open_legs
-                    if str(getattr(leg, "leg_type", "") or "")
-                    .lower()
-                    .startswith("hedge")
-                    or (
-                        bool(getattr(leg, "is_long", False))
-                        and str(getattr(leg, "leg_type", "") or "").lower()
-                        not in ("wing_call", "wing_put", "call", "put")
-                    )
-                ),
-                None,
-            )
-
-            self._positions[trade.id] = TradeState(
-                trade_id=trade.id,
-                trade=trade,
-                call_leg=call_leg,
-                put_leg=put_leg,
-                hedge_leg=hedge_leg,
-                wing_call_leg=wing_call_leg,
-                wing_put_leg=wing_put_leg,
-                last_call_premium=float(
-                    getattr(call_leg, "exit_premium", None)
-                    or call_leg.initial_premium
-                    or 0.0
-                ),
-                last_put_premium=float(
-                    getattr(put_leg, "exit_premium", None)
-                    or put_leg.initial_premium
-                    or 0.0
-                ),
-            )
-            loaded += 1
-            logger.info(
-                "Loaded trade %s: %s call=%s(%s) put=%s(%s) hedge=%s open=%s",
-                trade.id,
-                trade.underlying,
-                call_leg.symbol,
-                call_leg.status,
-                put_leg.symbol,
-                put_leg.status,
-                getattr(hedge_leg, "symbol", None),
-                len(open_legs),
-            )
+            if self._ingest_trade(db_session, trade):
+                loaded += 1
 
         logger.info("Loaded %s active trades into position tracker", loaded)
         return loaded
+
+    def reload_trade(self, db_session: Any, trade_id: int) -> bool:
+        """Reload a single ACTIVE trade from DB into the tracker (expunged)."""
+        trade = (
+            db_session.query(Trade)
+            .filter(
+                Trade.id == int(trade_id),
+                Trade.status == TradeStatus.ACTIVE.value,
+            )
+            .first()
+        )
+        if trade is None:
+            self._positions.pop(int(trade_id), None)
+            logger.critical(
+                "reload_trade: trade %s missing or not ACTIVE — dropped from tracker",
+                trade_id,
+            )
+            return False
+        return self._ingest_trade(db_session, trade)
+
+    def _ingest_trade(self, db_session: Any, trade: Any) -> bool:
+        legs = (
+            db_session.query(Leg)
+            .filter(
+                Leg.trade_id == trade.id,
+                Leg.is_bot_managed.is_(True),
+            )
+            .all()
+        )
+        open_legs = [leg for leg in legs if _is_open(leg)]
+        if not open_legs:
+            logger.warning(
+                "Trade %s skipped: ACTIVE but no open bot-managed legs",
+                trade.id,
+            )
+            return False
+
+        from backend.core.basket_legs import classify_legs
+        from backend.core.trade_side import is_long_trade
+
+        bl = classify_legs(legs)
+        if is_long_trade(trade):
+            call_leg = bl.get("long_call")
+            put_leg = bl.get("long_put")
+        else:
+            call_leg, put_leg = pick_call_put_legs(legs)
+        if call_leg is None or put_leg is None:
+            logger.warning(
+                "Trade %s skipped: incomplete call/put history "
+                "(call=%s, put=%s)",
+                trade.id,
+                call_leg is not None,
+                put_leg is not None,
+            )
+            return False
+
+        wing_call_leg = bl.get("wing_call")
+        wing_put_leg = bl.get("wing_put")
+        hedge_leg = next(
+            (
+                leg
+                for leg in open_legs
+                if str(getattr(leg, "leg_type", "") or "")
+                .lower()
+                .startswith("hedge")
+                or (
+                    bool(getattr(leg, "is_long", False))
+                    and str(getattr(leg, "leg_type", "") or "").lower()
+                    not in ("wing_call", "wing_put", "call", "put")
+                )
+            ),
+            None,
+        )
+        for obj in (trade, call_leg, put_leg, hedge_leg, wing_call_leg, wing_put_leg):
+            if obj is None:
+                continue
+            try:
+                db_session.refresh(obj)
+            except Exception:
+                pass
+            try:
+                db_session.expunge(obj)
+            except Exception:
+                pass
+        self._positions[trade.id] = TradeState(
+            trade_id=trade.id,
+            trade=trade,
+            call_leg=call_leg,
+            put_leg=put_leg,
+            hedge_leg=hedge_leg,
+            wing_call_leg=wing_call_leg,
+            wing_put_leg=wing_put_leg,
+            last_call_premium=float(
+                getattr(call_leg, "exit_premium", None)
+                or call_leg.initial_premium
+                or 0.0
+            ),
+            last_put_premium=float(
+                getattr(put_leg, "exit_premium", None)
+                or put_leg.initial_premium
+                or 0.0
+            ),
+        )
+        logger.info(
+            "Loaded trade %s: %s call=%s(%s) put=%s(%s) hedge=%s open=%s",
+            trade.id,
+            trade.underlying,
+            call_leg.symbol,
+            call_leg.status,
+            put_leg.symbol,
+            put_leg.status,
+            getattr(hedge_leg, "symbol", None),
+            len(open_legs),
+        )
+        return True
 
     def get_all_active(self) -> list[TradeState]:
         """Return all tracked TradeState objects."""
