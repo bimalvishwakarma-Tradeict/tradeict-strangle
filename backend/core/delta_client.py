@@ -404,6 +404,14 @@ def select_atm_anchored_pair(
     }
 
 
+def signed_size_is_open(size: Any) -> bool:
+    """True when Delta size is non-zero — long (+) or short (−)."""
+    try:
+        return abs(float(size)) > 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 class DeltaClient:
     """
     The ONE module that talks to Delta Exchange India REST API.
@@ -903,7 +911,7 @@ class DeltaClient:
             return []
 
     async def verify_position_exists(self, product_id: int) -> bool:
-        """Return True if Delta has a non-zero size position for product_id."""
+        """Return True if Delta has a non-zero size (long or short)."""
         try:
             wanted = int(product_id)
             result = await self._request("GET", "/v2/positions/margined")
@@ -932,8 +940,7 @@ class DeltaClient:
                         continue
                 except (TypeError, ValueError):
                     continue
-                size = float(pos.get("size") or 0)
-                return size != 0
+                return signed_size_is_open(pos.get("size"))
             return False
         except Exception as exc:
             logger.warning("verify_position_exists failed: %s", exc)

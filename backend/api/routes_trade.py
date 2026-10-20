@@ -2863,6 +2863,7 @@ async def exit_trade(
         if bot_engine.delta_client is None:
             raise HTTPException(status_code=502, detail="Delta client unavailable")
         await bot_engine._exit_trade(state, reason)
+        db.expire_all()
         refreshed = db.query(Trade).filter(Trade.id == trade_id).first()
         call_leg = (
             db.query(Leg)
@@ -3156,42 +3157,88 @@ async def close_single_leg(
         raise HTTPException(status_code=502, detail="Delta client unavailable")
 
     logger.info(
-        "[LEG_CLOSE] trade=%s clicked_leg=%s — closing single short only "
-        "(wings stay if other short open)",
+        "[LEG_CLOSE] trade=%s clicked_leg=%s long=%s",
         trade_id,
         leg_key,
+        long_side,
     )
 
-    bundle = await close_basket_legs(
-        trade=trade,
-        reason=ExitReason.MANUAL_LEG_CLOSE.value,
-        db=db,
-        delta_client=client,
-        order_executor=bot_engine.order_executor,
-        legs_to_close="shorts_only",
-        legs=[target],
-        verify_on_delta=True,
-    )
-    row = bundle.legs[0] if bundle.legs else None
-    if row is None or not row.success:
-        err = row.error if row else "no_result"
-        log_and_buffer(
-            "LEG_CLOSE_RESULT",
-            int(trade_id),
-            {"clicked_leg": leg_key, "ok": False, "message": str(err)},
+    fill_price: float | None = None
+    fill_oid: Any = None
+    fill_fee: float | None = None
+    if long_side:
+        res = await bot_engine.order_executor.close_leg(target, client)
+        for attempt in range(1, 3):
+            still = await bot_engine._delta_leg_size_open(int(target.product_id))
+            fill_ok = (
+                bool(res.success)
+                and res.order_id is not None
+                and float(res.filled_price or 0) > 0
+            )
+            if fill_ok and not still:
+                break
+            logger.critical(
+                "[LONG_EXIT_RETRY] single-leg trade=%s %s attempt=%s still=%s",
+                trade_id,
+                leg_key,
+                attempt,
+                still,
+            )
+            await asyncio.sleep(3)
+            res = await bot_engine.order_executor.close_leg(target, client)
+        still = await bot_engine._delta_leg_size_open(int(target.product_id))
+        fill_ok = (
+            bool(res.success)
+            and res.order_id is not None
+            and float(res.filled_price or 0) > 0
         )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to close {leg_key}: {err}",
+        if still or not fill_ok:
+            log_and_buffer(
+                "LEG_CLOSE_RESULT",
+                int(trade_id),
+                {"clicked_leg": leg_key, "ok": False, "still_open": still},
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to close {leg_key}: still open on Delta",
+            )
+        fill_price = float(res.filled_price or 0)
+        fill_oid = res.order_id
+        fill_fee = res.commission
+    else:
+        bundle = await close_basket_legs(
+            trade=trade,
+            reason=ExitReason.MANUAL_LEG_CLOSE.value,
+            db=db,
+            delta_client=client,
+            order_executor=bot_engine.order_executor,
+            legs_to_close="shorts_only",
+            legs=[target],
+            verify_on_delta=True,
         )
+        row = bundle.legs[0] if bundle.legs else None
+        if row is None or not row.success:
+            err = row.error if row else "no_result"
+            log_and_buffer(
+                "LEG_CLOSE_RESULT",
+                int(trade_id),
+                {"clicked_leg": leg_key, "ok": False, "message": str(err)},
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to close {leg_key}: {err}",
+            )
+        fill_price = row.fill_price
+        fill_oid = row.order_id
+        fill_fee = row.commission
 
     book_leg_close(
         leg=target,
         trade=trade,
-        exit_premium=row.fill_price,
+        exit_premium=fill_price,
         exit_time=get_utc_now(),
-        exit_fee_usd=row.commission,
-        exit_order_id=row.order_id,
+        exit_fee_usd=fill_fee,
+        exit_order_id=fill_oid,
         db=db,
     )
     recompute_trade_realized_pnl(db, trade)
@@ -3202,12 +3249,12 @@ async def close_single_leg(
     if state is not None:
         if leg_key == "call":
             state.call_leg.status = "closed"
-            if row.fill_price is not None:
-                state.call_leg.exit_premium = row.fill_price
+            if fill_price is not None:
+                state.call_leg.exit_premium = fill_price
         else:
             state.put_leg.status = "closed"
-            if row.fill_price is not None:
-                state.put_leg.exit_premium = row.fill_price
+            if fill_price is not None:
+                state.put_leg.exit_premium = fill_price
 
     orphan = await bot_engine.maybe_close_orphaned_wings(
         trade_id=int(trade_id),

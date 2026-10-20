@@ -70,6 +70,46 @@ class OrderExecutor:
             reduce_only=True,  # CRITICAL: prevents position flip on exit
         )
 
+    async def close_open_long_call_put(
+        self,
+        legs: list[Any],
+        delta_client: Any,
+    ) -> dict[int, OrderResult]:
+        """Sequential SELL reduce_only: open call, then open put. No phases."""
+        ordered: list[Any] = []
+        for want in ("call", "put"):
+            for leg in legs:
+                if str(getattr(leg, "leg_type", "") or "").lower() != want:
+                    continue
+                if str(getattr(leg, "status", "open") or "").lower() != "open":
+                    continue
+                ordered.append(leg)
+        out: dict[int, OrderResult] = {}
+        for leg in ordered:
+            lid = int(getattr(leg, "id", 0) or 0)
+            res = await self.close_leg(leg, delta_client)
+            fill = float(res.filled_price or 0.0)
+            if res.success and fill <= 0:
+                try:
+                    fill = float(
+                        await delta_client.resolve_fill_price(
+                            {"order_id": res.order_id},
+                            symbol_for_fallback=str(getattr(leg, "symbol", "") or ""),
+                        )
+                        or 0.0
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "resolve_fill_price after long close failed leg=%s: %s",
+                        getattr(leg, "symbol", "?"),
+                        exc,
+                    )
+                    fill = 0.0
+                if fill > 0:
+                    res.filled_price = fill
+            out[lid] = res
+        return out
+
     async def sell_option(
         self,
         product_id: int,
