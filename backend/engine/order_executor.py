@@ -30,11 +30,10 @@ class OrderExecutor:
 
     async def close_leg(self, leg: Any, delta_client: Any) -> OrderResult:
         """
-        Close a short option leg with a BUY market IOC order.
+        Close a bot-managed option leg with a reduce-only market IOC order.
 
-        ISOLATION: Only call this for bot-managed legs from our DB
-        (Leg.is_bot_managed=True, product_id + quantity from our DB —
-         never size from Delta positions API).
+        Long legs (``leg.is_long is True``): SELL reduce_only.
+        Short / unset / MagicMock: BUY reduce_only (unchanged).
         """
         if not getattr(leg, "is_bot_managed", False):
             msg = f"Refusing close_leg: leg_id={getattr(leg, 'id', '?')} not bot-managed"
@@ -53,18 +52,20 @@ class OrderExecutor:
                 order_id=getattr(leg, "delta_order_id", None),
             )
 
+        side = "sell" if getattr(leg, "is_long", False) is True else "buy"
         logger.info(
-            "Closing %s leg at %s, qty=%s product_id=%s",
+            "Closing %s leg at %s, qty=%s product_id=%s side=%s reduce_only=True",
             leg.leg_type,
             leg.symbol,
             leg.quantity,
             leg.product_id,
+            side,
         )
         return await self._execute_with_retry(
             delta_client=delta_client,
             product_id=int(leg.product_id),
             size=int(leg.quantity),
-            side="buy",
+            side=side,
             symbol_for_fallback=str(leg.symbol),
             reduce_only=True,  # CRITICAL: prevents position flip on exit
         )

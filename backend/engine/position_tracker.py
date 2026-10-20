@@ -84,7 +84,15 @@ class PositionTracker:
                 )
                 continue
 
-            call_leg, put_leg = pick_call_put_legs(legs)
+            from backend.core.basket_legs import classify_legs
+            from backend.core.trade_side import is_long_trade
+
+            bl = classify_legs(legs)
+            if is_long_trade(trade):
+                call_leg = bl.get("long_call")
+                put_leg = bl.get("long_put")
+            else:
+                call_leg, put_leg = pick_call_put_legs(legs)
             if call_leg is None or put_leg is None:
                 logger.warning(
                     "Trade %s skipped: incomplete call/put history "
@@ -95,9 +103,6 @@ class PositionTracker:
                 )
                 continue
 
-            from backend.core.basket_legs import classify_legs
-
-            bl = classify_legs(legs)
             wing_call_leg = bl.get("wing_call")
             wing_put_leg = bl.get("wing_put")
 

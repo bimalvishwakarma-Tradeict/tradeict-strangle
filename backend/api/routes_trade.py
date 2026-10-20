@@ -12,12 +12,14 @@ from sqlalchemy.orm import Session
 
 from backend.config import (
     ExitReason,
+    LONG_TRADES_ENABLED,
     OPTIONS_CONTRACT_VALUE,
     SETTLING_PERIOD_AFTER_PLACE_MINUTES,
     TradeStatus,
     TriggerMode,
 )
 from backend.core.bot_logger import log_and_buffer
+from backend.core.trade_side import is_long_trade, long_trade_public_fields
 from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt
 from backend.core.time_utils import (
@@ -344,6 +346,54 @@ def _validate_initiate_common(payload: TradeInitiateRequest) -> tuple[str, date]
     return underlying, expiry
 
 
+def _normalize_initiate_side(payload: TradeInitiateRequest) -> str:
+    side = str(getattr(payload, "position_side", None) or "short").strip().lower()
+    if side not in ("short", "long"):
+        raise HTTPException(
+            status_code=422, detail="position_side must be 'short' or 'long'"
+        )
+    if side == "long" and not LONG_TRADES_ENABLED:
+        raise HTTPException(status_code=403, detail="Long trades disabled")
+    if getattr(payload, "adjustment_enabled", None) is None:
+        payload.adjustment_enabled = False if side == "long" else True
+    if side != "long":
+        return side
+    try:
+        target = float(getattr(payload, "target_usd", None) or 0)
+        sl_usd = float(getattr(payload, "sl_usd", None) or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail="target_usd and sl_usd must be numbers"
+        ) from exc
+    if target <= 0 or sl_usd <= 0:
+        raise HTTPException(
+            status_code=422, detail="long trades require target_usd > 0 and sl_usd > 0"
+        )
+    step_raw = getattr(payload, "trail_step_usd", None)
+    amt_raw = getattr(payload, "trail_amt_usd", None)
+    step_set = step_raw is not None
+    amt_set = amt_raw is not None
+    if step_set != amt_set:
+        raise HTTPException(
+            status_code=422,
+            detail="trail_step_usd and trail_amt_usd must both be set or both empty",
+        )
+    if step_set and amt_set:
+        try:
+            step = float(step_raw)
+            amt = float(amt_raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422, detail="trail fields must be numbers"
+            ) from exc
+        if not (0 < amt <= step):
+            raise HTTPException(
+                status_code=422,
+                detail="require 0 < trail_amt_usd <= trail_step_usd",
+            )
+    return side
+
+
 async def _ensure_no_active_trade(
     db: Session, account: Account, underlying: str
 ) -> None:
@@ -587,6 +637,29 @@ async def _persist_strangle_trade(
         db, int(hedge_id) if hedge_id is not None else None
     )
 
+    is_long_side = (
+        str(getattr(payload, "position_side", None) or "short").strip().lower()
+        == "long"
+    )
+    adj_enabled = getattr(payload, "adjustment_enabled", None)
+    if adj_enabled is None:
+        adj_enabled = False if is_long_side else True
+    long_target = None
+    long_sl = None
+    long_step = None
+    long_amt = None
+    peak_gross = None
+    trail_level = None
+    if is_long_side:
+        long_target = float(payload.target_usd or 0)
+        long_sl = float(payload.sl_usd or 0)
+        profit_target_usd = long_target
+        stoploss_usd = long_sl
+        long_step = getattr(payload, "trail_step_usd", None)
+        long_amt = getattr(payload, "trail_amt_usd", None)
+        peak_gross = 0.0
+        trail_level = -abs(long_sl)
+
     trade = Trade(
         account_id=account.id,
         underlying=underlying,
@@ -605,6 +678,14 @@ async def _persist_strangle_trade(
         combined_trigger_mode=bool(
             getattr(payload, "combined_trigger_mode", False)
         ),
+        position_side="long" if is_long_side else "short",
+        adjustment_enabled=bool(adj_enabled),
+        target_usd=long_target,
+        sl_usd=long_sl,
+        trail_step_usd=long_step,
+        trail_amt_usd=long_amt,
+        peak_gross_mtm=peak_gross,
+        trail_sl_level=trail_level,
         notes=None,
         realized_pnl=0.0,
         monitoring_starts_at=to_utc_for_db(monitoring_starts, context="trades.monitoring_starts_at"),
@@ -648,13 +729,13 @@ async def _persist_strangle_trade(
         sent_price=call_sent,
         fill_price=float(call_fill_price),
         quantity=qty,
-        is_long=False,
+        is_long=is_long_side,
     )
     put_entry_spread = compute_entry_spread_usd(
         sent_price=put_sent,
         fill_price=float(put_fill_price),
         quantity=qty,
-        is_long=False,
+        is_long=is_long_side,
     )
 
     call_leg = Leg(
@@ -671,11 +752,17 @@ async def _persist_strangle_trade(
         status="open",
         delta_at_entry=payload.call_delta_at_entry,
         is_bot_managed=True,
+        is_long=is_long_side,
+        side="BUY" if is_long_side else "SELL",
         delta_order_id=call_order_id,
         sl_trigger_price=(
-            float(call_sl_trigger_price)
-            if call_sl_trigger_price is not None
-            else None
+            None
+            if is_long_side
+            else (
+                float(call_sl_trigger_price)
+                if call_sl_trigger_price is not None
+                else None
+            )
         ),
         delta_sl_order_id=None,
         entry_fee_usd=(
@@ -698,11 +785,17 @@ async def _persist_strangle_trade(
         status="open",
         delta_at_entry=payload.put_delta_at_entry,
         is_bot_managed=True,
+        is_long=is_long_side,
+        side="BUY" if is_long_side else "SELL",
         delta_order_id=put_order_id,
         sl_trigger_price=(
-            float(put_sl_trigger_price)
-            if put_sl_trigger_price is not None
-            else None
+            None
+            if is_long_side
+            else (
+                float(put_sl_trigger_price)
+                if put_sl_trigger_price is not None
+                else None
+            )
         ),
         delta_sl_order_id=None,  # bracket has no separate stop-order ID
         entry_fee_usd=(
@@ -780,6 +873,8 @@ async def initiate_trade(
     Uses ACTUAL fill prices from Delta (mark price fallback). Settling: 2 minutes.
     """
     underlying, expiry = _validate_initiate_common(payload)
+    position_side = _normalize_initiate_side(payload)
+    is_long_entry = position_side == "long"
     account = _get_active_account(db)
     await _ensure_no_active_trade(db, account, underlying)
 
@@ -814,24 +909,31 @@ async def initiate_trade(
         if put_mark_for_sl <= 0:
             put_mark_for_sl = float(await client.get_mark_price(payload.put_symbol))
 
-        call_prov_sl, call_prov_limit = compute_bracket_sl(
-            call_mark_for_sl,
-            uni_sl,
-            master_mark=call_mark_for_sl,
-            leg="call",
-            trade_id=None,
-        )
-        put_prov_sl, put_prov_limit = compute_bracket_sl(
-            put_mark_for_sl,
-            uni_sl,
-            master_mark=put_mark_for_sl,
-            leg="put",
-            trade_id=None,
-        )
-        call_sl_trigger_price = float(call_prov_sl)
-        put_sl_trigger_price = float(put_prov_sl)
-        call_sl_limit = float(call_prov_limit)
-        put_sl_limit = float(put_prov_limit)
+        call_prov_sl = 0.0
+        put_prov_sl = 0.0
+        call_prov_limit = 0.0
+        put_prov_limit = 0.0
+        call_sl_limit = 0.0
+        put_sl_limit = 0.0
+        if not is_long_entry:
+            call_prov_sl, call_prov_limit = compute_bracket_sl(
+                call_mark_for_sl,
+                uni_sl,
+                master_mark=call_mark_for_sl,
+                leg="call",
+                trade_id=None,
+            )
+            put_prov_sl, put_prov_limit = compute_bracket_sl(
+                put_mark_for_sl,
+                uni_sl,
+                master_mark=put_mark_for_sl,
+                leg="put",
+                trade_id=None,
+            )
+            call_sl_trigger_price = float(call_prov_sl)
+            put_sl_trigger_price = float(put_prov_sl)
+            call_sl_limit = float(call_prov_limit)
+            put_sl_limit = float(put_prov_limit)
 
         call_result = None
         put_result = None
@@ -923,6 +1025,153 @@ async def initiate_trade(
                 put_order_id,
                 call_sl_trigger_price,
                 put_sl_trigger_price,
+            )
+        elif is_long_entry:
+            from types import SimpleNamespace
+
+            logger.info("Long entry: buying call %s (no bracket)", payload.call_symbol)
+            call_open_ts = get_utc_now()
+            call_result = await bot_engine.order_executor.buy_option(
+                product_id=int(payload.call_product_id),
+                quantity=int(payload.quantity),
+                delta_client=client,
+                symbol_for_fallback=payload.call_symbol,
+            )
+            if not call_result.success:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Call order failed: {call_result.error or 'unknown error'}",
+                )
+            call_fill_ts = get_utc_now()
+            call_order_id = (
+                str(call_result.order_id) if call_result.order_id is not None else None
+            )
+            call_fill_price = float(call_result.filled_price or 0.0)
+            if call_fill_price <= 0 and call_order_id:
+                call_fill_price = await client.resolve_fill_price(
+                    {"order_id": call_order_id},
+                    symbol_for_fallback=None,
+                )
+            if call_fill_price <= 0:
+                call_fill_price = float(await client.get_mark_price(payload.call_symbol))
+            if call_fill_price <= 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Call order placed but fill/mark price could not be resolved. "
+                        f"Call order ID: {call_order_id}"
+                    ),
+                )
+            await _verify_leg_on_delta(
+                client,
+                product_id=int(payload.call_product_id),
+                leg_label="Call",
+                order_id=call_order_id,
+            )
+
+            logger.info("Long entry: buying put %s (no bracket)", payload.put_symbol)
+            put_open_ts = get_utc_now()
+            put_result = await bot_engine.order_executor.buy_option(
+                product_id=int(payload.put_product_id),
+                quantity=int(payload.quantity),
+                delta_client=client,
+                symbol_for_fallback=payload.put_symbol,
+            )
+            if not put_result.success:
+                logger.critical(
+                    "LONG PUT buy FAILED after call filled — unwinding call. "
+                    "Call order_id=%s at %s",
+                    call_order_id,
+                    call_fill_price,
+                )
+                unwind_leg = SimpleNamespace(
+                    id=0,
+                    is_bot_managed=True,
+                    status="open",
+                    is_long=True,
+                    leg_type="call",
+                    symbol=payload.call_symbol,
+                    product_id=int(payload.call_product_id),
+                    quantity=int(payload.quantity),
+                    exit_premium=None,
+                    delta_order_id=call_order_id,
+                )
+                unwind = await bot_engine.order_executor.close_leg(
+                    unwind_leg, client
+                )
+                try:
+                    fail_trade = Trade(
+                        account_id=account.id,
+                        underlying=underlying,
+                        expiry_date=expiry,
+                        status=TradeStatus.FAILED.value,
+                        entry_time=get_utc_now(),
+                        position_side="long",
+                        adjustment_enabled=False,
+                        target_usd=float(payload.target_usd or 0),
+                        sl_usd=float(payload.sl_usd or 0),
+                        exit_reason=ExitReason.ENTRY_PARTIAL_UNWIND.value,
+                        notes="LONG_PARTIAL_ENTRY_UNWIND",
+                        realized_pnl=0.0,
+                        total_premium_collected=0.0,
+                        profit_target_usd=float(payload.target_usd or 0),
+                        stoploss_usd=float(payload.sl_usd or 0),
+                        trigger_mode=payload.trigger_mode,
+                    )
+                    db.add(fail_trade)
+                    db.commit()
+                    fail_id = int(fail_trade.id)
+                except Exception as persist_exc:
+                    db.rollback()
+                    logger.critical(
+                        "Failed to persist FAILED long trade after partial: %s",
+                        persist_exc,
+                        exc_info=True,
+                    )
+                    fail_id = 0
+                await bot_engine._push_error(
+                    fail_id,
+                    (
+                        f"LONG PARTIAL: call filled @{call_fill_price} but put "
+                        f"failed ({put_result.error}). Call unwind "
+                        f"success={unwind.success}."
+                    ),
+                    requires_manual_action=True,
+                    severity="CRITICAL",
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"PARTIAL FILL: Call bought @ {call_fill_price} "
+                        f"but Put buy failed ({put_result.error or 'unknown'}). "
+                        f"Call unwind attempted. Call order ID: {call_order_id}"
+                    ),
+                )
+            put_fill_ts = get_utc_now()
+            put_order_id = (
+                str(put_result.order_id) if put_result.order_id is not None else None
+            )
+            put_fill_price = float(put_result.filled_price or 0.0)
+            if put_fill_price <= 0 and put_order_id:
+                put_fill_price = await client.resolve_fill_price(
+                    {"order_id": put_order_id},
+                    symbol_for_fallback=None,
+                )
+            if put_fill_price <= 0:
+                put_fill_price = float(await client.get_mark_price(payload.put_symbol))
+            if put_fill_price <= 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "PARTIAL FILL RISK: Put may have filled but price unknown. "
+                        f"Call order ID: {call_order_id}, Put order ID: {put_order_id}"
+                    ),
+                )
+            await _verify_leg_on_delta(
+                client,
+                product_id=int(payload.put_product_id),
+                leg_label="Put",
+                order_id=put_order_id,
             )
         else:
             # --- Step 1: Place CALL with inline bracket (mark-derived) ---
@@ -1152,7 +1401,7 @@ async def initiate_trade(
                 float(payload.premium_slab_100 or 0),
                 float(payload.premium_slab_lt100 or 0),
             )
-        if uni_sl <= max_trig:
+        if (not is_long_entry) and uni_sl <= max_trig:
             logger.warning(
                 "universal_sl_pct=%.1f <= max trigger %.1f — Delta may "
                 "close before bot can adjust",
@@ -1212,7 +1461,10 @@ async def initiate_trade(
         try:
             import backend.engine.mirror_engine as mirror_module
 
-            if mirror_module.mirror_engine is not None:
+            if (
+                mirror_module.mirror_engine is not None
+                and not is_long_trade(trade)
+            ):
                 # Manual initiate may also have wings on the trade
                 _wc = None
                 _wp = None
@@ -2097,6 +2349,7 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             ),
             "pnl_pct_of_target": round(pnl_pct, 2),
             "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
+            **long_trade_public_fields(state.trade),
             "adjustment_count": int(
                 getattr(state.trade, "adjustment_count", None) or adj_count or 0
             ),

@@ -8,15 +8,16 @@ from typing import Any
 
 
 SHORT_KEYS = ("short_call", "short_put")
+LONG_KEYS = ("long_call", "long_put")
 WING_KEYS = ("wing_call", "wing_put")
-ALL_KEYS = SHORT_KEYS + WING_KEYS
+ALL_KEYS = SHORT_KEYS + LONG_KEYS + WING_KEYS
 
 
 class BasketLegs(dict):
     """
     Mapping of role → leg (or None).
 
-    Keys: short_call, short_put, wing_call, wing_put
+    Keys: short_call, short_put, long_call, long_put, wing_call, wing_put
     """
 
     def open_legs(self) -> list[Any]:
@@ -86,6 +87,8 @@ def classify_legs(legs: list[Any] | None) -> BasketLegs:
     result = BasketLegs(
         short_call=None,
         short_put=None,
+        long_call=None,
+        long_put=None,
         wing_call=None,
         wing_put=None,
     )
@@ -95,16 +98,22 @@ def classify_legs(legs: list[Any] | None) -> BasketLegs:
     buckets: dict[str, list[Any]] = {
         "short_call": [],
         "short_put": [],
+        "long_call": [],
+        "long_put": [],
         "wing_call": [],
         "wing_put": [],
     }
     for leg in legs:
         lt = str(getattr(leg, "leg_type", "") or "").lower()
-        is_long = bool(getattr(leg, "is_long", False))
+        is_long = getattr(leg, "is_long", False) is True
         if lt == "wing_call":
             buckets["wing_call"].append(leg)
         elif lt == "wing_put":
             buckets["wing_put"].append(leg)
+        elif lt == "call" and is_long:
+            buckets["long_call"].append(leg)
+        elif lt == "put" and is_long:
+            buckets["long_put"].append(leg)
         elif lt == "call" and not is_long:
             buckets["short_call"].append(leg)
         elif lt == "put" and not is_long:
@@ -112,6 +121,8 @@ def classify_legs(legs: list[Any] | None) -> BasketLegs:
 
     result["short_call"] = _pick_latest(buckets["short_call"])
     result["short_put"] = _pick_latest(buckets["short_put"])
+    result["long_call"] = _pick_latest(buckets["long_call"])
+    result["long_put"] = _pick_latest(buckets["long_put"])
     result["wing_call"] = _pick_latest(buckets["wing_call"])
     result["wing_put"] = _pick_latest(buckets["wing_put"])
     return result
@@ -159,6 +170,8 @@ def basket_legs(
     return BasketLegs(
         short_call=None,
         short_put=None,
+        long_call=None,
+        long_put=None,
         wing_call=None,
         wing_put=None,
     )

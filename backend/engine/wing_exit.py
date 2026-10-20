@@ -141,7 +141,12 @@ async def _close_one_leg_with_retries(
     place_closed_at = get_utc_now()
     for attempt in range(1, max_attempts + 1):
         try:
-            if is_long:
+            # Main call/put (short or long strangle) go through close_leg
+            # so long trades SELL reduce_only in one place. Wings/hedges
+            # still use close_long_position.
+            if lt in SHORT_LEG_TYPES:
+                last_res = await order_executor.close_leg(leg, delta_client)
+            elif is_long:
                 last_res = await order_executor.close_long_position(
                     product_id=pid,
                     quantity=qty,

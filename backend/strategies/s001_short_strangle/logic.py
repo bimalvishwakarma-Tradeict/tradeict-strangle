@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from datetime import date
 from pathlib import Path
@@ -50,6 +51,106 @@ def _signed_leg_size(leg: Any) -> float:
     if getattr(leg, "is_long", False) is True:
         return float(qty)
     return -float(qty)
+
+
+def compute_long_trail_sl_level(
+    *,
+    sl_usd: float,
+    peak: float,
+    trail_step_usd: float | None,
+    trail_amt_usd: float | None,
+    prev_sl_level: float | None,
+) -> float:
+    """
+    Trail SL: -sl_usd + trail_amt × floor(peak / trail_step).
+
+    Never decreases vs prev_sl_level. No trail → -sl_usd.
+    """
+    base = -abs(float(sl_usd or 0.0))
+    step = float(trail_step_usd or 0.0)
+    amt = float(trail_amt_usd or 0.0)
+    if step > 0.0 and amt > 0.0:
+        n = math.floor(max(0.0, float(peak or 0.0)) / step)
+        new_sl = base + amt * n
+    else:
+        new_sl = base
+    if prev_sl_level is not None:
+        new_sl = max(float(prev_sl_level), new_sl)
+    return float(new_sl)
+
+
+def apply_long_gross_exits(
+    trade: Any,
+    gross: float,
+    db_session: Any = None,
+) -> TradeAction | None:
+    """
+    Update peak / trail SL on a long trade; return an exit action or None.
+
+    Gross = realized + unrealized, fees excluded. Credit TP/SL is not used.
+    """
+    from backend.config import ExitReason
+    from backend.models import Trade as TradeModel
+
+    sl_usd = abs(float(getattr(trade, "sl_usd", None) or 0.0))
+    target_usd = float(getattr(trade, "target_usd", None) or 0.0)
+    prev_peak = float(getattr(trade, "peak_gross_mtm", None) or 0.0)
+    peak = max(prev_peak, float(gross), 0.0)
+    prev_sl = getattr(trade, "trail_sl_level", None)
+    try:
+        prev_sl_f = float(prev_sl) if prev_sl is not None else None
+    except (TypeError, ValueError):
+        prev_sl_f = None
+    sl_level = compute_long_trail_sl_level(
+        sl_usd=sl_usd,
+        peak=peak,
+        trail_step_usd=getattr(trade, "trail_step_usd", None),
+        trail_amt_usd=getattr(trade, "trail_amt_usd", None),
+        prev_sl_level=prev_sl_f,
+    )
+    peak_changed = peak != prev_peak
+    sl_changed = prev_sl_f is None or sl_level != prev_sl_f
+    trade.peak_gross_mtm = peak
+    trade.trail_sl_level = sl_level
+    if db_session is not None and (peak_changed or sl_changed):
+        tid = int(getattr(trade, "id", 0) or 0)
+        if tid > 0:
+            try:
+                row = (
+                    db_session.query(TradeModel)
+                    .filter(TradeModel.id == tid)
+                    .first()
+                )
+                if row is not None:
+                    row.peak_gross_mtm = peak
+                    row.trail_sl_level = sl_level
+                    db_session.commit()
+            except Exception as exc:
+                logger.error(
+                    "Failed to persist long trail fields trade=%s: %s",
+                    tid,
+                    exc,
+                    exc_info=True,
+                )
+    if target_usd > 0 and float(gross) >= target_usd:
+        return TradeAction(
+            should_exit=True,
+            exit_reason=ExitReason.LONG_TARGET.value,
+            current_pnl=float(gross),
+        )
+    if sl_usd > 0 and float(gross) <= sl_level:
+        base = -sl_usd
+        reason = (
+            ExitReason.LONG_TRAIL_SL.value
+            if sl_level > base
+            else ExitReason.LONG_SL.value
+        )
+        return TradeAction(
+            should_exit=True,
+            exit_reason=reason,
+            current_pnl=float(gross),
+        )
+    return None
 
 
 # adjustment_count is PER BASKET (one Trade row), shared across BOTH legs.
@@ -636,10 +737,27 @@ class ShortStrangleStrategy(BaseStrategy):
         sl_limit = abs(float(trade.stoploss_usd or 0.0))
         tp_limit = float(trade.profit_target_usd or 0.0)
 
-        # Profit target (Net MTM) — skipped while settling
-        should_exit_profit = (not is_settling) and decision_pnl >= tp_limit
-        # Stop loss (Gross MTM for SL) — NEVER suppressed by settling
-        should_exit_sl = sl_limit > 0 and sl_mtm <= -sl_limit
+        # Long trades: $ TP / trailing SL on gross (no fees). Credit TP/SL skipped.
+        if is_long_trade(trade):
+            long_exit = apply_long_gross_exits(
+                trade, float(total_pnl), db_session=db_session
+            )
+            if long_exit is not None:
+                return long_exit
+            if not is_adjustment_enabled(trade):
+                return TradeAction(
+                    current_pnl=float(total_pnl),
+                    trigger_pct_used=0.0,
+                    call_trigger_pct=0.0,
+                    put_trigger_pct=0.0,
+                )
+            should_exit_profit = False
+            should_exit_sl = False
+        else:
+            # Profit target (Net MTM) — skipped while settling
+            should_exit_profit = (not is_settling) and decision_pnl >= tp_limit
+            # Stop loss (Gross MTM for SL) — NEVER suppressed by settling
+            should_exit_sl = sl_limit > 0 and sl_mtm <= -sl_limit
 
         # Explicit audit: prove SL decision is not based on net
         if sl_limit > 0 and decision_pnl <= -sl_limit and not should_exit_sl:
@@ -1878,6 +1996,8 @@ _STOPLOSS_REASON_MARKERS = frozenset(
         "HEDGE_STOPLOSS",
         "SL",
         "STOP_LOSS",
+        "LONG_SL",
+        "LONG_TRAIL_SL",
     }
 )
 
@@ -1899,9 +2019,10 @@ def leg_exit_phase(leg_type: str, *, is_long: bool = False) -> str:
     lt = str(leg_type or "").lower().strip()
     if lt.startswith("hedge"):
         return "hedge"
-    if lt.startswith("wing") or (is_long and lt in ("call", "put")):
+    if lt.startswith("wing"):
         return "wing"
-    if lt in ("call", "put") and not is_long:
+    # Main strangle legs (short SELL or long BUY) close in the main phase.
+    if lt in ("call", "put"):
         return "short"
     if is_long:
         return "wing"

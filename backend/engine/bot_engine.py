@@ -27,7 +27,7 @@ from backend.config import (
     TradeStatus,
 )
 from backend.core.bot_logger import log_and_buffer
-from backend.core.trade_side import is_long_trade
+from backend.core.trade_side import is_long_trade, long_trade_public_fields
 from backend.core.delta_client import DeltaClient
 from backend.core.delta_ws import DeltaWebSocket, ensure_margins_feed
 from backend.core.encryption import decrypt
@@ -101,6 +101,8 @@ class BotEngine:
         self._reconcile_fail_counts: dict[tuple[int, int], int] = {}
         self._reconcile_last_signature: dict[tuple[int, int], tuple[str, int, int]] = {}
         self._reconcile_disabled: set[tuple[int, int]] = set()
+        # Long trades: first monotonic ts after 17:30 while Delta still not flat
+        self._long_expiry_wait_since: dict[int, float] = {}
 
     def _get_exit_lock(self, trade_id: int) -> asyncio.Lock:
         tid = int(trade_id)
@@ -2874,6 +2876,28 @@ class BotEngine:
 
         # Recover legs wrongly closed by pre-fix emergency race (≤1/min)
         await self._maybe_recover_legs(trade_state)
+
+        if is_long_trade(getattr(trade_state, "trade", None)):
+            from backend.engine.long_settlement import handle_long_trade_tick
+
+            async def _long_close_funnel(
+                tid: int, reason: str, skip_master_legs: bool = True
+            ) -> None:
+                with self.db_factory() as db:
+                    await self.close_master_trade(
+                        tid, reason, db, skip_master_legs=skip_master_legs
+                    )
+
+            outcome = await handle_long_trade_tick(
+                db_factory=self.db_factory,
+                delta_client=self.delta_client,
+                position_tracker=self.position_tracker,
+                wait_since=self._long_expiry_wait_since,
+                trade_state=trade_state,
+                close_funnel=_long_close_funnel,
+            )
+            if outcome == "stop":
+                return
 
         call_leg = trade_state.call_leg
         put_leg = trade_state.put_leg
@@ -7129,6 +7153,7 @@ class BotEngine:
             ),
             "hours_to_expiry": get_hours_to_expiry(trade_state.trade.expiry_date),
             "status": "active",
+            **long_trade_public_fields(trade_state.trade),
             "is_settling": settling["is_settling"],
             "settling_ends_at": settling["settling_ends_at"],
             "settling_minutes_left": settling["settling_minutes_left"],
@@ -7508,6 +7533,7 @@ class BotEngine:
                     "delta_mtm_pnl": state.last_delta_mtm,
                     "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
                     "status": "active",
+                    **long_trade_public_fields(state.trade),
                     "is_settling": settling["is_settling"],
                     "settling_ends_at": settling["settling_ends_at"],
                     "settling_minutes_left": settling["settling_minutes_left"],

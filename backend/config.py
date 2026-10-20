@@ -74,6 +74,7 @@ class TradeStatus(str, Enum):
     CLOSED = "closed"
     EXPIRED = "expired"
     EMERGENCY_CLOSED = "emergency_closed"
+    FAILED = "failed"
 
 
 # Baskets in any terminal state — used for cum_closed / backfill / accounting.
@@ -81,6 +82,7 @@ TERMINAL_TRADE_STATUSES: tuple[str, ...] = (
     TradeStatus.CLOSED.value,
     TradeStatus.EMERGENCY_CLOSED.value,
     TradeStatus.EXPIRED.value,
+    TradeStatus.FAILED.value,
 )
 
 
@@ -125,5 +127,10 @@ class ExitReason(str, Enum):
     ORPHAN_NO_HEDGE = "ORPHAN_NO_HEDGE"
     # Entry basket could not fully fill after retries — positions unwound
     ENTRY_PARTIAL_UNWIND = "ENTRY_PARTIAL_UNWIND"
+    LONG_TARGET = "LONG_TARGET"
+    LONG_SL = "LONG_SL"
+    LONG_TRAIL_SL = "LONG_TRAIL_SL"
+    EXTERNAL_CLOSE = "EXTERNAL_CLOSE"
+    EXPIRY_SETTLED = "EXPIRY_SETTLED"
     # Both shorts closed; remaining long wings auto-closed (not a loss reason)
     WINGS_ORPHANED = "WINGS_ORPHANED"
