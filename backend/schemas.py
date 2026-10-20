@@ -27,6 +27,7 @@ class AccountStatusResponse(BaseModel):
     balance_inr: float = 0.0
     usd_inr_rate: float = 85.0
     last_checked: str = ""
+    long_trades_enabled: bool = False
 
 
 class AccountSettingsUpdate(BaseModel):

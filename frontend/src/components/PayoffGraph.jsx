@@ -47,6 +47,19 @@ function calcExpiryPnl(
   return pts * scale
 }
 
+/** Long strangle expiry USD: (call_intr + put_intr − debit) × qty × CV */
+export function calcLongExpiryPnl(
+  price,
+  callStrike,
+  putStrike,
+  debitPts,
+  scale,
+) {
+  const intrinsic =
+    Math.max(0, price - callStrike) + Math.max(0, putStrike - price)
+  return (intrinsic - (Number(debitPts) || 0)) * scale
+}
+
 /**
  * Intermediate (pre-expiry) MTM approximation — Delta-like shape.
  * Uses current marks (all four legs when wings on) for the intrinsic blend.
@@ -102,7 +115,16 @@ function hoursUntilExpiryIst(expiryDate) {
   }
 }
 
-function priceStatus(price, putStrike, callStrike, beLow, beHigh) {
+function priceStatus(price, putStrike, callStrike, beLow, beHigh, mode = 'short') {
+  if (mode === 'long') {
+    if (price <= beLow || price >= beHigh) {
+      return { label: '✅ In profit zone', className: 'text-green-400' }
+    }
+    if (price > beLow && price < beHigh) {
+      return { label: '❌ Between breakevens', className: 'text-red-400' }
+    }
+    return { label: '⚠️ Near breakeven', className: 'text-yellow-400' }
+  }
   if (price >= putStrike && price <= callStrike) {
     return { label: '✅ In profit zone', className: 'text-green-400' }
   }
@@ -142,6 +164,7 @@ function buildPayoffData({
   wingCallMarkPremium,
   wingPutMarkPremium,
   maxLossUsdProp,
+  mode = 'short',
 }) {
   const POINTS = 101
   const scale = positionScale(quantity)
@@ -166,9 +189,11 @@ function buildPayoffData({
     wingsOn,
   )
 
-  const maxProfitExpiry = entryNc * scale
-  const breakevenUpper = callStrike + entryNc
-  const breakevenLower = putStrike - entryNc
+  const isLong = mode === 'long'
+  const maxProfitExpiry = isLong ? null : entryNc * scale
+  const debitPts = Number(callPremium || 0) + Number(putPremium || 0)
+  const breakevenUpper = callStrike + (isLong ? debitPts : entryNc)
+  const breakevenLower = putStrike - (isLong ? debitPts : entryNc)
 
   // Prefer trade.max_loss_usd from /active — never disagree with PositionCard
   let maxLoss = null
@@ -195,9 +220,14 @@ function buildPayoffData({
     xMax = Math.max(xMax, breakevenUpper)
   }
 
+  if (isLong) {
+    maxLoss = debitPts * scale
+  }
+
   const peak = Math.max(
-    Math.abs(maxProfitExpiry),
+    Math.abs(maxProfitExpiry || 0),
     maxLoss != null ? Math.abs(maxLoss) : 0,
+    isLong && maxLoss != null ? Math.abs(maxLoss) * 4 : 0,
     0.01,
   )
   const yAxisMax = peak * 1.2
@@ -209,26 +239,30 @@ function buildPayoffData({
   let timedMin = Infinity
   for (let i = 0; i < POINTS; i += 1) {
     const price = xMin + step * i
-    const expiryPnl = calcExpiryPnl(
-      price,
-      callStrike,
-      putStrike,
-      entryNc,
-      scale,
-      wingsOn ? wingCallStrike : null,
-      wingsOn ? wingPutStrike : null,
-    )
-    const timedPnl = calcTimedPnl(
-      price,
-      callStrike,
-      putStrike,
-      entryNc,
-      markNc,
-      scale,
-      tau,
-      wingsOn ? wingCallStrike : null,
-      wingsOn ? wingPutStrike : null,
-    )
+    const expiryPnl = isLong
+      ? calcLongExpiryPnl(price, callStrike, putStrike, debitPts, scale)
+      : calcExpiryPnl(
+          price,
+          callStrike,
+          putStrike,
+          entryNc,
+          scale,
+          wingsOn ? wingCallStrike : null,
+          wingsOn ? wingPutStrike : null,
+        )
+    const timedPnl = isLong
+      ? expiryPnl
+      : calcTimedPnl(
+          price,
+          callStrike,
+          putStrike,
+          entryNc,
+          markNc,
+          scale,
+          tau,
+          wingsOn ? wingCallStrike : null,
+          wingsOn ? wingPutStrike : null,
+        )
     timedMax = Math.max(timedMax, timedPnl)
     timedMin = Math.min(timedMin, timedPnl)
     const clipped = Math.max(yAxisMin, Math.min(yAxisMax, timedPnl))
@@ -249,7 +283,7 @@ function buildPayoffData({
 
   return {
     points,
-    maxProfit: maxProfitExpiry,
+    maxProfit: isLong ? timedMax : maxProfitExpiry,
     maxLoss,
     riskReward,
     wingsOn,
@@ -353,6 +387,7 @@ export default function PayoffGraph({
   initialHoursRemaining = null,
   emptyMessage = 'Select both Call and Put strikes to see payoff',
   compact = false,
+  mode = 'short',
 }) {
   const hoursToExpiry = useMemo(
     () => hoursUntilExpiryIst(expiryDate),
@@ -418,6 +453,7 @@ export default function PayoffGraph({
       wingPutMarkPremium:
         wingPutMarkPremium != null ? Number(wingPutMarkPremium) : null,
       maxLossUsdProp: maxLossUsd,
+      mode,
     })
   }, [
     ready,
@@ -437,6 +473,7 @@ export default function PayoffGraph({
     wingCallMarkPremium,
     wingPutMarkPremium,
     maxLossUsd,
+    mode,
   ])
 
   const status = useMemo(() => {
@@ -447,8 +484,9 @@ export default function PayoffGraph({
       Number(callStrike),
       chart.breakevenLower,
       chart.breakevenUpper,
+      mode,
     )
-  }, [chart, currentPrice, putStrike, callStrike])
+  }, [chart, currentPrice, putStrike, callStrike, mode])
 
   if (!ready || !chart) {
     return (
@@ -608,18 +646,20 @@ export default function PayoffGraph({
             <ReferenceLine y={0} stroke="#9ca3af" strokeWidth={1} />
 
             {/* Max profit / max loss horizontals */}
+            {chart.maxProfit != null && Number.isFinite(chart.maxProfit) ? (
             <ReferenceLine
               y={chart.maxProfit}
               stroke="#22c55e"
               strokeDasharray="6 3"
               strokeWidth={1}
               label={{
-                value: 'Max profit',
+                value: mode === 'long' ? 'Payoff at range edge' : 'Max profit',
                 position: 'insideTopLeft',
                 fill: '#86efac',
                 fontSize: 10,
               }}
             />
+            ) : null}
             {chart.maxLoss != null ? (
               <ReferenceLine
                 y={-Math.abs(chart.maxLoss)}

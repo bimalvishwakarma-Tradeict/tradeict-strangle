@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from backend.config import LONG_TRADES_ENABLED
 from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt, encrypt
 from backend.core.time_utils import get_ist_now, get_utc_now
@@ -429,6 +430,7 @@ async def account_status(db: Session = Depends(get_db)) -> AccountStatusResponse
             balance_inr=0.0,
             usd_inr_rate=float(app_settings.usd_inr_rate or 85.0),
             last_checked="",
+            long_trades_enabled=bool(LONG_TRADES_ENABLED),
         )
 
     app_settings = get_or_create_auto_settings(db)
@@ -455,6 +457,7 @@ async def account_status(db: Session = Depends(get_db)) -> AccountStatusResponse
             balance_inr=round(balance_usd * rate, 2),
             usd_inr_rate=rate,
             last_checked=get_ist_now().isoformat(),
+            long_trades_enabled=bool(LONG_TRADES_ENABLED),
         )
     finally:
         await client.close()

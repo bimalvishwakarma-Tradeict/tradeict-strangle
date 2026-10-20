@@ -4,12 +4,14 @@ import AdjustmentSlabs from '../components/AdjustmentSlabs'
 import OptionChain from '../components/OptionChain'
 import PayoffGraph from '../components/PayoffGraph'
 import Toast from '../components/ui/Toast'
+import ConfirmDialog from '../components/ui/ConfirmDialog'
 import LoadingSpinner from '../components/ui/LoadingSpinner'
-import { getExpiries, initiateTrade, registerExistingTrade } from '../services/api'
+import { getAccountStatus, getExpiries, initiateTrade, registerExistingTrade } from '../services/api'
 import {
   OPTIONS_CONTRACT_VALUE,
   toUsdPnl,
 } from '../utils/contractValue'
+import { longTrailSlLevel } from '../utils/longTrail'
 import { isValidPct } from '../utils/pct'
 
 const UNDERLYINGS = ['BTC', 'ETH', 'XAU']
@@ -68,8 +70,27 @@ export default function TradeInitiator() {
   const [slPct, setSlPct] = useState('100')
   const [slippagePct, setSlippagePct] = useState('2')
   const [universalSlPct, setUniversalSlPct] = useState('200')
-  const [slabs, setSlabs] = useState(null)
+  const [slabs, setSlabs] = useState({
+    mode: 'slab',
+    flat_pct: 150,
+    slab_24h: 200,
+    slab_12h: 175,
+    slab_6h: 150,
+    slab_lt6h: 150,
+    premium_slab_300: 150,
+    premium_slab_200: 160,
+    premium_slab_100: 180,
+    premium_slab_lt100: 200,
+  })
   const [isDemo, setIsDemo] = useState(false)
+  const [positionSide, setPositionSide] = useState('short')
+  const [longTradesEnabled, setLongTradesEnabled] = useState(false)
+  const [adjustmentEnabled, setAdjustmentEnabled] = useState(true)
+  const [targetUsd, setTargetUsd] = useState('150')
+  const [slUsd, setSlUsd] = useState('100')
+  const [trailStepUsd, setTrailStepUsd] = useState('')
+  const [trailAmtUsd, setTrailAmtUsd] = useState('')
+  const [confirmLongOpen, setConfirmLongOpen] = useState(false)
 
   // Emergency-only: manual fill prices
   const [callEntry, setCallEntry] = useState('')
@@ -86,6 +107,22 @@ export default function TradeInitiator() {
       ? 'Delta Bot — Emergency Register'
       : 'Delta Bot — Place Strangle'
   }, [emergencyMode])
+
+  useEffect(() => {
+    let cancelled = false
+    getAccountStatus()
+      .then((st) => {
+        if (!cancelled) {
+          setLongTradesEnabled(Boolean(st?.long_trades_enabled))
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLongTradesEnabled(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -157,6 +194,44 @@ export default function TradeInitiator() {
       ? (estMaxProfitUsd * slPctNum) / 100
       : 0
 
+  const isLong = positionSide === 'long'
+  const targetUsdNum = Number(targetUsd)
+  const slUsdNum = Number(slUsd)
+  const trailStepNum = trailStepUsd === '' ? null : Number(trailStepUsd)
+  const trailAmtNum = trailAmtUsd === '' ? null : Number(trailAmtUsd)
+  const trailBothEmpty = trailStepUsd === '' && trailAmtUsd === ''
+  const trailBothSet = trailStepUsd !== '' && trailAmtUsd !== ''
+  const trailValid =
+    trailBothEmpty ||
+    (trailBothSet &&
+      Number.isFinite(trailStepNum) &&
+      Number.isFinite(trailAmtNum) &&
+      trailAmtNum > 0 &&
+      trailAmtNum <= trailStepNum)
+  const longParamsValid =
+    Number.isFinite(targetUsdNum) &&
+    targetUsdNum > 0 &&
+    Number.isFinite(slUsdNum) &&
+    slUsdNum > 0 &&
+    trailValid
+  const longSlNow = isLong && Number.isFinite(slUsdNum) ? -Math.abs(slUsdNum) : null
+  const longTrailPreview = [50, 100, 150].map((peak) => ({
+    peak,
+    sl: longTrailSlLevel({
+      slUsd: slUsdNum,
+      peak,
+      step: trailStepNum,
+      amt: trailAmtNum,
+    }),
+  }))
+  const livePeakExample = 37
+  const livePeakSl = longTrailSlLevel({
+    slUsd: slUsdNum,
+    peak: livePeakExample,
+    step: trailStepNum,
+    amt: trailAmtNum,
+  })
+
   const callPremPreview = emergencyMode
     ? Number(callEntry) || 0
     : Number(selectedCall?.call_mark_price) || 0
@@ -215,24 +290,33 @@ export default function TradeInitiator() {
     )
   }, [slabs])
 
-  const canPlace =
+  const canPlaceCommon =
     selectedCall &&
     selectedPut &&
     qty > 0 &&
-    Number.isFinite(tpPctNum) &&
-    tpPctNum > 0 &&
-    Number.isFinite(slPctNum) &&
-    slPctNum > 0 &&
     Number.isFinite(slippagePctNum) &&
     slippagePctNum >= 0 &&
     slippagePctNum <= 10 &&
-    Number.isFinite(universalSlPctNum) &&
-    universalSlPctNum >= 100 &&
-    universalSlPctNum <= 1000 &&
     estMaxProfitUsd > 0 &&
-    slabsValid &&
     !placing &&
     (!emergencyMode || (callPrem > 0 && putPrem > 0))
+  const canPlace = isLong
+    ? Boolean(
+        canPlaceCommon &&
+          longParamsValid &&
+          (!adjustmentEnabled || slabsValid),
+      )
+    : Boolean(
+        canPlaceCommon &&
+          Number.isFinite(tpPctNum) &&
+          tpPctNum > 0 &&
+          Number.isFinite(slPctNum) &&
+          slPctNum > 0 &&
+          Number.isFinite(universalSlPctNum) &&
+          universalSlPctNum >= 100 &&
+          universalSlPctNum <= 1000 &&
+          slabsValid,
+      )
 
   const buildPayload = () => {
     const base = {
@@ -262,6 +346,14 @@ export default function TradeInitiator() {
       call_delta_at_entry: selectedCall.call_delta ?? null,
       put_delta_at_entry: selectedPut.put_delta ?? null,
       is_demo: Boolean(isDemo) && !emergencyMode,
+      position_side: isLong ? 'long' : 'short',
+      adjustment_enabled: Boolean(adjustmentEnabled),
+    }
+    if (isLong) {
+      base.target_usd = targetUsdNum
+      base.sl_usd = slUsdNum
+      base.trail_step_usd = trailBothSet ? trailStepNum : null
+      base.trail_amt_usd = trailBothSet ? trailAmtNum : null
     }
     if (emergencyMode) {
       return {
@@ -275,6 +367,7 @@ export default function TradeInitiator() {
 
   const handlePlace = async () => {
     if (!canPlace || !slabs) return
+    setConfirmLongOpen(false)
     setPlacing(true)
     setPartialError(null)
     setSuccessResult(null)
@@ -368,18 +461,81 @@ export default function TradeInitiator() {
     )
   }
 
+  const isStraddle =
+    selectedCall &&
+    selectedPut &&
+    Number(selectedCall.strike) === Number(selectedPut.strike)
+  const longConfirmMessage = `BUY call ${fmtStrike(selectedCall?.strike)} + BUY put ${fmtStrike(selectedPut?.strike)}, qty ${qty}, debit ≈ $${fmtMoney(estMaxProfitUsd)}, master only — slaves copy nahi karenge.`
+  const placeButtonLabel = emergencyMode
+    ? 'Register Existing Trade'
+    : isDemo
+      ? '🎮 Place Demo Trade'
+      : isLong
+        ? isStraddle
+          ? 'Buy Straddle'
+          : 'Buy Strangle'
+        : 'Place Strangle on Delta Exchange'
+
   return (
     <main className="mx-auto max-w-6xl space-y-6 px-4 py-8">
       <h1 className="text-2xl font-semibold text-white">
         {emergencyMode
           ? 'Emergency: Register Existing Trade'
-          : 'Place Short Strangle'}
+          : isLong
+            ? 'Place Long Strangle'
+            : 'Place Short Strangle'}
       </h1>
       <p className="text-sm text-gray-400">
         {emergencyMode
           ? 'Use only if positions already exist on Delta. Enter actual fill premiums. No new orders will be placed.'
-          : 'Select strikes and parameters — the bot will sell the call and put on Delta Exchange, then monitor the position automatically.'}
+          : isLong
+            ? 'Select strikes — the bot will buy the call and put (debit), then monitor target / trailing SL. Slaves will not copy.'
+            : 'Select strikes and parameters — the bot will sell the call and put on Delta Exchange, then monitor the position automatically.'}
       </p>
+
+      {!emergencyMode && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold text-gray-300">Position</h2>
+          <div className="inline-flex rounded-lg border border-gray-700 bg-gray-900/60 p-1">
+            <button
+              type="button"
+              onClick={() => {
+                setPositionSide('short')
+                setAdjustmentEnabled(true)
+              }}
+              className={`rounded-md px-4 py-1.5 text-sm font-medium ${
+                !isLong
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              Short
+            </button>
+            <button
+              type="button"
+              disabled={!longTradesEnabled}
+              title={longTradesEnabled ? '' : 'Long trades disabled'}
+              onClick={() => {
+                if (!longTradesEnabled) return
+                setPositionSide('long')
+                setAdjustmentEnabled(false)
+              }}
+              className={`rounded-md px-4 py-1.5 text-sm font-medium ${
+                isLong
+                  ? 'bg-emerald-600 text-white'
+                  : longTradesEnabled
+                    ? 'text-gray-400 hover:text-gray-200'
+                    : 'cursor-not-allowed text-gray-600'
+              }`}
+            >
+              Long
+            </button>
+          </div>
+          {!longTradesEnabled && (
+            <p className="text-xs text-gray-500">Long trades disabled</p>
+          )}
+        </section>
+      )}
 
       {emergencyMode && (
         <div className="rounded-md border border-amber-700/50 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
@@ -504,14 +660,32 @@ export default function TradeInitiator() {
           </label>
           <p className="pb-2 text-xs text-gray-500">
             Graph shows real Delta USD (premium × lots ×{' '}
-            {OPTIONS_CONTRACT_VALUE}) · Est. max profit{' '}
-            <span className="text-green-400">
-              $
-              {estMaxProfitUsd.toLocaleString('en-US', {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 4,
-              })}
-            </span>
+            {OPTIONS_CONTRACT_VALUE})
+            {isLong ? (
+              <>
+                {' '}
+                · debit{' '}
+                <span className="text-amber-300">
+                  $
+                  {estMaxProfitUsd.toLocaleString('en-US', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 4,
+                  })}
+                </span>
+              </>
+            ) : (
+              <>
+                {' '}
+                · Est. max profit{' '}
+                <span className="text-green-400">
+                  $
+                  {estMaxProfitUsd.toLocaleString('en-US', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 4,
+                  })}
+                </span>
+              </>
+            )}
             <span className="text-gray-600">
               {' '}
               · mark pts ${totalPremiumPoints.toFixed(2)}
@@ -528,12 +702,14 @@ export default function TradeInitiator() {
           quantity={qty || 1}
           currentPrice={currentPrice || undefined}
           expiryDate={expiry || undefined}
+          mode={isLong ? 'long' : 'short'}
         />
       </section>
 
       {/* 5. Trade parameters */}
       <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
         <h2 className="text-sm font-semibold text-white">Trade Parameters</h2>
+        {!isLong && (
         <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-sm text-gray-300">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span>Est. Max Profit (locked at deploy)</span>
@@ -546,6 +722,87 @@ export default function TradeInitiator() {
             with strikes / qty · TP/SL $ never change after adjustments
           </p>
         </div>
+        )}
+        {isLong ? (
+          <>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-sm text-gray-300">
+                Target $
+                <input
+                  type="number"
+                  min={0.01}
+                  step={1}
+                  value={targetUsd}
+                  onChange={(e) => setTargetUsd(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+                />
+              </label>
+              <label className="text-sm text-gray-300">
+                SL $
+                <input
+                  type="number"
+                  min={0.01}
+                  step={1}
+                  value={slUsd}
+                  onChange={(e) => setSlUsd(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+                />
+              </label>
+              <label className="text-sm text-gray-300">
+                Trail step $
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={trailStepUsd}
+                  onChange={(e) => setTrailStepUsd(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+                  placeholder="optional"
+                />
+              </label>
+              <label className="text-sm text-gray-300">
+                Trail amount $
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={trailAmtUsd}
+                  onChange={(e) => setTrailAmtUsd(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
+                  placeholder="optional"
+                />
+              </label>
+            </div>
+            {!trailValid && (
+              <p className="text-xs text-amber-300">
+                Trail fields must both be empty or both filled, with 0 &lt; amount ≤
+                step.
+              </p>
+            )}
+            <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs text-gray-300">
+              <p>
+                SL abhi {longSlNow != null ? `−${fmtMoney(Math.abs(longSlNow))}` : '—'}.
+                Peak {livePeakExample} par SL = {fmtSignedTrail(livePeakSl)}.
+              </p>
+              <table className="mt-2 w-full max-w-xs text-left text-[11px] text-gray-400">
+                <thead>
+                  <tr>
+                    <th className="py-1">Peak</th>
+                    <th className="py-1">SL level</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {longTrailPreview.map((row) => (
+                    <tr key={row.peak}>
+                      <td className="py-0.5">{row.peak}</td>
+                      <td className="py-0.5">{fmtSignedTrail(row.sl)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-sm text-gray-300">
             Profit Target (%)
@@ -582,6 +839,7 @@ export default function TradeInitiator() {
             </span>
           </label>
         </div>
+        )}
         <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-3">
           <label className="block text-sm text-gray-300">
             Slippage Estimate (%)
@@ -600,6 +858,7 @@ export default function TradeInitiator() {
             </span>
           </label>
         </div>
+        {!isLong && (
         <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 px-3 py-3">
           <div className="mb-2 text-sm font-semibold text-amber-200">
             SAFETY STOP LOSS (Delta Exchange Order)
@@ -641,6 +900,7 @@ export default function TradeInitiator() {
             misses an exit. Updated automatically on each adjustment.
           </p>
         </div>
+        )}
         {emergencyMode && (
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="text-sm text-gray-300">
@@ -669,15 +929,28 @@ export default function TradeInitiator() {
         )}
       </section>
 
-      {/* 6. Adjustment slabs */}
-      <AdjustmentSlabs onChange={onSlabsChange} defaultMode="slab" />
+      {/* 6. Adjustment */}
+      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
+        <label className="flex cursor-pointer items-center gap-3 text-sm text-gray-200">
+          <input
+            type="checkbox"
+            checked={adjustmentEnabled}
+            onChange={(e) => setAdjustmentEnabled(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
+          />
+          Adjustment {adjustmentEnabled ? 'ON' : 'OFF'}
+        </label>
+        {adjustmentEnabled && (
+          <AdjustmentSlabs onChange={onSlabsChange} defaultMode="slab" />
+        )}
+      </section>
 
       {/* 7. Summary */}
       {(selectedCall || selectedPut) && (
         <section className="space-y-2 rounded-xl border border-gray-700 bg-gray-800/60 p-4 text-sm text-gray-200">
           <h2 className="font-semibold text-white">Trade Summary</h2>
           <div className="text-gray-400">
-            {emergencyMode ? 'Registering:' : 'Will sell:'}
+            {emergencyMode ? 'Registering:' : isLong ? 'Will buy:' : 'Will sell:'}
           </div>
           {selectedCall && (
             <div>
@@ -732,8 +1005,9 @@ export default function TradeInitiator() {
                 </div>
               )}
               <div>
-                Target: {fmtMoney(tpPctNum)}% ≈ ${fmtMoney(targetUsdPreview)} ·
-                SL: {fmtMoney(slPctNum)}% ≈ ${fmtMoney(slUsdPreview)}
+                {isLong
+                  ? `Target: $${fmtMoney(targetUsdNum)} · SL: $${fmtMoney(slUsdNum)}`
+                  : `Target: ${fmtMoney(tpPctNum)}% ≈ $${fmtMoney(targetUsdPreview)} · SL: ${fmtMoney(slPctNum)}% ≈ $${fmtMoney(slUsdPreview)}`}
               </div>
             </>
           )}
@@ -744,7 +1018,10 @@ export default function TradeInitiator() {
       <button
         type="button"
         disabled={!canPlace}
-        onClick={handlePlace}
+        onClick={() => {
+          if (isLong && !emergencyMode) setConfirmLongOpen(true)
+          else handlePlace()
+        }}
         className={`flex w-full items-center justify-center gap-2 rounded-lg px-4 py-3 text-sm font-semibold transition ${
           canPlace
             ? 'bg-green-600 text-white hover:bg-green-500'
@@ -760,12 +1037,8 @@ export default function TradeInitiator() {
                 ? 'Registering demo trade…'
                 : PLACE_STEPS[placeStep] || 'Placing…'}
           </>
-        ) : emergencyMode ? (
-          'Register Existing Trade'
-        ) : isDemo ? (
-          '🎮 Place Demo Trade'
         ) : (
-          'Place Strangle on Delta Exchange'
+          placeButtonLabel
         )}
       </button>
 
@@ -789,6 +1062,24 @@ export default function TradeInitiator() {
           onClose={() => setToast(null)}
         />
       )}
+
+      <ConfirmDialog
+        isOpen={confirmLongOpen}
+        title="Confirm long entry"
+        message={longConfirmMessage}
+        confirmLabel={isStraddle ? 'Buy Straddle' : 'Buy Strangle'}
+        onConfirm={handlePlace}
+        onCancel={() => setConfirmLongOpen(false)}
+        confirmDisabled={placing}
+      />
     </main>
   )
+}
+
+function fmtSignedTrail(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  if (n < 0) return `−${fmtMoney(Math.abs(n))}`
+  if (n > 0) return `+${fmtMoney(n)}`
+  return fmtMoney(0)
 }

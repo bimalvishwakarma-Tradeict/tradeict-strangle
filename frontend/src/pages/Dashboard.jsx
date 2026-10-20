@@ -2059,6 +2059,12 @@ export default function Dashboard() {
                   }
                   maxLossUsd={maxLossUsd}
                   emptyMessage="Waiting for BTC price…"
+                  mode={
+                    String(activeTrade.position_side || '').toLowerCase() ===
+                    'long'
+                      ? 'long'
+                      : 'short'
+                  }
                 />
               </div>
             )}

@@ -7,6 +7,7 @@ import PayoffGraph from './PayoffGraph'
 import AdjustmentSlabs from './AdjustmentSlabs'
 import PnlSlider from './PnlSlider'
 import { closeLeg, getAdjustments, updateSettings } from '../services/api'
+import { toUsdPnl } from '../utils/contractValue'
 
 function fmtMoney(v) {
   const n = Number(v)
@@ -524,8 +525,24 @@ function normalizeLeg(trade, side) {
       : side === 'put'
         ? trade.put_change_pct
         : null)
+  const quantity =
+    nested?.quantity ??
+    (side === 'call' || side === 'put' ? trade[`${side}_quantity`] : null) ??
+    trade.quantity ??
+    null
+  const tradeIsLong = String(trade.position_side || '').toLowerCase() === 'long'
+  const isLongLeg = nested?.is_long === true || (tradeIsLong && !isWing)
   // Legs-table only — NEVER fall back to call_upnl / Delta MTM (those are NET MTM)
-  const legPnl = nested?.leg_pnl
+  let legPnl = nested?.leg_pnl
+  if (
+    isLongLeg &&
+    initial != null &&
+    current != null &&
+    Number.isFinite(Number(initial)) &&
+    Number.isFinite(Number(current))
+  ) {
+    legPnl = toUsdPnl(Number(current) - Number(initial), quantity)
+  }
   const status = (nested?.status || 'open').toLowerCase()
   const entryFee =
     nested?.entry_fee_usd ??
@@ -551,11 +568,7 @@ function normalizeLeg(trade, side) {
       nested?.symbol ??
       (side === 'call' || side === 'put' ? trade[`${side}_symbol`] : '') ??
       '',
-    quantity:
-      nested?.quantity ??
-      (side === 'call' || side === 'put' ? trade[`${side}_quantity`] : null) ??
-      trade.quantity ??
-      null,
+    quantity,
     initial_premium: initial,
     trigger_baseline_premium:
       nested?.trigger_baseline_premium ??
@@ -574,8 +587,8 @@ function normalizeLeg(trade, side) {
     closed: status === 'closed',
     entry_time: nested?.entry_time ?? null,
     exit_time: nested?.exit_time ?? null,
-    side: nested?.side ?? (isWing ? 'BUY' : 'SELL'),
-    is_long: nested?.is_long ?? isWing,
+    side: nested?.side ?? (isWing || isLongLeg ? 'BUY' : 'SELL'),
+    is_long: isLongLeg,
     is_wing: isWing,
   }
 }
@@ -613,7 +626,11 @@ function LegRow({ label, leg, compact = false, accent = false }) {
       <td className="px-2 py-2">${fmtStrike(leg.strike)}</td>
       <td className="px-2 py-2">${fmtMoney(leg.initial_premium)}</td>
       <td className="px-2 py-2">${fmtMoney(leg.current_premium)}</td>
-      <td className={`px-2 py-2 ${pnlColor(-(Number(leg.change_pct) || 0))}`}>
+      <td
+        className={`px-2 py-2 ${pnlColor(
+          (leg.is_long ? 1 : -1) * (Number(leg.change_pct) || 0),
+        )}`}
+      >
         {fmtPct(leg.change_pct)}
       </td>
       <td className={`px-2 py-2 font-medium ${pnlColor(leg.leg_pnl)}`}>
@@ -819,6 +836,16 @@ function BasketStory({
         why = '❌ No Hedge Strike — Basket Exited'
       } else if (reason.includes('NO_OTHER_STRIKE')) {
         why = '❌ Conversion Strike Missing — Basket Exited'
+      } else if (reason.includes('LONG_TRAIL_SL')) {
+        why = `LONG_TRAIL_SL: peak ${fmtSignedMoney(trade.peak_gross_mtm)} SL ${fmtSignedMoney(trade.trail_sl_level)}`
+      } else if (reason.includes('LONG_TARGET')) {
+        why = `LONG_TARGET: Net MTM ${fmtSignedMoney(trade.net_mtm)} reached +$${fmtMoney(trade.profit_target_usd ?? trade.target_usd)}`
+      } else if (reason.includes('LONG_SL')) {
+        why = `LONG_SL: Gross MTM ${fmtSignedMoney(trade.gross_mtm ?? trade.total_pnl)} hit −$${fmtMoney(trade.stoploss_usd ?? trade.sl_usd)}`
+      } else if (reason.includes('EXPIRY_SETTLED')) {
+        why = 'EXPIRY_SETTLED: settled at expiry'
+      } else if (reason.includes('EXTERNAL_CLOSE')) {
+        why = 'EXTERNAL_CLOSE: legs closed on exchange'
       } else if (reason.includes('STOP')) {
         why = `STOPLOSS: Gross MTM ${fmtSignedMoney(trade.gross_mtm ?? trade.total_pnl)} exceeded -$${fmtMoney(trade.stoploss_usd)}`
       } else if (reason.includes('PROFIT')) {
@@ -1023,6 +1050,11 @@ export default function PositionCard({
   const put = normalizeLeg(trade, 'put')
   const wingCall = normalizeLeg(trade, 'wing_call')
   const wingPut = normalizeLeg(trade, 'wing_put')
+  const isLongTrade = String(trade.position_side || '').toLowerCase() === 'long'
+  const adjEnabled = isLongTrade
+    ? Boolean(trade.adjustment_enabled)
+    : trade.adjustment_enabled !== false
+  const payoffMode = isLongTrade ? 'long' : 'short'
   const hasWings = Boolean(
     (wingCall && wingCall.strike != null) ||
       (wingPut && wingPut.strike != null),
@@ -1112,8 +1144,18 @@ export default function PositionCard({
     trade.net_mtm != null && trade.net_mtm !== '' ? n(trade.net_mtm) : computedNet
   const totalMtm = netMtm
   const lastMtmUpdate = trade.last_mtm_update || null
-  const target = n(trade.profit_target_usd)
-  const stoploss = n(trade.stoploss_usd)
+  const target = n(trade.profit_target_usd ?? trade.target_usd)
+  const stoploss = n(trade.stoploss_usd ?? trade.sl_usd)
+  const trailSlLevel =
+    trade.trail_sl_level != null && trade.trail_sl_level !== ''
+      ? n(trade.trail_sl_level)
+      : isLongTrade
+        ? -stoploss
+        : null
+  const peakGross =
+    trade.peak_gross_mtm != null && trade.peak_gross_mtm !== ''
+      ? n(trade.peak_gross_mtm)
+      : null
   const nearSl =
     grossMtmForSl != null &&
     stoploss > 0 &&
@@ -1498,7 +1540,7 @@ export default function PositionCard({
               </div>
             )
           })()}
-          {combinedMode ? (
+          {adjEnabled && (combinedMode ? (
             <div className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 p-3 text-xs text-cyan-200">
               Combined trigger mode active — {fmtMoney(combinedTrigPct)}% of
               combined entry (${fmtMoney(combinedEntry)})
@@ -1538,7 +1580,7 @@ export default function PositionCard({
                 otherSideLabel="CALL"
               />
             </div>
-          )}
+          ))}
         </div>
       </article>
     )
@@ -1552,11 +1594,16 @@ export default function PositionCard({
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
               <h2 className="font-bold text-white">
-                🟠 Basket {basketNo ?? '—'} · {trade.underlying || 'BTC'} Short
-                Strangle
+                🟠 Basket {basketNo ?? '—'} · {trade.underlying || 'BTC'}{' '}
+                {isLongTrade ? 'Long Strangle' : 'Short Strangle'}
+                {isLongTrade && (
+                  <span className="ml-2 rounded bg-emerald-900/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+                    LONG
+                  </span>
+                )}
               </h2>
               <p className="text-[11px] text-gray-500">trade #{trade.trade_id}</p>
-              {adjMax != null && (
+              {adjEnabled && adjMax != null && (
                 <span className="mt-1 inline-block rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">
                   Adjustments {adjCount}/{adjMax}
                 </span>
@@ -1598,8 +1645,16 @@ export default function PositionCard({
                 </tr>
               </thead>
               <tbody>
-                <LegRow label="SHORT CALL" leg={call} compact />
-                <LegRow label="SHORT PUT" leg={put} compact />
+                <LegRow
+                  label={isLongTrade ? 'LONG CALL' : 'SHORT CALL'}
+                  leg={call}
+                  compact
+                />
+                <LegRow
+                  label={isLongTrade ? 'LONG PUT' : 'SHORT PUT'}
+                  leg={put}
+                  compact
+                />
                 {hasWings && (
                   <>
                     <LegRow
@@ -1639,8 +1694,19 @@ export default function PositionCard({
               🎯 Target: <span className="font-bold">+${fmtMoney(target)}</span>
             </span>
             <span className="text-red-400">
-              🛑 SL: <span className="font-bold">−${fmtMoney(stoploss)}</span>
+              🛑 SL:{' '}
+              <span className="font-bold">
+                {isLongTrade
+                  ? fmtSignedMoney(trailSlLevel)
+                  : `−$${fmtMoney(stoploss)}`}
+              </span>
             </span>
+            {isLongTrade && (
+              <span className="text-gray-300">
+                Peak:{' '}
+                <span className="font-bold">{fmtSignedMoney(peakGross)}</span>
+              </span>
+            )}
             <span className={pnlColor(netMtm)}>
               📊 Net: <span className="font-bold">{fmtSignedMoney(netMtm)}</span>
             </span>
@@ -1704,6 +1770,7 @@ export default function PositionCard({
             >
               Edit Slippage %
             </button>
+            {adjEnabled && (
             <button
               type="button"
               onClick={() => openEdit('trigger')}
@@ -1711,6 +1778,7 @@ export default function PositionCard({
             >
               Edit Trigger
             </button>
+            )}
           </div>
         </div>
 
@@ -1768,7 +1836,13 @@ export default function PositionCard({
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-700 bg-gray-900/60 px-4 py-3 text-sm">
         <div className="font-semibold text-white">
           <div>
-            🟠 Basket {basketNo ?? '—'} · {trade.underlying || '—'} Short Strangle
+            🟠 Basket {basketNo ?? '—'} · {trade.underlying || '—'}{' '}
+            {isLongTrade ? 'Long Strangle' : 'Short Strangle'}
+            {isLongTrade && (
+              <span className="ml-2 rounded bg-emerald-900/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-200">
+                LONG
+              </span>
+            )}
           </div>
           <div className="text-[11px] font-normal text-gray-500">
             trade #{trade.trade_id}
@@ -1778,7 +1852,7 @@ export default function PositionCard({
               1 leg open
             </span>
           )}
-          {adjMax != null && (
+          {adjEnabled && adjMax != null && (
             <span
               className={`ml-2 rounded px-2 py-0.5 text-xs font-normal ${
                 adjLimitReached
@@ -1796,7 +1870,7 @@ export default function PositionCard({
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs sm:text-sm">
           <span className="font-semibold text-green-400">
-            🎯 Target{' '}
+            🎯 Target $
             <span className="text-base font-bold">+${fmtMoney(target)}</span>
             {String(trade.target_source || '').toUpperCase() === 'THETA' &&
             trade.hedge_theta_at_entry != null ? (
@@ -1807,8 +1881,20 @@ export default function PositionCard({
           </span>
           <span className="font-semibold text-red-400">
             🛑 SL{' '}
-            <span className="text-base font-bold">-${fmtMoney(stoploss)}</span>
+            <span className="text-base font-bold">
+              {isLongTrade
+                ? fmtSignedMoney(trailSlLevel)
+                : `-$${fmtMoney(stoploss)}`}
+            </span>
           </span>
+          {isLongTrade && (
+            <span className="font-semibold text-gray-300">
+              Peak{' '}
+              <span className="text-base font-bold">
+                {fmtSignedMoney(peakGross)}
+              </span>
+            </span>
+          )}
           <span className={pnlColor(netMtm)}>
             Net {fmtSignedMoney(netMtm)}
           </span>
@@ -1852,8 +1938,14 @@ export default function PositionCard({
             </tr>
           </thead>
           <tbody>
-            <LegRow label="SHORT CALL" leg={call} />
-            <LegRow label="SHORT PUT" leg={put} />
+            <LegRow
+              label={isLongTrade ? 'LONG CALL' : 'SHORT CALL'}
+              leg={call}
+            />
+            <LegRow
+              label={isLongTrade ? 'LONG PUT' : 'SHORT PUT'}
+              leg={put}
+            />
             {hasWings && (
               <>
                 <LegRow label="WING CALL" leg={wingCall} accent />
@@ -2271,6 +2363,7 @@ export default function PositionCard({
                 maxLossUsd={maxLossUsd}
                 emptyMessage="Waiting for BTC price…"
                 compact
+                mode={payoffMode}
               />
             </div>
           ) : (
@@ -2317,7 +2410,7 @@ export default function PositionCard({
           )
         })()}
 
-        {combinedMode && (
+        {adjEnabled && combinedMode && (
           <div className="mb-3 space-y-3 rounded-lg border border-cyan-500/40 bg-cyan-500/10 p-3">
             <div className="text-xs font-semibold text-cyan-200">
               Combined Trigger Mode Active — Adjustment triggers when total
@@ -2373,7 +2466,7 @@ export default function PositionCard({
           </div>
         )}
 
-        {!combinedMode && (
+        {adjEnabled && !combinedMode && (
           <div className="grid gap-3 sm:grid-cols-2">
             <TriggerWatch
               title="Call Leg Watch"
@@ -2410,7 +2503,7 @@ export default function PositionCard({
           </div>
         )}
 
-        {trade.in_conversion_mode ? (
+        {adjEnabled && (trade.in_conversion_mode ? (
           <div className="mt-3 space-y-3">
             <div className="rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-4">
               <div className="mb-3 flex items-center gap-2">
@@ -2594,7 +2687,7 @@ export default function PositionCard({
               )}
             </div>
           </div>
-        )}
+        ))}
       </div>
 
       {/* Controls */}
@@ -2655,6 +2748,7 @@ export default function PositionCard({
           >
             Edit Slippage %
           </button>
+          {adjEnabled && (
           <button
             type="button"
             onClick={() => openEdit('trigger')}
@@ -2662,6 +2756,7 @@ export default function PositionCard({
           >
             Edit Trigger
           </button>
+          )}
         </div>
       </div>
 
