@@ -34,6 +34,7 @@ from backend.core.time_utils import (
 from backend.core.ws_manager import ws_manager
 from backend.database import get_db, get_or_create_auto_settings
 from backend.engine.bot_engine import bot_engine
+from backend.engine.long_settlement import _refresh_expunge_for_tracker
 from backend.engine.trade_reconcile import (
     book_leg_close,
     count_open_bot_legs,
@@ -891,6 +892,48 @@ async def _persist_strangle_trade(
     return trade, call_leg, put_leg
 
 
+def _attach_trade_to_tracker(
+    db: Session,
+    trade: Any,
+    call_leg: Any,
+    put_leg: Any,
+) -> str | None:
+    """Refresh+expunge then tracker.add. Never raise — caller already placed orders."""
+    try:
+        _refresh_expunge_for_tracker(db, trade, call_leg, put_leg)
+        bot_engine.position_tracker.add(trade, call_leg, put_leg)
+        state = bot_engine.position_tracker.get(int(trade.id))
+        if state is None:
+            logger.critical(
+                "Trade %s NOT in position tracker after add()! "
+                "This is a bug — trade will not be monitored!",
+                trade.id,
+            )
+            log_and_buffer(
+                "ERROR",
+                int(trade.id),
+                {"stage": "tracker_add", "error": "missing_after_add"},
+            )
+            return "Trade saved but missing from position tracker"
+        logger.info(
+            "Trade %s confirmed in position tracker (is_demo=%s)",
+            trade.id,
+            bool(getattr(trade, "is_demo", False)),
+        )
+        return None
+    except Exception as exc:
+        logger.critical(
+            "Post-order tracker add failed trade=%s: %s",
+            getattr(trade, "id", "?"),
+            exc,
+            exc_info=True,
+        )
+        return (
+            "Orders are live on Delta but monitor attach failed; "
+            f"/active will resync. ({exc})"
+        )
+
+
 @router.post("/initiate")
 async def initiate_trade(
     payload: TradeInitiateRequest,
@@ -1445,46 +1488,37 @@ async def initiate_trade(
             and (put_sl_trigger_price is not None and put_sl_trigger_price > 0)
         )
         delta_sl_warning = None
-
-        db.expunge(trade)
-        db.expunge(call_leg)
-        db.expunge(put_leg)
-        bot_engine.position_tracker.add(trade, call_leg, put_leg)
-        state = bot_engine.position_tracker.get(trade.id)
-        if state is None:
-            logger.critical(
-                "Trade %s NOT in position tracker after add()! "
-                "This is a bug — trade will not be monitored!",
-                trade.id,
-            )
-            log_and_buffer(
-                "ERROR",
-                int(trade.id),
-                {"stage": "tracker_add", "error": "missing_after_add"},
-            )
-        else:
+        post_order_warning = _attach_trade_to_tracker(db, trade, call_leg, put_leg)
+        if post_order_warning is None:
+            try:
+                log_and_buffer(
+                    "ENTRY_GUARD_PASS",
+                    int(trade.id),
+                    {
+                        "stage": "tracker_confirmed",
+                        "source": "manual_demo" if is_demo else "manual",
+                        "is_demo": is_demo,
+                    },
+                )
+            except Exception as exc:
+                logger.critical(
+                    "Post-order activity log failed trade=%s: %s",
+                    getattr(trade, "id", "?"),
+                    exc,
+                    exc_info=True,
+                )
+                post_order_warning = (
+                    "Orders are live but activity log failed; "
+                    f"/active will resync. ({exc})"
+                )
             logger.info(
-                "Trade %s confirmed in position tracker (is_demo=%s)",
+                "Step 9: Added to position tracker trade_id=%s active_count=%s "
+                "(P&L checks start at %s IST) delta_sl_ok=%s",
                 trade.id,
-                bool(getattr(trade, "is_demo", False)),
+                len(bot_engine.position_tracker.get_all_active()),
+                monitoring_starts.isoformat(),
+                delta_sl_ok,
             )
-            log_and_buffer(
-                "ENTRY_GUARD_PASS",
-                int(trade.id),
-                {
-                    "stage": "tracker_confirmed",
-                    "source": "manual_demo" if is_demo else "manual",
-                    "is_demo": is_demo,
-                },
-            )
-        logger.info(
-            "Step 9: Added to position tracker trade_id=%s active_count=%s "
-            "(P&L checks start at %s IST) delta_sl_ok=%s",
-            trade.id,
-            len(bot_engine.position_tracker.get_all_active()),
-            monitoring_starts.isoformat(),
-            delta_sl_ok,
-        )
 
         # Mirror to slave accounts (non-fatal)
         try:
@@ -1568,21 +1602,34 @@ async def initiate_trade(
         except Exception as exc:
             logger.warning("Mirror queue failed (non-fatal): %s", exc)
 
-        await ws_manager.broadcast(
-            {
-                "type": "TRADE_UPDATE",
-                "trade_id": trade.id,
-                "underlying": underlying,
-                "status": TradeStatus.ACTIVE.value,
-                "delta_sl_active": delta_sl_ok,
-                "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
-                "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
-                **get_settling_info_for_trade(trade),
-            }
-        )
+        try:
+            await ws_manager.broadcast(
+                {
+                    "type": "TRADE_UPDATE",
+                    "trade_id": trade.id,
+                    "underlying": underlying,
+                    "status": TradeStatus.ACTIVE.value,
+                    "delta_sl_active": delta_sl_ok,
+                    "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
+                    "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
+                    **get_settling_info_for_trade(trade),
+                }
+            )
+        except Exception as exc:
+            logger.critical(
+                "Post-order WS broadcast failed trade=%s: %s",
+                getattr(trade, "id", "?"),
+                exc,
+                exc_info=True,
+            )
+            if not post_order_warning:
+                post_order_warning = (
+                    "Orders are live but live feed notify failed; "
+                    f"/active will resync. ({exc})"
+                )
 
         total_prem = call_fill_price + put_fill_price
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "trade_id": trade.id,
             "is_demo": bool(getattr(trade, "is_demo", False)),
@@ -1626,6 +1673,9 @@ async def initiate_trade(
                 "stoploss_usd": float(trade.stoploss_usd),
             },
         }
+        if post_order_warning:
+            result["warning"] = post_order_warning
+        return result
     except HTTPException:
         raise
     except DeltaAPIError as exc:
@@ -1718,10 +1768,7 @@ async def register_existing_trade(
         else None
     )
 
-    db.expunge(trade)
-    db.expunge(call_leg)
-    db.expunge(put_leg)
-    bot_engine.position_tracker.add(trade, call_leg, put_leg)
+    post_order_warning = _attach_trade_to_tracker(db, trade, call_leg, put_leg)
     logger.info(
         "Emergency register trade id=%s (no entry orders) — monitoring at %s "
         "bracket_display_sl=%s",
@@ -1730,21 +1777,34 @@ async def register_existing_trade(
         delta_sl_ok,
     )
 
-    await ws_manager.broadcast(
-        {
-            "type": "TRADE_UPDATE",
-            "trade_id": trade.id,
-            "underlying": underlying,
-            "status": TradeStatus.ACTIVE.value,
-            "delta_sl_active": delta_sl_ok,
-            "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
-            "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
-            "universal_sl_pct": uni_sl,
-            **get_settling_info_for_trade(trade),
-        }
-    )
+    try:
+        await ws_manager.broadcast(
+            {
+                "type": "TRADE_UPDATE",
+                "trade_id": trade.id,
+                "underlying": underlying,
+                "status": TradeStatus.ACTIVE.value,
+                "delta_sl_active": delta_sl_ok,
+                "call_sl_trigger_price": getattr(call_leg, "sl_trigger_price", None),
+                "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
+                "universal_sl_pct": uni_sl,
+                **get_settling_info_for_trade(trade),
+            }
+        )
+    except Exception as exc:
+        logger.critical(
+            "Post-register WS broadcast failed trade=%s: %s",
+            getattr(trade, "id", "?"),
+            exc,
+            exc_info=True,
+        )
+        if not post_order_warning:
+            post_order_warning = (
+                "Trade registered but live feed notify failed; "
+                f"/active will resync. ({exc})"
+            )
 
-    return {
+    result: dict[str, Any] = {
         "success": True,
         "trade_id": trade.id,
         "message": "Existing strangle registered for monitoring (no entry orders placed)",
@@ -1761,6 +1821,9 @@ async def register_existing_trade(
         "put_sl_trigger_price": getattr(put_leg, "sl_trigger_price", None),
         "universal_sl_pct": uni_sl,
     }
+    if post_order_warning:
+        result["warning"] = post_order_warning
+    return result
 
 
 def _sync_tracker_from_db(db: Session) -> None:
@@ -2040,11 +2103,25 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                             call_mtm = float(call_row.get("upnl") or 0.0)
                             if float(call_row.get("mark_price") or 0) > 0:
                                 call_mark = float(call_row["mark_price"])
-                            if float(call_row.get("best_offer") or 0) > 0:
-                                px = float(call_row["best_offer"])
-                                call_prem = px
-                                if trade_is_long:
-                                    call_bid = px
+                            if trade_is_long:
+                                bid = float(call_row.get("best_bid") or 0)
+                                if bid > 0:
+                                    call_prem = bid
+                                    call_bid = bid
+                                else:
+                                    try:
+                                        call_prem = float(
+                                            await client.get_long_exit_price(
+                                                str(state.call_leg.symbol)
+                                            )
+                                        )
+                                        call_bid = call_prem
+                                    except Exception:
+                                        if call_mark > 0:
+                                            call_prem = call_mark
+                                            call_bid = call_mark
+                            elif float(call_row.get("best_offer") or 0) > 0:
+                                call_prem = float(call_row["best_offer"])
                         elif call_open:
                             if trade_is_long:
                                 call_prem = float(
@@ -2069,11 +2146,25 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                             put_mtm = float(put_row.get("upnl") or 0.0)
                             if float(put_row.get("mark_price") or 0) > 0:
                                 put_mark = float(put_row["mark_price"])
-                            if float(put_row.get("best_offer") or 0) > 0:
-                                px = float(put_row["best_offer"])
-                                put_prem = px
-                                if trade_is_long:
-                                    put_bid = px
+                            if trade_is_long:
+                                bid = float(put_row.get("best_bid") or 0)
+                                if bid > 0:
+                                    put_prem = bid
+                                    put_bid = bid
+                                else:
+                                    try:
+                                        put_prem = float(
+                                            await client.get_long_exit_price(
+                                                str(state.put_leg.symbol)
+                                            )
+                                        )
+                                        put_bid = put_prem
+                                    except Exception:
+                                        if put_mark > 0:
+                                            put_prem = put_mark
+                                            put_bid = put_mark
+                            elif float(put_row.get("best_offer") or 0) > 0:
+                                put_prem = float(put_row["best_offer"])
                         elif put_open:
                             if trade_is_long:
                                 put_prem = float(

@@ -81,16 +81,16 @@ function LiveTradeCard({ trade, onToast }) {
     amt: trade.trail_amt_usd == null ? '' : String(trade.trail_amt_usd),
   })
 
-  const slLevel = Number(trade.trail_sl_level)
   const target = Number(trade.target_usd ?? trade.profit_target_usd)
   const gross = Number(trade.gross_mtm)
+  const net = Number(trade.net_mtm)
   const progress = useMemo(() => {
-    if (!Number.isFinite(slLevel) || !Number.isFinite(target) || target === slLevel) {
+    if (!Number.isFinite(target) || target <= 0) {
       return 0
     }
-    const g = Number.isFinite(gross) ? gross : slLevel
-    return Math.max(0, Math.min(100, ((g - slLevel) / (target - slLevel)) * 100))
-  }, [slLevel, target, gross])
+    const n = Number.isFinite(net) ? net : 0
+    return Math.max(0, Math.min(100, (n / target) * 100))
+  }, [target, net])
 
   const run = async (key, fn, okMsg) => {
     setBusy(key)
@@ -196,8 +196,14 @@ function LiveTradeCard({ trade, onToast }) {
       {isLong && (
         <div className="mt-3 space-y-2 text-xs text-gray-300">
           <div className="flex flex-wrap gap-x-4 gap-y-1">
-            <span>Target ${fmtMoney(trade.target_usd)}</span>
-            <span>SL level {fmtSigned(trade.trail_sl_level)}</span>
+            <span>
+              Target (Net $) ${fmtMoney(trade.target_usd)} · now{' '}
+              {fmtSigned(net)}
+            </span>
+            <span>
+              SL (Gross $) {fmtSigned(trade.trail_sl_level)} · now{' '}
+              {fmtSigned(gross)}
+            </span>
             <span>Peak ${fmtMoney(trade.peak_gross_mtm)}</span>
             <span>
               Trail {fmtMoney(trade.trail_step_usd)} / {fmtMoney(trade.trail_amt_usd)}
@@ -218,8 +224,8 @@ function LiveTradeCard({ trade, onToast }) {
       {isLong && modifyOpen && (
         <div className="mt-3 grid gap-2 rounded-md border border-gray-700 p-3 sm:grid-cols-2">
           {[
-            ['target', 'Target $'],
-            ['sl', 'SL $'],
+            ['target', 'Target (Net $)'],
+            ['sl', 'SL (Gross $)'],
             ['step', 'Trail step'],
             ['amt', 'Trail amount'],
           ].map(([key, label]) => (

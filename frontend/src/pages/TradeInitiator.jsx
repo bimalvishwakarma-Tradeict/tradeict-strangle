@@ -348,10 +348,10 @@ export default function TradeInitiator() {
   if (placing) placeDisabledReasons.push('Order chal raha hai')
   if (isLong) {
     if (!Number.isFinite(targetUsdNum) || targetUsdNum <= 0) {
-      placeDisabledReasons.push('Target $ daalo')
+      placeDisabledReasons.push('Target (Net $) daalo')
     }
     if (!Number.isFinite(slUsdNum) || slUsdNum <= 0) {
-      placeDisabledReasons.push('SL $ daalo')
+      placeDisabledReasons.push('SL (Gross $) daalo')
     }
     if (
       trailBothSet &&
@@ -790,7 +790,7 @@ export default function TradeInitiator() {
           <>
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="text-sm text-gray-300">
-                Target $
+                Target (Net $)
                 <input
                   type="number"
                   min={0.01}
@@ -801,7 +801,7 @@ export default function TradeInitiator() {
                 />
               </label>
               <label className="text-sm text-gray-300">
-                SL $
+                SL (Gross $)
                 <input
                   type="number"
                   min={0.01}

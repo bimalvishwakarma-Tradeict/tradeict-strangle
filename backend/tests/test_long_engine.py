@@ -18,6 +18,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.api.routes_trade import (
+    _leg_snapshot,
     _persist_strangle_trade,
     initiate_trade,
     register_existing_trade,
@@ -831,3 +832,296 @@ async def test_long_adj_enabled_trigger_does_not_call_executor(
     assert any(
         "adjustment_enabled=True on long trade" in r.message for r in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_long_initiate_tracker_readable_without_session() -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.database import Base
+    from backend.engine.position_tracker import PositionTracker
+    from backend.models import Account
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    acc = Account(name="long-init", api_key_encrypted="x", api_secret_encrypted="y")
+    db.add(acc)
+    db.commit()
+    db.refresh(acc)
+
+    client = AsyncMock()
+    client.get_mark_price = AsyncMock(return_value=20.0)
+    client.resolve_fill_price = AsyncMock(return_value=20.0)
+    client.close = AsyncMock()
+    buy = AsyncMock(
+        return_value=OrderResult(success=True, filled_price=20.0, order_id=101)
+    )
+    tracker = PositionTracker()
+    eng = MagicMock()
+    eng.order_executor.buy_option = buy
+    eng.order_executor.sell_option = AsyncMock()
+    eng.order_executor.close_leg = AsyncMock()
+    eng.position_tracker = tracker
+    eng._push_error = AsyncMock()
+
+    with (
+        patch("backend.api.routes_trade.LONG_TRADES_ENABLED", True),
+        patch("backend.api.routes_trade._get_active_account", return_value=acc),
+        patch(
+            "backend.api.routes_trade._ensure_no_active_trade",
+            new_callable=AsyncMock,
+        ),
+        patch("backend.api.routes_trade._build_delta_client", return_value=client),
+        patch(
+            "backend.api.routes_trade._manual_entry_triple_guard",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "backend.api.routes_trade._verify_leg_on_delta",
+            new_callable=AsyncMock,
+        ),
+        patch("backend.api.routes_trade.bot_engine", eng),
+        patch(
+            "backend.api.routes_trade.ws_manager.broadcast",
+            new_callable=AsyncMock,
+        ),
+        patch("backend.api.routes_trade.log_and_buffer"),
+        patch(
+            "backend.api.routes_trade.get_or_create_auto_settings",
+            return_value=SimpleNamespace(entry_settling_seconds=0),
+        ),
+    ):
+        result = await initiate_trade(
+            _payload(trail_step_usd=10, trail_amt_usd=5),
+            db=db,
+        )
+
+    assert result["success"] is True
+    assert "warning" not in result
+    tid = int(result["trade_id"])
+    state = tracker.get(tid)
+    assert state is not None
+    db.close()
+    assert state.call_leg.symbol
+    assert state.put_leg.initial_premium > 0
+    assert str(state.trade.position_side).lower() == "long"
+
+
+@pytest.mark.asyncio
+async def test_long_initiate_tracker_add_fail_returns_200_warning() -> None:
+    account = SimpleNamespace(id=1)
+    db = MagicMock()
+    client = AsyncMock()
+    client.get_mark_price = AsyncMock(return_value=20.0)
+    client.resolve_fill_price = AsyncMock(return_value=20.0)
+    client.close = AsyncMock()
+    buy = AsyncMock(
+        return_value=OrderResult(success=True, filled_price=20.0, order_id=101)
+    )
+
+    async def fake_persist(**kwargs: object) -> tuple[Any, Any, Any]:
+        trade = SimpleNamespace(
+            id=16,
+            position_side="long",
+            is_demo=False,
+            expiry_date=date(2099, 12, 31),
+            underlying="BTC",
+            basket_number=16,
+            monitoring_starts_at=None,
+            profit_target_usd=150.0,
+            stoploss_usd=100.0,
+            initial_max_profit=0.0,
+            tp_pct=50.0,
+            sl_pct=100.0,
+        )
+        call = SimpleNamespace(id=1, is_long=True, side="BUY", sl_trigger_price=None)
+        put = SimpleNamespace(id=2, is_long=True, side="BUY", sl_trigger_price=None)
+        return trade, call, put
+
+    tracker = MagicMock()
+    tracker.add.side_effect = RuntimeError("boom")
+    tracker.get = MagicMock(return_value=None)
+    tracker.get_all_active = MagicMock(return_value=[])
+    eng = MagicMock()
+    eng.order_executor.buy_option = buy
+    eng.order_executor.sell_option = AsyncMock()
+    eng.order_executor.close_leg = AsyncMock()
+    eng.position_tracker = tracker
+    eng._push_error = AsyncMock()
+
+    with (
+        patch("backend.api.routes_trade.LONG_TRADES_ENABLED", True),
+        patch("backend.api.routes_trade._get_active_account", return_value=account),
+        patch(
+            "backend.api.routes_trade._ensure_no_active_trade",
+            new_callable=AsyncMock,
+        ),
+        patch("backend.api.routes_trade._build_delta_client", return_value=client),
+        patch(
+            "backend.api.routes_trade._manual_entry_triple_guard",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "backend.api.routes_trade._verify_leg_on_delta",
+            new_callable=AsyncMock,
+        ),
+        patch("backend.api.routes_trade._persist_strangle_trade", new=fake_persist),
+        patch("backend.api.routes_trade.bot_engine", eng),
+        patch(
+            "backend.api.routes_trade.ws_manager.broadcast",
+            new_callable=AsyncMock,
+        ),
+        patch("backend.api.routes_trade.log_and_buffer"),
+    ):
+        result = await initiate_trade(
+            _payload(trail_step_usd=10, trail_amt_usd=5),
+            db=db,
+        )
+
+    assert result["success"] is True
+    assert "warning" in result
+    assert "boom" in str(result["warning"])
+
+
+def test_long_leg_snapshot_pnl_from_bid() -> None:
+    leg = SimpleNamespace(
+        id=1,
+        leg_type="put",
+        strike=100000.0,
+        symbol="P-BTC",
+        quantity=10,
+        initial_premium=569.0,
+        trigger_baseline_premium=569.0,
+        trigger_premium=569.0,
+        status="open",
+        is_long=True,
+        side="BUY",
+        exit_premium=None,
+        entry_time=None,
+        exit_time=None,
+        realized_pnl=None,
+        entry_fee_usd=None,
+        exit_fee_usd=None,
+    )
+    snap = _leg_snapshot(leg, 539.0)
+    assert snap["leg_pnl"] == -0.30
+    short = SimpleNamespace(
+        id=2,
+        leg_type="put",
+        strike=100000.0,
+        symbol="P-BTC",
+        quantity=10,
+        initial_premium=569.0,
+        trigger_baseline_premium=569.0,
+        trigger_premium=569.0,
+        status="open",
+        is_long=False,
+        side="SELL",
+        exit_premium=None,
+        entry_time=None,
+        exit_time=None,
+        realized_pnl=None,
+        entry_fee_usd=None,
+        exit_fee_usd=None,
+    )
+    short_snap = _leg_snapshot(short, 548.0)
+    assert short_snap["leg_pnl"] == pytest.approx((569.0 - 548.0) * 10 * 0.001)
+
+
+@pytest.mark.asyncio
+async def test_get_positions_upnl_long_uses_bid_not_ask() -> None:
+    from backend.core.delta_client import DeltaClient
+
+    client = DeltaClient("k", "s")
+    client._request = AsyncMock(
+        return_value=[
+            {
+                "product_id": 1,
+                "size": 10,
+                "entry_price": 569,
+                "mark_price": 545,
+                "best_ask_price": 548,
+                "best_bid_price": 539,
+                "contract_value": 0.001,
+                "product_symbol": "P-BTC-1",
+            },
+            {
+                "product_id": 2,
+                "size": -10,
+                "entry_price": 569,
+                "mark_price": 545,
+                "best_ask_price": 548,
+                "best_bid_price": 539,
+                "contract_value": 0.001,
+                "product_symbol": "C-BTC-2",
+            },
+        ]
+    )
+    try:
+        out = await client.get_positions_upnl([1, 2])
+        assert out[1]["upnl"] == -0.30
+        assert out[1]["best_bid"] == 539.0
+        assert out[2]["upnl"] == pytest.approx(0.21)
+        assert out[2]["best_offer"] == 548.0
+    finally:
+        await client.client.aclose()
+
+
+def test_long_target_on_net_sl_on_gross() -> None:
+    from backend.core.fees import compute_net_mtm
+
+    net_hold = compute_net_mtm(
+        gross_mtm=1.2,
+        fees_paid=0.2,
+        est_exit_fees=0.2,
+        slippage_pct=0.0,
+    )["net_mtm"]
+    assert net_hold == pytest.approx(0.8)
+    trade = SimpleNamespace(
+        id=0,
+        sl_usd=2.0,
+        target_usd=1.0,
+        trail_step_usd=None,
+        trail_amt_usd=None,
+        peak_gross_mtm=0.0,
+        trail_sl_level=-2.0,
+        position_side="long",
+    )
+    hold = apply_long_gross_exits(trade, 1.2, net_mtm=net_hold)
+    assert hold is None
+    net_tp = compute_net_mtm(
+        gross_mtm=1.5,
+        fees_paid=0.2,
+        est_exit_fees=0.2,
+        slippage_pct=0.0,
+    )["net_mtm"]
+    assert net_tp == pytest.approx(1.1)
+    trade_tp = SimpleNamespace(
+        id=0,
+        sl_usd=2.0,
+        target_usd=1.0,
+        trail_step_usd=None,
+        trail_amt_usd=None,
+        peak_gross_mtm=0.0,
+        trail_sl_level=-2.0,
+        position_side="long",
+    )
+    tp = apply_long_gross_exits(trade_tp, 1.5, net_mtm=net_tp)
+    assert tp is not None
+    assert tp.exit_reason == ExitReason.LONG_TARGET.value
+    trade_sl = SimpleNamespace(
+        id=0,
+        sl_usd=2.0,
+        target_usd=10.0,
+        trail_step_usd=None,
+        trail_amt_usd=None,
+        peak_gross_mtm=0.0,
+        trail_sl_level=-2.0,
+        position_side="long",
+    )
+    sl = apply_long_gross_exits(trade_sl, -2.0, net_mtm=-2.4)
+    assert sl is not None
+    assert sl.exit_reason == ExitReason.LONG_SL.value

@@ -963,11 +963,8 @@ class DeltaClient:
 
         Delta India `unrealized_pnl` field is entry cashflow — NEVER use it.
 
-        Correct short-option UPNL (matches Delta UPL@Offer):
-            (entry_price - best_offer) × abs(size) × contract_size
-        where best_offer = L2 top ask / ticker quotes.best_ask
-        (the price paid to buy back the short). Falls back to mark only
-        if no offer is available.
+        Short UPNL (UPL@Offer): (entry − ask) × abs(size) × cv.
+        Long UPNL (UPL@Bid): (bid − entry) × size × cv. Bid missing → mark.
         """
         wanted: set[int] | None = None
         if product_ids:
@@ -1034,66 +1031,94 @@ class DeltaClient:
                 },
             )
 
-            # Prefer live best_offer (ask) from L2/ticker — matches Delta UPL@Offer
+            is_long_pos = size > 0
             best_offer = 0.0
-            # First try any ask/offer fields on the position payload itself
-            for field in (
-                "best_ask_price",
-                "ask_price",
-                "best_offer",
-                "best_ask",
-            ):
-                candidate = _safe_float(pos.get(field))
-                if candidate > 0:
-                    best_offer = candidate
-                    break
-
-            if best_offer <= 0 and symbol and size < 0:
-                try:
-                    best_offer = float(await self.get_short_exit_price(symbol))
-                except Exception as exc:
+            best_bid = 0.0
+            if is_long_pos:
+                for field in ("best_bid_price", "bid_price", "best_bid"):
+                    candidate = _safe_float(pos.get(field))
+                    if candidate > 0:
+                        best_bid = candidate
+                        break
+                if best_bid <= 0 and symbol:
+                    try:
+                        best_bid = float(await self.get_long_exit_price(symbol))
+                    except Exception as exc:
+                        logger.warning(
+                            "Best bid fetch failed pid=%s symbol=%s: %s",
+                            pid,
+                            symbol,
+                            exc,
+                        )
+                close_price = best_bid if best_bid > 0 else mark
+                if best_bid <= 0:
                     logger.warning(
-                        "Best offer fetch failed pid=%s symbol=%s: %s",
+                        "Long bid missing pid=%s symbol=%s — using mark=%.4f",
                         pid,
                         symbol,
-                        exc,
+                        mark,
                     )
-            elif best_offer <= 0 and symbol and size > 0:
-                try:
-                    best_offer = float(await self.get_long_exit_price(symbol))
-                except Exception as exc:
-                    logger.warning(
-                        "Best bid fetch failed pid=%s symbol=%s: %s",
-                        pid,
-                        symbol,
-                        exc,
-                    )
+            else:
+                for field in (
+                    "best_ask_price",
+                    "ask_price",
+                    "best_offer",
+                    "best_ask",
+                ):
+                    candidate = _safe_float(pos.get(field))
+                    if candidate > 0:
+                        best_offer = candidate
+                        break
+                if best_offer <= 0 and symbol and size < 0:
+                    try:
+                        best_offer = float(await self.get_short_exit_price(symbol))
+                    except Exception as exc:
+                        logger.warning(
+                            "Best offer fetch failed pid=%s symbol=%s: %s",
+                            pid,
+                            symbol,
+                            exc,
+                        )
+                close_price = best_offer if best_offer > 0 else mark
 
-            # UPL@Offer: use best_offer; fall back to mark only if no offer
-            close_price = best_offer if best_offer > 0 else mark
             if entry > 0 and close_price > 0 and size != 0 and cv > 0:
                 upnl = compute_signed_upnl(entry, close_price, size, cv)
             else:
                 upnl = 0.0
 
-            logger.info(
-                "UPL@Offer calc: %s entry=%.4f offer=%.4f mark=%.4f "
-                "size=%s cv=%s upnl=%.4f (api_unrealized_pnl=%.4f IGNORED)",
-                symbol or pid,
-                entry,
-                close_price,
-                mark,
-                size,
-                cv,
-                upnl,
-                api_raw,
-            )
+            if is_long_pos:
+                logger.info(
+                    "UPL@Bid calc: %s entry=%.4f bid=%.4f mark=%.4f "
+                    "size=%s cv=%s upnl=%.4f (api_unrealized_pnl=%.4f IGNORED)",
+                    symbol or pid,
+                    entry,
+                    close_price,
+                    mark,
+                    size,
+                    cv,
+                    upnl,
+                    api_raw,
+                )
+            else:
+                logger.info(
+                    "UPL@Offer calc: %s entry=%.4f offer=%.4f mark=%.4f "
+                    "size=%s cv=%s upnl=%.4f (api_unrealized_pnl=%.4f IGNORED)",
+                    symbol or pid,
+                    entry,
+                    close_price,
+                    mark,
+                    size,
+                    cv,
+                    upnl,
+                    api_raw,
+                )
 
             out[pid] = {
                 "upnl": round(float(upnl), 4),
                 "entry_price": entry,
                 "mark_price": mark,
-                "best_offer": float(close_price),
+                "best_offer": float(best_offer if best_offer > 0 else (0.0 if is_long_pos else close_price)),
+                "best_bid": float(best_bid if best_bid > 0 else (close_price if is_long_pos else 0.0)),
                 "size": size,
                 "symbol": symbol,
                 "contract_value": cv,

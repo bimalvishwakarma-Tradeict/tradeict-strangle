@@ -3113,7 +3113,17 @@ class BotEngine:
                         leg_upnl = float(row.get("upnl") or 0.0)
                         delta_upnl += leg_upnl
                         lt = str(leg.leg_type or "").lower()
-                        best = float(row.get("best_offer") or 0)
+                        leg_is_long = bool(getattr(leg, "is_long", False)) or float(
+                            row.get("size") or 0
+                        ) > 0
+                        best = float(
+                            (
+                                row.get("best_bid")
+                                if leg_is_long
+                                else row.get("best_offer")
+                            )
+                            or 0
+                        )
                         if lt == "call":
                             call_mtm = leg_upnl
                             if best > 0:

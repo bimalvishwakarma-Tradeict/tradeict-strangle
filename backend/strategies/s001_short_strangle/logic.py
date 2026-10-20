@@ -83,11 +83,16 @@ def apply_long_gross_exits(
     trade: Any,
     gross: float,
     db_session: Any = None,
+    *,
+    net_mtm: float | None = None,
+    fees_paid: float = 0.0,
+    est_exit_fees: float = 0.0,
 ) -> TradeAction | None:
     """
-    Update peak / trail SL on a long trade; return an exit action or None.
+    Peak / trail SL on gross; Target on net. Credit TP/SL is not used.
 
-    Gross = realized + unrealized, fees excluded. Credit TP/SL is not used.
+    Gross = realized + bid-based unrealized (same as panel Gross).
+    Net uses the short-trade compute_net_mtm formula.
     """
     from backend.config import ExitReason
     from backend.models import Trade as TradeModel
@@ -132,11 +137,20 @@ def apply_long_gross_exits(
                     exc,
                     exc_info=True,
                 )
-    if target_usd > 0 and float(gross) >= target_usd:
+    net_val = float(net_mtm) if net_mtm is not None else float(gross)
+    if target_usd > 0 and net_val >= target_usd:
+        logger.info(
+            "LONG_TARGET trade=%s gross=%.4f net=%.4f fees_paid=%.4f est_exit_fees=%.4f",
+            getattr(trade, "id", "?"),
+            float(gross),
+            net_val,
+            float(fees_paid),
+            float(est_exit_fees),
+        )
         return TradeAction(
             should_exit=True,
             exit_reason=ExitReason.LONG_TARGET.value,
-            current_pnl=float(gross),
+            current_pnl=net_val,
         )
     if sl_usd > 0 and float(gross) <= sl_level:
         base = -sl_usd
@@ -144,6 +158,15 @@ def apply_long_gross_exits(
             ExitReason.LONG_TRAIL_SL.value
             if sl_level > base
             else ExitReason.LONG_SL.value
+        )
+        logger.info(
+            "%s trade=%s gross=%.4f net=%.4f fees_paid=%.4f est_exit_fees=%.4f",
+            reason,
+            getattr(trade, "id", "?"),
+            float(gross),
+            net_val,
+            float(fees_paid),
+            float(est_exit_fees),
         )
         return TradeAction(
             should_exit=True,
@@ -740,7 +763,10 @@ class ShortStrangleStrategy(BaseStrategy):
         # Long trades: $ TP / trailing SL on gross (no fees). Credit TP/SL skipped.
         if is_long_trade(trade):
             long_exit = apply_long_gross_exits(
-                trade, float(total_pnl), db_session=db_session
+                trade,
+                float(total_pnl),
+                db_session=db_session,
+                net_mtm=float(decision_pnl),
             )
             if long_exit is not None:
                 return long_exit
