@@ -107,7 +107,14 @@ def _seed(db: object, *, name: str, side: str = "long") -> tuple[Trade, Leg, Leg
     return trade, call, put
 
 
-def _harness(*, size_after: float = 0.0, side: str = "long"):
+def _harness(
+    *,
+    size_after: float = 0.0,
+    size_before: float = 10.0,
+    side: str = "long",
+    size_by_pid: dict[int, float] | None = None,
+    verify_by_pid: dict[int, bool] | None = None,
+):
     engine_sql = _engine()
     SessionLocal = sessionmaker(bind=engine_sql, expire_on_commit=False)
 
@@ -129,8 +136,32 @@ def _harness(*, size_after: float = 0.0, side: str = "long"):
         }
     )
     client.resolve_fill_price = AsyncMock(return_value=12.5)
-    client.verify_position_exists = AsyncMock(return_value=True)
-    client.get_position_size = AsyncMock(return_value=abs(float(size_after)))
+    client.get_product_exit_fill_since = AsyncMock(return_value=9.25)
+
+    async def _verify(pid: int) -> bool:
+        if verify_by_pid is not None:
+            return bool(verify_by_pid.get(int(pid), True))
+        return True
+
+    async def _size(pid: int) -> float:
+        pid_i = int(pid)
+        sold = {
+            int(c.kwargs.get("product_id") or 0)
+            for c in client.place_order.await_args_list
+        }
+        if size_by_pid is not None:
+            base = float(size_by_pid.get(pid_i, 0.0))
+            if pid_i in sold:
+                return abs(float(size_after))
+            return base
+        if side == "long":
+            if pid_i in sold:
+                return abs(float(size_after))
+            return abs(float(size_before))
+        return abs(float(size_after))
+
+    client.verify_position_exists = AsyncMock(side_effect=_verify)
+    client.get_position_size = AsyncMock(side_effect=_size)
     client.get_order_commission = AsyncMock(return_value=0.0)
 
     bot = BotEngine(
@@ -286,5 +317,64 @@ async def test_short_exit_still_uses_phased_buy() -> None:
             assert spy.await_count == 1
         assert all(c.kwargs["side"] == "buy" for c in client.place_order.await_args_list)
         assert all(c.kwargs["reduce_only"] is True for c in client.place_order.await_args_list)
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_short_exit_one_leg_already_flat_still_closes() -> None:
+    bot, client, db, trade, call, put = _harness(
+        side="short",
+        verify_by_pid={11: False, 12: True},
+    )
+    try:
+        await _run_close(bot, trade, ExitReason.PROFIT_TARGET.value)
+        db.expire_all()
+        row = db.query(Trade).filter(Trade.id == trade.id).first()
+        assert str(row.status).lower() == TradeStatus.CLOSED.value
+        pids = [int(c.kwargs["product_id"]) for c in client.place_order.await_args_list]
+        assert 11 not in pids
+        assert 12 in pids
+        bot._push_error.assert_not_awaited()
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_short_exit_post_exit_size_lag_does_not_abort() -> None:
+    bot, client, db, trade, _, _ = _harness(
+        side="short",
+        size_after=10.0,
+        size_before=10.0,
+    )
+    try:
+        await _run_close(bot, trade, ExitReason.PROFIT_TARGET.value)
+        db.expire_all()
+        row = db.query(Trade).filter(Trade.id == trade.id).first()
+        assert str(row.status).lower() == TradeStatus.CLOSED.value
+        bot._push_error.assert_not_awaited()
+        assert all(c.kwargs["side"] == "buy" for c in client.place_order.await_args_list)
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_long_exit_skips_sell_on_already_flat_call() -> None:
+    bot, client, db, trade, call, put = _harness(
+        size_after=0.0,
+        size_by_pid={11: 0.0, 12: 10.0},
+    )
+    try:
+        await _run_close(bot, trade, ExitReason.LONG_TARGET.value)
+        db.expire_all()
+        row = db.query(Trade).filter(Trade.id == trade.id).first()
+        assert str(row.status).lower() == TradeStatus.CLOSED.value
+        pids = [int(c.kwargs["product_id"]) for c in client.place_order.await_args_list]
+        assert pids == [12]
+        assert all(c.kwargs["side"] == "sell" for c in client.place_order.await_args_list)
+        call_db = db.query(Leg).filter(Leg.id == call.id).first()
+        put_db = db.query(Leg).filter(Leg.id == put.id).first()
+        assert float(call_db.exit_premium) == 9.25
+        assert float(put_db.exit_premium) == 12.5
     finally:
         db.close()

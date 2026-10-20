@@ -145,29 +145,69 @@ class BotEngine:
         trade_id: int,
         legs: list[Any],
     ) -> dict[int, Any]:
-        """SELL reduce_only call then put; retry still-open legs twice."""
+        """SELL reduce_only call then put; skip already-flat legs (EXTERNAL_CLOSE)."""
+        from backend.engine.trade_reconcile import resolve_external_exit_fill
         from backend.strategies.base_strategy import OrderResult
 
         assert self.delta_client is not None
-        results = await self.order_executor.close_open_long_call_put(
-            legs, self.delta_client
-        )
-
-        async def _need_retry(leg: Any) -> bool:
-            lid = int(getattr(leg, "id", 0) or 0)
-            res = results.get(lid)
-            oid_missing = res is None or getattr(res, "order_id", None) is None
-            still = await self._delta_leg_size_open(int(getattr(leg, "product_id", 0) or 0))
-            return still or oid_missing
-
         pending = [
             leg
             for leg in legs
             if str(getattr(leg, "leg_type", "") or "").lower() in {"call", "put"}
             and str(getattr(leg, "status", "open") or "").lower() == "open"
         ]
+        results: dict[int, Any] = {}
+        to_sell: list[Any] = []
+        for leg in pending:
+            lid = int(getattr(leg, "id", 0) or 0)
+            pid = int(getattr(leg, "product_id", 0) or 0)
+            size: float | None = None
+            try:
+                size = await self.delta_client.get_position_size(pid)
+            except Exception as exc:
+                logger.warning(
+                    "get_position_size before long SELL failed pid=%s: %s — will SELL",
+                    pid,
+                    exc,
+                )
+                size = None
+            if size is not None and float(size) == 0.0:
+                fill = await resolve_external_exit_fill(self.delta_client, leg)
+                results[lid] = OrderResult(
+                    success=True,
+                    filled_price=fill,
+                    order_id=None,
+                    error="EXTERNAL_CLOSE",
+                )
+                logger.info(
+                    "[LONG_EXIT] trade=%s %s already flat on Delta — "
+                    "EXTERNAL_CLOSE fill=%s (no SELL)",
+                    trade_id,
+                    getattr(leg, "leg_type", "?"),
+                    fill,
+                )
+            else:
+                to_sell.append(leg)
+        if to_sell:
+            results.update(
+                await self.order_executor.close_open_long_call_put(
+                    to_sell, self.delta_client
+                )
+            )
+
+        async def _need_retry(leg: Any) -> bool:
+            lid = int(getattr(leg, "id", 0) or 0)
+            res = results.get(lid)
+            if getattr(res, "error", None) == "EXTERNAL_CLOSE":
+                return False
+            oid_missing = res is None or getattr(res, "order_id", None) is None
+            still = await self._delta_leg_size_open(
+                int(getattr(leg, "product_id", 0) or 0)
+            )
+            return still or oid_missing
+
         for attempt in range(1, _LONG_EXIT_VERIFY_RETRIES + 1):
-            retry_legs = [leg for leg in pending if await _need_retry(leg)]
+            retry_legs = [leg for leg in to_sell if await _need_retry(leg)]
             if not retry_legs:
                 break
             logger.critical(
@@ -4541,7 +4581,14 @@ class BotEngine:
                         "is_long": True,
                     },
                 )
-                if res.success and res.order_id is not None and fill > 0:
+                if getattr(res, "error", None) == "EXTERNAL_CLOSE":
+                    master_legs_closed += 1
+                    logger.info(
+                        "EXIT_CLOSE %s EXTERNAL_CLOSE fill=%s (no SELL)",
+                        lt,
+                        fill,
+                    )
+                elif res.success and res.order_id is not None and fill > 0:
                     master_legs_closed += 1
                     logger.info("EXIT_CLOSE %s @ %.2f order_id=%s", lt, fill, res.order_id)
                 else:
@@ -4686,56 +4733,63 @@ class BotEngine:
             if not skip_master_legs:
                 await asyncio.sleep(2 if not trade_is_demo else 0)
                 still_map: dict[str, bool] = {}
-                missing_order_id = False
-                for leg in all_open_legs:
-                    label = str(leg.leg_type)
-                    pid = int(getattr(leg, "product_id", 0) or 0)
-                    still = False
-                    if pid > 0 and not trade_is_demo:
-                        still = await self._delta_leg_size_open(pid)
-                    still_map[label] = still
-                    res = close_results.get(int(leg.id))
-                    oid = getattr(res, "order_id", None) if res is not None else None
-                    fill_ok = (
-                        res is not None
-                        and bool(getattr(res, "success", False))
-                        and float(getattr(res, "filled_price", 0) or 0) > 0
+                if is_long_trade(trade):
+                    missing_order_id = False
+                    for leg in all_open_legs:
+                        label = str(leg.leg_type)
+                        pid = int(getattr(leg, "product_id", 0) or 0)
+                        still = False
+                        if pid > 0 and not trade_is_demo:
+                            still = await self._delta_leg_size_open(pid)
+                        still_map[label] = still
+                        res = close_results.get(int(leg.id))
+                        is_ext = (
+                            res is not None
+                            and getattr(res, "error", None) == "EXTERNAL_CLOSE"
+                        )
+                        oid = (
+                            getattr(res, "order_id", None) if res is not None else None
+                        )
+                        fill_ok = (
+                            res is not None
+                            and bool(getattr(res, "success", False))
+                            and (
+                                is_ext
+                                or float(getattr(res, "filled_price", 0) or 0) > 0
+                            )
+                        )
+                        if still:
+                            hard_fail = True
+                            logger.warning(
+                                "[EXIT_VERIFY] %s still visible on Delta after close "
+                                "(abs size > 0)!",
+                                label,
+                            )
+                        if (
+                            not trade_is_demo
+                            and not is_ext
+                            and (oid is None or not fill_ok)
+                        ):
+                            missing_order_id = True
+                            logger.warning(
+                                "[EXIT_VERIFY] %s missing order_id/fill "
+                                "oid=%s fill=%s",
+                                label,
+                                oid,
+                                getattr(res, "filled_price", None) if res else None,
+                            )
+
+                    log_and_buffer(
+                        "EXIT_VERIFY",
+                        trade_id,
+                        {
+                            "stage": "post_exit",
+                            "still_open": still_map,
+                            "missing_order_id": missing_order_id,
+                        },
                     )
-                    if still:
-                        hard_fail = True
-                        logger.warning(
-                            "[EXIT_VERIFY] %s still visible on Delta after close "
-                            "(abs size > 0)!",
-                            label,
-                        )
-                    if not trade_is_demo and (oid is None or not fill_ok):
-                        missing_order_id = True
-                        logger.warning(
-                            "[EXIT_VERIFY] %s missing order_id/fill "
-                            "oid=%s fill=%s",
-                            label,
-                            oid,
-                            getattr(res, "filled_price", None) if res else None,
-                        )
 
-                log_and_buffer(
-                    "EXIT_VERIFY",
-                    trade_id,
-                    {
-                        "stage": "post_exit",
-                        "still_open": still_map,
-                        "missing_order_id": missing_order_id,
-                    },
-                )
-
-                if (hard_fail or missing_order_id) and not wing_close_failed_note:
-                    # Wing failures already surfaced; short hard-fail still aborts
-                    short_still = {
-                        k: v
-                        for k, v in still_map.items()
-                        if k in ("call", "put") and v
-                    }
-                    if short_still or hard_fail or missing_order_id:
+                    if hard_fail or missing_order_id:
                         msg = (
                             f"Exit order failure trade={trade_id} "
                             f"still_open={still_map} missing_order_id={missing_order_id}"
@@ -4760,8 +4814,66 @@ class BotEngine:
                             trade_id, reason, result, note="exit_order_hard_fail"
                         )
                         return result
-                    # Only wings still open — continue to book shorts; note already set
-                    hard_fail = False
+                else:
+                    for leg in all_open_legs:
+                        leg_id = int(leg.id)
+                        if not exists_map.get(leg_id, False):
+                            continue
+                        res = close_results.get(leg_id)
+                        if res is not None and not res.success:
+                            still = await self.delta_client.verify_position_exists(
+                                int(leg.product_id)
+                            )
+                            label = str(leg.leg_type)
+                            still_map[label] = still
+                            if still:
+                                hard_fail = True
+                                logger.warning(
+                                    "[EXIT_VERIFY] %s still visible on Delta after close!",
+                                    label,
+                                )
+                        else:
+                            still_map[str(leg.leg_type)] = False
+
+                    log_and_buffer(
+                        "EXIT_VERIFY",
+                        trade_id,
+                        {"stage": "post_exit", "still_open": still_map},
+                    )
+
+                    if hard_fail and not wing_close_failed_note:
+                        # Wing failures already surfaced; short hard-fail still aborts
+                        short_still = {
+                            k: v
+                            for k, v in still_map.items()
+                            if k in ("call", "put") and v
+                        }
+                        if short_still:
+                            msg = (
+                                f"Exit order failure trade={trade_id} "
+                                f"still_open={still_map}"
+                            )
+                            logger.critical(msg)
+                            log_and_buffer(
+                                "EXIT_FAIL",
+                                trade_id,
+                                {"reason": reason, "error": msg},
+                            )
+                            await self._push_error(
+                                trade_id, msg, requires_manual_action=True
+                            )
+                            result = {
+                                "slaves_total": slaves_total,
+                                "slaves_closed": slaves_closed,
+                                "slaves_failed": slaves_failed,
+                                "master_legs_closed": master_legs_closed,
+                            }
+                            self._emit_exit_funnel(
+                                trade_id, reason, result, note="exit_order_hard_fail"
+                            )
+                            return result
+                        # Only wings still open — continue to book shorts; note already set
+                        hard_fail = False
 
             # Step 6: Update DB — book closes for all tracked legs
             status = self._status_for_reason(reason)
@@ -4816,7 +4928,12 @@ class BotEngine:
                     if res is not None and res.success:
                         px = float(res.filled_price or 0.0)
                         exit_px = px if px > 0 else None
-                    if exit_px is None and res is not None and res.order_id is not None:
+                    if (
+                        is_long_trade(trade)
+                        and exit_px is None
+                        and res is not None
+                        and res.order_id is not None
+                    ):
                         try:
                             fill = float(
                                 await self.delta_client.resolve_fill_price(
@@ -4833,7 +4950,19 @@ class BotEngine:
                                 leg_db.symbol,
                                 fill_exc,
                             )
-                    if exit_px is None and not skip_master_legs:
+                    if (
+                        is_long_trade(trade)
+                        and exit_px is None
+                        and getattr(res, "error", None) == "EXTERNAL_CLOSE"
+                    ):
+                        exit_px = await resolve_external_exit_fill(
+                            self.delta_client, leg_db
+                        )
+                    if (
+                        is_long_trade(trade)
+                        and exit_px is None
+                        and not skip_master_legs
+                    ):
                         logger.critical(
                             "[EXIT_BOOK_SKIP] trade=%s leg=%s — no fill, not booking",
                             trade_id,
