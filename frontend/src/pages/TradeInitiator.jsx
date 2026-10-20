@@ -229,22 +229,21 @@ export default function TradeInitiator() {
     slUsdNum > 0 &&
     trailValid
   const longSlNow = isLong && Number.isFinite(slUsdNum) ? -Math.abs(slUsdNum) : null
-  const longTrailPreview = [50, 100, 150].map((peak) => ({
-    peak,
-    sl: longTrailSlLevel({
-      slUsd: slUsdNum,
-      peak,
-      step: trailStepNum,
-      amt: trailAmtNum,
-    }),
-  }))
-  const livePeakExample = 37
-  const livePeakSl = longTrailSlLevel({
-    slUsd: slUsdNum,
-    peak: livePeakExample,
-    step: trailStepNum,
-    amt: trailAmtNum,
-  })
+  const longTrailPreview =
+    trailValid && Number.isFinite(targetUsdNum) && targetUsdNum > 0
+      ? [0.25, 0.5, 0.75, 1].map((frac) => {
+          const peak = targetUsdNum * frac
+          return {
+            peak,
+            sl: longTrailSlLevel({
+              slUsd: slUsdNum,
+              peak,
+              step: trailStepNum,
+              amt: trailAmtNum,
+            }),
+          }
+        })
+      : []
 
   const callPremPreview = emergencyMode
     ? Number(callEntry) || 0
@@ -327,6 +326,63 @@ export default function TradeInitiator() {
           universalSlPctNum <= 1000 &&
           slabsValid,
       )
+
+  const placeDisabledReasons = []
+  if (!selectedCall || !selectedPut) placeDisabledReasons.push('Strikes select karo')
+  if (!(qty > 0)) placeDisabledReasons.push('Quantity daalo')
+  if (
+    !Number.isFinite(slippagePctNum) ||
+    slippagePctNum < 0 ||
+    slippagePctNum > 10
+  ) {
+    placeDisabledReasons.push('Slippage 0–10% ke beech daalo')
+  }
+  if (!(estMaxProfitUsd > 0)) {
+    placeDisabledReasons.push(
+      isLong ? 'Call/put ask se debit nahi ban raha' : 'Est. max profit nahi mil raha',
+    )
+  }
+  if (emergencyMode && (!(callPrem > 0) || !(putPrem > 0))) {
+    placeDisabledReasons.push('Call aur put fill premium daalo')
+  }
+  if (placing) placeDisabledReasons.push('Order chal raha hai')
+  if (isLong) {
+    if (!Number.isFinite(targetUsdNum) || targetUsdNum <= 0) {
+      placeDisabledReasons.push('Target $ daalo')
+    }
+    if (!Number.isFinite(slUsdNum) || slUsdNum <= 0) {
+      placeDisabledReasons.push('SL $ daalo')
+    }
+    if (
+      trailBothSet &&
+      Number.isFinite(trailStepNum) &&
+      Number.isFinite(trailAmtNum) &&
+      trailAmtNum > trailStepNum
+    ) {
+      placeDisabledReasons.push(
+        `Trail amount step se bada nahi ho sakta (amount ${trailAmtNum} > step ${trailStepNum})`,
+      )
+    } else if (!trailValid) {
+      placeDisabledReasons.push(
+        'Trail amount aur step dono bharo ya dono khali chhodo (0 < amount ≤ step)',
+      )
+    }
+  } else {
+    if (!Number.isFinite(tpPctNum) || tpPctNum <= 0) {
+      placeDisabledReasons.push('Target % daalo')
+    }
+    if (!Number.isFinite(slPctNum) || slPctNum <= 0) {
+      placeDisabledReasons.push('SL % daalo')
+    }
+    if (
+      !Number.isFinite(universalSlPctNum) ||
+      universalSlPctNum < 100 ||
+      universalSlPctNum > 1000
+    ) {
+      placeDisabledReasons.push('Delta SL % 100–1000 ke beech daalo')
+    }
+    if (!slabsValid) placeDisabledReasons.push('Adjustment slabs 100–500% valid hon')
+  }
 
   const buildPayload = () => {
     const base = {
@@ -480,11 +536,7 @@ export default function TradeInitiator() {
     ? 'Register Existing Trade'
     : isDemo
       ? '🎮 Place Demo Trade'
-      : isLong
-        ? isStraddle
-          ? 'Buy Straddle'
-          : 'Buy Strangle'
-        : 'Place Strangle on Delta Exchange'
+      : 'Place Trade'
 
   return (
     <main className="mx-auto max-w-6xl space-y-6 px-4 py-8">
@@ -675,13 +727,13 @@ export default function TradeInitiator() {
             {isLong ? (
               <>
                 {' '}
-                · debit{' '}
+                · Debit (max loss):{' '}
                 <span className="text-amber-300">
-                  $
-                  {estMaxProfitUsd.toLocaleString('en-US', {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 4,
-                  })}
+                  ${fmtMoney(estMaxProfitUsd)}
+                </span>
+                <span className="text-gray-400">
+                  {' '}
+                  · Max profit: unlimited (breakeven ke bahar)
                 </span>
               </>
             ) : (
@@ -795,14 +847,14 @@ export default function TradeInitiator() {
             )}
             {!trailValid && (
               <p className="text-xs text-amber-300">
-                Trail fields must both be empty or both filled, with 0 &lt; amount ≤
-                step.
+                Trail amount step se bada nahi ho sakta, aur dono fields ek saath
+                bhare hon ya dono khali. 0 &lt; amount ≤ step.
               </p>
             )}
+            {trailValid && (
             <div className="rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs text-gray-300">
               <p>
                 SL abhi {longSlNow != null ? `−${fmtMoney(Math.abs(longSlNow))}` : '—'}.
-                Peak {livePeakExample} par SL = {fmtSignedTrail(livePeakSl)}.
               </p>
               <table className="mt-2 w-full max-w-xs text-left text-[11px] text-gray-400">
                 <thead>
@@ -814,13 +866,14 @@ export default function TradeInitiator() {
                 <tbody>
                   {longTrailPreview.map((row) => (
                     <tr key={row.peak}>
-                      <td className="py-0.5">{row.peak}</td>
+                      <td className="py-0.5">${fmtMoney(row.peak)}</td>
                       <td className="py-0.5">{fmtSignedTrail(row.sl)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+            )}
           </>
         ) : (
         <div className="grid gap-3 sm:grid-cols-2">
@@ -1019,12 +1072,23 @@ export default function TradeInitiator() {
             <>
               {!emergencyMode && (
                 <div className="pt-1 text-gray-400">
-                  Est. premium (marks): ${fmtMoney(totalPremiumPoints)} · Real
-                  max profit:{' '}
-                  <span className="text-green-400">
-                    ${fmtMoney(estMaxProfitUsd)} USD
-                  </span>{' '}
-                  ({qty} lots × {OPTIONS_CONTRACT_VALUE})
+                  {isLong ? (
+                    <>
+                      Debit (max loss): ${fmtMoney(estMaxProfitUsd)}
+                      <div className="text-gray-400">
+                        Max profit: unlimited (breakeven ke bahar)
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      Est. premium (marks): ${fmtMoney(totalPremiumPoints)} · Real
+                      max profit:{' '}
+                      <span className="text-green-400">
+                        ${fmtMoney(estMaxProfitUsd)} USD
+                      </span>{' '}
+                      ({qty} lots × {OPTIONS_CONTRACT_VALUE})
+                    </>
+                  )}
                 </div>
               )}
               {emergencyMode && (
@@ -1044,6 +1108,13 @@ export default function TradeInitiator() {
       )}
 
       {/* 8. Place */}
+      {!canPlace && placeDisabledReasons.length > 0 && (
+        <ul className="space-y-1 text-sm text-red-400">
+          {placeDisabledReasons.map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      )}
       <button
         type="button"
         disabled={!canPlace}

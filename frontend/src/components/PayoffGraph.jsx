@@ -118,12 +118,9 @@ function hoursUntilExpiryIst(expiryDate) {
 function priceStatus(price, putStrike, callStrike, beLow, beHigh, mode = 'short') {
   if (mode === 'long') {
     if (price <= beLow || price >= beHigh) {
-      return { label: '✅ In profit zone', className: 'text-green-400' }
+      return { label: '✅ profit zone', className: 'text-green-400' }
     }
-    if (price > beLow && price < beHigh) {
-      return { label: '❌ Between breakevens', className: 'text-red-400' }
-    }
-    return { label: '⚠️ Near breakeven', className: 'text-yellow-400' }
+    return { label: '❌ between breakevens', className: 'text-red-400' }
   }
   if (price >= putStrike && price <= callStrike) {
     return { label: '✅ In profit zone', className: 'text-green-400' }
@@ -791,6 +788,38 @@ export default function PayoffGraph({
       </div>
 
       <div className="mt-3 grid grid-cols-1 gap-2 border-t border-gray-700 pt-3 text-xs sm:grid-cols-2">
+        {mode === 'long' ? (
+          <>
+            <div className="text-gray-300">
+              Max profit:{' '}
+              <span className="font-medium text-green-400">Unlimited</span>
+            </div>
+            <div className="text-gray-300">
+              Max loss:{' '}
+              <span className="font-medium text-red-400">
+                {fmtMoney(-(Math.abs(chart.maxLoss || 0)))}
+              </span>
+              <span className="text-gray-500"> (premium paid)</span>
+            </div>
+            <div className="text-gray-300 sm:col-span-2">
+              Breakevens:{' '}
+              <span className="font-medium text-white">
+                {fmtStrike(chart.breakevenLower)} / {fmtStrike(chart.breakevenUpper)}
+              </span>
+            </div>
+            <div className="text-gray-300 sm:col-span-2">
+              Now:{' '}
+              <span className="font-medium text-white">
+                $
+                {Number(currentPrice).toLocaleString('en-US', {
+                  maximumFractionDigits: 0,
+                })}
+              </span>{' '}
+              <span className={status.className}>{status.label}</span>
+            </div>
+          </>
+        ) : (
+          <>
         <div className="text-gray-300">
           Max profit:{' '}
           <span className="font-medium text-green-400">
@@ -831,6 +860,8 @@ export default function PayoffGraph({
           </span>{' '}
           <span className={status.className}>{status.label}</span>
         </div>
+          </>
+        )}
       </div>
     </div>
   )
