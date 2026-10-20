@@ -760,6 +760,86 @@ class DeltaClient:
             )
         return normalized
 
+    async def get_position_size(self, product_id: int) -> float | None:
+        """
+        GET /v2/positions?product_id= — single-position size.
+
+        Returns abs(size). 0 means flat. None means the call failed
+        (do not treat as flat).
+        """
+        try:
+            result = await self._request(
+                "GET",
+                "/v2/positions",
+                params={"product_id": int(product_id)},
+            )
+        except Exception as exc:
+            logger.warning(
+                "get_position_size product_id=%s failed: %s", product_id, exc
+            )
+            return None
+        if isinstance(result, dict):
+            try:
+                return abs(float(result.get("size") or 0))
+            except (TypeError, ValueError):
+                return None
+        if isinstance(result, list):
+            wanted = int(product_id)
+            for pos in result:
+                if not isinstance(pos, dict):
+                    continue
+                try:
+                    pid = int(pos.get("product_id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if pid != wanted:
+                    continue
+                try:
+                    return abs(float(pos.get("size") or 0))
+                except (TypeError, ValueError):
+                    return None
+            return 0.0
+        return None
+
+    async def get_official_settlement_price(
+        self,
+        *,
+        symbol: str | None = None,
+        product_id: int | None = None,
+    ) -> float | None:
+        """
+        Official product settlement_price (expired options / ticker).
+
+        Tries GET /v2/tickers/{symbol} then GET /v2/products/{product_id}.
+        Field: settlement_price. Returns None if missing or <= 0.
+        """
+        if symbol:
+            try:
+                ticker = await self.get_ticker(str(symbol))
+                val = float(ticker.get("settlement_price") or 0)
+                if val > 0:
+                    return val
+            except Exception as exc:
+                logger.warning(
+                    "settlement_price ticker %s failed: %s", symbol, exc
+                )
+        if product_id:
+            try:
+                product = await self._request(
+                    "GET", f"/v2/products/{int(product_id)}"
+                )
+                if isinstance(product, dict):
+                    val = float(product.get("settlement_price") or 0)
+                    if val > 0:
+                        return val
+            except Exception as exc:
+                logger.warning(
+                    "settlement_price product_id=%s failed: %s",
+                    product_id,
+                    exc,
+                )
+        return None
+
     async def get_option_positions(self) -> list[dict[str, Any]]:
         """
         Open option positions on Delta (non-zero size).

@@ -19,6 +19,7 @@ from backend.models import Leg, Trade
 logger = logging.getLogger(__name__)
 
 LONG_EXPIRY_FLAT_WAIT_SECONDS = 30 * 60
+LONG_EXTERNAL_FLAT_CONFIRM_SECONDS = 60.0
 
 
 def option_intrinsic(leg_type: str, strike: float, spot: float) -> float:
@@ -84,12 +85,59 @@ def book_long_settlement_leg(
     return realized
 
 
+async def resolve_settlement_spot(
+    client: Any,
+    legs: list[Any],
+) -> tuple[float, str]:
+    """
+    Official product ``settlement_price``, else BTC index.
+
+    Returns (spot, settlement_src) where src is official | index_fallback.
+    """
+    if client is not None:
+        getter = getattr(client, "get_official_settlement_price", None)
+        if callable(getter):
+            for leg in legs or []:
+                symbol = str(getattr(leg, "symbol", "") or "") or None
+                try:
+                    pid_raw = getattr(leg, "product_id", None)
+                    pid = int(pid_raw) if pid_raw else None
+                except (TypeError, ValueError):
+                    pid = None
+                if not symbol and not pid:
+                    continue
+                try:
+                    px = await getter(symbol=symbol, product_id=pid)
+                except Exception as exc:
+                    logger.warning(
+                        "official settlement_price fetch failed %s: %s",
+                        symbol or pid,
+                        exc,
+                    )
+                    px = None
+                try:
+                    val = float(px or 0)
+                except (TypeError, ValueError):
+                    val = 0.0
+                if val > 0:
+                    return val, "official"
+        logger.warning("settlement fallback to index")
+        try:
+            idx = float(await client.get_btc_index_price() or 0)
+        except Exception as exc:
+            logger.error("settlement index fallback failed: %s", exc, exc_info=True)
+            idx = 0.0
+        return idx, "index_fallback"
+    return 0.0, "index_fallback"
+
+
 def apply_expiry_settlement(
     *,
     trade: Any,
     legs: list[Any],
     spot: float,
     finalize: bool = True,
+    settlement_src: str | None = None,
 ) -> str:
     """Intrinsic-settle all open call/put legs. Never places orders."""
     now = get_utc_now()
@@ -107,13 +155,20 @@ def apply_expiry_settlement(
         realized_sum += float(getattr(leg, "realized_pnl", None) or 0.0)
     trade.realized_pnl = realized_sum
     trade.exit_reason = ExitReason.EXPIRY_SETTLED.value
+    if settlement_src:
+        trade.settlement_src = settlement_src
+        prior = str(getattr(trade, "notes", None) or "")
+        tag = f"settlement_src={settlement_src}"
+        if tag not in prior:
+            trade.notes = f"{prior};{tag}".strip(";") if prior else tag
     if finalize:
         trade.status = TradeStatus.CLOSED.value
         trade.exit_time = now
     logger.info(
-        "[EXPIRY_SETTLED] trade=%s spot=%s realized=%s (no orders)",
+        "[EXPIRY_SETTLED] trade=%s spot=%s settlement_src=%s realized=%s (no orders)",
         getattr(trade, "id", "?"),
         spot,
+        settlement_src or "?",
         realized_sum,
     )
     return ExitReason.EXPIRY_SETTLED.value
@@ -133,6 +188,31 @@ def _all_main_legs_flat(
     return True
 
 
+async def _single_position_size(client: Any, product_id: int) -> float | None:
+    """Size from GET /v2/positions?product_id=. None = unconfirmed."""
+    if client is None:
+        return None
+    getter = getattr(client, "get_position_size", None)
+    if not callable(getter):
+        logger.warning(
+            "delta_client has no get_position_size — cannot confirm flat"
+        )
+        return None
+    try:
+        raw = await getter(int(product_id))
+    except Exception as exc:
+        logger.warning(
+            "get_position_size product_id=%s failed: %s", product_id, exc
+        )
+        return None
+    if raw is None:
+        return None
+    try:
+        return abs(float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 async def apply_pre_expiry_external_close(
     *,
     client: Any,
@@ -140,18 +220,75 @@ async def apply_pre_expiry_external_close(
     legs: list[Any],
     positions: list[dict[str, Any]] | None,
     db: Any | None = None,
+    flat_since: dict[tuple[int, int], float] | None = None,
+    now_monotonic: float | None = None,
 ) -> str | None:
     """
     If a long call/put is already flat on Delta, book via fill history.
     No orders. Both closed → EXTERNAL_CLOSE.
+
+    Flat requires: non-empty positions list with size 0 or missing pid,
+    plus get_position_size == 0, confirmed on two ticks ≥ 60s apart.
     """
+    import time
+
+    open_main = _main_open_legs(legs)
+    if not open_main:
+        now = get_utc_now()
+        trade.status = TradeStatus.CLOSED.value
+        trade.exit_reason = ExitReason.EXTERNAL_CLOSE.value
+        trade.exit_time = now
+        if db is not None:
+            recompute_trade_realized_pnl(db, trade)
+        return ExitReason.EXTERNAL_CLOSE.value
+
+    if positions is None:
+        return None
+    if len(positions) == 0:
+        logger.warning(
+            "[EXTERNAL_CLOSE] trade=%s empty positions list with %s open legs "
+            "— skipping close this tick",
+            getattr(trade, "id", "?"),
+            len(open_main),
+        )
+        return None
+
     size_by_pid = _pid_size_map(positions)
     now = get_utc_now()
-    for leg in _main_open_legs(legs):
+    now_m = float(now_monotonic if now_monotonic is not None else time.monotonic())
+    trade_id = int(getattr(trade, "id", 0) or 0)
+    timers = flat_since if flat_since is not None else {}
+
+    for leg in open_main:
         pid = int(getattr(leg, "product_id", 0) or 0)
         if pid <= 0:
             continue
-        if size_by_pid.get(pid, 0.0) > 0:
+        key = (trade_id, pid)
+        list_size = size_by_pid.get(pid, 0.0)
+        if list_size > 0:
+            timers.pop(key, None)
+            continue
+        single = await _single_position_size(client, pid)
+        if single is None or single > 0:
+            timers.pop(key, None)
+            continue
+        first = timers.get(key)
+        if first is None:
+            timers[key] = now_m
+            logger.info(
+                "[EXTERNAL_CLOSE] trade=%s %s pid=%s first flat tick — waiting 60s",
+                trade_id,
+                getattr(leg, "leg_type", "?"),
+                pid,
+            )
+            continue
+        if (now_m - float(first)) < LONG_EXTERNAL_FLAT_CONFIRM_SECONDS:
+            logger.info(
+                "[EXTERNAL_CLOSE] trade=%s %s pid=%s flat but <60s since first tick",
+                trade_id,
+                getattr(leg, "leg_type", "?"),
+                pid,
+            )
             continue
         fill = await resolve_external_exit_fill(client, leg)
         book_leg_close(
@@ -161,8 +298,9 @@ async def apply_pre_expiry_external_close(
             exit_time=now,
             db=db,
         )
+        timers.pop(key, None)
         logger.info(
-            "[EXTERNAL_CLOSE] trade=%s %s booked fill=%s (no orders)",
+            "[EXTERNAL_CLOSE] trade=%s %s booked fill=%s (no orders, 2-tick confirm)",
             getattr(trade, "id", "?"),
             getattr(leg, "leg_type", "?"),
             fill,
@@ -186,6 +324,7 @@ async def handle_long_trade_tick(
     wait_since: dict[int, float],
     trade_state: Any,
     close_funnel: Any | None = None,
+    flat_since: dict[tuple[int, int], float] | None = None,
 ) -> str:
     """
     Returns 'stop' when the monitor should not run on_tick / place orders,
@@ -221,26 +360,29 @@ async def handle_long_trade_tick(
         size_by_pid = _pid_size_map(positions)
 
         if hours_left == 0:
+            if open_main and not positions:
+                logger.warning(
+                    "[EXPIRY_SETTLED] trade=%s empty positions list with open "
+                    "legs — skipping settlement this tick",
+                    trade_id,
+                )
+                return "stop"
             if _all_main_legs_flat(open_main, size_by_pid):
-                spot = 0.0
-                if delta_client is not None:
-                    try:
-                        spot = float(await delta_client.get_btc_index_price() or 0)
-                    except Exception as exc:
-                        logger.error(
-                            "Expiry settlement index fetch failed trade=%s: %s",
-                            trade_id,
-                            exc,
-                            exc_info=True,
-                        )
+                spot, settlement_src = await resolve_settlement_spot(
+                    delta_client, legs
+                )
                 if spot <= 0:
                     logger.critical(
-                        "[EXPIRY_SETTLED] trade=%s missing 17:30 index — leaving open",
+                        "[EXPIRY_SETTLED] trade=%s missing settlement/index — leaving open",
                         trade_id,
                     )
                     return "stop"
                 apply_expiry_settlement(
-                    trade=db_trade, legs=legs, spot=spot, finalize=False
+                    trade=db_trade,
+                    legs=legs,
+                    spot=spot,
+                    finalize=False,
+                    settlement_src=settlement_src,
                 )
                 db.commit()
                 wait_since.pop(trade_id, None)
@@ -281,6 +423,7 @@ async def handle_long_trade_tick(
             legs=legs,
             positions=positions,
             db=db,
+            flat_since=flat_since,
         )
         if reason is not None:
             db.commit()

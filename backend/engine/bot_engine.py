@@ -103,6 +103,8 @@ class BotEngine:
         self._reconcile_disabled: set[tuple[int, int]] = set()
         # Long trades: first monotonic ts after 17:30 while Delta still not flat
         self._long_expiry_wait_since: dict[int, float] = {}
+        # Long external close: first flat tick per (trade_id, product_id)
+        self._long_flat_since: dict[tuple[int, int], float] = {}
 
     def _get_exit_lock(self, trade_id: int) -> asyncio.Lock:
         tid = int(trade_id)
@@ -2895,6 +2897,7 @@ class BotEngine:
                 wait_since=self._long_expiry_wait_since,
                 trade_state=trade_state,
                 close_funnel=_long_close_funnel,
+                flat_since=self._long_flat_since,
             )
             if outcome == "stop":
                 return

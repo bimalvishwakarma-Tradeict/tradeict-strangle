@@ -23,6 +23,7 @@ from backend.engine.long_settlement import (
     apply_expiry_settlement,
     apply_pre_expiry_external_close,
     option_intrinsic,
+    resolve_settlement_spot,
 )
 from backend.engine.order_executor import OrderExecutor
 from backend.schemas import TradeInitiateRequest
@@ -409,34 +410,197 @@ def test_expiry_settlement_intrinsic_no_orders() -> None:
     assert option_intrinsic("put", 109000, 110000) == 0
 
 
-@pytest.mark.asyncio
-async def test_pre_expiry_external_close_no_orders() -> None:
+def _flat_client() -> AsyncMock:
+    client = AsyncMock()
+    client.place_order = AsyncMock()
+    client.resolve_fill_price = AsyncMock(return_value=12.0)
+    client.get_product_exit_fill_since = AsyncMock(return_value=12.0)
+    client.get_position_size = AsyncMock(return_value=0.0)
+    return client
+
+
+def _long_pair() -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
     call = _leg(is_long=True, leg_type="call", strike=109000)
     put = _leg(is_long=True, leg_type="put", strike=109000)
     put.product_id = 12
     trade = SimpleNamespace(
         id=4, status=TradeStatus.ACTIVE.value, exit_reason=None, realized_pnl=0
     )
-    client = AsyncMock()
-    client.place_order = AsyncMock()
-    client.resolve_fill_price = AsyncMock(return_value=12.0)
-    client.get_product_exit_fill_since = AsyncMock(return_value=12.0)
-    positions = [
-        {"product_id": 11, "size": 0},
-        {"product_id": 12, "size": 0},
-    ]
+    return call, put, trade
+
+
+_FLAT_POS = [
+    {"product_id": 11, "size": 0},
+    {"product_id": 12, "size": 0},
+]
+
+
+@pytest.mark.asyncio
+async def test_empty_positions_list_does_not_close() -> None:
+    call, put, trade = _long_pair()
+    client = _flat_client()
     reason = await apply_pre_expiry_external_close(
         client=client,
         trade=trade,
         legs=[call, put],
-        positions=positions,
+        positions=[],
         db=None,
+        flat_since={},
+        now_monotonic=1000.0,
+    )
+    assert reason is None
+    assert str(call.status).lower() == "open"
+    assert str(put.status).lower() == "open"
+    assert client.place_order.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_one_tick_flat_does_not_close() -> None:
+    call, put, trade = _long_pair()
+    client = _flat_client()
+    timers: dict[tuple[int, int], float] = {}
+    reason = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=_FLAT_POS,
+        db=None,
+        flat_since=timers,
+        now_monotonic=1000.0,
+    )
+    assert reason is None
+    assert str(call.status).lower() == "open"
+    assert str(put.status).lower() == "open"
+    assert timers
+
+
+@pytest.mark.asyncio
+async def test_two_tick_flat_60s_external_close() -> None:
+    call, put, trade = _long_pair()
+    client = _flat_client()
+    timers: dict[tuple[int, int], float] = {}
+    first = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=_FLAT_POS,
+        db=None,
+        flat_since=timers,
+        now_monotonic=1000.0,
+    )
+    assert first is None
+    reason = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=_FLAT_POS,
+        db=None,
+        flat_since=timers,
+        now_monotonic=1060.0,
     )
     assert reason == ExitReason.EXTERNAL_CLOSE.value
     assert trade.status == TradeStatus.CLOSED.value
     assert client.place_order.await_count == 0
     assert str(call.status).lower() == "closed"
     assert str(put.status).lower() == "closed"
+
+
+@pytest.mark.asyncio
+async def test_flat_open_flat_under_60s_does_not_close() -> None:
+    call, put, trade = _long_pair()
+    client = _flat_client()
+    timers: dict[tuple[int, int], float] = {}
+    await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=_FLAT_POS,
+        db=None,
+        flat_since=timers,
+        now_monotonic=1000.0,
+    )
+    client.get_position_size = AsyncMock(return_value=1.0)
+    await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=[
+            {"product_id": 11, "size": 1},
+            {"product_id": 12, "size": 1},
+        ],
+        db=None,
+        flat_since=timers,
+        now_monotonic=1030.0,
+    )
+    client.get_position_size = AsyncMock(return_value=0.0)
+    reason = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=_FLAT_POS,
+        db=None,
+        flat_since=timers,
+        now_monotonic=1050.0,
+    )
+    assert reason is None
+    assert str(call.status).lower() == "open"
+    assert str(put.status).lower() == "open"
+
+
+@pytest.mark.asyncio
+async def test_pre_expiry_external_close_no_orders() -> None:
+    call, put, trade = _long_pair()
+    client = _flat_client()
+    timers: dict[tuple[int, int], float] = {}
+    await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=_FLAT_POS,
+        db=None,
+        flat_since=timers,
+        now_monotonic=1000.0,
+    )
+    reason = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=_FLAT_POS,
+        db=None,
+        flat_since=timers,
+        now_monotonic=1060.0,
+    )
+    assert reason == ExitReason.EXTERNAL_CLOSE.value
+    assert client.place_order.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_official_settlement_price_used() -> None:
+    call, put, trade = _long_pair()
+    client = AsyncMock()
+    client.get_official_settlement_price = AsyncMock(return_value=110000.0)
+    client.get_btc_index_price = AsyncMock(return_value=99999.0)
+    spot, src = await resolve_settlement_spot(client, [call, put])
+    assert spot == 110000.0
+    assert src == "official"
+    apply_expiry_settlement(
+        trade=trade, legs=[call, put], spot=spot, settlement_src=src
+    )
+    assert trade.settlement_src == "official"
+    client.get_btc_index_price.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_settlement_index_fallback_warns(caplog: pytest.LogCaptureFixture) -> None:
+    call, put, _trade = _long_pair()
+    client = AsyncMock()
+    client.get_official_settlement_price = AsyncMock(return_value=None)
+    client.get_btc_index_price = AsyncMock(return_value=110000.0)
+    with caplog.at_level("WARNING"):
+        spot, src = await resolve_settlement_spot(client, [call, put])
+    assert spot == 110000.0
+    assert src == "index_fallback"
+    assert any("settlement fallback to index" in r.message for r in caplog.records)
 
 
 def test_stoploss_markers_include_long() -> None:
