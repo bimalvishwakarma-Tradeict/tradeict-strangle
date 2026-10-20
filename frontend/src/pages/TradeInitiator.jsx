@@ -215,6 +215,13 @@ export default function TradeInitiator() {
       Number.isFinite(trailAmtNum) &&
       trailAmtNum > 0 &&
       trailAmtNum <= trailStepNum)
+  const callAsk = Number(selectedCall?.call_ask) || 0
+  const putAsk = Number(selectedPut?.put_ask) || 0
+  const longDebitUsd = (callAsk + putAsk) * qty * Number(OPTIONS_CONTRACT_VALUE)
+  const longTargetFar =
+    Number.isFinite(targetUsdNum) &&
+    longDebitUsd > 0 &&
+    targetUsdNum > 5 * longDebitUsd
   const longParamsValid =
     Number.isFinite(targetUsdNum) &&
     targetUsdNum > 0 &&
@@ -777,6 +784,15 @@ export default function TradeInitiator() {
                 />
               </label>
             </div>
+            <p className="text-xs text-gray-400">
+              Ye poore trade ke $ hain. Is qty par max loss (debit) ≈ $
+              {fmtMoney(longDebitUsd)}.
+            </p>
+            {longTargetFar && (
+              <p className="text-xs text-amber-300">
+                Target bahut door hai is qty ke liye.
+              </p>
+            )}
             {!trailValid && (
               <p className="text-xs text-amber-300">
                 Trail fields must both be empty or both filled, with 0 &lt; amount ≤

@@ -49,6 +49,17 @@ def _refresh_expunge_for_tracker(db: Any, *objs: Any) -> None:
 
 LONG_EXPIRY_FLAT_WAIT_SECONDS = 30 * 60
 LONG_EXTERNAL_FLAT_CONFIRM_SECONDS = 60.0
+_EMPTY_POS_WARN_INTERVAL_SECONDS = 5 * 60
+_empty_pos_warn_at: dict[int, float] = {}
+
+
+def _throttled_empty_pos_warn(trade_id: int, now_m: float, msg: str, *args: Any) -> None:
+    """At most one WARNING per trade per 5 minutes."""
+    last = _empty_pos_warn_at.get(int(trade_id))
+    if last is not None and (now_m - float(last)) < _EMPTY_POS_WARN_INTERVAL_SECONDS:
+        return
+    _empty_pos_warn_at[int(trade_id)] = now_m
+    logger.warning(msg, *args)
 
 
 def option_intrinsic(leg_type: str, strike: float, spot: float) -> float:
@@ -223,16 +234,10 @@ async def _single_position_size(client: Any, product_id: int) -> float | None:
         return None
     getter = getattr(client, "get_position_size", None)
     if not callable(getter):
-        logger.warning(
-            "delta_client has no get_position_size — cannot confirm flat"
-        )
         return None
     try:
         raw = await getter(int(product_id))
-    except Exception as exc:
-        logger.warning(
-            "get_position_size product_id=%s failed: %s", product_id, exc
-        )
+    except Exception:
         return None
     if raw is None:
         return None
@@ -256,8 +261,9 @@ async def apply_pre_expiry_external_close(
     If a long call/put is already flat on Delta, book via fill history.
     No orders. Both closed → EXTERNAL_CLOSE.
 
-    Flat requires: non-empty positions list with size 0 or missing pid,
-    plus get_position_size == 0, confirmed on two ticks ≥ 60s apart.
+    Flat requires: list size 0 (or empty successful list) plus
+    get_position_size == 0, confirmed on two ticks ≥ 60s apart.
+    Empty list does not skip — each open long leg is probed by product_id.
     """
     import time
 
@@ -273,19 +279,21 @@ async def apply_pre_expiry_external_close(
 
     if positions is None:
         return None
-    if len(positions) == 0:
-        logger.warning(
-            "[EXTERNAL_CLOSE] trade=%s empty positions list with %s open legs "
-            "— skipping close this tick",
-            getattr(trade, "id", "?"),
-            len(open_main),
-        )
-        return None
 
-    size_by_pid = _pid_size_map(positions)
     now = get_utc_now()
     now_m = float(now_monotonic if now_monotonic is not None else time.monotonic())
     trade_id = int(getattr(trade, "id", 0) or 0)
+    if len(positions) == 0:
+        _throttled_empty_pos_warn(
+            trade_id,
+            now_m,
+            "[EXTERNAL_CLOSE] trade=%s empty positions list with %s open legs "
+            "— probing get_position_size per product",
+            trade_id,
+            len(open_main),
+        )
+
+    size_by_pid = _pid_size_map(positions)
     timers = flat_since if flat_since is not None else {}
 
     for leg in open_main:
@@ -298,7 +306,18 @@ async def apply_pre_expiry_external_close(
             timers.pop(key, None)
             continue
         single = await _single_position_size(client, pid)
-        if single is None or single > 0:
+        if single is None:
+            timers.pop(key, None)
+            _throttled_empty_pos_warn(
+                trade_id,
+                now_m,
+                "[EXTERNAL_CLOSE] trade=%s pid=%s get_position_size unconfirmed "
+                "— skip close this tick",
+                trade_id,
+                pid,
+            )
+            continue
+        if single > 0:
             timers.pop(key, None)
             continue
         first = timers.get(key)
@@ -390,12 +409,30 @@ async def handle_long_trade_tick(
 
         if hours_left == 0:
             if open_main and not positions:
-                logger.warning(
-                    "[EXPIRY_SETTLED] trade=%s empty positions list with open "
-                    "legs — skipping settlement this tick",
-                    trade_id,
-                )
-                return "stop"
+                now_m = time.monotonic()
+                probed: dict[int, float] = {}
+                unconfirmed = False
+                for leg in open_main:
+                    pid = int(getattr(leg, "product_id", 0) or 0)
+                    if pid <= 0:
+                        unconfirmed = True
+                        break
+                    sz = await _single_position_size(delta_client, pid)
+                    if sz is None:
+                        unconfirmed = True
+                        _throttled_empty_pos_warn(
+                            trade_id,
+                            now_m,
+                            "[EXPIRY_SETTLED] trade=%s empty positions list — "
+                            "get_position_size unconfirmed pid=%s",
+                            trade_id,
+                            pid,
+                        )
+                        break
+                    probed[pid] = sz
+                if unconfirmed:
+                    return "stop"
+                size_by_pid = probed
             if _all_main_legs_flat(open_main, size_by_pid):
                 spot, settlement_src = await resolve_settlement_spot(
                     delta_client, legs

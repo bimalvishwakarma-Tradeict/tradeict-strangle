@@ -460,6 +460,106 @@ async def test_empty_positions_list_does_not_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_list_two_tick_size_zero_external_close() -> None:
+    call, put, trade = _long_pair()
+    client = _flat_client()
+    timers: dict[tuple[int, int], float] = {}
+    first = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=[],
+        db=None,
+        flat_since=timers,
+        now_monotonic=1000.0,
+    )
+    assert first is None
+    assert str(call.status).lower() == "open"
+    assert str(put.status).lower() == "open"
+    reason = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=[],
+        db=None,
+        flat_since=timers,
+        now_monotonic=1060.0,
+    )
+    assert reason == ExitReason.EXTERNAL_CLOSE.value
+    assert trade.status == TradeStatus.CLOSED.value
+    assert client.place_order.await_count == 0
+    assert str(call.status).lower() == "closed"
+    assert str(put.status).lower() == "closed"
+
+
+@pytest.mark.asyncio
+async def test_empty_list_size_none_does_not_close() -> None:
+    call, put, trade = _long_pair()
+    client = _flat_client()
+    client.get_position_size = AsyncMock(return_value=None)
+    timers: dict[tuple[int, int], float] = {}
+    first = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=[],
+        db=None,
+        flat_since=timers,
+        now_monotonic=1000.0,
+    )
+    second = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=[],
+        db=None,
+        flat_since=timers,
+        now_monotonic=1060.0,
+    )
+    assert first is None
+    assert second is None
+    assert str(call.status).lower() == "open"
+    assert str(put.status).lower() == "open"
+    assert trade.status == TradeStatus.ACTIVE.value
+    assert client.place_order.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_empty_list_one_flat_one_open_partial_close() -> None:
+    call, put, trade = _long_pair()
+    client = _flat_client()
+
+    async def _size(pid: int) -> float:
+        return 0.0 if int(pid) == 11 else 1.0
+
+    client.get_position_size = AsyncMock(side_effect=_size)
+    timers: dict[tuple[int, int], float] = {}
+    await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=[],
+        db=None,
+        flat_since=timers,
+        now_monotonic=1000.0,
+    )
+    reason = await apply_pre_expiry_external_close(
+        client=client,
+        trade=trade,
+        legs=[call, put],
+        positions=[],
+        db=None,
+        flat_since=timers,
+        now_monotonic=1060.0,
+    )
+    assert reason is None
+    assert str(call.status).lower() == "closed"
+    assert str(put.status).lower() == "open"
+    assert trade.status == TradeStatus.ACTIVE.value
+    assert client.place_order.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_one_tick_flat_does_not_close() -> None:
     call, put, trade = _long_pair()
     client = _flat_client()
