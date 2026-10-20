@@ -744,13 +744,6 @@ class ShortStrangleStrategy(BaseStrategy):
             )
             if long_exit is not None:
                 return long_exit
-            if not is_adjustment_enabled(trade):
-                return TradeAction(
-                    current_pnl=float(total_pnl),
-                    trigger_pct_used=0.0,
-                    call_trigger_pct=0.0,
-                    put_trigger_pct=0.0,
-                )
             should_exit_profit = False
             should_exit_sl = False
         else:
@@ -936,6 +929,19 @@ class ShortStrangleStrategy(BaseStrategy):
         # growth is a loss on the long side; adjusting on it would fire in the
         # wrong direction. Triggers use call_leg / put_leg (shorts) only.
         # Locked by backend/tests/test_wing_trigger_shorts_only.py.
+        if is_long_trade(trade):
+            if is_adjustment_enabled(trade):
+                logger.error(
+                    "Trade %s: adjustment_enabled=True on long trade — "
+                    "adjustment not supported; skipping trigger",
+                    getattr(trade, "id", "?"),
+                )
+            return TradeAction(
+                current_pnl=decision_pnl,
+                trigger_pct_used=0.0,
+                call_trigger_pct=0.0,
+                put_trigger_pct=0.0,
+            )
         if not is_adjustment_enabled(trade):
             logger.info(
                 "Trade %s: skipping adjustment trigger (adjustment_enabled=False)",

@@ -125,6 +125,12 @@ export default function TradeInitiator() {
   }, [])
 
   useEffect(() => {
+    if (positionSide === 'long') {
+      setAdjustmentEnabled(false)
+    }
+  }, [positionSide])
+
+  useEffect(() => {
     let cancelled = false
     async function loadExpiries() {
       setLoadingExpiries(true)
@@ -301,11 +307,7 @@ export default function TradeInitiator() {
     !placing &&
     (!emergencyMode || (callPrem > 0 && putPrem > 0))
   const canPlace = isLong
-    ? Boolean(
-        canPlaceCommon &&
-          longParamsValid &&
-          (!adjustmentEnabled || slabsValid),
-      )
+    ? Boolean(canPlaceCommon && longParamsValid)
     : Boolean(
         canPlaceCommon &&
           Number.isFinite(tpPctNum) &&
@@ -347,7 +349,7 @@ export default function TradeInitiator() {
       put_delta_at_entry: selectedPut.put_delta ?? null,
       is_demo: Boolean(isDemo) && !emergencyMode,
       position_side: isLong ? 'long' : 'short',
-      adjustment_enabled: Boolean(adjustmentEnabled),
+      adjustment_enabled: isLong ? false : Boolean(adjustmentEnabled),
     }
     if (isLong) {
       base.target_usd = targetUsdNum
@@ -931,16 +933,25 @@ export default function TradeInitiator() {
 
       {/* 6. Adjustment */}
       <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800/60 p-4">
-        <label className="flex cursor-pointer items-center gap-3 text-sm text-gray-200">
+        <label
+          className={`flex items-center gap-3 text-sm text-gray-200 ${
+            isLong ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+          }`}
+          title={isLong ? 'Long adjustment abhi available nahi' : undefined}
+        >
           <input
             type="checkbox"
-            checked={adjustmentEnabled}
-            onChange={(e) => setAdjustmentEnabled(e.target.checked)}
-            className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500"
+            disabled={isLong}
+            checked={isLong ? false : adjustmentEnabled}
+            onChange={(e) => {
+              if (isLong) return
+              setAdjustmentEnabled(e.target.checked)
+            }}
+            className="h-4 w-4 rounded border-gray-600 bg-gray-900 text-blue-500 disabled:cursor-not-allowed"
           />
-          Adjustment {adjustmentEnabled ? 'ON' : 'OFF'}
+          Adjustment {isLong || !adjustmentEnabled ? 'OFF' : 'ON'}
         </label>
-        {adjustmentEnabled && (
+        {!isLong && adjustmentEnabled && (
           <AdjustmentSlabs onChange={onSlabsChange} defaultMode="slab" />
         )}
       </section>

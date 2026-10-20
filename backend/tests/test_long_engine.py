@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,7 +17,11 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend.api.routes_trade import _persist_strangle_trade, initiate_trade
+from backend.api.routes_trade import (
+    _persist_strangle_trade,
+    initiate_trade,
+    register_existing_trade,
+)
 from backend.config import ExitReason, TradeStatus
 from backend.engine.long_settlement import (
     apply_expiry_settlement,
@@ -26,9 +30,10 @@ from backend.engine.long_settlement import (
     resolve_settlement_spot,
 )
 from backend.engine.order_executor import OrderExecutor
-from backend.schemas import TradeInitiateRequest
+from backend.schemas import TradeInitiateRequest, TradeRegisterExistingRequest
 from backend.strategies.base_strategy import OrderResult
 from backend.strategies.s001_short_strangle.logic import (
+    ShortStrangleStrategy,
     apply_long_gross_exits,
     compute_long_trail_sl_level,
     is_stoploss_exit_reason,
@@ -607,3 +612,122 @@ def test_stoploss_markers_include_long() -> None:
     assert is_stoploss_exit_reason("LONG_SL")
     assert is_stoploss_exit_reason("LONG_TRAIL_SL")
     assert is_stoploss_exit_reason("STOPLOSS")
+
+
+def _register_payload(**kwargs: object) -> TradeRegisterExistingRequest:
+    data: dict[str, object] = {
+        "underlying": "BTC",
+        "expiry_date": "2099-12-31",
+        "call_strike": 110000,
+        "call_product_id": 11,
+        "call_symbol": "C-BTC-110000-311299",
+        "put_strike": 100000,
+        "put_product_id": 12,
+        "put_symbol": "P-BTC-100000-311299",
+        "quantity": 1,
+        "trigger_mode": "flat",
+        "flat_trigger_pct": 150,
+        "position_side": "long",
+        "target_usd": 150,
+        "sl_usd": 100,
+        "call_entry_premium": 20.0,
+        "put_entry_premium": 18.0,
+    }
+    data.update(kwargs)
+    return TradeRegisterExistingRequest(**data)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_long_initiate_adjustment_enabled_422() -> None:
+    with patch("backend.api.routes_trade.LONG_TRADES_ENABLED", True):
+        with pytest.raises(HTTPException) as ei:
+            await initiate_trade(
+                _payload(adjustment_enabled=True),
+                db=MagicMock(),
+            )
+    assert ei.value.status_code == 422
+    assert "Adjustment not supported for long trades yet" in str(ei.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_register_existing_long_flag_off_403() -> None:
+    with pytest.raises(HTTPException) as ei:
+        await register_existing_trade(_register_payload(), db=MagicMock())
+    assert ei.value.status_code == 403
+    assert "disabled" in str(ei.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_register_existing_long_target_zero_422() -> None:
+    with patch("backend.api.routes_trade.LONG_TRADES_ENABLED", True):
+        with pytest.raises(HTTPException) as ei:
+            await register_existing_trade(
+                _register_payload(target_usd=0),
+                db=MagicMock(),
+            )
+    assert ei.value.status_code == 422
+    assert "target_usd" in str(ei.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_long_adj_enabled_trigger_does_not_call_executor(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    strat = ShortStrangleStrategy()
+    call = _leg(is_long=True, leg_type="call", entry=100.0)
+    call.status = "open"
+    call.trigger_baseline_premium = 100.0
+    call.trigger_premium = 100.0
+    put = _leg(is_long=True, leg_type="put", entry=100.0)
+    put.status = "open"
+    put.trigger_baseline_premium = 100.0
+    put.trigger_premium = 100.0
+    trade = SimpleNamespace(
+        id=9,
+        profit_target_usd=10_000.0,
+        stoploss_usd=10_000.0,
+        sl_usd=10_000.0,
+        target_usd=10_000.0,
+        trail_step_usd=None,
+        trail_amt_usd=None,
+        peak_gross_mtm=0.0,
+        trail_sl_level=None,
+        trigger_mode="flat",
+        combined_trigger_mode=False,
+        expiry_date=date.today() + timedelta(days=2),
+        monitoring_starts_at=None,
+        adjust_settling_until=None,
+        slippage_pct=0.0,
+        entry_spread_for_sl_usd=0.0,
+        position_side="long",
+        adjustment_enabled=True,
+        is_demo=False,
+        universal_sl_pct=200,
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = []
+    db.query.return_value.filter.return_value.first.return_value = None
+    with caplog.at_level("ERROR"):
+        with patch(
+            "backend.strategies.s001_short_strangle.adjustment.AdjustmentExecutor.execute",
+            new_callable=AsyncMock,
+        ) as exe:
+            action = await strat.on_tick(
+                trade,
+                call,
+                put,
+                250.0,
+                90.0,
+                db,
+                realized_pnl=0.0,
+                delta_mtm=-0.05,
+                net_mtm=-0.05,
+                slippage_pct=0.0,
+                gross_mtm_for_sl=-0.05,
+            )
+    assert action.should_adjust is False
+    assert action.adjust_leg is None
+    assert exe.await_count == 0
+    assert any(
+        "adjustment_enabled=True on long trade" in r.message for r in caplog.records
+    )

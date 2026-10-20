@@ -354,7 +354,13 @@ def _normalize_initiate_side(payload: TradeInitiateRequest) -> str:
         )
     if side == "long" and not LONG_TRADES_ENABLED:
         raise HTTPException(status_code=403, detail="Long trades disabled")
-    if getattr(payload, "adjustment_enabled", None) is None:
+    adj = getattr(payload, "adjustment_enabled", None)
+    if side == "long" and adj is True:
+        raise HTTPException(
+            status_code=422,
+            detail="Adjustment not supported for long trades yet",
+        )
+    if adj is None:
         payload.adjustment_enabled = False if side == "long" else True
     if side != "long":
         return side
@@ -1615,6 +1621,7 @@ async def register_existing_trade(
     Emergency only: register an already-open Delta strangle (no order placement).
     """
     underlying, expiry = _validate_initiate_common(payload)
+    _normalize_initiate_side(payload)
     if payload.call_entry_premium <= 0 or payload.put_entry_premium <= 0:
         raise HTTPException(status_code=400, detail="Entry premiums must be > 0")
 
