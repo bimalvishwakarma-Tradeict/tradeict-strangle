@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from backend.core.trade_side import is_long_trade
+
 logger = logging.getLogger(__name__)
 
 # Master fill vs mark: beyond this relative gap, fall back to mark × uni_sl.
@@ -118,6 +120,7 @@ async def attach_position_bracket_sl(
     trade_id: int | None = None,
     quantity: int | None = None,
     max_attempts: int = 3,
+    trade: Any | None = None,
 ) -> None:
     """
     Attach exchange bracket SL to the open POSITION (not the entry order).
@@ -129,6 +132,14 @@ async def attach_position_bracket_sl(
     closes or alters the position.
     """
     import asyncio
+
+    if is_long_trade(trade):
+        logger.info(
+            "[BRACKET_SL] skip long trade_id=%s leg=%s",
+            trade_id,
+            leg or "?",
+        )
+        return
 
     pid = int(product_id or 0)
     stop_px = round(float(stop_price or 0.0), 2)
@@ -260,6 +271,7 @@ async def finalize_bracket_sl_after_fill(
     leg: str = "",
     trade_id: int | None = None,
     quantity: int | None = None,
+    trade: Any | None = None,
 ) -> tuple[float, float]:
     """
     After a short-leg fill, ensure exchange bracket SL is on the POSITION.
@@ -273,6 +285,13 @@ async def finalize_bracket_sl_after_fill(
     entry_order_id is retained for call-site compatibility only (unused).
     """
     _ = entry_order_id  # legacy kw; position attach does not need it
+    if is_long_trade(trade):
+        logger.info(
+            "[BRACKET_SL] skip long trade_id=%s leg=%s",
+            trade_id,
+            leg or "?",
+        )
+        return 0.0, 0.0
     fill_stop, fill_limit = compute_bracket_sl(
         float(fill_price or 0.0),
         float(universal_sl_pct or 200.0),
@@ -324,6 +343,7 @@ async def finalize_bracket_sl_after_fill(
         leg=leg,
         trade_id=trade_id,
         quantity=quantity,
+        trade=trade,
     )
     return stop_px, limit_px
 

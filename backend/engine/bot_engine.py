@@ -27,6 +27,7 @@ from backend.config import (
     TradeStatus,
 )
 from backend.core.bot_logger import log_and_buffer
+from backend.core.trade_side import is_long_trade
 from backend.core.delta_client import DeltaClient
 from backend.core.delta_ws import DeltaWebSocket, ensure_margins_feed
 from backend.core.encryption import decrypt
@@ -289,6 +290,8 @@ class BotEngine:
         for state in self.position_tracker.get_all_active():
             # Demo trades have no Delta positions — never trigger integrity
             if bool(getattr(state.trade, "is_demo", False)):
+                continue
+            if is_long_trade(getattr(state, "trade", None)):
                 continue
             call_sym = str(state.call_leg.symbol)
             put_sym = str(state.put_leg.symbol)
@@ -2029,6 +2032,13 @@ class BotEngine:
         """
         trade_id = trade_state.trade_id
 
+        if is_long_trade(getattr(trade_state, "trade", None)):
+            logger.info(
+                "[INTEGRITY_SKIP] Trade#%s — long trade, skipping integrity/naked check",
+                trade_id,
+            )
+            return "ok"
+
         # CRITICAL: Skip integrity if adjustment is in progress.
         # During adjustment one leg is intentionally closed temporarily.
         # Re-read from tracker so we never use a stale is_adjusting=False.
@@ -2194,6 +2204,14 @@ class BotEngine:
         Returns False if trade was closed / emergency-handled (caller must stop).
         """
         trade_id = trade_state.trade_id
+
+        if is_long_trade(getattr(trade_state, "trade", None)):
+            logger.info(
+                "[INTEGRITY_SKIP] Trade#%s enforce skipped (long trade) source=%s",
+                trade_id,
+                source,
+            )
+            return True
 
         # Absolute gate: never act while adjustment is in progress
         live = self.position_tracker.get(trade_id)
@@ -6117,6 +6135,13 @@ class BotEngine:
         if now - last < 60.0:
             return
         self._leg_recovery_last_checked[trade_id] = now
+
+        if is_long_trade(getattr(trade_state, "trade", None)):
+            logger.warning(
+                "[LEG_RECOVERY] Trade#%s skipped (long trade; no orders)",
+                trade_id,
+            )
+            return
 
         if bool(getattr(trade_state.trade, "is_demo", False)):
             return

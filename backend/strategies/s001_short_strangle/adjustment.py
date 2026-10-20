@@ -1195,6 +1195,7 @@ class AdjustmentExecutor:
                     provisional_limit=float(conv_prov_limit or 0),
                     leg=str(other_leg.leg_type),
                     trade_id=int(trade.id),
+                    trade=trade,
                 )
 
                 now_utc = get_utc_now()
@@ -2437,6 +2438,7 @@ class AdjustmentExecutor:
                 provisional_limit=adj_prov_limit,
                 leg=str(triggered_leg_type),
                 trade_id=int(trade.id),
+                trade=trade,
             )
             display_sl = bracket_sl_price
 

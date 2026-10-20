@@ -56,6 +56,9 @@ PNL_SANITY_ABS_TOLERANCE_USD: float = float(
 OPTION_FEE_RATE: float = float(os.getenv("OPTION_FEE_RATE", "0.00010"))  # 0.010% of notional
 PREMIUM_CAP_RATE: float = float(os.getenv("PREMIUM_CAP_RATE", "0.035"))  # 3.5% of premium
 GST_RATE: float = float(os.getenv("GST_RATE", "0.18"))  # 18% GST on base fee
+# Long-basket placement is off until explicitly enabled. Existing shorts unchanged.
+_LONG_TRADES_RAW = (os.getenv("LONG_TRADES_ENABLED") or "false").strip().lower()
+LONG_TRADES_ENABLED: bool = _LONG_TRADES_RAW in ("1", "true", "yes", "on")
 
 # Phase-1 UTC timestamp writer cutover (commit b52d738, 2026-08-21 23:37:49 IST).
 # Rows with timestamps BEFORE this instant may be mixed IST or UTC wall-clock;

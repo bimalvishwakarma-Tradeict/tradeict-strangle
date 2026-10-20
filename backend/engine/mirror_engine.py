@@ -34,6 +34,7 @@ from backend.models import (
     Trade,
 )
 from backend.config import MAX_SLAVE_QTY, OPTIONS_CONTRACT_VALUE, ExitReason, TradeStatus
+from backend.core.trade_side import is_long_trade
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,14 @@ def is_virtual_slave_trade(
     call_oid = str(getattr(slave_trade, "call_order_id", None) or "").upper()
     put_oid = str(getattr(slave_trade, "put_order_id", None) or "").upper()
     return call_oid == "VIRTUAL" or put_oid == "VIRTUAL"
+
+
+def _skip_long_master_mirror(db: Any, master_trade_id: int) -> bool:
+    row = db.query(Trade).filter(Trade.id == int(master_trade_id)).first()
+    if row is not None and is_long_trade(row):
+        logger.info("long trade not mirrored")
+        return True
+    return False
 
 
 class MirrorEngine:
@@ -1243,6 +1252,8 @@ class MirrorEngine:
         abort without shorts (NIYAM 0).
         """
         with self.db_factory() as db:
+            if _skip_long_master_mirror(db, master_trade_id):
+                return
             slaves = get_active_slave_accounts(db)
             if not slaves:
                 return
@@ -2669,6 +2680,8 @@ class MirrorEngine:
         wing_roll: when True, also roll the same-side wing (master strikes).
         """
         with self.db_factory() as db:
+            if _skip_long_master_mirror(db, master_trade_id):
+                return
             uni_sl = float(universal_sl_pct) if universal_sl_pct else 0.0
             if uni_sl <= 0:
                 uni_sl = self._master_universal_sl_pct(db, master_trade_id)
@@ -7054,6 +7067,12 @@ class MirrorEngine:
             return result
 
         with self.db_factory() as db:
+            if _skip_long_master_mirror(db, master_trade_id):
+                return {
+                    "slaves_total": 0,
+                    "slaves_closed": 0,
+                    "slaves_failed": 0,
+                }
             slave_trades = (
                 db.query(SlaveTrade)
                 .filter(
@@ -7594,6 +7613,8 @@ class MirrorEngine:
         may differ from entry). Hint product_ids are logged for diagnosis only.
         """
         with self.db_factory() as db:
+            if _skip_long_master_mirror(db, master_trade_id):
+                return
             # Every non-closed SlaveTrade for this master — entry failures
             # ('error'/'partial') and exit_failed rows often still hold live legs.
             slave_trades = (

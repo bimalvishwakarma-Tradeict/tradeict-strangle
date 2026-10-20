@@ -537,6 +537,53 @@ def _migrate_schema() -> None:
                         "WHERE adjustment_count IS NULL"
                     )
                 )
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "position_side" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN "
+                        "position_side VARCHAR(8) NOT NULL DEFAULT 'short'"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE trades SET position_side = 'short' "
+                        "WHERE position_side IS NULL OR position_side = ''"
+                    )
+                )
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        if "adjustment_enabled" not in trade_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE trades ADD COLUMN "
+                        "adjustment_enabled BOOLEAN NOT NULL DEFAULT 1"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "UPDATE trades SET adjustment_enabled = 1 "
+                        "WHERE adjustment_enabled IS NULL"
+                    )
+                )
+        trade_cols = {col["name"] for col in inspector.get_columns("trades")}
+        for col_name in (
+            "target_usd",
+            "sl_usd",
+            "trail_step_usd",
+            "trail_amt_usd",
+            "peak_gross_mtm",
+            "trail_sl_level",
+        ):
+            if col_name not in trade_cols:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE trades ADD COLUMN {col_name} FLOAT"
+                        )
+                    )
+                trade_cols.add(col_name)
     if "slave_accounts" in tables:
         slave_cols = {
             col["name"] for col in inspector.get_columns("slave_accounts")

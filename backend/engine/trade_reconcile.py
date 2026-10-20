@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.config import ExitReason, TradeStatus
+from backend.core.trade_side import is_long_trade
 from backend.core.realized_booking import (
     basket_realized_breakdown,
     book_leg_close as _book_leg_close_core,
@@ -335,6 +336,10 @@ async def reconcile_open_legs_with_delta(
                     trade.id,
                 )
                 continue
+
+        if is_long_trade(trade):
+            logger.debug("Reconcile skip trade=%s (long trade)", trade.id)
+            continue
 
         # Demo/virtual trades have no real Delta size — never reconcile-close them
         if bool(getattr(trade, "is_demo", False)):

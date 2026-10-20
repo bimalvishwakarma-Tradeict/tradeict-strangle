@@ -162,6 +162,19 @@ class Trade(Base):
     wing_premium_paid_usd: Mapped[float | None] = mapped_column(
         Float, nullable=True, default=None
     )
+    # Master direction: "short" (default existing baskets) or "long"
+    position_side: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="short"
+    )
+    adjustment_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    target_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sl_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trail_step_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trail_amt_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    peak_gross_mtm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trail_sl_level: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     account: Mapped[Account] = relationship("Account", back_populates="trades")
     hedge_position: Mapped[HedgePosition | None] = relationship(

@@ -14,6 +14,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.config import OPTIONS_CONTRACT_VALUE
+from backend.core.trade_side import is_adjustment_enabled, is_long_trade
 from backend.core.time_utils import (
     get_hours_to_expiry,
     get_premium_trigger_pct,
@@ -41,6 +42,15 @@ from backend.strategies.s001_short_strangle.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _signed_leg_size(leg: Any) -> float:
+    """+qty if leg.is_long is True; otherwise −qty (short / unset / MagicMock)."""
+    qty = abs(int(getattr(leg, "quantity", 0) or 0))
+    if getattr(leg, "is_long", False) is True:
+        return float(qty)
+    return -float(qty)
+
 
 # adjustment_count is PER BASKET (one Trade row), shared across BOTH legs.
 # Each successful adjustment — call or put — increments Trade.adjustment_count
@@ -330,8 +340,9 @@ class ShortStrangleStrategy(BaseStrategy):
         Total P&L USD = realized (closed legs) + unrealized (open shorts + wings).
 
         Uses compute_signed_upnl:
-          SHORT size = −qty  → (entry − mark) × qty × CV
-          WING  size = +qty  → (mark − entry) × qty × CV
+          is_long False → size = −qty  → (entry − mark) × qty × CV
+          is_long True  → size = +qty  → (mark − entry) × qty × CV
+        Short call/put legs stay is_long=False so output matches the old formula.
         """
         call_upnl = 0.0
         put_upnl = 0.0
@@ -340,14 +351,14 @@ class ShortStrangleStrategy(BaseStrategy):
             call_upnl = compute_signed_upnl(
                 float(call_leg.initial_premium),
                 float(call_premium),
-                size=-abs(int(call_leg.quantity)),
+                size=_signed_leg_size(call_leg),
                 contract_value=OPTIONS_CONTRACT_VALUE,
             )
         if str(getattr(put_leg, "status", "open")).lower() == "open":
             put_upnl = compute_signed_upnl(
                 float(put_leg.initial_premium),
                 float(put_premium),
-                size=-abs(int(put_leg.quantity)),
+                size=_signed_leg_size(put_leg),
                 contract_value=OPTIONS_CONTRACT_VALUE,
             )
         if (
@@ -358,7 +369,7 @@ class ShortStrangleStrategy(BaseStrategy):
             wing_upnl += compute_signed_upnl(
                 float(wing_call_leg.initial_premium),
                 float(wing_call_premium),
-                size=+abs(int(wing_call_leg.quantity)),
+                size=_signed_leg_size(wing_call_leg),
                 contract_value=OPTIONS_CONTRACT_VALUE,
             )
         if (
@@ -369,7 +380,7 @@ class ShortStrangleStrategy(BaseStrategy):
             wing_upnl += compute_signed_upnl(
                 float(wing_put_leg.initial_premium),
                 float(wing_put_premium),
-                size=+abs(int(wing_put_leg.quantity)),
+                size=_signed_leg_size(wing_put_leg),
                 contract_value=OPTIONS_CONTRACT_VALUE,
             )
         return float(realized_pnl or 0.0) + call_upnl + put_upnl + wing_upnl
@@ -713,14 +724,20 @@ class ShortStrangleStrategy(BaseStrategy):
                 current_pnl=decision_pnl,
             )
 
-        # d. Pre-expiry
+        # d. Pre-expiry (short baskets only — long trades hold through 17:15)
         hours_left = get_hours_to_expiry(trade.expiry_date)
         if hours_left == 0 or is_pre_expiry_window(trade.expiry_date):
-            return TradeAction(
-                should_exit=True,
-                exit_reason="PRE_EXPIRY",
-                current_pnl=decision_pnl,
-            )
+            if is_long_trade(trade):
+                logger.info(
+                    "Trade %s: skipping PRE_EXPIRY exit (long trade)",
+                    getattr(trade, "id", "?"),
+                )
+            else:
+                return TradeAction(
+                    should_exit=True,
+                    exit_reason="PRE_EXPIRY",
+                    current_pnl=decision_pnl,
+                )
 
         # d2. Premium decay exit (B26) — after TP/pre-expiry, before adjustment
         decay_enabled = False
@@ -801,6 +818,12 @@ class ShortStrangleStrategy(BaseStrategy):
         # growth is a loss on the long side; adjusting on it would fire in the
         # wrong direction. Triggers use call_leg / put_leg (shorts) only.
         # Locked by backend/tests/test_wing_trigger_shorts_only.py.
+        if not is_adjustment_enabled(trade):
+            logger.info(
+                "Trade %s: skipping adjustment trigger (adjustment_enabled=False)",
+                getattr(trade, "id", "?"),
+            )
+            return TradeAction(current_pnl=decision_pnl)
         call_trigger_pct = self.get_trigger_for_leg(
             call_premium, trade, db_session
         )
