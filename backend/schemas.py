@@ -140,6 +140,11 @@ class TradeSettingsUpdate(BaseModel):
     premium_slab_100: float | None = Field(default=None, ge=1, le=500)
     premium_slab_lt100: float | None = Field(default=None, ge=1, le=500)
     combined_trigger_mode: bool | None = None
+    # Long-trade $ / trail (ignored on shorts except via dedicated PATCH branch)
+    target_usd: float | None = None
+    sl_usd: float | None = None
+    trail_step_usd: float | None = None
+    trail_amt_usd: float | None = None
 
 
 class TradeExitRequest(BaseModel):

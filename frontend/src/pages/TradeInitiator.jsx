@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import AdjustmentSlabs from '../components/AdjustmentSlabs'
+import LiveTradesPanel from '../components/LiveTradesPanel'
 import OptionChain from '../components/OptionChain'
 import PayoffGraph from '../components/PayoffGraph'
 import Toast from '../components/ui/Toast'
@@ -494,6 +495,7 @@ export default function TradeInitiator() {
             ? 'Select strikes — the bot will buy the call and put (debit), then monitor target / trailing SL. Slaves will not copy.'
             : 'Select strikes and parameters — the bot will sell the call and put on Delta Exchange, then monitor the position automatically.'}
       </p>
+      <LiveTradesPanel />
 
       {!emergencyMode && (
         <section className="space-y-2">

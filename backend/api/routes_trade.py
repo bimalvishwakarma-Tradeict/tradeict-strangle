@@ -156,6 +156,8 @@ def _leg_snapshot(leg: Any, current_premium: float) -> dict[str, Any]:
         "status": str(leg.status or "open"),
         "side": side,
         "is_long": is_long,
+        "current_bid": round(float(display_prem), 4),
+        "current_mark": round(float(display_prem), 4),
     }
 
 
@@ -364,40 +366,61 @@ def _normalize_initiate_side(payload: TradeInitiateRequest) -> str:
         payload.adjustment_enabled = False if side == "long" else True
     if side != "long":
         return side
+    _validate_long_money_fields(
+        target_usd=getattr(payload, "target_usd", None),
+        sl_usd=getattr(payload, "sl_usd", None),
+        trail_step_usd=getattr(payload, "trail_step_usd", None),
+        trail_amt_usd=getattr(payload, "trail_amt_usd", None),
+    )
+    return side
+
+
+_LONG_PATCH_ALLOWED = frozenset(
+    {"target_usd", "sl_usd", "trail_step_usd", "trail_amt_usd"}
+)
+
+
+def _validate_long_money_fields(
+    *,
+    target_usd: Any,
+    sl_usd: Any,
+    trail_step_usd: Any,
+    trail_amt_usd: Any,
+) -> tuple[float, float, float | None, float | None]:
+    """Same rules as long entry: target/SL > 0; trail both-or-neither; 0 < amt ≤ step."""
     try:
-        target = float(getattr(payload, "target_usd", None) or 0)
-        sl_usd = float(getattr(payload, "sl_usd", None) or 0)
+        target = float(target_usd or 0)
+        sl_val = float(sl_usd or 0)
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=422, detail="target_usd and sl_usd must be numbers"
         ) from exc
-    if target <= 0 or sl_usd <= 0:
+    if target <= 0 or sl_val <= 0:
         raise HTTPException(
             status_code=422, detail="long trades require target_usd > 0 and sl_usd > 0"
         )
-    step_raw = getattr(payload, "trail_step_usd", None)
-    amt_raw = getattr(payload, "trail_amt_usd", None)
-    step_set = step_raw is not None
-    amt_set = amt_raw is not None
+    step_set = trail_step_usd is not None
+    amt_set = trail_amt_usd is not None
     if step_set != amt_set:
         raise HTTPException(
             status_code=422,
             detail="trail_step_usd and trail_amt_usd must both be set or both empty",
         )
-    if step_set and amt_set:
-        try:
-            step = float(step_raw)
-            amt = float(amt_raw)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=422, detail="trail fields must be numbers"
-            ) from exc
-        if not (0 < amt <= step):
-            raise HTTPException(
-                status_code=422,
-                detail="require 0 < trail_amt_usd <= trail_step_usd",
-            )
-    return side
+    if not step_set:
+        return target, sl_val, None, None
+    try:
+        step = float(trail_step_usd)
+        amt = float(trail_amt_usd)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail="trail fields must be numbers"
+        ) from exc
+    if not (0 < amt <= step):
+        raise HTTPException(
+            status_code=422,
+            detail="require 0 < trail_amt_usd <= trail_step_usd",
+        )
+    return target, sl_val, step, amt
 
 
 async def _ensure_no_active_trade(
@@ -1964,6 +1987,11 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
 
             call_prem = float(state.last_call_premium or state.call_leg.initial_premium)
             put_prem = float(state.last_put_premium or state.put_leg.initial_premium)
+            call_bid = call_prem
+            put_bid = put_prem
+            call_mark = call_prem
+            put_mark = put_prem
+            trade_is_long = is_long_trade(state.trade)
             calculated = float(state.last_pnl)
             delta_mtm = float(state.last_delta_mtm)
             call_mtm = 0.0
@@ -2010,14 +2038,27 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                         put_row = upnl_data.get(put_pid) or {}
                         if call_open and call_row:
                             call_mtm = float(call_row.get("upnl") or 0.0)
+                            if float(call_row.get("mark_price") or 0) > 0:
+                                call_mark = float(call_row["mark_price"])
                             if float(call_row.get("best_offer") or 0) > 0:
-                                call_prem = float(call_row["best_offer"])
+                                px = float(call_row["best_offer"])
+                                call_prem = px
+                                if trade_is_long:
+                                    call_bid = px
                         elif call_open:
-                            call_prem = float(
-                                await client.get_short_exit_price(
-                                    str(state.call_leg.symbol)
+                            if trade_is_long:
+                                call_prem = float(
+                                    await client.get_long_exit_price(
+                                        str(state.call_leg.symbol)
+                                    )
                                 )
-                            )
+                                call_bid = call_prem
+                            else:
+                                call_prem = float(
+                                    await client.get_short_exit_price(
+                                        str(state.call_leg.symbol)
+                                    )
+                                )
                         else:
                             call_prem = float(
                                 state.call_leg.exit_premium
@@ -2026,14 +2067,27 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                             )
                         if put_open and put_row:
                             put_mtm = float(put_row.get("upnl") or 0.0)
+                            if float(put_row.get("mark_price") or 0) > 0:
+                                put_mark = float(put_row["mark_price"])
                             if float(put_row.get("best_offer") or 0) > 0:
-                                put_prem = float(put_row["best_offer"])
+                                px = float(put_row["best_offer"])
+                                put_prem = px
+                                if trade_is_long:
+                                    put_bid = px
                         elif put_open:
-                            put_prem = float(
-                                await client.get_short_exit_price(
-                                    str(state.put_leg.symbol)
+                            if trade_is_long:
+                                put_prem = float(
+                                    await client.get_long_exit_price(
+                                        str(state.put_leg.symbol)
+                                    )
                                 )
-                            )
+                                put_bid = put_prem
+                            else:
+                                put_prem = float(
+                                    await client.get_short_exit_price(
+                                        str(state.put_leg.symbol)
+                                    )
+                                )
                         else:
                             put_prem = float(
                                 state.put_leg.exit_premium
@@ -2165,6 +2219,10 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 put_snap["est_exit_fee_usd"] = round(float(fee_fields["put_est_exit_fee"]), 6)
             else:
                 put_snap["est_exit_fee_usd"] = 0.0
+            call_snap["current_bid"] = round(float(call_bid), 4)
+            call_snap["current_mark"] = round(float(call_mark), 4)
+            put_snap["current_bid"] = round(float(put_bid), 4)
+            put_snap["current_mark"] = round(float(put_mark), 4)
 
             wing_call_snap = None
             wing_put_snap = None
@@ -2358,6 +2416,29 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "pnl_pct_of_target": round(pnl_pct, 2),
                 "hours_to_expiry": get_hours_to_expiry(state.trade.expiry_date),
                 **long_trade_public_fields(state.trade),
+                **(
+                    {
+                        "debit_premium": round(
+                            float(state.call_leg.initial_premium or 0)
+                            + float(state.put_leg.initial_premium or 0),
+                            4,
+                        ),
+                        "call_breakeven": round(
+                            float(state.call_leg.strike or 0)
+                            + float(state.call_leg.initial_premium or 0)
+                            + float(state.put_leg.initial_premium or 0),
+                            4,
+                        ),
+                        "put_breakeven": round(
+                            float(state.put_leg.strike or 0)
+                            - float(state.call_leg.initial_premium or 0)
+                            - float(state.put_leg.initial_premium or 0),
+                            4,
+                        ),
+                    }
+                    if trade_is_long
+                    else {}
+                ),
                 "adjustment_count": int(
                     getattr(state.trade, "adjustment_count", None) or adj_count or 0
                 ),
@@ -2919,11 +3000,10 @@ async def close_single_leg(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """
-    UI "Close Call" / "Close Put" — closes ONLY that short leg.
+    UI "Close Call" / "Close Put" — closes that call/put leg.
 
-    Wings stay open while the other short is still open. When both shorts
-    are closed, ``maybe_close_orphaned_wings`` auto-closes wings
-    (reason WINGS_ORPHANED). Emergency full exit uses POST /exit instead.
+    Short baskets: BUY reduce_only. Long baskets: SELL reduce_only via close_leg.
+    Wings stay if the other main leg is open. Full exit uses POST /exit.
     """
     from backend.engine.wing_exit import close_basket_legs
 
@@ -2948,18 +3028,18 @@ async def close_single_leg(
             "final_pnl": float(trade.realized_pnl or 0.0),
         }
 
-    target = (
-        db.query(Leg)
-        .filter(
-            Leg.trade_id == trade_id,
-            Leg.leg_type == leg_key,
-            Leg.status == "open",
-            Leg.is_bot_managed.is_(True),
-            Leg.is_long.is_(False),
-        )
-        .order_by(Leg.id.desc())
-        .first()
+    long_side = is_long_trade(trade)
+    target_q = db.query(Leg).filter(
+        Leg.trade_id == trade_id,
+        Leg.leg_type == leg_key,
+        Leg.status == "open",
+        Leg.is_bot_managed.is_(True),
     )
+    if long_side:
+        target_q = target_q.filter(Leg.is_long.is_(True))
+    else:
+        target_q = target_q.filter(Leg.is_long.is_(False))
+    target = target_q.order_by(Leg.id.desc()).first()
     if target is None:
         # Already closed — still run orphan wing hook in case other short gone
         orphan = await bot_engine.maybe_close_orphaned_wings(
@@ -3046,17 +3126,17 @@ async def close_single_leg(
 
     db.refresh(trade)
     other_key = "put" if leg_key == "call" else "call"
-    other_open = (
-        db.query(Leg)
-        .filter(
-            Leg.trade_id == trade_id,
-            Leg.leg_type == other_key,
-            Leg.status == "open",
-            Leg.is_bot_managed.is_(True),
-            Leg.is_long.is_(False),
-        )
-        .count()
+    other_q = db.query(Leg).filter(
+        Leg.trade_id == trade_id,
+        Leg.leg_type == other_key,
+        Leg.status == "open",
+        Leg.is_bot_managed.is_(True),
     )
+    if long_side:
+        other_q = other_q.filter(Leg.is_long.is_(True))
+    else:
+        other_q = other_q.filter(Leg.is_long.is_(False))
+    other_open = other_q.count()
     basket_closed = str(trade.status or "").lower() != TradeStatus.ACTIVE.value
 
     # If both shorts closed but trade still active (no wings / wings failed),
@@ -3153,6 +3233,96 @@ async def update_trade_settings(
 
     updated: dict[str, Any] = {}
     state = bot_engine.position_tracker.get(trade_id)
+
+    if is_long_trade(trade):
+        forbidden = sorted(k for k in updates if k not in _LONG_PATCH_ALLOWED)
+        if forbidden:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "long trades cannot update adjustment / slab / % fields: "
+                    + ", ".join(forbidden)
+                ),
+            )
+        from backend.strategies.s001_short_strangle.logic import (
+            compute_long_trail_sl_level,
+        )
+
+        merged_target = (
+            updates["target_usd"] if "target_usd" in updates else trade.target_usd
+        )
+        merged_sl = updates["sl_usd"] if "sl_usd" in updates else trade.sl_usd
+        merged_step = (
+            updates["trail_step_usd"]
+            if "trail_step_usd" in updates
+            else trade.trail_step_usd
+        )
+        merged_amt = (
+            updates["trail_amt_usd"]
+            if "trail_amt_usd" in updates
+            else trade.trail_amt_usd
+        )
+        target, sl_val, step, amt = _validate_long_money_fields(
+            target_usd=merged_target,
+            sl_usd=merged_sl,
+            trail_step_usd=merged_step,
+            trail_amt_usd=merged_amt,
+        )
+        old_vals = {
+            "target_usd": getattr(trade, "target_usd", None),
+            "sl_usd": getattr(trade, "sl_usd", None),
+            "trail_step_usd": getattr(trade, "trail_step_usd", None),
+            "trail_amt_usd": getattr(trade, "trail_amt_usd", None),
+            "trail_sl_level": getattr(trade, "trail_sl_level", None),
+        }
+        peak = float(getattr(trade, "peak_gross_mtm", None) or 0.0)
+        new_level = compute_long_trail_sl_level(
+            sl_usd=sl_val,
+            peak=peak,
+            trail_step_usd=step,
+            trail_amt_usd=amt,
+            prev_sl_level=None,
+        )
+        trade.target_usd = target
+        trade.sl_usd = sl_val
+        trade.trail_step_usd = step
+        trade.trail_amt_usd = amt
+        trade.trail_sl_level = new_level
+        trade.profit_target_usd = target
+        trade.stoploss_usd = sl_val
+        updated = {
+            "target_usd": target,
+            "sl_usd": sl_val,
+            "trail_step_usd": step,
+            "trail_amt_usd": amt,
+            "trail_sl_level": new_level,
+            "peak_gross_mtm": peak,
+            "profit_target_usd": target,
+            "stoploss_usd": sl_val,
+        }
+        if state is not None:
+            st = state.trade
+            st.target_usd = target
+            st.sl_usd = sl_val
+            st.trail_step_usd = step
+            st.trail_amt_usd = amt
+            st.trail_sl_level = new_level
+            st.profit_target_usd = target
+            st.stoploss_usd = sl_val
+        logger.info(
+            "LONG_SETTINGS_PATCH trade=%s old=%s new=%s at=%s",
+            trade_id,
+            old_vals,
+            updated,
+            get_utc_now().isoformat(),
+        )
+        log_and_buffer(
+            "LONG_SETTINGS_PATCH",
+            int(trade_id),
+            {"old": old_vals, "new": updated},
+        )
+        db.commit()
+        return {"success": True, "updated": updated}
 
     def _sync_tracker_money() -> None:
         if state is None:
