@@ -25,6 +25,7 @@ from backend.core.entry_slip import (
     maybe_note_entry_slip,
 )
 from backend.core.trade_side import is_long_trade, long_trade_public_fields
+from backend.schemas import UNIVERSAL_SL_PCT_ERROR, coerce_universal_sl_pct
 from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt
 from backend.core.time_utils import (
@@ -174,6 +175,13 @@ def _leg_snapshot(leg: Any, current_premium: float) -> dict[str, Any]:
             if getattr(leg, "entry_slip_ratio", None) is not None
             else None
         ),
+        "sl_trigger_price": (
+            round(float(leg.sl_trigger_price), 4)
+            if getattr(leg, "sl_trigger_price", None) is not None
+            else None
+        ),
+        "delta_sl_order_id": getattr(leg, "delta_sl_order_id", None),
+        "delta_sl_confirmed": getattr(leg, "delta_sl_confirmed", None),
     }
 
 
@@ -3600,11 +3608,13 @@ async def update_trade_settings(
         _sync_tracker_money()
 
     if "universal_sl_pct" in updates and updates["universal_sl_pct"] is not None:
-        usp = float(updates["universal_sl_pct"])
-        if usp < 100 or usp > 1000:
+        try:
+            usp = coerce_universal_sl_pct(updates["universal_sl_pct"])
+        except (TypeError, ValueError) as exc:
             raise HTTPException(
-                status_code=400, detail="universal_sl_pct must be between 100 and 1000"
-            )
+                status_code=422,
+                detail=str(exc) if str(exc) else UNIVERSAL_SL_PCT_ERROR,
+            ) from exc
         trade.universal_sl_pct = usp
         updated["universal_sl_pct"] = trade.universal_sl_pct
         if state is not None and hasattr(state.trade, "universal_sl_pct"):

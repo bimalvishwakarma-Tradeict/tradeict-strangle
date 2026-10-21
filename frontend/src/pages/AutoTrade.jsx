@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import AdjustmentSlabs from '../components/AdjustmentSlabs'
+import DeltaStopLossSection, {
+  universalSlPctError,
+} from '../components/DeltaStopLossSection'
 import InfoTooltip from '../components/InfoTooltip'
 import {
   AutoTradeStickyHeader,
@@ -1286,6 +1289,11 @@ export default function AutoTrade() {
   }, [loading, refreshPreviews])
 
   const handleSave = async () => {
+    const uniErr = universalSlPctError(universalSlPct)
+    if (uniErr) {
+      setToast({ type: 'error', message: uniErr })
+      return
+    }
     if (
       hedgeSlFloorPctError ||
       hedgeTargetMultipleError ||
@@ -2251,18 +2259,19 @@ export default function AutoTrade() {
                   className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
             />
           </label>
-          <label className="text-sm text-gray-300">
-                <FieldLabel>Delta SL (%)</FieldLabel>
-            <input
-              type="number"
-              min={100}
-              max={1000}
-              step={1}
-              value={universalSlPct}
-              onChange={(e) => setUniversalSlPct(e.target.value)}
-                  className="mt-2 w-full rounded-md border border-gray-600 bg-gray-700 px-3 py-2 text-white"
-            />
-          </label>
+          <DeltaStopLossSection
+            universalSlPct={universalSlPct}
+            onChange={setUniversalSlPct}
+            callStrike={null}
+            putStrike={null}
+            callPremium={
+              tradeType === 'strangle' ? Number(targetPremium) || 150 : Number(targetPremium) || 150
+            }
+            putPremium={
+              tradeType === 'strangle' ? Number(targetPremium) || 150 : Number(targetPremium) || 150
+            }
+            quantity={Math.max(1, Number(quantity) || 1)}
+          />
           <label className="text-sm text-gray-300">
                 <FieldLabel>Slippage Est (%)</FieldLabel>
             <input

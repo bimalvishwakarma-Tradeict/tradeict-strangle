@@ -107,6 +107,58 @@ class BotEngine:
         self._long_expiry_wait_since: dict[int, float] = {}
         # Long external close: first flat tick per (trade_id, product_id)
         self._long_flat_since: dict[tuple[int, int], float] = {}
+        # Short Delta SL watchdog (trade_id → monotonic ts)
+        self._delta_sl_check_at: dict[int, float] = {}
+
+    async def _maybe_recheck_delta_stops(
+        self,
+        trade_state: TradeState,
+        call_leg: Any,
+        put_leg: Any,
+        trade: Any,
+    ) -> None:
+        """Every 60s: confirm short-leg Delta stops still exist; re-place if gone."""
+        if is_long_trade(trade):
+            return
+        if self.delta_client is None:
+            return
+        tid = int(trade_state.trade_id)
+        now = time.monotonic()
+        last = float(self._delta_sl_check_at.get(tid) or 0.0)
+        if now - last < 60.0:
+            return
+        self._delta_sl_check_at[tid] = now
+        from backend.core.delta_sl import ensure_leg_delta_stop
+
+        for lg in (call_leg, put_leg):
+            if lg is None:
+                continue
+            if str(getattr(lg, "status", "") or "").lower() != "open":
+                continue
+            await ensure_leg_delta_stop(
+                self.delta_client,
+                lg,
+                trade=trade,
+                trade_id=tid,
+            )
+        with self.db_factory() as db:
+            dirty = False
+            for lg in (call_leg, put_leg):
+                if lg is None or getattr(lg, "id", None) is None:
+                    continue
+                row = db.query(Leg).filter(Leg.id == int(lg.id)).first()
+                if row is None:
+                    continue
+                confirmed = getattr(lg, "delta_sl_confirmed", None)
+                oid = getattr(lg, "delta_sl_order_id", None)
+                if confirmed is not None:
+                    row.delta_sl_confirmed = bool(confirmed)
+                    dirty = True
+                if oid:
+                    row.delta_sl_order_id = str(oid)
+                    dirty = True
+            if dirty:
+                db.commit()
 
     def _get_exit_lock(self, trade_id: int) -> asyncio.Lock:
         tid = int(trade_id)
@@ -3541,6 +3593,18 @@ class BotEngine:
                         wing_put_px_tick = float(self._live_prices[sym])
                     else:
                         wing_put_px_tick = float(lg.initial_premium or 0)
+
+            try:
+                await self._maybe_recheck_delta_stops(
+                    trade_state, call_leg, put_leg, trade
+                )
+            except Exception as sl_exc:
+                logger.error(
+                    "Delta SL watchdog failed trade=%s: %s",
+                    trade_id,
+                    sl_exc,
+                    exc_info=True,
+                )
 
             action = await self.strategy.on_tick(
                 trade,

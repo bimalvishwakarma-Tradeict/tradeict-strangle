@@ -14,6 +14,7 @@ from backend.core.bot_logger import log_and_buffer
 from backend.core.time_utils import get_ist_now, get_utc_now, to_utc_for_db
 from backend.database import get_db, get_or_create_auto_settings
 from backend.models import AutoTradeSettings
+from backend.schemas import coerce_universal_sl_pct
 from backend.strategies.s001_short_strangle.config import SUPPORTED_UNDERLYINGS
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ class AutoTradeSettingsSchema(BaseModel):
     # Risk
     tp_pct: float = Field(default=50.0, gt=0, le=500)
     sl_pct: float = Field(default=100.0, gt=0, le=1000)
-    universal_sl_pct: float = Field(default=200.0, ge=100, le=1000)
+    universal_sl_pct: float = Field(default=200.0)
     slippage_pct: float = Field(default=2.0, ge=0, le=10)
 
     # Trigger
@@ -266,6 +267,11 @@ class AutoTradeSettingsSchema(BaseModel):
         if normalized not in {"A_ONLY", "B_ONLY", "BOTH"}:
             return "A_ONLY"
         return normalized
+
+    @field_validator("universal_sl_pct")
+    @classmethod
+    def validate_universal_sl_pct(cls, v: float) -> float:
+        return coerce_universal_sl_pct(v)
 
     @model_validator(mode="after")
     def validate_hedge_money_when_enabled(self) -> AutoTradeSettingsSchema:

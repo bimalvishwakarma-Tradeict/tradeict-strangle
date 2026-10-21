@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -110,117 +111,112 @@ def compute_sl_trigger_price(baseline_premium: float, universal_sl_pct: float) -
     return stop
 
 
-async def attach_position_bracket_sl(
+def extract_bracket_order_id(result: Any) -> str | None:
+    """Pull a stop/bracket order id from a Delta place_position_bracket payload."""
+    if not isinstance(result, dict):
+        return None
+    for key in ("id", "order_id"):
+        val = result.get(key)
+        if val is not None and str(val).strip():
+            return str(val)
+    for nested_key in ("stop_loss_order", "result", "order", "bracket_order"):
+        inner = result.get(nested_key)
+        found = extract_bracket_order_id(inner)
+        if found:
+            return found
+    for nested_key in ("orders", "stop_loss_orders"):
+        inner = result.get(nested_key)
+        if isinstance(inner, list):
+            for item in inner:
+                found = extract_bracket_order_id(item)
+                if found:
+                    return found
+    return None
+
+
+def delta_sl_missing_message(trade_id: int | None, leg: str) -> str:
+    return (
+        f"⚠ DELTA STOP-LOSS NAHI LAGA — Trade #{int(trade_id or 0)}, "
+        f"leg {leg or '?'}. Delta app me manually lagao."
+    )
+
+
+def _already_bracketed(exc: BaseException) -> bool:
+    err_text = str(exc).lower()
+    return any(
+        token in err_text
+        for token in (
+            "already",
+            "duplicate",
+            "bracket_order_exists",
+            "existing_bracket",
+        )
+    )
+
+
+async def stop_order_exists_on_delta(
     delta_client: Any,
     *,
     product_id: int,
-    stop_price: float,
-    stop_limit_price: float,
-    leg: str = "",
-    trade_id: int | None = None,
-    quantity: int | None = None,
-    max_attempts: int = 3,
-    trade: Any | None = None,
-) -> None:
-    """
-    Attach exchange bracket SL to the open POSITION (not the entry order).
-
-    Mirrors the stop/limit pairing used by OrderExecutor.sell_option, but uses
-    POST /v2/orders/bracket so market/IOC fills (parent order already gone)
-    still receive an exchange-side stop. Retries with backoff; on total failure
-    logs BRACKET_SL_FAILED as CRITICAL and broadcasts to the frontend — never
-    closes or alters the position.
-    """
-    import asyncio
-
-    if is_long_trade(trade):
-        logger.info(
-            "[BRACKET_SL] skip long trade_id=%s leg=%s",
-            trade_id,
-            leg or "?",
-        )
-        return
-
-    pid = int(product_id or 0)
-    stop_px = round(float(stop_price or 0.0), 2)
-    limit_px = round(float(stop_limit_price or 0.0), 2)
-    if limit_px <= 0 and stop_px > 0:
-        limit_px = round(stop_px * 1.05, 2)
-    if delta_client is None or pid <= 0 or stop_px <= 0:
-        raise ValueError(
-            f"attach_position_bracket_sl invalid args "
-            f"product_id={pid} stop={stop_px}"
-        )
-
-    last_err: Exception | None = None
-    attempts = max(1, int(max_attempts))
-    for attempt in range(1, attempts + 1):
+    order_id: str | None = None,
+) -> bool:
+    """True when Delta still has a stop/bracket for this product (or order id)."""
+    if order_id:
         try:
-            await delta_client.place_position_bracket(
-                product_id=pid,
-                bracket_stop_loss_price=stop_px,
-                bracket_stop_loss_limit_price=limit_px,
-            )
-            logger.info(
-                "[BRACKET_SL] position bracket attached leg=%s "
-                "product_id=%s stop=%.2f limit=%.2f attempt=%s",
-                leg or "?",
-                pid,
-                stop_px,
-                limit_px,
-                attempt,
-            )
-            return
-        except Exception as exc:
-            last_err = exc
-            err_text = str(exc).lower()
-            # Already bracketed (e.g. inline entry attach succeeded) — OK.
-            if any(
-                token in err_text
-                for token in (
-                    "already",
-                    "duplicate",
-                    "bracket_order_exists",
-                    "existing_bracket",
-                )
-            ):
-                logger.info(
-                    "[BRACKET_SL] position already has bracket leg=%s "
-                    "product_id=%s — treating as success (%s)",
-                    leg or "?",
-                    pid,
-                    exc,
-                )
-                return
-            logger.warning(
-                "[BRACKET_SL] position attach failed leg=%s product_id=%s "
-                "attempt=%s/%s: %s",
-                leg or "?",
-                pid,
-                attempt,
-                attempts,
-                exc,
-            )
-            if attempt < attempts:
-                await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+            row = await delta_client.get_order(order_id)
+            if isinstance(row, dict) and row:
+                state = str(row.get("state") or "").lower()
+                if state not in {
+                    "cancelled",
+                    "canceled",
+                    "rejected",
+                    "closed",
+                }:
+                    return True
+        except Exception:
+            pass
+    try:
+        opens = await delta_client.get_open_stop_orders()
+    except Exception:
+        opens = []
+    pid = int(product_id or 0)
+    if not isinstance(opens, list):
+        return False
+    for row in opens:
+        if not isinstance(row, dict):
+            continue
+        try:
+            if int(row.get("product_id") or 0) == pid:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
-    err_msg = str(last_err) if last_err is not None else "unknown"
+
+async def _broadcast_delta_sl_missing(
+    *,
+    trade_id: int | None,
+    leg: str,
+    product_id: int,
+    quantity: int | None,
+    err_msg: str,
+    stop_px: float,
+    limit_px: float,
+) -> None:
+    banner = delta_sl_missing_message(trade_id, leg)
     payload = {
         "leg": leg or "?",
-        "product_id": pid,
+        "product_id": product_id,
         "qty": int(quantity) if quantity is not None else None,
         "stop_price": stop_px,
         "stop_limit_price": limit_px,
         "delta_error": err_msg[:500],
-        "summary": (
-            f"[BRACKET_SL_FAILED] CRITICAL leg={leg or '?'} "
-            f"product_id={pid} qty={quantity} err={err_msg[:200]}"
-        ),
+        "summary": banner,
     }
     logger.critical(
-        "[BRACKET_SL_FAILED] leg=%s product_id=%s qty=%s err=%s",
-        leg or "?",
-        pid,
+        "[BRACKET_SL_FAILED] %s product_id=%s qty=%s err=%s",
+        banner,
+        product_id,
         quantity,
         err_msg,
     )
@@ -237,25 +233,214 @@ async def attach_position_bracket_sl(
             {
                 "type": "ERROR",
                 "trade_id": int(trade_id or 0),
-                "message": (
-                    f"Exchange bracket SL FAILED for {leg or 'leg'} "
-                    f"(product {pid}): {err_msg[:300]}. "
-                    f"Position left open — software stop still active. "
-                    f"Place SL manually on Delta if needed."
-                ),
+                "message": banner,
                 "requires_manual_action": True,
+                "sticky": True,
                 "severity": "CRITICAL",
-                "event": "BRACKET_SL_FAILED",
+                "event": "DELTA_SL_MISSING",
                 "leg": leg or "?",
-                "product_id": pid,
+                "product_id": product_id,
                 "qty": quantity,
             }
         )
     except Exception as push_exc:
         logger.error(
-            "Failed to broadcast BRACKET_SL_FAILED: %s", push_exc, exc_info=True
+            "Failed to broadcast DELTA_SL_MISSING: %s", push_exc, exc_info=True
         )
-    # Do not raise — caller must keep the position; software SL continues.
+
+
+async def attach_position_bracket_sl(
+    delta_client: Any,
+    *,
+    product_id: int,
+    stop_price: float,
+    stop_limit_price: float,
+    leg: str = "",
+    trade_id: int | None = None,
+    quantity: int | None = None,
+    max_attempts: int = 2,
+    trade: Any | None = None,
+    leg_obj: Any | None = None,
+    confirm_wait_seconds: float = 5.0,
+) -> bool:
+    """
+    Attach exchange bracket SL to the open POSITION (not the entry order).
+
+    After place: require an order id, wait, then confirm the stop exists on
+    Delta. One retry if missing. Total failure → CRITICAL + sticky banner.
+    Never closes the position.
+    """
+    if is_long_trade(trade):
+        logger.info(
+            "[BRACKET_SL] skip long trade_id=%s leg=%s",
+            trade_id,
+            leg or "?",
+        )
+        return False
+
+    pid = int(product_id or 0)
+    stop_px = round(float(stop_price or 0.0), 2)
+    limit_px = round(float(stop_limit_price or 0.0), 2)
+    if limit_px <= 0 and stop_px > 0:
+        limit_px = round(stop_px * 1.05, 2)
+    if delta_client is None or pid <= 0 or stop_px <= 0:
+        raise ValueError(
+            f"attach_position_bracket_sl invalid args "
+            f"product_id={pid} stop={stop_px}"
+        )
+
+    last_err = "unknown"
+    attempts = max(1, int(max_attempts))
+    wait_s = max(0.0, float(confirm_wait_seconds))
+    for attempt in range(1, attempts + 1):
+        oid: str | None = None
+        already = False
+        try:
+            result = await delta_client.place_position_bracket(
+                product_id=pid,
+                bracket_stop_loss_price=stop_px,
+                bracket_stop_loss_limit_price=limit_px,
+            )
+            oid = extract_bracket_order_id(result)
+            logger.info(
+                "[BRACKET_SL] position bracket attached leg=%s "
+                "product_id=%s stop=%.2f limit=%.2f attempt=%s order_id=%s",
+                leg or "?",
+                pid,
+                stop_px,
+                limit_px,
+                attempt,
+                oid,
+            )
+        except Exception as exc:
+            last_err = str(exc)
+            if _already_bracketed(exc):
+                already = True
+                logger.info(
+                    "[BRACKET_SL] position already has bracket leg=%s "
+                    "product_id=%s — confirming on Delta (%s)",
+                    leg or "?",
+                    pid,
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "[BRACKET_SL] position attach failed leg=%s product_id=%s "
+                    "attempt=%s/%s: %s",
+                    leg or "?",
+                    pid,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+                    continue
+                break
+
+        if not already and not oid:
+            last_err = "no_order_id"
+            logger.warning(
+                "[BRACKET_SL] no order id after place leg=%s product_id=%s "
+                "attempt=%s/%s",
+                leg or "?",
+                pid,
+                attempt,
+                attempts,
+            )
+
+        if wait_s > 0:
+            await asyncio.sleep(wait_s)
+        exists = await stop_order_exists_on_delta(
+            delta_client, product_id=pid, order_id=oid
+        )
+        if exists or already:
+            if leg_obj is not None:
+                if oid:
+                    leg_obj.delta_sl_order_id = oid
+                leg_obj.delta_sl_confirmed = True
+            return True
+        last_err = "stop_not_found_on_delta"
+        if attempt < attempts:
+            logger.warning(
+                "[BRACKET_SL] confirm miss leg=%s product_id=%s — retrying",
+                leg or "?",
+                pid,
+            )
+
+    if leg_obj is not None:
+        leg_obj.delta_sl_confirmed = False
+    await _broadcast_delta_sl_missing(
+        trade_id=trade_id,
+        leg=leg or "?",
+        product_id=pid,
+        quantity=quantity,
+        err_msg=last_err,
+        stop_px=stop_px,
+        limit_px=limit_px,
+    )
+    return False
+
+
+async def ensure_leg_delta_stop(
+    delta_client: Any,
+    leg: Any,
+    *,
+    trade: Any | None = None,
+    trade_id: int | None = None,
+    confirm_wait_seconds: float = 5.0,
+) -> bool:
+    """60s watchdog: if Delta stop is gone, re-attach once and log."""
+    if is_long_trade(trade):
+        return False
+    if str(getattr(leg, "status", "") or "").lower() != "open":
+        return True
+    pid = int(getattr(leg, "product_id", 0) or 0)
+    stop_px = float(getattr(leg, "sl_trigger_price", 0) or 0)
+    if pid <= 0 or stop_px <= 0 or delta_client is None:
+        return False
+    oid = getattr(leg, "delta_sl_order_id", None)
+    exists = await stop_order_exists_on_delta(
+        delta_client, product_id=pid, order_id=str(oid) if oid else None
+    )
+    if exists:
+        leg.delta_sl_confirmed = True
+        return True
+    logger.critical(
+        "[BRACKET_SL] stop missing on Delta trade=%s leg=%s product_id=%s "
+        "— re-attaching",
+        trade_id,
+        getattr(leg, "leg_type", "?"),
+        pid,
+    )
+    try:
+        from backend.core.bot_logger import log_and_buffer
+
+        log_and_buffer(
+            "BRACKET_SL_REPLACED",
+            int(trade_id or 0),
+            {
+                "leg": str(getattr(leg, "leg_type", "?")),
+                "product_id": pid,
+                "stop_price": stop_px,
+                "reason": "missing_on_delta",
+            },
+        )
+    except Exception:
+        pass
+    limit_px = round(stop_px * 1.05, 2)
+    return await attach_position_bracket_sl(
+        delta_client,
+        product_id=pid,
+        stop_price=stop_px,
+        stop_limit_price=limit_px,
+        leg=str(getattr(leg, "leg_type", "") or ""),
+        trade_id=trade_id,
+        quantity=int(getattr(leg, "quantity", 0) or 0),
+        trade=trade,
+        leg_obj=leg,
+        confirm_wait_seconds=confirm_wait_seconds,
+    )
 
 
 async def finalize_bracket_sl_after_fill(

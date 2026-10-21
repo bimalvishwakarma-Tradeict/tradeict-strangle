@@ -205,6 +205,7 @@ function LiveTradeCard({ trade, onToast }) {
             <th>Bid / Mark</th>
             <th>Chg %</th>
             <th>PnL</th>
+            {!isLong && <th>Delta SL</th>}
           </tr>
         </thead>
         <tbody>
@@ -221,6 +222,20 @@ function LiveTradeCard({ trade, onToast }) {
               </td>
               <td>{Number(leg.change_pct).toFixed(2)}%</td>
               <td className={pnlClass(leg.leg_pnl)}>{fmtSigned(leg.leg_pnl)}</td>
+              {!isLong && (
+                <td>
+                  {leg.delta_sl_confirmed === false ? (
+                    <span className="font-semibold text-red-400">✗ NAHI LAGA</span>
+                  ) : Number(leg.sl_trigger_price) > 0 &&
+                    leg.delta_sl_confirmed !== false ? (
+                    <span className="text-emerald-400">
+                      Delta SL ✓ @ ${fmtMoney(leg.sl_trigger_price)}
+                    </span>
+                  ) : (
+                    <span className="font-semibold text-red-400">✗ NAHI LAGA</span>
+                  )}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

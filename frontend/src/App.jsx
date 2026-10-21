@@ -36,12 +36,21 @@ function ProtectedRoute({ children }) {
   return children
 }
 
-function GlobalAutoTradeToasts({ wsUrl }) {
+function GlobalLiveAlerts({ wsUrl }) {
   const { lastMessage } = useWebSocket(wsUrl)
   const [toast, setToast] = useState(null)
+  const [alerts, setAlerts] = useState({})
 
   useEffect(() => {
-    if (!lastMessage?.type) return
+    if (!lastMessage?.type && !lastMessage?.event) return
+    const event = lastMessage.event || lastMessage.type
+    if (event === 'DELTA_SL_MISSING' || lastMessage.sticky) {
+      const key = `${lastMessage.trade_id || 0}:${lastMessage.leg || 'leg'}`
+      setAlerts((prev) => ({
+        ...prev,
+        [key]: lastMessage.message || '⚠ DELTA STOP-LOSS NAHI LAGA',
+      }))
+    }
     if (lastMessage.type === 'AUTO_TRADE_PLACED') {
       const und = lastMessage.underlying || 'BTC'
       const strike = fmtStrike(lastMessage.strike)
@@ -61,14 +70,30 @@ function GlobalAutoTradeToasts({ wsUrl }) {
     }
   }, [lastMessage])
 
-  if (!toast) return null
+  const rows = Object.entries(alerts)
   return (
-    <Toast
-      message={toast.message}
-      type={toast.type}
-      durationMs={toast.durationMs}
-      onClose={() => setToast(null)}
-    />
+    <>
+      {rows.length > 0 ? (
+        <div className="sticky top-0 z-50 space-y-1 p-2">
+          {rows.map(([key, message]) => (
+            <div
+              key={key}
+              className="rounded border-2 border-red-600 bg-red-950 px-3 py-2 text-sm font-semibold text-red-100"
+            >
+              {message}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {toast ? (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          durationMs={toast.durationMs}
+          onClose={() => setToast(null)}
+        />
+      ) : null}
+    </>
   )
 }
 
@@ -95,7 +120,7 @@ function AuthenticatedShell() {
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-        {wsUrl ? <GlobalAutoTradeToasts wsUrl={wsUrl} /> : null}
+        {wsUrl ? <GlobalLiveAlerts wsUrl={wsUrl} /> : null}
       </div>
     </ProtectedRoute>
   )

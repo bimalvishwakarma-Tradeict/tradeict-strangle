@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import AdjustmentSlabs from '../components/AdjustmentSlabs'
+import DeltaStopLossSection, {
+  universalSlPctError,
+} from '../components/DeltaStopLossSection'
 import LiveTradesPanel from '../components/LiveTradesPanel'
 import OptionChain from '../components/OptionChain'
 import PayoffGraph from '../components/PayoffGraph'
@@ -322,7 +325,7 @@ export default function TradeInitiator() {
           Number.isFinite(slPctNum) &&
           slPctNum > 0 &&
           Number.isFinite(universalSlPctNum) &&
-          universalSlPctNum >= 100 &&
+          universalSlPctNum >= 120 &&
           universalSlPctNum <= 1000 &&
           slabsValid,
       )
@@ -374,12 +377,8 @@ export default function TradeInitiator() {
     if (!Number.isFinite(slPctNum) || slPctNum <= 0) {
       placeDisabledReasons.push('SL % daalo')
     }
-    if (
-      !Number.isFinite(universalSlPctNum) ||
-      universalSlPctNum < 100 ||
-      universalSlPctNum > 1000
-    ) {
-      placeDisabledReasons.push('Delta SL % 100–1000 ke beech daalo')
+    if (universalSlPctError(universalSlPctNum)) {
+      placeDisabledReasons.push(universalSlPctError(universalSlPctNum))
     }
     if (!slabsValid) placeDisabledReasons.push('Adjustment slabs 100–500% valid hon')
   }
@@ -932,47 +931,26 @@ export default function TradeInitiator() {
           </label>
         </div>
         {!isLong && (
-        <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 px-3 py-3">
-          <div className="mb-2 text-sm font-semibold text-amber-200">
-            SAFETY STOP LOSS (Delta Exchange Order)
-          </div>
-          <label className="block text-sm text-gray-300">
-            Stop Loss at (% of each leg entry)
-            <input
-              type="number"
-              min={100}
-              max={1000}
-              step={1}
-              value={universalSlPct}
-              onChange={(e) => setUniversalSlPct(e.target.value)}
-              className="mt-1 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-white"
-              placeholder="200"
+          <div className="space-y-2">
+            <DeltaStopLossSection
+              universalSlPct={universalSlPct}
+              onChange={setUniversalSlPct}
+              callStrike={selectedCall?.strike}
+              putStrike={selectedPut?.strike}
+              callPremium={callPremPreview}
+              putPremium={putPremPreview}
+              quantity={qty}
+              currentCallMark={callPremPreview}
+              currentPutMark={putPremPreview}
             />
-          </label>
-          <div className="mt-2 space-y-1 text-xs text-gray-400">
-            <div>
-              Call SL triggers at: ~${fmtMoney(callDeltaSlPreview)} (
-              {fmtMoney(universalSlPctNum) || '—'}% of $
-              {fmtMoney(callPremPreview)})
-            </div>
-            <div>
-              Put SL triggers at: ~${fmtMoney(putDeltaSlPreview)} (
-              {fmtMoney(universalSlPctNum) || '—'}% of $
-              {fmtMoney(putPremPreview)})
-            </div>
+            {deltaSlBelowTrigger && (
+              <p className="text-xs text-amber-300">
+                Warning: Delta SL % ({fmtMoney(universalSlPctNum)}) is ≤ max
+                adjustment trigger ({fmtMoney(maxTriggerPct)}%). Delta may close
+                a leg before the bot can adjust.
+              </p>
+            )}
           </div>
-          {deltaSlBelowTrigger && (
-            <p className="mt-2 text-xs text-amber-300">
-              Warning: Delta SL % ({fmtMoney(universalSlPctNum)}) is ≤ max
-              adjustment trigger ({fmtMoney(maxTriggerPct)}%). Delta may close
-              a leg before the bot can adjust.
-            </p>
-          )}
-          <p className="mt-2 text-xs text-gray-500">
-            These are placed as stop orders on Delta as backup if the bot
-            misses an exit. Updated automatically on each adjustment.
-          </p>
-        </div>
         )}
         {emergencyMode && (
           <div className="grid gap-3 sm:grid-cols-2">

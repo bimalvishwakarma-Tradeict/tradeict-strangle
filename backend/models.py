@@ -224,6 +224,7 @@ class Leg(Base):
     # Delta stop-loss safety order (buy-to-close when premium spikes)
     delta_sl_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     sl_trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta_sl_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Exit order id (buy-to-close / adjust exit) for fee lookup
     exit_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # BOT TRADE ISOLATION: True = bot-placed; never manage manual account positions

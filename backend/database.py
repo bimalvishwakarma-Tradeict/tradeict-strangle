@@ -285,6 +285,12 @@ def _migrate_schema() -> None:
                     text("ALTER TABLE legs ADD COLUMN sl_trigger_price FLOAT")
                 )
         leg_cols = {col["name"] for col in inspector.get_columns("legs")}
+        if "delta_sl_confirmed" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE legs ADD COLUMN delta_sl_confirmed BOOLEAN")
+                )
+        leg_cols = {col["name"] for col in inspector.get_columns("legs")}
         if "is_long" not in leg_cols:
             with engine.begin() as conn:
                 conn.execute(

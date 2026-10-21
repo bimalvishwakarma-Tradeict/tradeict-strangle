@@ -6,6 +6,19 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+UNIVERSAL_SL_PCT_MIN = 120.0
+UNIVERSAL_SL_PCT_MAX = 1000.0
+UNIVERSAL_SL_PCT_ERROR = (
+    "SL % 120 se kam nahi ho sakta. 200 = premium double hone par stop."
+)
+
+
+def coerce_universal_sl_pct(value: Any) -> float:
+    v = float(value)
+    if v < UNIVERSAL_SL_PCT_MIN or v > UNIVERSAL_SL_PCT_MAX:
+        raise ValueError(UNIVERSAL_SL_PCT_ERROR)
+    return v
+
 
 class AccountConnectRequest(BaseModel):
     name: str = Field(..., min_length=1)
@@ -86,7 +99,7 @@ class TradeInitiateRequest(BaseModel):
     sl_pct: float = Field(default=100.0, gt=0, le=500)
     slippage_pct: float = Field(default=2.0, ge=0, le=10)
     # Delta Exchange per-leg stop-market safety net (% of entry premium)
-    universal_sl_pct: float = Field(default=200.0, ge=100, le=1000)
+    universal_sl_pct: float = Field(default=200.0)
     trigger_mode: str  # "flat", "slab", or "premium"
     flat_trigger_pct: float | None = Field(default=None, ge=1, le=500)
     slab_24h: float = Field(default=200.0, ge=1, le=500)
@@ -112,6 +125,11 @@ class TradeInitiateRequest(BaseModel):
     trail_step_usd: float | None = None
     trail_amt_usd: float | None = None
 
+    @field_validator("universal_sl_pct")
+    @classmethod
+    def _uni_sl_pct(cls, value: float) -> float:
+        return coerce_universal_sl_pct(value)
+
 
 class TradeRegisterExistingRequest(TradeInitiateRequest):
     """Emergency: register an already-open Delta strangle (no new orders)."""
@@ -125,7 +143,7 @@ class TradeSettingsUpdate(BaseModel):
     tp_pct: float | None = Field(default=None, gt=0, le=500)
     sl_pct: float | None = Field(default=None, gt=0, le=500)
     slippage_pct: float | None = Field(default=None, ge=0, le=10)
-    universal_sl_pct: float | None = Field(default=None, ge=100, le=1000)
+    universal_sl_pct: float | None = Field(default=None)
     # Legacy direct $ (discouraged; kept for compatibility)
     profit_target_usd: float | None = None
     stoploss_usd: float | None = None
@@ -145,6 +163,13 @@ class TradeSettingsUpdate(BaseModel):
     sl_usd: float | None = None
     trail_step_usd: float | None = None
     trail_amt_usd: float | None = None
+
+    @field_validator("universal_sl_pct")
+    @classmethod
+    def _uni_sl_pct(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        return coerce_universal_sl_pct(value)
 
 
 class TradeExitRequest(BaseModel):
