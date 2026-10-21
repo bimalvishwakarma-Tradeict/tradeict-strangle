@@ -41,6 +41,15 @@ function pnlClass(v) {
   return n > 0 ? 'text-green-400' : 'text-red-400'
 }
 
+function chgClass(changePct, isLong) {
+  const n = Number(changePct)
+  if (!Number.isFinite(n) || n === 0) return 'text-gray-300'
+  if (isLong) {
+    return n > 0 ? 'text-green-400' : 'text-red-400'
+  }
+  return n > 0 ? 'text-red-400' : 'text-green-400'
+}
+
 function fmtCountdown(hours) {
   const h = Number(hours)
   if (!Number.isFinite(h) || h <= 0) return 'expired'
@@ -220,7 +229,11 @@ function LiveTradeCard({ trade, onToast }) {
                 ${fmtMoney(leg.current_bid ?? leg.current_premium)} / $
                 {fmtMoney(leg.current_mark ?? leg.current_premium)}
               </td>
-              <td>{Number(leg.change_pct).toFixed(2)}%</td>
+              <td className={chgClass(leg.change_pct, isLong)}>
+                {Number(leg.change_pct) > 0
+                  ? `+${Number(leg.change_pct).toFixed(2)}%`
+                  : `${Number(leg.change_pct).toFixed(2)}%`}
+              </td>
               <td className={pnlClass(leg.leg_pnl)}>{fmtSigned(leg.leg_pnl)}</td>
               {!isLong && (
                 <td>

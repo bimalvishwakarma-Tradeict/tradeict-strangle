@@ -109,12 +109,21 @@ def _upsert_setting(db: Session, trade_id: int, key: str, value: Any) -> None:
         row.value = str(value)
 
 
-def _leg_snapshot(leg: Any, current_premium: float) -> dict[str, Any]:
+def _leg_snapshot(
+    leg: Any,
+    current_premium: float,
+    *,
+    force_long: bool | None = None,
+) -> dict[str, Any]:
     from backend.core.delta_client import compute_signed_upnl
 
     initial = float(leg.initial_premium)
     is_closed = str(getattr(leg, "status", "") or "").lower() == "closed"
     is_long = bool(getattr(leg, "is_long", False))
+    if force_long is True:
+        is_long = True
+    elif force_long is False:
+        is_long = False
     side = str(getattr(leg, "side", None) or ("BUY" if is_long else "SELL")).upper()
     qty = abs(int(leg.quantity or 0))
     display_prem = (
@@ -183,6 +192,34 @@ def _leg_snapshot(leg: Any, current_premium: float) -> dict[str, Any]:
         "delta_sl_order_id": getattr(leg, "delta_sl_order_id", None),
         "delta_sl_confirmed": getattr(leg, "delta_sl_confirmed", None),
     }
+
+
+def check_open_leg_pnl_vs_gross(
+    trade_id: int,
+    snaps: list[dict[str, Any] | None],
+    *,
+    realized: float,
+    gross: float,
+) -> None:
+    """WARNING if Σ open leg_pnl + realized disagrees with gross by > $0.01."""
+    open_sum = 0.0
+    for snap in snaps:
+        if not snap:
+            continue
+        if str(snap.get("status") or "").lower() != "open":
+            continue
+        open_sum += float(snap.get("leg_pnl") or 0.0)
+    combined = open_sum + float(realized or 0.0)
+    if abs(combined - float(gross or 0.0)) > 0.01:
+        logger.warning(
+            "leg_pnl/gross mismatch trade_id=%s open_leg_pnl=%.4f "
+            "realized=%.4f combined=%.4f gross=%.4f",
+            int(trade_id),
+            open_sum,
+            float(realized or 0.0),
+            combined,
+            float(gross or 0.0),
+        )
 
 
 def _note_and_attach_entry_slip(
@@ -2306,11 +2343,15 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                     "slab_used": last_adj.slab_used,
                 }
 
-            call_snap = _leg_snapshot(state.call_leg, call_prem)
-            put_snap = _leg_snapshot(state.put_leg, put_prem)
-            if call_open:
+            call_snap = _leg_snapshot(
+                state.call_leg, call_prem, force_long=trade_is_long
+            )
+            put_snap = _leg_snapshot(
+                state.put_leg, put_prem, force_long=trade_is_long
+            )
+            if call_open and not trade_is_long:
                 call_snap["leg_pnl"] = round(call_mtm, 4)
-            if put_open:
+            if put_open and not trade_is_long:
                 put_snap["leg_pnl"] = round(put_mtm, 4)
 
             all_legs = (
@@ -2331,18 +2372,22 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 call_offer=call_prem,
                 put_offer=put_prem,
             )
-            call_snap = _leg_snapshot(state.call_leg, call_prem)
-            put_snap = _leg_snapshot(state.put_leg, put_prem)
-            if call_open:
+            call_snap = _leg_snapshot(
+                state.call_leg, call_prem, force_long=trade_is_long
+            )
+            put_snap = _leg_snapshot(
+                state.put_leg, put_prem, force_long=trade_is_long
+            )
+            if call_open and not trade_is_long:
                 call_snap["leg_pnl"] = round(call_mtm, 4)
-                call_snap["est_exit_fee_usd"] = round(float(fee_fields["call_est_exit_fee"]), 6)
-            else:
-                call_snap["est_exit_fee_usd"] = 0.0
-            if put_open:
+            if put_open and not trade_is_long:
                 put_snap["leg_pnl"] = round(put_mtm, 4)
-                put_snap["est_exit_fee_usd"] = round(float(fee_fields["put_est_exit_fee"]), 6)
-            else:
-                put_snap["est_exit_fee_usd"] = 0.0
+            call_snap["est_exit_fee_usd"] = (
+                round(float(fee_fields["call_est_exit_fee"]), 6) if call_open else 0.0
+            )
+            put_snap["est_exit_fee_usd"] = (
+                round(float(fee_fields["put_est_exit_fee"]), 6) if put_open else 0.0
+            )
             call_snap["current_bid"] = round(float(call_bid), 4)
             call_snap["current_mark"] = round(float(call_mark), 4)
             put_snap["current_bid"] = round(float(put_bid), 4)
@@ -2354,12 +2399,12 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             wing_put_snap = None
             if wing_call_leg is not None:
                 wing_call_snap = _leg_snapshot(wing_call_leg, wing_call_prem)
-                if wing_call_open:
+                if wing_call_open and not bool(wing_call_snap.get("is_long")):
                     wing_call_snap["leg_pnl"] = round(wing_call_mtm, 4)
                 _note_and_attach_entry_slip(wing_call_leg, wing_call_snap, db)
             if wing_put_leg is not None:
                 wing_put_snap = _leg_snapshot(wing_put_leg, wing_put_prem)
-                if wing_put_open:
+                if wing_put_open and not bool(wing_put_snap.get("is_long")):
                     wing_put_snap["leg_pnl"] = round(wing_put_mtm, 4)
                 _note_and_attach_entry_slip(wing_put_leg, wing_put_snap, db)
 
@@ -2376,6 +2421,18 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 wing_call_premium=wing_call_prem if wing_call_leg else None,
                 wing_put_premium=wing_put_prem if wing_put_leg else None,
             )
+
+            if trade_is_long:
+                if call_open:
+                    call_mtm = float(call_snap["leg_pnl"])
+                if put_open:
+                    put_mtm = float(put_snap["leg_pnl"])
+                if wing_call_open and wing_call_snap is not None:
+                    wing_call_mtm = float(wing_call_snap["leg_pnl"])
+                if wing_put_open and wing_put_snap is not None:
+                    wing_put_mtm = float(wing_put_snap["leg_pnl"])
+                delta_mtm = call_mtm + put_mtm + wing_call_mtm + wing_put_mtm
+                display_total = realized + delta_mtm
 
             # Gross MTM = realized + Delta UPNL (premium-only; fees NOT included)
             gross_mtm = display_total
@@ -2641,6 +2698,12 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                         if x
                     ],
                 )
+            )
+            check_open_leg_pnl_vs_gross(
+                int(state.trade_id),
+                [call_snap, put_snap, wing_call_snap, wing_put_snap],
+                realized=float(realized),
+                gross=float(gross_mtm),
             )
             logger.info(
                 "/active trade=%s slippage_pct=%s slippage_amount=%s net_mtm=%s",
