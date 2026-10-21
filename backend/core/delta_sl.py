@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from backend.core.trade_side import is_long_trade
+from backend.schemas import UNIVERSAL_SL_PCT_MIN
 
 logger = logging.getLogger(__name__)
 
 # Master fill vs mark: beyond this relative gap, fall back to mark × uni_sl.
 _BRACKET_SL_ANOMALY_RATIO = 0.35
+# Short buy-stop must sit at least 10% above mark or Delta rejects / is unsafe.
+SHORT_STOP_MIN_MARK_MULT = 1.10
+UNSAFE_STOP_ALERT_SECONDS = 300.0
+# trade_id → monotonic ts of last unsafe-stop CRITICAL/banner
+_unsafe_stop_alert_at: dict[int, float] = {}
 
 
 def compute_bracket_sl(
@@ -132,6 +139,114 @@ def extract_bracket_order_id(result: Any) -> str | None:
                 if found:
                     return found
     return None
+
+
+def reset_unsafe_stop_alert_throttle() -> None:
+    _unsafe_stop_alert_at.clear()
+
+
+def short_stop_is_safe(stop_px: float, mark: float) -> bool:
+    """True when a short-leg buy-stop is ≥ 10% above current mark."""
+    stop = float(stop_px or 0.0)
+    mk = float(mark or 0.0)
+    if stop <= 0 or mk <= 0:
+        return False
+    return stop >= mk * SHORT_STOP_MIN_MARK_MULT
+
+
+def unsafe_stop_message(
+    trade_id: int | None,
+    leg: str,
+    stop_px: float,
+    mark: float,
+) -> str:
+    return (
+        f"⚠ Trade #{int(trade_id or 0)} leg {leg or '?'}: saved stop "
+        f"${float(stop_px):.2f} current mark ${float(mark):.2f} se "
+        f"neeche/paas hai — Delta app me manually stop lagao ya Modify se "
+        f"SL % badlo."
+    )
+
+
+def _should_emit_unsafe_alert(trade_id: int | None) -> bool:
+    tid = int(trade_id or 0)
+    now = time.monotonic()
+    last = float(_unsafe_stop_alert_at.get(tid) or 0.0)
+    if now - last < UNSAFE_STOP_ALERT_SECONDS:
+        return False
+    _unsafe_stop_alert_at[tid] = now
+    return True
+
+
+async def _alert_unsafe_stop(
+    *,
+    trade_id: int | None,
+    leg: str,
+    stop_px: float,
+    mark: float,
+    reason: str,
+) -> None:
+    banner = unsafe_stop_message(trade_id, leg, stop_px, mark)
+    if not _should_emit_unsafe_alert(trade_id):
+        logger.info(
+            "[BRACKET_SL] unsafe-stop alert throttled trade=%s leg=%s reason=%s",
+            trade_id,
+            leg,
+            reason,
+        )
+        return
+    logger.critical("%s reason=%s", banner, reason)
+    try:
+        from backend.core.bot_logger import log_and_buffer
+
+        log_and_buffer(
+            "BRACKET_SL_UNSAFE",
+            int(trade_id or 0),
+            {
+                "leg": leg or "?",
+                "stop_price": round(float(stop_px), 4),
+                "mark": round(float(mark), 4),
+                "reason": reason,
+                "summary": banner,
+            },
+        )
+    except Exception:
+        pass
+    try:
+        from backend.core.ws_manager import ws_manager
+
+        await ws_manager.broadcast(
+            {
+                "type": "ERROR",
+                "trade_id": int(trade_id or 0),
+                "message": banner,
+                "requires_manual_action": True,
+                "sticky": True,
+                "severity": "CRITICAL",
+                "event": "DELTA_SL_UNSAFE",
+                "leg": leg or "?",
+                "stop_price": round(float(stop_px), 4),
+                "mark": round(float(mark), 4),
+                "reason": reason,
+            }
+        )
+    except Exception as push_exc:
+        logger.error(
+            "Failed to broadcast DELTA_SL_UNSAFE: %s", push_exc, exc_info=True
+        )
+
+
+async def _fetch_mark(delta_client: Any, symbol: str | None) -> float:
+    if delta_client is None or not symbol:
+        return 0.0
+    getter = getattr(delta_client, "get_mark_price", None)
+    if getter is None:
+        return 0.0
+    try:
+        return float(await getter(str(symbol)) or 0.0)
+    except Exception as exc:
+        logger.warning("get_mark_price %s failed: %s", symbol, exc)
+        return 0.0
 
 
 def delta_sl_missing_message(trade_id: int | None, leg: str) -> str:
@@ -262,6 +377,7 @@ async def attach_position_bracket_sl(
     trade: Any | None = None,
     leg_obj: Any | None = None,
     confirm_wait_seconds: float = 5.0,
+    mark_price: float | None = None,
 ) -> bool:
     """
     Attach exchange bracket SL to the open POSITION (not the entry order).
@@ -288,6 +404,22 @@ async def attach_position_bracket_sl(
             f"attach_position_bracket_sl invalid args "
             f"product_id={pid} stop={stop_px}"
         )
+
+    mark = float(mark_price or 0.0)
+    if mark <= 0:
+        mark = await _fetch_mark(
+            delta_client,
+            getattr(leg_obj, "symbol", None) if leg_obj is not None else None,
+        )
+    if mark > 0 and not short_stop_is_safe(stop_px, mark):
+        await _alert_unsafe_stop(
+            trade_id=trade_id,
+            leg=leg or "?",
+            stop_px=stop_px,
+            mark=mark,
+            reason="entry_or_attach_too_close",
+        )
+        return False
 
     last_err = "unknown"
     attempts = max(1, int(max_attempts))
@@ -390,7 +522,7 @@ async def ensure_leg_delta_stop(
     trade_id: int | None = None,
     confirm_wait_seconds: float = 5.0,
 ) -> bool:
-    """60s watchdog: if Delta stop is gone, re-attach once and log."""
+    """60s watchdog: if Delta stop is gone, re-attach once — never if flat/unsafe."""
     if is_long_trade(trade):
         return False
     if str(getattr(leg, "status", "") or "").lower() != "open":
@@ -406,6 +538,41 @@ async def ensure_leg_delta_stop(
     if exists:
         leg.delta_sl_confirmed = True
         return True
+
+    size_getter = getattr(delta_client, "get_position_size", None)
+    if size_getter is not None:
+        try:
+            size = await size_getter(pid)
+        except Exception as exc:
+            logger.warning(
+                "get_position_size failed pid=%s: %s", pid, exc
+            )
+            size = None
+        if size is not None and abs(float(size)) == 0.0:
+            logger.info("position flat, stop not needed")
+            return False
+
+    mark = await _fetch_mark(delta_client, getattr(leg, "symbol", None))
+    uni_sl = float(getattr(trade, "universal_sl_pct", None) or 0.0)
+    if uni_sl > 0 and uni_sl < float(UNIVERSAL_SL_PCT_MIN):
+        await _alert_unsafe_stop(
+            trade_id=trade_id,
+            leg=str(getattr(leg, "leg_type", "") or ""),
+            stop_px=stop_px,
+            mark=mark,
+            reason="legacy_uni_sl_pct",
+        )
+        return False
+    if mark > 0 and not short_stop_is_safe(stop_px, mark):
+        await _alert_unsafe_stop(
+            trade_id=trade_id,
+            leg=str(getattr(leg, "leg_type", "") or ""),
+            stop_px=stop_px,
+            mark=mark,
+            reason="stop_too_close_to_mark",
+        )
+        return False
+
     logger.critical(
         "[BRACKET_SL] stop missing on Delta trade=%s leg=%s product_id=%s "
         "— re-attaching",
@@ -440,6 +607,7 @@ async def ensure_leg_delta_stop(
         trade=trade,
         leg_obj=leg,
         confirm_wait_seconds=confirm_wait_seconds,
+        mark_price=mark,
     )
 
 
@@ -529,6 +697,7 @@ async def finalize_bracket_sl_after_fill(
         trade_id=trade_id,
         quantity=quantity,
         trade=trade,
+        mark_price=float(mark_price or 0.0),
     )
     return stop_px, limit_px
 

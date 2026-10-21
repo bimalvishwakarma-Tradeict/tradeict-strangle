@@ -27,6 +27,7 @@ from backend.core.delta_sl import (
     compute_bracket_sl,
     delta_sl_missing_message,
     ensure_leg_delta_stop,
+    reset_unsafe_stop_alert_throttle,
 )
 from backend.database import Base
 from backend.models import Account, Leg, Trade
@@ -35,6 +36,27 @@ from backend.schemas import (
     TradeInitiateRequest,
     TradeSettingsUpdate,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_unsafe_alert_throttle() -> None:
+    reset_unsafe_stop_alert_throttle()
+
+
+def _short_leg(**kw: object) -> SimpleNamespace:
+    data: dict[str, object] = {
+        "id": 1,
+        "status": "open",
+        "product_id": 9,
+        "symbol": "C-BTC-83000",
+        "sl_trigger_price": 1088.0,
+        "delta_sl_order_id": None,
+        "quantity": 1,
+        "leg_type": "call",
+        "delta_sl_confirmed": None,
+    }
+    data.update(kw)
+    return SimpleNamespace(**data)
 
 
 def _engine() -> object:
@@ -126,6 +148,8 @@ async def test_bracket_fail_no_order_id_retries_then_critical(
     client.place_position_bracket = AsyncMock(return_value={})
     client.get_open_stop_orders = AsyncMock(return_value=[])
     client.get_order = AsyncMock(side_effect=Exception("missing"))
+    client.get_mark_price = AsyncMock(return_value=0.0)
+    client.get_position_size = AsyncMock(return_value=1.0)
     ws = MagicMock()
     ws.broadcast = AsyncMock()
     with (
@@ -162,21 +186,14 @@ async def test_ensure_leg_stop_replaces_when_missing() -> None:
         side_effect=[[], [{"product_id": 9, "id": 77}]]
     )
     client.place_position_bracket = AsyncMock(return_value={"id": 77})
-    leg = SimpleNamespace(
-        id=1,
-        status="open",
-        product_id=9,
-        sl_trigger_price=20.0,
-        delta_sl_order_id="old",
-        quantity=1,
-        leg_type="call",
-        delta_sl_confirmed=True,
-    )
+    client.get_position_size = AsyncMock(return_value=1.0)
+    client.get_mark_price = AsyncMock(return_value=654.0)
+    leg = _short_leg(sl_trigger_price=1088.0, delta_sl_order_id="old")
     with patch("backend.core.delta_sl.asyncio.sleep", new_callable=AsyncMock):
         ok = await ensure_leg_delta_stop(
             client,
             leg,
-            trade=SimpleNamespace(position_side="short"),
+            trade=SimpleNamespace(position_side="short", universal_sl_pct=200),
             trade_id=5,
             confirm_wait_seconds=0,
         )
@@ -184,6 +201,144 @@ async def test_ensure_leg_stop_replaces_when_missing() -> None:
     assert client.place_position_bracket.await_count == 1
     assert leg.delta_sl_confirmed is True
     assert str(leg.delta_sl_order_id) == "77"
+
+
+@pytest.mark.asyncio
+async def test_ensure_flat_position_skips_reattach() -> None:
+    client = MagicMock()
+    client.get_open_stop_orders = AsyncMock(return_value=[])
+    client.get_order = AsyncMock(side_effect=Exception("none"))
+    client.get_position_size = AsyncMock(return_value=0.0)
+    client.place_position_bracket = AsyncMock()
+    ok = await ensure_leg_delta_stop(
+        client,
+        _short_leg(),
+        trade=SimpleNamespace(position_side="short", universal_sl_pct=200),
+        trade_id=3,
+        confirm_wait_seconds=0,
+    )
+    assert ok is False
+    client.place_position_bracket.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_stop_below_mark_skips_and_alerts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = MagicMock()
+    client.get_open_stop_orders = AsyncMock(return_value=[])
+    client.get_order = AsyncMock(side_effect=Exception("none"))
+    client.get_position_size = AsyncMock(return_value=1.0)
+    client.get_mark_price = AsyncMock(return_value=654.0)
+    client.place_position_bracket = AsyncMock()
+    ws = MagicMock()
+    ws.broadcast = AsyncMock()
+    with (
+        caplog.at_level(logging.CRITICAL),
+        patch("backend.core.ws_manager.ws_manager", ws),
+    ):
+        ok = await ensure_leg_delta_stop(
+            client,
+            _short_leg(sl_trigger_price=544.0, leg_type="call"),
+            trade=SimpleNamespace(position_side="short", universal_sl_pct=200),
+            trade_id=8,
+            confirm_wait_seconds=0,
+        )
+    assert ok is False
+    client.place_position_bracket.assert_not_called()
+    assert any("neeche/paas" in r.message for r in caplog.records)
+    assert ws.broadcast.await_count == 1
+    assert "544" in ws.broadcast.await_args.args[0]["message"]
+    assert "654" in ws.broadcast.await_args.args[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_legacy_uni_sl_pct_alert_only() -> None:
+    client = MagicMock()
+    client.get_open_stop_orders = AsyncMock(return_value=[])
+    client.get_order = AsyncMock(side_effect=Exception("none"))
+    client.get_position_size = AsyncMock(return_value=1.0)
+    client.get_mark_price = AsyncMock(return_value=654.0)
+    client.place_position_bracket = AsyncMock()
+    ws = MagicMock()
+    ws.broadcast = AsyncMock()
+    with patch("backend.core.ws_manager.ws_manager", ws):
+        ok = await ensure_leg_delta_stop(
+            client,
+            _short_leg(sl_trigger_price=544.0),
+            trade=SimpleNamespace(position_side="short", universal_sl_pct=100),
+            trade_id=11,
+            confirm_wait_seconds=0,
+        )
+    assert ok is False
+    client.place_position_bracket.assert_not_called()
+    assert ws.broadcast.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_manual_stop_present_does_nothing() -> None:
+    client = MagicMock()
+    client.get_open_stop_orders = AsyncMock(
+        return_value=[{"product_id": 9, "id": 1}]
+    )
+    client.place_position_bracket = AsyncMock()
+    client.get_position_size = AsyncMock(return_value=1.0)
+    ok = await ensure_leg_delta_stop(
+        client,
+        _short_leg(),
+        trade=SimpleNamespace(position_side="short", universal_sl_pct=200),
+        trade_id=4,
+        confirm_wait_seconds=0,
+    )
+    assert ok is True
+    client.place_position_bracket.assert_not_called()
+    client.get_position_size.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_alert_throttled_to_once_per_five_min() -> None:
+    client = MagicMock()
+    client.get_open_stop_orders = AsyncMock(return_value=[])
+    client.get_order = AsyncMock(side_effect=Exception("none"))
+    client.get_position_size = AsyncMock(return_value=1.0)
+    client.get_mark_price = AsyncMock(return_value=654.0)
+    client.place_position_bracket = AsyncMock()
+    ws = MagicMock()
+    ws.broadcast = AsyncMock()
+    trade = SimpleNamespace(position_side="short", universal_sl_pct=200)
+    leg = _short_leg(sl_trigger_price=544.0)
+    with patch("backend.core.ws_manager.ws_manager", ws):
+        await ensure_leg_delta_stop(
+            client, leg, trade=trade, trade_id=22, confirm_wait_seconds=0
+        )
+        await ensure_leg_delta_stop(
+            client, leg, trade=trade, trade_id=22, confirm_wait_seconds=0
+        )
+    assert ws.broadcast.await_count == 1
+    client.place_position_bracket.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_entry_attach_blocks_stop_too_close_to_mark() -> None:
+    client = MagicMock()
+    client.place_position_bracket = AsyncMock()
+    ws = MagicMock()
+    ws.broadcast = AsyncMock()
+    with patch("backend.core.ws_manager.ws_manager", ws):
+        ok = await attach_position_bracket_sl(
+            client,
+            product_id=11,
+            stop_price=544.0,
+            stop_limit_price=571.0,
+            leg="put",
+            trade_id=7,
+            confirm_wait_seconds=0,
+            mark_price=654.0,
+        )
+    assert ok is False
+    client.place_position_bracket.assert_not_called()
+    assert ws.broadcast.await_count == 1
+    assert "neeche/paas" in ws.broadcast.await_args.args[0]["message"]
 
 
 @pytest.mark.asyncio
