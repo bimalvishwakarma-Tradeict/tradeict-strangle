@@ -3429,15 +3429,32 @@ class BotEngine:
         entry_spread_for_sl = get_entry_spread_for_sl(trade)
         gross_mtm_for_stoploss = total_pnl + entry_spread_for_sl
 
-        mtm_snap = basket_net_mtm_snapshot(
-            gross_mtm=total_pnl,
-            fees_paid=fees_paid,
-            est_exit_fees=est_exit,
-            slippage_pct=slip_pct,
-            expected_exit_spread_usd=expected_exit_spread,
-        )
+        from backend.core.entry_slip import long_net_mtm_kwargs, maybe_note_entry_slip
+
+        with self.db_factory() as _slip_db:
+            if call_open:
+                maybe_note_entry_slip(call_leg, float(call_mtm), db=_slip_db)
+            if put_open:
+                maybe_note_entry_slip(put_leg, float(put_mtm), db=_slip_db)
+
+        if is_long_trade(trade):
+            mtm_snap = basket_net_mtm_snapshot(
+                gross_mtm=total_pnl,
+                fees_paid=fees_paid,
+                est_exit_fees=est_exit,
+                **long_net_mtm_kwargs(),
+            )
+        else:
+            mtm_snap = basket_net_mtm_snapshot(
+                gross_mtm=total_pnl,
+                fees_paid=fees_paid,
+                est_exit_fees=est_exit,
+                slippage_pct=slip_pct,
+                expected_exit_spread_usd=expected_exit_spread,
+            )
         net_mtm_val = float(mtm_snap["net_mtm"])
         slippage_amount = float(mtm_snap["slippage_amount"])
+        slip_pct = float(mtm_snap["slippage_pct"])
         slip_fields = mtm_snap
 
         pnl_log: dict[str, Any] = {

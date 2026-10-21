@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,6 +36,7 @@ def _seed(
     name: str,
     side: str = "long",
     peak: float = 40.0,
+    hours_ago: float = 2.0,
 ) -> tuple[Trade, Leg, Leg]:
     acc = Account(name=name, api_key_encrypted="x", api_secret_encrypted="y")
     db.add(acc)
@@ -62,7 +63,7 @@ def _seed(
     )
     db.add(trade)
     db.flush()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
     call = Leg(
         trade_id=trade.id,
         leg_type="call",
@@ -220,8 +221,20 @@ async def test_active_long_has_live_fields() -> None:
         "hours_to_expiry",
         "call_breakeven",
         "put_breakeven",
+        "lots",
+        "gross",
+        "net",
+        "entry_slip_usd",
+        "slip_now",
+        "market_move",
+        "target_remaining",
+        "sl_distance",
     ):
         assert key in row, key
+    assert row["lots"] == 1
+    assert row["entry_slip_usd"] is None
+    assert row["call_leg"]["entry_slip_usd"] is None
+    assert row["slip_now"] is None
     assert "leg_pnl" in row["call_leg"]
     assert "initial_premium" in row["call_leg"]
     assert "current_bid" in row["call_leg"]
@@ -229,3 +242,55 @@ async def test_active_long_has_live_fields() -> None:
     assert "leg_pnl" in row["put_leg"]
     assert row["call_breakeven"] == 82200.0 + 50.0 + 40.0
     assert row["put_breakeven"] == 80000.0 - 50.0 - 40.0
+
+
+@pytest.mark.asyncio
+async def test_short_patch_profit_target_bad_422() -> None:
+    SessionLocal = sessionmaker(bind=_engine())
+    with SessionLocal() as db:
+        trade, _, _ = _seed(db, name="live-short-bad", side="short", peak=0)
+        bot = MagicMock()
+        bot.position_tracker.get.return_value = None
+        with patch("backend.api.routes_trade.bot_engine", bot):
+            with pytest.raises(HTTPException) as ei:
+                await update_trade_settings(
+                    trade.id,
+                    TradeSettingsUpdate(profit_target_usd=-10),
+                    db=db,
+                )
+        assert ei.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_active_legacy_slippage_null() -> None:
+    SessionLocal = sessionmaker(bind=_engine())
+    tracker = PositionTracker()
+    with SessionLocal() as db:
+        trade, call, put = _seed(db, name="live-old-slip", side="short", peak=0)
+        db.expunge(trade)
+        db.expunge(call)
+        db.expunge(put)
+        tracker.add(trade, call, put)
+        trade_id = int(trade.id)
+
+    bot = MagicMock()
+    bot.position_tracker = tracker
+    bot.delta_client = None
+    bot._refresh_delta_client = MagicMock()
+    bot._refresh_btc_spot = AsyncMock()
+    bot.maybe_close_orphaned_wings = AsyncMock()
+
+    with SessionLocal() as db:
+        with (
+            patch("backend.api.routes_trade.bot_engine", bot),
+            patch("backend.api.routes_trade.ws_manager", MagicMock()),
+        ):
+            payload = await get_active_trades(db=db)
+
+    row = next(t for t in payload["trades"] if t.get("trade_id") == trade_id)
+    assert row["entry_slip_usd"] is None
+    assert row["slip_now"] is None
+    assert row["call_leg"]["entry_slip_usd"] is None
+    assert row["put_leg"]["entry_slip_ratio"] is None
+    assert row["target_usd"] == 50.0
+    assert row["sl_usd"] == 100.0

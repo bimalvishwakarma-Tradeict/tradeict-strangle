@@ -235,6 +235,9 @@ class Leg(Base):
     side: Mapped[str] = mapped_column(
         String(4), nullable=False, default="SELL", server_default="SELL"
     )
+    # First-mark fill vs bid/offer (noted once; already inside gross / leg PnL)
+    entry_slip_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_slip_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     trade: Mapped[Trade] = relationship("Trade", back_populates="legs")
 

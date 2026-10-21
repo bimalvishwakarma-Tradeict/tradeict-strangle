@@ -310,6 +310,18 @@ def _migrate_schema() -> None:
                         "('hedge_call', 'hedge_put')"
                     )
                 )
+        leg_cols = {col["name"] for col in inspector.get_columns("legs")}
+        if "entry_slip_usd" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE legs ADD COLUMN entry_slip_usd FLOAT")
+                )
+        leg_cols = {col["name"] for col in inspector.get_columns("legs")}
+        if "entry_slip_ratio" not in leg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE legs ADD COLUMN entry_slip_ratio FLOAT")
+                )
     if "trades" in tables:
         trade_cols = {col["name"] for col in inspector.get_columns("trades")}
         if "universal_sl_pct" not in trade_cols:

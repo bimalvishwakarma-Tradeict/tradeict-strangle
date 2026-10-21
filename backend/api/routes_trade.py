@@ -19,6 +19,11 @@ from backend.config import (
     TriggerMode,
 )
 from backend.core.bot_logger import log_and_buffer
+from backend.core.entry_slip import (
+    build_live_progress_fields,
+    long_net_mtm_kwargs,
+    maybe_note_entry_slip,
+)
 from backend.core.trade_side import is_long_trade, long_trade_public_fields
 from backend.core.delta_client import DeltaAPIError, DeltaClient
 from backend.core.encryption import decrypt
@@ -159,7 +164,27 @@ def _leg_snapshot(leg: Any, current_premium: float) -> dict[str, Any]:
         "is_long": is_long,
         "current_bid": round(float(display_prem), 4),
         "current_mark": round(float(display_prem), 4),
+        "entry_slip_usd": (
+            round(float(leg.entry_slip_usd), 6)
+            if getattr(leg, "entry_slip_usd", None) is not None
+            else None
+        ),
+        "entry_slip_ratio": (
+            round(float(leg.entry_slip_ratio), 8)
+            if getattr(leg, "entry_slip_ratio", None) is not None
+            else None
+        ),
     }
+
+
+def _note_and_attach_entry_slip(
+    leg: Any, snap: dict[str, Any], db: Session
+) -> None:
+    maybe_note_entry_slip(leg, float(snap.get("leg_pnl") or 0.0), db=db)
+    usd = getattr(leg, "entry_slip_usd", None)
+    ratio = getattr(leg, "entry_slip_ratio", None)
+    snap["entry_slip_usd"] = round(float(usd), 6) if usd is not None else None
+    snap["entry_slip_ratio"] = round(float(ratio), 8) if ratio is not None else None
 
 
 def _basket_leg_history(db: Session, trade_id: int) -> list[dict[str, Any]]:
@@ -2314,6 +2339,8 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             call_snap["current_mark"] = round(float(call_mark), 4)
             put_snap["current_bid"] = round(float(put_bid), 4)
             put_snap["current_mark"] = round(float(put_mark), 4)
+            _note_and_attach_entry_slip(state.call_leg, call_snap, db)
+            _note_and_attach_entry_slip(state.put_leg, put_snap, db)
 
             wing_call_snap = None
             wing_put_snap = None
@@ -2321,10 +2348,12 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 wing_call_snap = _leg_snapshot(wing_call_leg, wing_call_prem)
                 if wing_call_open:
                     wing_call_snap["leg_pnl"] = round(wing_call_mtm, 4)
+                _note_and_attach_entry_slip(wing_call_leg, wing_call_snap, db)
             if wing_put_leg is not None:
                 wing_put_snap = _leg_snapshot(wing_put_leg, wing_put_prem)
                 if wing_put_open:
                     wing_put_snap["leg_pnl"] = round(wing_put_mtm, 4)
+                _note_and_attach_entry_slip(wing_put_leg, wing_put_snap, db)
 
             from backend.core.basket_legs import build_wing_credit_fields
 
@@ -2390,13 +2419,21 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
             entry_spread_for_sl = get_entry_spread_for_sl(state.trade)
             gross_mtm_for_stoploss = float(gross_mtm) + entry_spread_for_sl
 
-            mtm_snap = basket_net_mtm_snapshot(
-                gross_mtm=gross_mtm,
-                fees_paid=fees_paid,
-                est_exit_fees=est_exit,
-                slippage_pct=getattr(state.trade, "slippage_pct", None) or 2.0,
-                expected_exit_spread_usd=expected_exit_spread,
-            )
+            if trade_is_long:
+                mtm_snap = basket_net_mtm_snapshot(
+                    gross_mtm=gross_mtm,
+                    fees_paid=fees_paid,
+                    est_exit_fees=est_exit,
+                    **long_net_mtm_kwargs(),
+                )
+            else:
+                mtm_snap = basket_net_mtm_snapshot(
+                    gross_mtm=gross_mtm,
+                    fees_paid=fees_paid,
+                    est_exit_fees=est_exit,
+                    slippage_pct=getattr(state.trade, "slippage_pct", None) or 2.0,
+                    expected_exit_spread_usd=expected_exit_spread,
+                )
             net_mtm = float(mtm_snap["net_mtm"])
             slip_fields = mtm_snap
 
@@ -2580,6 +2617,23 @@ async def get_active_trades(db: Session = Depends(get_db)) -> dict[str, Any]:
                 "computed_at": mtm_snap.get("computed_at_iso"),
                 "stale_seconds": mtm_snap.get("stale_seconds", 0.0),
             }
+            row.update(
+                build_live_progress_fields(
+                    state.trade,
+                    gross=float(gross_mtm),
+                    net=float(net_mtm),
+                    snaps=[
+                        x
+                        for x in (
+                            call_snap,
+                            put_snap,
+                            wing_call_snap,
+                            wing_put_snap,
+                        )
+                        if x
+                    ],
+                )
+            )
             logger.info(
                 "/active trade=%s slippage_pct=%s slippage_amount=%s net_mtm=%s",
                 state.trade_id,
@@ -3515,13 +3569,23 @@ async def update_trade_settings(
     if "profit_target_usd" in updates and updates["profit_target_usd"] is not None:
         # Legacy path — only if tp_pct not also sent
         if "tp_pct" not in updates:
-            trade.profit_target_usd = float(updates["profit_target_usd"])
+            pt = float(updates["profit_target_usd"])
+            if pt <= 0:
+                raise HTTPException(
+                    status_code=422, detail="profit_target_usd must be > 0"
+                )
+            trade.profit_target_usd = pt
             updated["profit_target_usd"] = trade.profit_target_usd
             _sync_tracker_money()
 
     if "stoploss_usd" in updates and updates["stoploss_usd"] is not None:
         if "sl_pct" not in updates:
-            trade.stoploss_usd = float(updates["stoploss_usd"])
+            sl_cash = float(updates["stoploss_usd"])
+            if sl_cash <= 0:
+                raise HTTPException(
+                    status_code=422, detail="stoploss_usd must be > 0"
+                )
+            trade.stoploss_usd = sl_cash
             updated["stoploss_usd"] = trade.stoploss_usd
             _sync_tracker_money()
 

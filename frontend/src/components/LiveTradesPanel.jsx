@@ -28,6 +28,13 @@ function fmtSigned(v) {
   return `$${abs}`
 }
 
+function fmtDash(v) {
+  if (v == null || v === '') return '—'
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  return fmtMoney(n)
+}
+
 function pnlClass(v) {
   const n = Number(v)
   if (!Number.isFinite(n) || n === 0) return 'text-gray-300'
@@ -65,11 +72,20 @@ function validateLongForm({ target, sl, step, amt }) {
   return null
 }
 
+function validateShortForm({ target, sl }) {
+  const t = Number(target)
+  const s = Number(sl)
+  if (!Number.isFinite(t) || t <= 0 || !Number.isFinite(s) || s <= 0) {
+    return 'profit_target_usd and stoploss_usd must be > 0'
+  }
+  return null
+}
+
 function LiveTradeCard({ trade, onToast }) {
   const isLong = String(trade.position_side || '').toLowerCase() === 'long'
   const call = trade.call_leg || {}
   const put = trade.put_leg || {}
-  const qty = Math.abs(Number(call.quantity || put.quantity || 1))
+  const qty = Math.abs(Number(trade.lots || call.quantity || put.quantity || 1))
   const sideVerb = isLong ? 'SELL' : 'BUY'
   const [busy, setBusy] = useState('')
   const [modifyOpen, setModifyOpen] = useState(false)
@@ -82,8 +98,13 @@ function LiveTradeCard({ trade, onToast }) {
   })
 
   const target = Number(trade.target_usd ?? trade.profit_target_usd)
-  const gross = Number(trade.gross_mtm)
-  const net = Number(trade.net_mtm)
+  const slUsd = Number(trade.sl_usd ?? trade.stoploss_usd)
+  const gross = Number(trade.gross ?? trade.gross_mtm)
+  const net = Number(trade.net ?? trade.net_mtm)
+  const remaining = Number(trade.target_remaining)
+  const slDistance = Number(trade.sl_distance)
+  const hasTrail =
+    isLong && (trade.trail_step_usd != null || trade.trail_sl_level != null)
   const progress = useMemo(() => {
     if (!Number.isFinite(target) || target <= 0) {
       return 0
@@ -106,21 +127,29 @@ function LiveTradeCard({ trade, onToast }) {
   }
 
   const applyModify = async () => {
-    const err = validateLongForm(form)
+    const err = isLong ? validateLongForm(form) : validateShortForm(form)
     if (err) {
       onToast({ type: 'error', message: err })
       return
     }
-    const payload = {
-      target_usd: Number(form.target),
-      sl_usd: Number(form.sl),
-    }
-    if (form.step === '' && form.amt === '') {
-      payload.trail_step_usd = null
-      payload.trail_amt_usd = null
+    let payload
+    if (isLong) {
+      payload = {
+        target_usd: Number(form.target),
+        sl_usd: Number(form.sl),
+      }
+      if (form.step === '' && form.amt === '') {
+        payload.trail_step_usd = null
+        payload.trail_amt_usd = null
+      } else {
+        payload.trail_step_usd = Number(form.step)
+        payload.trail_amt_usd = Number(form.amt)
+      }
     } else {
-      payload.trail_step_usd = Number(form.step)
-      payload.trail_amt_usd = Number(form.amt)
+      payload = {
+        profit_target_usd: Number(form.target),
+        stoploss_usd: Number(form.sl),
+      }
     }
     await run('modify', () => updateSettings(trade.trade_id, payload), 'Settings updated')
     setModifyOpen(false)
@@ -140,6 +169,7 @@ function LiveTradeCard({ trade, onToast }) {
           <span className="text-sm text-white">
             C {fmtStrike(call.strike)} / P {fmtStrike(put.strike)}
           </span>
+          <span className="text-xs text-gray-300">{qty} lots</span>
         </div>
         <div className="text-xs text-gray-400">
           {trade.expiry_date} · {fmtCountdown(trade.hours_to_expiry)}
@@ -149,19 +179,22 @@ function LiveTradeCard({ trade, onToast }) {
       <div className="mt-3 grid grid-cols-2 gap-3">
         <div>
           <div className="text-xs text-gray-400">Net PnL</div>
-          <div className={`text-2xl font-semibold ${pnlClass(trade.net_mtm)}`}>
-            {fmtSigned(trade.net_mtm)}
+          <div className={`text-2xl font-semibold ${pnlClass(net)}`}>
+            {fmtSigned(net)}
           </div>
         </div>
         <div>
           <div className="text-xs text-gray-400">Gross PnL</div>
-          <div className={`text-2xl font-semibold ${pnlClass(trade.gross_mtm)}`}>
-            {fmtSigned(trade.gross_mtm)}
+          <div className={`text-2xl font-semibold ${pnlClass(gross)}`}>
+            {fmtSigned(gross)}
           </div>
         </div>
       </div>
       <div className="mt-1 text-xs text-gray-500">
-        Fees paid ${fmtMoney(trade.fees_paid)} · est. exit ${fmtMoney(trade.est_exit_fees)}
+        Fees: paid ${fmtDash(trade.fees_paid)} + exit est ${fmtDash(trade.est_exit_fees)}
+        {' · '}
+        Slippage: entry ${fmtDash(trade.entry_slip_usd)}, abhi ≈ ${fmtDash(trade.slip_now)}{' '}
+        (gross me shaamil)
       </div>
 
       <table className="mt-3 w-full text-left text-xs text-gray-300">
@@ -193,42 +226,43 @@ function LiveTradeCard({ trade, onToast }) {
         </tbody>
       </table>
 
-      {isLong && (
-        <div className="mt-3 space-y-2 text-xs text-gray-300">
-          <div className="flex flex-wrap gap-x-4 gap-y-1">
-            <span>
-              Target (Net $) ${fmtMoney(trade.target_usd)} · now{' '}
-              {fmtSigned(net)}
-            </span>
-            <span>
-              SL (Gross $) {fmtSigned(trade.trail_sl_level)} · now{' '}
-              {fmtSigned(gross)}
-            </span>
-            <span>Peak ${fmtMoney(trade.peak_gross_mtm)}</span>
-            <span>
-              Trail {fmtMoney(trade.trail_step_usd)} / {fmtMoney(trade.trail_amt_usd)}
-            </span>
-          </div>
-          <div className="h-2 overflow-hidden rounded bg-gray-800">
-            <div
-              className="h-full bg-emerald-500"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
+      <div className="mt-3 space-y-2 text-xs text-gray-300">
+        <div>
+          Target ${fmtDash(target)} · Abhi Net {fmtSigned(net)} · Baaki{' '}
+          {fmtSigned(Number.isFinite(remaining) ? remaining : target - net)}
+        </div>
+        <div className="h-2 overflow-hidden rounded bg-gray-800">
+          <div
+            className="h-full bg-emerald-500"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+        <div>
+          SL −${fmtDash(slUsd)} · Abhi Gross {fmtSigned(gross)} · SL tak{' '}
+          {fmtSigned(Number.isFinite(slDistance) ? slDistance : gross + slUsd)}
+          {hasTrail ? ` · trail ${fmtSigned(trade.trail_sl_level)}` : ''}
+        </div>
+        {isLong && (
           <div className="text-gray-500">
             BE call {fmtStrike(trade.call_breakeven)} · put {fmtStrike(trade.put_breakeven)}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {isLong && modifyOpen && (
+      {modifyOpen && (
         <div className="mt-3 grid gap-2 rounded-md border border-gray-700 p-3 sm:grid-cols-2">
-          {[
-            ['target', 'Target (Net $)'],
-            ['sl', 'SL (Gross $)'],
-            ['step', 'Trail step'],
-            ['amt', 'Trail amount'],
-          ].map(([key, label]) => (
+          {(isLong
+            ? [
+                ['target', 'Target (Net $)'],
+                ['sl', 'SL (Gross $)'],
+                ['step', 'Trail step'],
+                ['amt', 'Trail amount'],
+              ]
+            : [
+                ['target', 'Target (Net $)'],
+                ['sl', 'SL (Gross $)'],
+              ]
+          ).map(([key, label]) => (
             <label key={key} className="text-xs text-gray-400">
               {label}
               <input
@@ -244,7 +278,9 @@ function LiveTradeCard({ trade, onToast }) {
             onClick={() =>
               setConfirm({
                 title: 'Apply settings?',
-                message: `target ${form.target}, SL ${form.sl}, trail ${form.step || '—'} / ${form.amt || '—'}`,
+                message: isLong
+                  ? `target ${form.target}, SL ${form.sl}, trail ${form.step || '—'} / ${form.amt || '—'}`
+                  : `profit_target_usd ${form.target}, stoploss_usd ${form.sl}`,
                 onConfirm: applyModify,
               })
             }
@@ -256,15 +292,13 @@ function LiveTradeCard({ trade, onToast }) {
       )}
 
       <div className="mt-3 flex flex-wrap gap-2">
-        {isLong && (
-          <button
-            type="button"
-            className="rounded border border-gray-600 px-3 py-1.5 text-xs text-gray-200"
-            onClick={() => setModifyOpen((v) => !v)}
-          >
-            Modify
-          </button>
-        )}
+        <button
+          type="button"
+          className="rounded border border-gray-600 px-3 py-1.5 text-xs text-gray-200"
+          onClick={() => setModifyOpen((v) => !v)}
+        >
+          Modify
+        </button>
         <button
           type="button"
           disabled={Boolean(busy)}
